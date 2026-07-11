@@ -77,8 +77,24 @@ attestation-verified vendoring on its side.
   translated interpreter) is likewise dual-licensed under Perl's terms in its
   own repository.
 
-Practical note: under the Artistic License, embedding the (complete,
-unmodified) interpreter and its library in your application is expressly
-permitted as mere aggregation — your own application code does not inherit
-Perl's license, and Perl code you run on the interpreter, plus its output,
-remain yours.
+### Using go-perl in your own project
+
+- **As a library dependency** (source distribution): your repository contains
+  no Perl-derived bytes — only an import path and a go.mod entry. License your
+  code however you like (MIT, proprietary, ...); no Perl license text needs to
+  accompany it. Your users receive go-perl and perlwasm2go from their own
+  origins, under their own licenses.
+- **Shipping a compiled binary**: the binary embeds the translated interpreter
+  and `stdlib.zip`. The Artistic License expressly permits this: linking the
+  complete interpreter into your executable is "a mere form of aggregation"
+  (§5), and embedded use inside a (commercial) distribution "shall not be
+  construed as a distribution of this Package" (§8) — so your own code does not
+  inherit Perl's license and no Perl license text is required to accompany the
+  binary, provided the interpreter is embedded complete and unmodified, you do
+  not overtly expose Perl's interfaces to your end users, and you do not
+  advertise Perl as your own product (§5, §9). If your product *does* expose
+  Perl to end users (say, a Perl plugin system), add a short third-party notice
+  pointing at Perl 5 and its dual license — customary and costless in any case.
+- **Perl code you run** on the interpreter, and its output, remain yours (§6).
+
+This summary is not legal advice; the license texts govern.
