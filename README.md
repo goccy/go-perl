@@ -1,9 +1,12 @@
 # go-perl
 
-Embed the Perl 5 interpreter in Go — as **pure Go**. No cgo, no wasm runtime,
-no external `perl` binary: the interpreter is
+**Perl 5 in pure Go — embed and run Perl anywhere Go runs. No cgo, no external
+`perl`, one static binary.**
+
+The interpreter is
 [Perl 5.42.2 compiled to WebAssembly](https://github.com/goccy/perl-wasm) and
-then [translated to Go](https://github.com/goccy/wasm2go), published as the
+then [translated to Go](https://github.com/goccy/wasm2go) — no wasm runtime is
+involved at run time — published as the
 [`perlwasm2go`](https://github.com/goccy/perlwasm2go) module this package
 builds on. The pure-Perl standard library ships inside the package as an
 embedded zip, so a `go build` produces a single self-contained binary that can
