@@ -617,14 +617,15 @@ func Instance() *base.Module {
 func initModule(opts Options) (retErr error) {
 	m := &Module{}
 	env := envStubs{m: m}
+	wm := wasmifyStubs{m: m}
 	wasi := opts.WASI
 	if wasi == nil {
 		wasi = base.DefaultWASI()
 	}
 	if opts.MemoryReserveBytes > 0 {
-		m.g = wasm2go.NewWithWASIReserve(wasi, env, opts.MemoryReserveBytes)
+		m.g = wasm2go.NewWithWASIReserve(wasi, env, wm, opts.MemoryReserveBytes)
 	} else {
-		m.g = wasm2go.NewWithWASI(wasi, env)
+		m.g = wasm2go.NewWithWASI(wasi, env, wm)
 	}
 	if opts.MaxMemoryBytes > 0 {
 		wasm2go.SetMaxMemory(m.g, opts.MaxMemoryBytes)
@@ -744,6 +745,75 @@ func encodeCallbackResult(m *Module, resp []byte) int64 {
 // wasm "env" imports. The per-method definitions are emitted by the
 // generator (generateEnvStubs) since the import set is module-specific.
 type envStubs struct{ m *Module }
+
+// RegisterCallback registers a Go callback handler and returns its ID.
+// Safe to call concurrently with other Register/Unregister/callback
+// dispatch calls.
+func RegisterCallback(handler CallbackHandler) int32 {
+	m := module()
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.callbacks == nil {
+		m.callbacks = make(map[int32]CallbackHandler)
+	}
+	m.nextCBID++
+	id := m.nextCBID
+	m.callbacks[id] = handler
+	return id
+}
+
+// UnregisterCallback removes a previously registered callback handler.
+// Safe to call concurrently with other Register/Unregister/callback
+// dispatch calls.
+func UnregisterCallback(id int32) {
+	m := module()
+	m.cbMu.Lock()
+	delete(m.callbacks, id)
+	m.cbMu.Unlock()
+}
+
+func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
+	m.cbMu.RLock()
+	handler, ok := m.callbacks[callbackID]
+	m.cbMu.RUnlock()
+	if !ok {
+		return 0
+	}
+	mem := wasm2go.Memory(m.g)
+	var req []byte
+	if reqLen > 0 {
+		buf := make([]byte, reqLen)
+		copy(buf, mem[wptrOff(reqPtr):wptrOff(reqPtr)+uint64(reqLen)])
+		req = buf
+	}
+	// Release m.mu around the user handler so that nested calls
+	// back into the transpiled module can re-acquire it without
+	// deadlocking. The IIFE + defer guarantees Lock is retaken even
+	// if the handler panics, so the outer invoke's defer
+	// m.mu.Unlock() always sees a held mutex.
+	var resp []byte
+	var err error
+	func() {
+		m.mu.Unlock()
+		defer m.mu.Lock()
+		resp, err = handler.HandleCallback(methodID, req)
+	}()
+	if err != nil {
+		resp = pbAppendString(nil, 15, err.Error())
+	}
+	if len(resp) == 0 {
+		return 0
+	}
+	return encodeCallbackResult(m, resp)
+}
+
+// wasmifyStubs implements wasm2go/base.WasmifyImports: the single
+// callback_invoke entry point that the C++ bridge calls back into.
+type wasmifyStubs struct{ m *Module }
+
+func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
+	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
+}
 
 func (h envStubs) Alarm(m *base.Module, l0 int32) int32                             { return 0 }
 func (h envStubs) Bind(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
@@ -871,13 +941,45 @@ var _ = errors.New
 var _ = fmt.Errorf
 var _ = runtime.SetFinalizer
 
+// Call the named Perl subroutine in list context. `sub_name` is a fully
+// qualified sub name ("main::handler", "My::App::run") or a main:: sub name;
+// `args_json` is a JSON array holding the argument list (NULL/empty means no
+// arguments). Returns
+//
+//	{"ok":
+//
+// <bool
+// >,"result":
+// <array
+// >,"error":
+// <string
+// >}
+//
+// where "result" is the sub's return list re-encoded as a JSON array. On a
+// Perl-level die (including "no such sub"), "ok" is false and "error" holds
+// $
+// .
+// Unlike perl_eval, STDOUT/STDERR are NOT redirected: prints go to the
+// instance's WASI fds.
+func PerlCall(h uint64, subName string, argsJson string) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, subName)
+	buf = pbAppendString(buf, 3, argsJson)
+	resp, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
 // Destroy the interpreter (perl_destruct + perl_free). PERL_SYS_TERM runs at
 // process teardown, not here, so the handle is fully torn down but the process
 // stays usable.
 func PerlClose(h uint64) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	_, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	_, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
 	return err
 }
 
@@ -915,7 +1017,7 @@ func PerlEval(h uint64, src string) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, src)
-	resp, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
+	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
 	if err != nil {
 		return "", err
 	}
@@ -945,7 +1047,7 @@ func PerlEval(h uint64, src string) (string, error) {
 func PerlInterruptAddr(h uint64) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
+	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
 	if err != nil {
 		return 0, err
 	}
@@ -966,9 +1068,25 @@ func PerlInterruptAddr(h uint64) (uint32, error) {
 func PerlNew(libDir string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
-	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
+	resp, err := invokeMethod(0, 4, buf, wasm2go.Inv_0_4)
 	if err != nil {
 		return 0, err
 	}
 	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
+}
+
+// Register the Go-side dispatcher for this instance. `callback_id` is the id
+// the host returned when registering its callback handler; every Perl->Go
+// call from this interpreter is routed to it. Perl code reaches Go through
+// main::__plwasm_go_invoke($func_id, $payload_json) — an XS installed by
+// perl_new that forwards to the wasmify callback import — and the
+// main::__plwasm_go_call glue that wraps it with JSON encode/decode (the
+// host binds a named Perl sub to a Go function by eval'ing a one-line sub
+// that calls the glue with the Go function's id).
+func PerlSetGoDispatcher(h uint64, callbackId int32) error {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendInt32(buf, 2, callbackId)
+	_, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
+	return err
 }

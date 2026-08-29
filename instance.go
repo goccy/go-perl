@@ -15,18 +15,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 
 	wasm2go "github.com/goccy/perlwasm2go"
 	"github.com/goccy/perlwasm2go/base"
 )
 
 // Method IDs of the perl bridge service (service 0), in the order the proto
-// declares them: perl_close, perl_eval, perl_interrupt_addr, perl_new.
+// declares them (alphabetical over the pl.h exports): perl_call, perl_close,
+// perl_eval, perl_interrupt_addr, perl_new, perl_set_go_dispatcher.
 const (
-	midClose         = 0
-	midEval          = 1
-	midInterruptAddr = 2
-	midNew           = 3
+	midCall            = 0
+	midClose           = 1
+	midEval            = 2
+	midInterruptAddr   = 3
+	midNew             = 4
+	midSetGoDispatcher = 5
 )
 
 // EvalResult is the decoded form of the JSON document perl_eval returns.
@@ -58,6 +62,14 @@ type Perl struct {
 	// built from the process snapshot; unmapped on Close. nil for instances
 	// that booted privately.
 	mapped []byte
+
+	// Go-function bridge state (bridge.go). funcs maps the ids baked into the
+	// bound Perl subs to their Go functions; dispatcherSet records whether the
+	// per-instance callback handler has been registered with the guest.
+	funcsMu       sync.RWMutex
+	funcs         map[int32]GoFunc
+	nextFuncID    int32
+	dispatcherSet bool
 }
 
 // New builds a fresh Perl instance, applies the sandbox config, and returns
@@ -172,7 +184,7 @@ func (p *Perl) boot(cfg Config, wasi *base.WasiStubs) error {
 		}
 		mem, err := snap.img.Memory(ceiling)
 		if err == nil {
-			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
+			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
 			p.h = snap.handle
 			p.mapped = mem
 			return nil
@@ -186,9 +198,9 @@ func (p *Perl) boot(cfg Config, wasi *base.WasiStubs) error {
 // perl_new on a private linear memory.
 func (p *Perl) bootPrivate(cfg Config, wasi *base.WasiStubs) (err error) {
 	if cfg.MemoryReserveBytes > 0 {
-		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, cfg.MemoryReserveBytes)
+		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, cfg.MemoryReserveBytes)
 	} else {
-		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m})
+		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
 	// instead of growing the host process unbounded. Round down to a wasm
@@ -242,40 +254,14 @@ func (p *Perl) Eval(ctx context.Context, src string) (EvalResult, error) {
 	if err := ctx.Err(); err != nil {
 		return EvalResult{}, err
 	}
-	// Watchdog: on ctx cancellation, trip the interrupt flag with a plain
-	// store into linear memory — no call into the (busy) instance. fired
-	// reports whether it tripped, so the flag can be cleared when the eval
-	// happened to finish first (a lingering flag would poison the next Eval).
-	var fired chan bool
-	if done := ctx.Done(); done != nil {
-		stop := make(chan struct{})
-		fired = make(chan bool, 1)
-		defer close(stop)
-		go func() {
-			select {
-			case <-done:
-				p.fireInterrupt()
-				fired <- true
-			case <-stop:
-				fired <- false
-			}
-		}()
-	}
-
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, src)
-	resp, invokeErr := p.m.invoke(0, midEval, buf, wasm2go.Inv_0_1)
 
-	interrupted := false
-	if fired != nil {
-		// Receiving after close(stop) is deterministic: the watchdog sent
-		// exactly one value, and a true arrives strictly after its Fire.
-		if <-fired {
-			p.clearInterrupt()
-			interrupted = true
-		}
-	}
+	disarm := p.armInterrupt(ctx)
+	resp, invokeErr := p.m.invoke(0, midEval, buf, wasm2go.Inv_0_2)
+	interrupted := disarm()
+
 	if invokeErr != nil {
 		return EvalResult{}, invokeErr
 	}
@@ -295,11 +281,45 @@ func (p *Perl) Eval(ctx context.Context, src string) (EvalResult, error) {
 	return r, nil
 }
 
+// armInterrupt starts the cancellation watchdog for ctx: on ctx cancellation
+// it trips the interrupt flag with a plain store into linear memory — no call
+// into the (busy) instance. The returned disarm function MUST be called
+// exactly once, after the guarded invoke returns; it reports whether the
+// watchdog fired and, when it did, clears the flag (the eval may have
+// finished before testing it, and a lingering flag would poison the next
+// call). Receiving after close(stop) is deterministic: the watchdog sends
+// exactly one value, and a true arrives strictly after its store.
+func (p *Perl) armInterrupt(ctx context.Context) (disarm func() bool) {
+	done := ctx.Done()
+	if done == nil {
+		return func() bool { return false }
+	}
+	stop := make(chan struct{})
+	fired := make(chan bool, 1)
+	go func() {
+		select {
+		case <-done:
+			p.fireInterrupt()
+			fired <- true
+		case <-stop:
+			fired <- false
+		}
+	}()
+	return func() bool {
+		close(stop)
+		if <-fired {
+			p.clearInterrupt()
+			return true
+		}
+		return false
+	}
+}
+
 // Close finalizes the instance. The Perl must not be used afterward.
 func (p *Perl) Close() error {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_0)
+	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_1)
 	if err == nil {
 		err = pbExtractError(resp)
 	}
@@ -319,7 +339,7 @@ func (p *Perl) releaseMapping() {
 func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
-	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_3)
+	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_4)
 	if err != nil {
 		return 0, err
 	}
@@ -334,7 +354,7 @@ func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 func (p *Perl) interruptAddr() (uint32, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_2)
+	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_3)
 	if err != nil {
 		return 0, err
 	}

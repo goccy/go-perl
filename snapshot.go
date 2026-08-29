@@ -81,7 +81,7 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 		wasi.SetStderr(io.Discard)
 
 		mod := &Module{}
-		mod.g = wasm2go.NewWithWASI(wasi, envStubs{m: mod})
+		mod.g = wasm2go.NewWithWASI(wasi, envStubs{m: mod}, wasmifyStubs{m: mod})
 		wasm2go.Initialize(mod.g)
 		_ = wasm2go.WasmInit(mod.g)
 
