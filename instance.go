@@ -168,7 +168,10 @@ func buildWASI(cfg Config) *base.WasiStubs {
 	wasi := base.DefaultWASI()
 	wasi.SetEnv(cfg.Env)
 	if cfg.FS != nil {
-		wasi.SetFS(cfg.FS)
+		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
+		// bit bucket as its script filehandle); synthesize one over any
+		// custom backend.
+		wasi.SetFS(withDevNull(cfg.FS))
 	} else if cfg.PreopenDir != "" {
 		wasi.SetPreopenDir(cfg.PreopenDir)
 	}

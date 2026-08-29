@@ -307,10 +307,12 @@ func (p *Perl) decodeValues(nodes []wireNode) ([]any, error) {
 	return out, nil
 }
 
-// callEnvelope is the decoded perl_call response document.
+// callEnvelope is the decoded perl_call response document. Exit is set (and
+// Ok false) when the guest called exit() and the bridge caught the unwind.
 type callEnvelope struct {
 	Ok     bool       `json:"ok"`
 	Result []wireNode `json:"result"`
+	Exit   *int       `json:"exit"`
 	Error  string     `json:"error"`
 }
 
@@ -370,6 +372,9 @@ func (p *Perl) call(ctx context.Context, name string, args []any, drain bool) ([
 		return nil, fmt.Errorf("decode call result %q: %w", js, err)
 	}
 	if !env.Ok {
+		if env.Exit != nil {
+			return nil, &exitStatusError{code: *env.Exit}
+		}
 		if interrupted {
 			return nil, ctx.Err()
 		}
