@@ -24,14 +24,17 @@ import (
 
 // Method IDs of the perl bridge service (service 0), in the order the proto
 // declares them (alphabetical over the pl.h exports): perl_call, perl_close,
-// perl_eval, perl_interrupt_addr, perl_new, perl_set_go_dispatcher.
+// perl_eval, perl_interrupt_addr, perl_new, perl_register_native_xs,
+// perl_set_go_dispatcher, perl_xs_helper.
 const (
-	midCall            = 0
-	midClose           = 1
-	midEval            = 2
-	midInterruptAddr   = 3
-	midNew             = 4
-	midSetGoDispatcher = 5
+	midCall             = 0
+	midClose            = 1
+	midEval             = 2
+	midInterruptAddr    = 3
+	midNew              = 4
+	midRegisterNativeXS = 5
+	midSetGoDispatcher  = 6
+	midXSHelper         = 7
 )
 
 // EvalResult is the decoded form of the JSON document perl_eval returns.
@@ -71,6 +74,9 @@ type Perl struct {
 	funcs         map[int32]GoFunc
 	nextFuncID    int32
 	dispatcherSet bool
+	// nativeXS handles native-XSUB dispatch (the reserved callback method
+	// id); see native.go and the xsnative subpackage.
+	nativeXS func(req []byte) []byte
 
 	// closed flips when Close runs; every public entry point checks it so a
 	// straggler — including a *Ref Free racing a Close — errors out instead

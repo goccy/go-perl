@@ -1074,6 +1074,17 @@ func PerlNew(libDir string) (uint64, error) {
 	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
+// Bind the generic native thunk as the Perl sub `name`; fn_id is the host's
+// key for the actual native function (stored in the CV's XSANY).
+func PerlRegisterNativeXs(h uint64, name string, fnId int32) error {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, name)
+	buf = pbAppendInt32(buf, 3, fnId)
+	_, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
+	return err
+}
+
 // Register the Go-side dispatcher for this instance. `callback_id` is the id
 // the host returned when registering its callback handler; every Perl->Go
 // call from this interpreter is routed to it. Perl code reaches Go through
@@ -1086,6 +1097,34 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, callbackId)
-	_, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
+	_, err := invokeMethod(0, 6, buf, wasm2go.Inv_0_6)
 	return err
+}
+
+// SV micro-operations the host-side SDK vtable is built from. op selects:
+//
+//	1 SV_IV      a=sv                   -> IV (as u64)
+//	2 SV_PV      a=sv                   -> (ptr
+//
+// <
+// <
+// 32)|len into linear memory
+//
+//	3 NEW_IV     a=iv                   -> new SV token
+//	4 NEW_PVN    s=bytes b=len          -> new SV token
+//	5 SV_MORTAL  a=sv                   -> sv (now mortal)
+//
+// Unknown ops return 0.
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendInt32(buf, 2, op)
+	buf = pbAppendUint64(buf, 3, a)
+	buf = pbAppendUint64(buf, 4, b)
+	buf = pbAppendString(buf, 5, s)
+	resp, err := invokeMethod(0, 7, buf, wasm2go.Inv_0_7)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }

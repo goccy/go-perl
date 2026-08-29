@@ -497,7 +497,7 @@ func (p *Perl) ensureDispatcher() error {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, cbID)
-	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_5)
+	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_6)
 	if err != nil {
 		return fmt.Errorf("set Go dispatcher: %w", err)
 	}
@@ -519,6 +519,15 @@ func (p *Perl) ensureDispatcher() error {
 type goDispatcher struct{ p *Perl }
 
 func (d goDispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
+	if methodID == nativeXSMethodID {
+		d.p.funcsMu.RLock()
+		native := d.p.nativeXS
+		d.p.funcsMu.RUnlock()
+		if native == nil {
+			return append([]byte{0}, "no native XS handler installed"...), nil
+		}
+		return native(req), nil
+	}
 	d.p.funcsMu.RLock()
 	fn, ok := d.p.funcs[methodID]
 	d.p.funcsMu.RUnlock()
