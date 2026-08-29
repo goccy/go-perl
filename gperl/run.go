@@ -5,11 +5,11 @@
 // its vendored modules, and the interpreter.
 //
 // Everything the CLI does is callable programmatically: Get/EnsureDeps for
-// dependency vendoring, Run for execution, Build for binary production. The
-// planned XS pipeline slots in here as well — converting an XS distribution
-// into a shared-memory wasm side module and then (via wasm2go) into a Go
-// package placed in a shared cache, linked statically by Build or loaded at
-// runtime by an application through a pluggable loader.
+// dependency vendoring, Run for execution, Build for binary production, and
+// XSBuild/LoadXS for native XS modules — an XS distribution is compiled
+// once against the bundled XS SDK (its own Makefile.PL/Build.PL drives the
+// build) and the resulting shared library loads at runtime with no
+// compiler present.
 package gperl
 
 import (
@@ -54,6 +54,12 @@ func Run(script string, args []string) (status int, err error) {
 		Env:    os.Environ(),
 	})
 	if err != nil {
+		return 1, err
+	}
+	// Native XS modules built by `gperl xs build` register lazily; a
+	// stock `use Module;` boots them through the XSLoader contract.
+	if err := LoadXS(p, xsDir(projectDir)); err != nil {
+		p.Close()
 		return 1, err
 	}
 	runErr := p.RunFile(context.Background(), script, inc, args)

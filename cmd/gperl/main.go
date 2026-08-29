@@ -6,6 +6,10 @@
 //	                                embeds the script, its vendored modules,
 //	                                and the interpreter
 //	gperl get Module...             vendor CPAN modules into ./local (cpanm)
+//	gperl xs build dist...          compile XS distributions (source dir or
+//	                                .tar.gz) against the native XS SDK into
+//	                                ./local/xs; gperl run and built binaries
+//	                                load them automatically
 //
 // Every subcommand is a thin wrapper over the github.com/goccy/go-perl/gperl
 // library, so applications can drive the same functionality programmatically.
@@ -26,6 +30,7 @@ func usage() {
   gperl run script.pl [args...]
   gperl build [-o out] script.pl
   gperl get Module [Module...]
+  gperl xs build [-C dir] dist [dist...]
 `)
 	os.Exit(2)
 }
@@ -59,6 +64,24 @@ func main() {
 			usage()
 		}
 		if err := gperl.Build(fs.Arg(0), *out); err != nil {
+			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+			os.Exit(1)
+		}
+	case "xs":
+		if len(os.Args) < 4 || os.Args[2] != "build" {
+			usage()
+		}
+		fs := flag.NewFlagSet("xs build", flag.ExitOnError)
+		dir := fs.String("C", ".", "project directory (module output goes to its local/xs)")
+		_ = fs.Parse(os.Args[3:])
+		if fs.NArg() == 0 {
+			usage()
+		}
+		modules, err := gperl.XSBuild(*dir, fs.Args())
+		for _, m := range modules {
+			fmt.Fprintf(os.Stderr, "gperl: built native module %s\n", m)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
 			os.Exit(1)
 		}

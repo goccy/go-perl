@@ -81,6 +81,12 @@
 #define PERL_VERSION_LT(r, v, s) \
     (PERL_DECIMAL_VERSION < PERL_VERSION_DECIMAL(r, v, s))
 
+/* Capability macros real perl.h inherits from config.h. The SDK targets
+ * ordinary darwin/linux hosts, so declare what those always have. */
+#ifndef HAS_GETTIMEOFDAY
+#define HAS_GETTIMEOFDAY
+#endif
+
 /* A dist's bundled ppport.h is a portability layer for REAL perl headers;
  * against this SDK it must not activate. Its include guard is pre-defined
  * so the #include turns into a no-op. */
@@ -834,6 +840,26 @@ static const char *goperl_form(goperl_frame_t *f, const char *fmt, ...) {
     return buf;
 }
 #define form(...) goperl_form(_gof, __VA_ARGS__)
+static const char *Perl_form(pTHX_ const char *fmt, ...)
+    __attribute__((unused));
+static const char *Perl_form(pTHX_ const char *fmt, ...) {
+    char *buf = goperl_form_bufs_v[goperl_form_ix_v++ % GOPERL_FORM_BUFS];
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vfmt(_gof, buf, GOPERL_FORM_LEN, fmt, ap);
+    va_end(ap);
+    return buf;
+}
+static const char *Perl_form_nocontext(const char *fmt, ...)
+    __attribute__((unused));
+static const char *Perl_form_nocontext(const char *fmt, ...) {
+    char *buf = goperl_form_bufs_v[goperl_form_ix_v++ % GOPERL_FORM_BUFS];
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vfmt(goperl_cur_frame_v, buf, GOPERL_FORM_LEN, fmt, ap);
+    va_end(ap);
+    return buf;
+}
 
 /* croak() and warn() (no context arg) are variadic macros over the local
  * frame. Perl_croak/Perl_warn/Perl_warner are called with aTHX_ — which now

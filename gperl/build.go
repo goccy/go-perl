@@ -85,6 +85,19 @@ func Build(script, out string) error {
 			return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
 		}
 	}
+	// Native XS modules cannot be embedded (they are dlopen'd host
+	// libraries); ship them next to the binary, where the generated main
+	// looks by default.
+	if srcXS := xsDir(projectDir); dirExists(srcXS) {
+		dstXS := out + ".xs"
+		if err := os.RemoveAll(dstXS); err != nil {
+			return err
+		}
+		if err := copyTree(srcXS, dstXS); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "gperl: native XS modules copied to %s\n", dstXS)
+	}
 	fmt.Fprintf(os.Stderr, "gperl: built %s\n", out)
 	return nil
 }
@@ -175,8 +188,10 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/gperl"
 )
 
 //go:embed app.zip
@@ -224,6 +239,21 @@ func main() {
 	})
 	if err != nil {
 		fatal(err)
+	}
+	// Native XS modules built by gperl xs build: GPERL_XS_DIR wins, then
+	// <binary>.xs next to the executable, then the project-layout dir.
+	xsCandidates := []string{os.Getenv("GPERL_XS_DIR")}
+	if exe, exeErr := os.Executable(); exeErr == nil {
+		xsCandidates = append(xsCandidates, exe+".xs")
+	}
+	xsCandidates = append(xsCandidates, filepath.Join("local", "xs", gperl.XSArchTag()))
+	for _, dir := range xsCandidates {
+		if dir == "" {
+			continue
+		}
+		if err := gperl.LoadXS(p, dir); err != nil {
+			fatal(err)
+		}
 	}
 	err = p.RunFile(context.Background(), scriptPath, incDirs, os.Args[1:])
 	if err == nil {
