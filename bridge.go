@@ -29,6 +29,7 @@ package perl
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -527,6 +528,15 @@ func (d goDispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error)
 			return append([]byte{0}, "no native XS handler installed"...), nil
 		}
 		return native(req), nil
+	}
+	if methodID == magicFreeMethodID {
+		d.p.funcsMu.RLock()
+		free := d.p.magicFree
+		d.p.funcsMu.RUnlock()
+		if free != nil && len(req) >= 4 {
+			free(binary.LittleEndian.Uint32(req))
+		}
+		return []byte{1}, nil
 	}
 	d.p.funcsMu.RLock()
 	fn, ok := d.p.funcs[methodID]

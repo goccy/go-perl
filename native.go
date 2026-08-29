@@ -16,17 +16,37 @@ import (
 // functions use positive ids, so the spaces cannot collide.
 const nativeXSMethodID = -1
 
+// magicFreeMethodID is the reserved callback method id fired when a guest SV
+// carrying the SDK's anchor magic is freed (perl.cc GOPERL_MG_FREE_METHOD_ID);
+// the payload is the u32 host magic id.
+const magicFreeMethodID = -2
+
 // SetNativeXSHandler installs the dispatcher for native XSUB calls. req is
-// the thunk's raw payload ([u32 fn_id][u32 items][u32 sv_tokens...]) and the
-// returned bytes are the raw response ([1][u32 nret][u32 sv_tokens...] on
-// success, [0]+message on failure). Installing a handler registers the
-// instance's callback dispatcher with the guest if that has not happened yet.
+// the thunk's raw payload ([u32 fn_id][u32 cv_token][u32 items][u32
+// sv_tokens...]) and the returned bytes are the raw response ([1][u32 nret]
+// [u32 sv_tokens...] on success, [0]+message on failure). Installing a
+// handler registers the instance's callback dispatcher with the guest if
+// that has not happened yet.
 func (p *Perl) SetNativeXSHandler(fn func(req []byte) []byte) error {
 	if err := p.ensureDispatcher(); err != nil {
 		return err
 	}
 	p.funcsMu.Lock()
 	p.nativeXS = fn
+	p.funcsMu.Unlock()
+	return nil
+}
+
+// SetMagicFreeHandler installs the teardown hook for host-side MAGIC: when
+// the guest frees an SV carrying the native SDK's anchor magic, id (the u32
+// the loader stored at attach time) is delivered here so the loader can run
+// the native module's svt_free chain and release its mirrors.
+func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
+	if err := p.ensureDispatcher(); err != nil {
+		return err
+	}
+	p.funcsMu.Lock()
+	p.magicFree = fn
 	p.funcsMu.Unlock()
 	return nil
 }

@@ -77,6 +77,9 @@ type Perl struct {
 	// nativeXS handles native-XSUB dispatch (the reserved callback method
 	// id); see native.go and the xsnative subpackage.
 	nativeXS func(req []byte) []byte
+	// magicFree handles teardown of host-side MAGIC mirrors when the guest
+	// frees an anchored SV (reserved callback method id -2).
+	magicFree func(id uint32)
 
 	// closed flips when Close runs; every public entry point checks it so a
 	// straggler — including a *Ref Free racing a Close — errors out instead
