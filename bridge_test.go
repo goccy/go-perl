@@ -3,6 +3,7 @@ package perl_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -45,9 +46,148 @@ func TestCallListReturnAndStructuredArgs(t *testing.T) {
 	if got[0] != float64(3) || got[1] != "perl" {
 		t.Fatalf("shape scalars = %#v", got[:2])
 	}
-	doubled, ok := got[2].([]any)
+	// The returned arrayref crosses as a handle; Export materialises data.
+	ref, ok := got[2].(*perl.Ref)
+	if !ok || ref.Reftype() != "ARRAY" {
+		t.Fatalf("shape list = %#v, want an ARRAY *perl.Ref", got[2])
+	}
+	defer ref.Free()
+	exported, err := ref.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	doubled, ok := exported.([]any)
 	if !ok || len(doubled) != 3 || doubled[2] != float64(6) {
-		t.Fatalf("shape list = %#v, want [2 4 6]", got[2])
+		t.Fatalf("shape list = %#v, want [2 4 6]", exported)
+	}
+}
+
+// TestObjectIdentityRoundTrip is the pointer-semantics guarantee: a blessed
+// Perl object crossing to Go and back must be THE SAME object — method calls
+// from Go mutate the object Perl sees, the same object always surfaces with
+// an Equal handle, and identity survives being passed back as an argument.
+func TestObjectIdentityRoundTrip(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	r, err := p.Eval(ctx, `
+		package Counter;
+		sub new { my ($c) = @_; bless { n => 0 }, $c }
+		sub inc { my ($s) = @_; $s->{n}++; $s }
+		sub n   { my ($s) = @_; $s->{n} }
+		package main;
+		our $counter = Counter->new;
+		sub get_counter { $counter }
+		sub same_as_ours { my ($x) = @_; $x == $counter ? "same" : "different" }
+		1;`)
+	if err != nil || !r.Ok {
+		t.Fatalf("define Counter: err=%v error=%q", err, r.Error)
+	}
+
+	got, err := p.Call(ctx, "get_counter")
+	if err != nil {
+		t.Fatalf("Call get_counter: %v", err)
+	}
+	obj, ok := got[0].(*perl.Ref)
+	if !ok {
+		t.Fatalf("get_counter returned %#v, want *perl.Ref", got[0])
+	}
+	defer obj.Free()
+	if obj.Class() != "Counter" || obj.Reftype() != "HASH" {
+		t.Fatalf("Class=%q Reftype=%q, want Counter/HASH", obj.Class(), obj.Reftype())
+	}
+
+	// Mutate through a Go-side method call; Perl must observe it.
+	if _, err := obj.MethodCall(ctx, "inc"); err != nil {
+		t.Fatalf("MethodCall inc: %v", err)
+	}
+	if r, err := p.Eval(ctx, `$counter->{n}`); err != nil || !r.Ok || r.Result != "1" {
+		t.Fatalf("Perl-side n after Go inc = %q (err=%v error=%q)", r.Result, err, r.Error)
+	}
+
+	// The same object surfaces with the same handle (dedup by refaddr).
+	again, err := p.Call(ctx, "get_counter")
+	if err != nil {
+		t.Fatalf("Call get_counter again: %v", err)
+	}
+	obj2 := again[0].(*perl.Ref)
+	defer obj2.Free()
+	if !obj.Equal(obj2) {
+		t.Fatalf("two crossings of the same object are not Equal")
+	}
+
+	// Passing the handle back dereferences to the same SV.
+	same, err := p.Call(ctx, "same_as_ours", obj)
+	if err != nil {
+		t.Fatalf("Call same_as_ours: %v", err)
+	}
+	if same[0] != "same" {
+		t.Fatalf("identity through an argument round trip = %#v, want same", same[0])
+	}
+}
+
+// TestCodeRefInvoke drives a Perl closure from Go and checks the captured
+// state advances — closures only work if the handle is the same code ref.
+func TestCodeRefInvoke(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	if r, err := p.Eval(ctx, `sub make_adder { my ($n) = @_; my $sum = $n; sub { $sum += $_[0]; $sum } } 1;`); err != nil || !r.Ok {
+		t.Fatalf("define make_adder: err=%v error=%q", err, r.Error)
+	}
+	res, err := p.Call(ctx, "make_adder", 10)
+	if err != nil {
+		t.Fatalf("Call make_adder: %v", err)
+	}
+	adder := res[0].(*perl.Ref)
+	defer adder.Free()
+	if adder.Reftype() != "CODE" {
+		t.Fatalf("Reftype = %q, want CODE", adder.Reftype())
+	}
+	if out, err := adder.Invoke(ctx, 5); err != nil || out[0] != float64(15) {
+		t.Fatalf("first Invoke = %#v err=%v, want 15", out, err)
+	}
+	if out, err := adder.Invoke(ctx, 7); err != nil || out[0] != float64(22) {
+		t.Fatalf("second Invoke = %#v err=%v, want 22 (closure state must persist)", out, err)
+	}
+}
+
+// TestBindReceivesRefs: a reference argument to a bound Go function arrives
+// as a *Ref to the same object, is usable during the call, and can be
+// retained beyond it.
+func TestBindReceivesRefs(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	var kept *perl.Ref
+	if err := p.Bind("go_take", func(args []any) ([]any, error) {
+		ref, ok := args[0].(*perl.Ref)
+		if !ok {
+			return nil, errors.New("expected a reference argument")
+		}
+		if err := ref.Retain(ctx); err != nil {
+			return nil, err
+		}
+		kept = ref
+		return []any{ref.Class()}, nil
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	r, err := p.Eval(ctx, `package Box; sub new { bless {v=>"inside"}, shift } package main; go_take(Box->new)`)
+	if err != nil || !r.Ok {
+		t.Fatalf("Eval: err=%v error=%q", err, r.Error)
+	}
+	if r.Result != "Box" {
+		t.Fatalf("bound fn saw class %q, want Box", r.Result)
+	}
+	if kept == nil {
+		t.Fatalf("handler did not retain the ref")
+	}
+	defer kept.Free()
+	// The retained handle outlives the call that delivered it.
+	out, err := kept.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export retained ref: %v", err)
+	}
+	if m, ok := out.(map[string]any); !ok || m["v"] != "inside" {
+		t.Fatalf("retained ref exported %#v, want {v: inside}", out)
 	}
 }
 
@@ -129,6 +269,105 @@ func TestBindReentrant(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "15-relayed" {
 		t.Fatalf("relay = %#v, want [15-relayed]", got)
+	}
+}
+
+// TestGoFuncValueAsCallback passes Go function VALUES to Perl: they arrive
+// as ordinary code refs Perl can call immediately, store, and call later.
+func TestGoFuncValueAsCallback(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	r, err := p.Eval(ctx, `
+		sub apply     { my ($f, $x) = @_; $f->($x) + 1 }
+		sub keep_cb   { $main::kept_cb = $_[0]; 1 }
+		sub call_kept { $main::kept_cb->(@_) }
+		1;`)
+	if err != nil || !r.Ok {
+		t.Fatalf("define helpers: err=%v error=%q", err, r.Error)
+	}
+
+	double := func(args []any) ([]any, error) {
+		return []any{args[0].(float64) * 2}, nil
+	}
+	got, err := p.Call(ctx, "apply", double, 20)
+	if err != nil {
+		t.Fatalf("Call apply: %v", err)
+	}
+	if got[0] != float64(41) {
+		t.Fatalf("apply(double, 20) = %#v, want 41", got[0])
+	}
+
+	// Perl keeps the callback and calls it in a later, unrelated call.
+	joiner := func(args []any) ([]any, error) {
+		parts := make([]string, len(args))
+		for i, a := range args {
+			parts[i] = fmt.Sprint(a)
+		}
+		return []any{strings.Join(parts, "-")}, nil
+	}
+	if _, err := p.Call(ctx, "keep_cb", joiner); err != nil {
+		t.Fatalf("Call keep_cb: %v", err)
+	}
+	out, err := p.Call(ctx, "call_kept", "a", "b", "c")
+	if err != nil {
+		t.Fatalf("Call call_kept: %v", err)
+	}
+	if out[0] != "a-b-c" {
+		t.Fatalf("stored Go callback returned %#v, want a-b-c", out[0])
+	}
+}
+
+// TestBindClassFromGo defines a Perl class whose methods are Go functions:
+// Perl constructs instances, calls methods (instance and class invocants),
+// and subclasses it with plain @ISA inheritance.
+func TestBindClassFromGo(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	err := p.BindClass("Shout", map[string]perl.GoFunc{
+		"upper": func(args []any) ([]any, error) {
+			self, ok := args[0].(*perl.Ref)
+			if !ok {
+				return nil, errors.New("upper is an instance method")
+			}
+			data, err := self.Export(ctx)
+			if err != nil {
+				return nil, err
+			}
+			word, _ := data.(map[string]any)["word"].(string)
+			return []any{strings.ToUpper(word)}, nil
+		},
+		"who": func(args []any) ([]any, error) {
+			switch inv := args[0].(type) {
+			case *perl.Ref:
+				return []any{"instance:" + inv.Class()}, nil
+			case string:
+				return []any{"class:" + inv}, nil
+			default:
+				return nil, fmt.Errorf("unexpected invocant %T", args[0])
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("BindClass: %v", err)
+	}
+
+	r, err := p.Eval(ctx, `Shout->new(word => "quiet")->upper`)
+	if err != nil || !r.Ok || r.Result != "QUIET" {
+		t.Fatalf("instance method = %q (err=%v error=%q)", r.Result, err, r.Error)
+	}
+	r, err = p.Eval(ctx, `Shout->who`)
+	if err != nil || !r.Ok || r.Result != "class:Shout" {
+		t.Fatalf("class invocant = %q (err=%v error=%q)", r.Result, err, r.Error)
+	}
+	// Perl-side subclassing of the Go-implemented class just works: method
+	// resolution is Perl's own.
+	r, err = p.Eval(ctx, `package Louder; our @ISA = ('Shout'); package main; Louder->new(word => "sub")->upper`)
+	if err != nil || !r.Ok || r.Result != "SUB" {
+		t.Fatalf("inherited method = %q (err=%v error=%q)", r.Result, err, r.Error)
+	}
+	r, err = p.Eval(ctx, `Louder->new->who`)
+	if err != nil || !r.Ok || r.Result != "instance:Louder" {
+		t.Fatalf("subclass invocant = %q (err=%v error=%q)", r.Result, err, r.Error)
 	}
 }
 

@@ -57,8 +57,11 @@ func main() {
 - **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
   runaway script at the next Perl opcode.
 - **Bridged**: `Call` invokes named Perl subs from Go and `Bind` makes Go
-  functions callable from Perl as ordinary subs — arguments and return lists
-  cross as JSON, and errors map to `*PerlError` / Perl `die` respectively.
+  functions callable from Perl as ordinary subs. Plain scalars cross by
+  value; Perl references — blessed objects, array/hash/code refs — cross as
+  identity-preserving handles (`*Ref`), never serialized, so the same object
+  stays the same object across any number of round trips. Errors map to
+  `*PerlError` / Perl `die` respectively.
 
 ## Calling between Go and Perl
 
@@ -72,6 +75,16 @@ p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`)
 sum, _ := p.Call(ctx, "add", 40, 2)
 fmt.Println(sum[0]) // 42
 
+// Perl objects cross as handles, not copies: the same object, its methods,
+// and its state remain live on the Go side.
+p.Eval(ctx, `package Counter; sub new { bless {n=>0}, shift } sub inc { $_[0]{n}++ }
+             package main; sub counter { our $c ||= Counter->new } 1;`)
+res, _ := p.Call(ctx, "counter")
+obj := res[0].(*perl.Ref) // Class() == "Counter"
+defer obj.Free()
+obj.MethodCall(ctx, "inc")            // mutates the object Perl sees
+p.Call(ctx, "counter")                // returns an Equal handle: same object
+
 // Perl -> Go: bind a Go function as a Perl sub.
 p.Bind("go_upper", func(args []any) ([]any, error) {
 	return []any{strings.ToUpper(args[0].(string))}, nil
@@ -80,11 +93,15 @@ r, _ := p.Eval(ctx, `go_upper("hello")`)
 fmt.Println(r.Result) // HELLO
 ```
 
-A bound Go function may call back into the same instance (`Eval`/`Call`),
-so round trips compose. See
-[`examples/plack`](./examples/plack) for the bridge carrying real traffic: a
-PSGI web application (Plack + Mojolicious) served from `net/http` over a pool
-of warm instances.
+The value model matches go-spidermonkey's: primitives cross as data (Perl
+scalars are value-semantic anyway), Go composites materialize as fresh Perl
+structures (data, not identity), and every Perl reference crosses by handle —
+`*Ref` supports `MethodCall`, `Invoke` (code refs), `Export` (deep copy to Go
+data), `Retain`/`Free`, and `Equal` (identity). A bound Go function may call
+back into the same instance (`Eval`/`Call`/`Ref` methods), so round trips
+compose. See [`examples/plack`](./examples/plack) for the bridge carrying
+real traffic: a PSGI web application (Plack + Mojolicious) served from
+`net/http` over a pool of warm instances.
 
 ## Supply-chain verification
 

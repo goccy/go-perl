@@ -943,7 +943,7 @@ var _ = runtime.SetFinalizer
 
 // Call the named Perl subroutine in list context. `sub_name` is a fully
 // qualified sub name ("main::handler", "My::App::run") or a main:: sub name;
-// `args_json` is a JSON array holding the argument list (NULL/empty means no
+// `args_json` is a JSON array of tagged value nodes (NULL/empty means no
 // arguments). Returns
 //
 //	{"ok":
@@ -951,16 +951,15 @@ var _ = runtime.SetFinalizer
 // <bool
 // >,"result":
 // <array
-// >,"error":
+// of tagged nodes>,"error":
 // <string
 // >}
 //
-// where "result" is the sub's return list re-encoded as a JSON array. On a
-// Perl-level die (including "no such sub"), "ok" is false and "error" holds
-// $
+// On a Perl-level die (including "no such sub"), "ok" is false and "error"
+// holds $
 // .
-// Unlike perl_eval, STDOUT/STDERR are NOT redirected: prints go to the
-// instance's WASI fds.
+// Unlike perl_eval, STDOUT/STDERR are NOT redirected: prints go to
+// the instance's WASI fds.
 func PerlCall(h uint64, subName string, argsJson string) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)

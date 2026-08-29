@@ -177,9 +177,20 @@ func writePSGIResponse(w http.ResponseWriter, res []any) error {
 	if !ok || status < 100 || status > 999 {
 		return fmt.Errorf("bad status %#v", res[0])
 	}
-	pairs, ok := res[1].([]any)
-	if !ok || len(pairs)%2 != 0 {
+	// The PSGI header arrayref crosses as an identity-preserving handle;
+	// headers are pure data here, so materialise and release it.
+	hdrRef, ok := res[1].(*perl.Ref)
+	if !ok {
 		return fmt.Errorf("bad header list %#v", res[1])
+	}
+	defer hdrRef.Free()
+	exported, err := hdrRef.Export(context.Background())
+	if err != nil {
+		return fmt.Errorf("export headers: %w", err)
+	}
+	pairs, ok := exported.([]any)
+	if !ok || len(pairs)%2 != 0 {
+		return fmt.Errorf("bad header list %#v", exported)
 	}
 	bodyB64, ok := res[2].(string)
 	if !ok {
