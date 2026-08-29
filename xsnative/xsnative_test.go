@@ -64,7 +64,7 @@ func TestNativeXSModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(libdir, "Demo", "XS.pm"),
-		[]byte("package Demo::XS;\nour $VERSION = '0.01';\n1;\n"), 0o644); err != nil {
+		[]byte("package Demo::XS;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if r, err := p.Eval(ctx, `sub __t_add_inc { unshift @INC, $_[0]; 1 } 1;`); err != nil || !r.Ok {
@@ -106,5 +106,104 @@ func TestNativeXSModule(t *testing.T) {
 	}
 	if got[0] != float64(42) {
 		t.Fatalf("Call add = %#v, want 42", got[0])
+	}
+}
+
+// findCXX locates a working C++ compiler: some hosts have a `c++` whose
+// standard-library headers are broken, so candidates are probe-compiled
+// (with the platform sysroot when needed) before being trusted.
+func findCXX(t *testing.T) []string {
+	t.Helper()
+	probe := filepath.Join(t.TempDir(), "probe.cpp")
+	if err := os.WriteFile(probe, []byte("#include <cstdio>\nint main(){return 0;}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sysroot []string
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
+			sysroot = []string{"-isysroot", strings.TrimSpace(string(out))}
+		}
+	}
+	candidates := [][]string{{"c++"}, {"clang++"}, {"g++"},
+		{"/opt/homebrew/opt/llvm/bin/clang++"}, {"/usr/local/opt/llvm/bin/clang++"}}
+	if env := os.Getenv("CXX"); env != "" {
+		candidates = append([][]string{{env}}, candidates...)
+	}
+	out := filepath.Join(t.TempDir(), "probe.o")
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		args := append(append([]string{}, c[1:]...), sysroot...)
+		args = append(args, "-c", probe, "-o", out)
+		if exec.Command(c[0], args...).Run() == nil {
+			return append(append([]string{c[0]}, c[1:]...), sysroot...)
+		}
+	}
+	t.Skip("no working C++ compiler found")
+	return nil
+}
+
+// TestNativeCppObjectModule pins the SDK v2 surface with a C++ module: a
+// T_PTROBJ native object (host pointer as registry id in a blessed IV ref),
+// method dispatch on it, and a blessed hash built with the AV/HV ops.
+func TestNativeCppObjectModule(t *testing.T) {
+	cxx := findCXX(t)
+	so := filepath.Join(t.TempDir(), "ObjDemo.so")
+	args := append(append([]string{}, cxx[1:]...),
+		"-shared", "-fPIC", "-x", "c++", "-std=c++11",
+		"-I", "sdk/include", "-o", so, "testdata/objdemo/ObjDemo.c")
+	if runtime.GOOS == "darwin" {
+		switch runtime.GOARCH {
+		case "arm64":
+			args = append([]string{"-arch", "arm64"}, args...)
+		case "amd64":
+			args = append([]string{"-arch", "x86_64"}, args...)
+		}
+	}
+	if out, err := exec.Command(cxx[0], args...).CombinedOutput(); err != nil {
+		t.Fatalf("compile ObjDemo.so: %v\n%s", err, out)
+	}
+
+	p, err := perl.New(perl.Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+	ctx := context.Background()
+	if err := xsnative.Load(p, "Obj::Demo", so); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	libdir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(libdir, "Obj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libdir, "Obj", "Demo.pm"), []byte(
+		"package Obj::Demo;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n"+
+			"sub new { my ($class, $label) = @_; $class->_new($label) }\n1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := p.Eval(ctx, `sub __t_inc2 { unshift @INC, $_[0]; 1 } 1;`); err != nil || !r.Ok {
+		t.Fatalf("inc helper: err=%v error=%q", err, r.Error)
+	}
+	if _, err := p.Call(ctx, "__t_inc2", libdir); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := p.Eval(ctx, `
+		use Obj::Demo;
+		my $o = Obj::Demo->new("hits");
+		$o->incr(5);
+		my $n = $o->incr(37);
+		my $s = $o->stats;
+		my $out = join("|", $n, ref($s), $s->{label}, $s->{count});
+		undef $o;   # DESTROY tears the native object down
+		$out;
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if want := "42|Obj::Demo::Stats|hits|42"; !r.Ok || r.Result != want {
+		t.Fatalf("ObjDemo = ok=%v result=%q error=%q, want %q", r.Ok, r.Result, r.Error, want)
 	}
 }

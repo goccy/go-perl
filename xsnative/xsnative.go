@@ -36,7 +36,7 @@ import (
 )
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 1
+const abiVersion = 2
 
 const maxStack = 64
 
@@ -52,6 +52,7 @@ type cFrame struct {
 	reserved int32
 	st       [maxStack]uint64
 	err      [512]byte
+	tmp      uint64 // scratch slot for the SDK's pointer-returning fetch macros
 
 	// Go-only:
 	p *perl.Perl
@@ -67,6 +68,10 @@ type cAPI struct {
 	newPVN   uintptr
 	svMortal uintptr
 	regXS    uintptr
+	// v2:
+	xsOp      uintptr
+	ptrEncode uintptr
+	ptrDecode uintptr
 }
 
 // state is the per-instance loader state.
@@ -75,7 +80,25 @@ type state struct {
 	mu      sync.Mutex
 	fns     []uintptr // fnID -> native XSUB pointer
 	fnNames [][]byte  // fnID -> NUL-terminated sub name (frame.subname points here)
-	interns [][]byte  // other pinned C strings (boot frame names)
+	// ptrs is the host-pointer registry backing T_PTROBJ: guest IVs are
+	// 32-bit, so a native object pointer crosses as (index+1) here.
+	ptrs []uintptr
+}
+
+func (s *state) encodePtr(p uintptr) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ptrs = append(s.ptrs, p)
+	return uint64(len(s.ptrs))
+}
+
+func (s *state) decodePtr(id uint64) uintptr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == 0 || id > uint64(len(s.ptrs)) {
+		return 0
+	}
+	return s.ptrs[id-1]
 }
 
 var (
@@ -123,8 +146,11 @@ func stateFor(p *perl.Perl) *state {
 }
 
 // Load dlopens a native XS module built against the SDK, injects the vtable,
-// and runs boot_<Module> so its subs are registered with the interpreter.
-// module is the Perl package the .xs declared (e.g. "Demo::XS").
+// and registers its boot function as the Perl sub <Module>::bootstrap — the
+// exact contract a statically linked perl's XSLoader/DynaLoader resolve, so
+// a stock `use Module;` (whose .pm calls XSLoader::load) boots the native
+// module lazily at use time with no loader-side patching. module is the Perl
+// package the .xs declared (e.g. "Compiler::Lexer").
 func Load(p *perl.Perl, module, path string) error {
 	libcInit()
 	if libcErr != nil {
@@ -153,26 +179,10 @@ func Load(p *perl.Perl, module, path string) error {
 	if err != nil {
 		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
 	}
-
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: p}
-	f.subname = s.internName(module + "::BOOT")
-	fp := pinFrame(f)
-	purego.SyscallN(bootFn, fp)
-	unpinFrame(fp)
-	if f.failed != 0 {
-		return fmt.Errorf("boot %s: %s", module, f.errString())
-	}
-	return nil
-}
-
-// internName stores a NUL-terminated copy of name whose address stays valid
-// for the instance's lifetime (frame.subname points at it during calls).
-func (s *state) internName(name string) uintptr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := append([]byte(name), 0)
-	s.interns = append(s.interns, b)
-	return uintptr(unsafe.Pointer(&b[0]))
+	// The static-perl bootstrap contract: DynaLoader::bootstrap (which
+	// XSLoader falls back to on a perl without dynamic loading) resolves
+	// and calls &{"${module}::bootstrap"}.
+	return s.registerNative(module+"::bootstrap", bootFn)
 }
 
 // registerNative records fn and binds it as the Perl sub name via the
@@ -310,6 +320,32 @@ func buildVtable() {
 			return 0
 		}
 		return uintptr(out)
+	})
+	vtable.xsOp = purego.NewCallback(func(fr uintptr, op int32, a, b, sPtr, sLen uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		v, err := f.p.XSHelperOp(op, uint64(a), uint64(b), goBytesString(sPtr, int(sLen)))
+		if err != nil {
+			f.fail(fmt.Sprintf("xs op %d: %v", op, err))
+			return 0
+		}
+		return uintptr(v)
+	})
+	vtable.ptrEncode = purego.NewCallback(func(fr, p uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		return uintptr(stateFor(f.p).encodePtr(p))
+	})
+	vtable.ptrDecode = purego.NewCallback(func(fr, id uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		return stateFor(f.p).decodePtr(uint64(id))
 	})
 	vtable.regXS = purego.NewCallback(func(fr, name, fn uintptr) uintptr {
 		f := lookupFrame(fr)
