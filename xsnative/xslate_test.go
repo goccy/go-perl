@@ -42,7 +42,7 @@ func TestTextXslate(t *testing.T) {
 		t.Fatalf("GOPERL_XSLATE_DIR is set but %s is missing: %v", so, err)
 	}
 
-	p, err := perl.New(perl.Config{})
+	p, err := perl.New(perl.Config{HostFS: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

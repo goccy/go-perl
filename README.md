@@ -42,16 +42,18 @@ func main() {
 - **Pure Go**: works anywhere Go compiles; `CGO_ENABLED=0` friendly.
 - **Batteries included**: libperl plus every static XS extension (List::Util,
   POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib
-  (embedded zip, unpacked automatically — or served from an in-memory FS via
-  `NewStdlibMemFS`).
+  (embedded zip, served from a private in-memory filesystem by default).
 - **Instant start, copy-on-write**: the first `New` boots one interpreter and
   snapshots its memory; every later `New` maps that snapshot copy-on-write, so
   instances start without re-running interpreter init and share the read-only
   bulk of their memory (the same machinery as
   [go-spidermonkey](https://github.com/goccy/go-spidermonkey)).
-- **Sandboxed**: each `Perl` runs in its own WASI sandbox — a pluggable
-  filesystem backend (`Config.FS`), environment, network (`Dial`/`Resolve`)
-  and subprocess (`Exec`) policy hooks, and no ambient host access.
+- **Sandboxed by default**: each `Perl` runs in its own WASI sandbox with a
+  PRIVATE in-memory filesystem — an embedded instance touches no host files
+  unless asked to. `Config.HostFS` opts into the operating system's
+  filesystem (how the `gperl` command behaves, matching `perl`), `Config.FS`
+  plugs in any custom backend, and environment, network (`Dial`/`Resolve`)
+  and subprocess (`Exec`) policy hooks complete the sandbox.
 - **Multi-instance**: independent `Perl` instances share nothing (writable
   state, that is — read-only snapshot pages are shared).
 - **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a

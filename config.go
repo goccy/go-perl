@@ -70,7 +70,18 @@ type Config struct {
 	// giving two instances separate FS values isolates them completely. Use
 	// NewStdlibMemFS() for an in-memory FS pre-loaded with the standard
 	// library. When FS is set, PreopenDir is ignored and StdlibDir defaults to
-	// "/" (the FS root). When nil, the default os-backed filesystem (optionally
-	// scoped by PreopenDir) is used.
+	// "/" (the FS root).
+	//
+	// When FS is nil the default depends on HostFS below: an embedded
+	// instance gets a private in-memory filesystem (sandboxed by default),
+	// while HostFS opts into the operating system's filesystem.
 	FS FS
+	// HostFS, when true (and FS is nil), gives the guest the host operating
+	// system's filesystem, optionally scoped by PreopenDir — the way the
+	// perl command behaves, and what gperl uses. When false and FS is nil,
+	// the instance gets a PRIVATE in-memory filesystem pre-loaded with the
+	// standard library, so a library embedding never touches the host disk
+	// unless explicitly asked to. Setting StdlibDir or PreopenDir (host
+	// paths by nature) implies HostFS.
+	HostFS bool
 }

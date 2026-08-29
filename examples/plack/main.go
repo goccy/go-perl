@@ -42,6 +42,9 @@ type pool struct {
 // bridge (Bind/Call), so no Perl-source quoting is involved.
 func bootInstance(incDirs []string, appPath string) (*perl.Perl, error) {
 	p, err := perl.New(perl.Config{
+		// The example loads its app and vendored modules from the host
+		// working tree.
+		HostFS: true,
 		// The PSGI app's STDERR (psgi.errors) surfaces on the process stderr.
 		Stderr: os.Stderr,
 	})

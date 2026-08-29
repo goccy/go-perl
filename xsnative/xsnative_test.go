@@ -47,7 +47,7 @@ func buildDemo(t *testing.T) string {
 
 func TestNativeXSModule(t *testing.T) {
 	so := buildDemo(t)
-	p, err := perl.New(perl.Config{})
+	p, err := perl.New(perl.Config{HostFS: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestNativeCppObjectModule(t *testing.T) {
 		t.Fatalf("compile ObjDemo.so: %v\n%s", err, out)
 	}
 
-	p, err := perl.New(perl.Config{})
+	p, err := perl.New(perl.Config{HostFS: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

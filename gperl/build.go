@@ -2,8 +2,9 @@ package gperl
 
 // gperl build: produce a self-contained Go binary that embeds the script,
 // its vendored pure-Perl modules, and the interpreter. The generated program
-// serves everything from an in-memory filesystem (stdlib + app tree), so the
-// result is a single static binary in the `go build` tradition.
+// behaves like the perl command (host filesystem, stdio, environment): at
+// startup it unpacks the embedded app tree into a private temp directory,
+// runs the script from there, and cleans up on exit.
 
 import (
 	"archive/zip"
@@ -61,7 +62,7 @@ func Build(script, out string) error {
 	}
 	var mainSrc bytes.Buffer
 	if err := mainTemplate.Execute(&mainSrc, map[string]any{
-		"ScriptPath": "/app/" + scriptName,
+		"ScriptPath": "app/" + scriptName,
 		"Inc":        incDirs,
 	}); err != nil {
 		return err
@@ -141,15 +142,15 @@ func buildAppZip(projectDir, script string) ([]byte, []string, error) {
 		if err := addTree("app/local/lib/perl5", lib); err != nil {
 			return nil, nil, err
 		}
-		inc = append(inc, "/app/local/lib/perl5")
+		inc = append(inc, "app/local/lib/perl5")
 	}
 	if st, err := os.Stat(filepath.Join(projectDir, "lib")); err == nil && st.IsDir() {
 		if err := addTree("app/lib", filepath.Join(projectDir, "lib")); err != nil {
 			return nil, nil, err
 		}
-		inc = append(inc, "/app/lib")
+		inc = append(inc, "app/lib")
 	}
-	inc = append(inc, "/app")
+	inc = append(inc, "app")
 	if err := zw.Close(); err != nil {
 		return nil, nil, err
 	}
@@ -187,8 +188,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
+	"strings"
 
 	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/gperl"
@@ -197,15 +198,19 @@ import (
 //go:embed app.zip
 var appZip []byte
 
-const scriptPath = {{printf "%q" .ScriptPath}}
+const scriptRel = {{printf "%q" .ScriptPath}}
 
-var incDirs = []string{ {{range .Inc}}{{printf "%q" .}}, {{end}} }
+var incRel = []string{ {{range .Inc}}{{printf "%q" .}}, {{end}} }
 
 func main() {
-	fsys, err := perl.NewStdlibMemFS()
+	// The embedded app tree unpacks into a private temp directory; the
+	// script itself runs with the HOST filesystem, like the perl command.
+	appDir, err := os.MkdirTemp("", "gperl-app-")
 	if err != nil {
 		fatal(err)
 	}
+	cleanup = func() { os.RemoveAll(appDir) }
+	defer cleanup()
 	zr, err := zip.NewReader(bytes.NewReader(appZip), int64(len(appZip)))
 	if err != nil {
 		fatal(err)
@@ -214,7 +219,11 @@ func main() {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if err := fsys.MkdirAll(path.Dir(f.Name), 0o755); err != nil {
+		target := filepath.Join(appDir, filepath.FromSlash(f.Name))
+		if !strings.HasPrefix(target, appDir+string(os.PathSeparator)) {
+			fatal(fmt.Errorf("embedded path escapes app dir: %s", f.Name))
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			fatal(err)
 		}
 		rc, err := f.Open()
@@ -226,12 +235,17 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		if err := fsys.WriteFile(f.Name, data, 0o644); err != nil {
+		if err := os.WriteFile(target, data, 0o644); err != nil {
 			fatal(err)
 		}
 	}
+	scriptPath := filepath.Join(appDir, filepath.FromSlash(scriptRel))
+	incDirs := make([]string, 0, len(incRel))
+	for _, rel := range incRel {
+		incDirs = append(incDirs, filepath.Join(appDir, filepath.FromSlash(rel)))
+	}
 	p, err := perl.New(perl.Config{
-		FS:     fsys,
+		HostFS: true,
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
@@ -264,6 +278,7 @@ func main() {
 		// A guest exit() unwound cleanly; Close flushes PerlIO and runs
 		// END blocks before the process reports the status.
 		p.Close()
+		cleanup()
 		os.Exit(code)
 	}
 	var pe *perl.PerlError
@@ -274,13 +289,19 @@ func main() {
 		}
 		fmt.Fprint(os.Stderr, msg)
 		p.Close()
+		cleanup()
 		os.Exit(255)
 	}
 	fatal(err)
 }
 
+// cleanup removes the unpacked app dir; os.Exit skips defers, so every
+// exit path calls it explicitly.
+var cleanup = func() {}
+
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, err)
+	cleanup()
 	os.Exit(1)
 }
 `))

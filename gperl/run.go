@@ -48,6 +48,9 @@ func Run(script string, args []string) (status int, err error) {
 	inc = append(inc, projectDir)
 
 	p, err := perl.New(perl.Config{
+		// gperl behaves like the perl command: the script sees the host
+		// filesystem, stdio, and environment.
+		HostFS: true,
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,

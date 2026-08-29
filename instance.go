@@ -132,20 +132,36 @@ func (p *Perl) drainReleases(ctx context.Context) {
 // interpreter, so construction is cheap and the instances share the read-only
 // bulk of their memory.
 func New(cfg Config) (p *Perl, err error) {
-	// Resolve the standard library location:
+	// Resolve the filesystem and standard library location:
 	//   - custom FS backend: the stdlib must live inside it; default the search
 	//     path to its root ("/"). (Use NewStdlibMemFS to pre-load it.)
-	//   - no FS and no StdlibDir: extract the embedded stdlib to a temp dir.
-	if cfg.FS != nil {
+	//   - host mode (HostFS, or a host path in StdlibDir/PreopenDir): the OS
+	//     filesystem, with the embedded stdlib extracted to a temp dir when no
+	//     StdlibDir is given. This is how the perl command behaves; gperl
+	//     runs this way.
+	//   - otherwise (the library default): a PRIVATE in-memory filesystem
+	//     pre-loaded with the stdlib — sandboxed, nothing touches host disk.
+	hostMode := cfg.HostFS || cfg.StdlibDir != "" || cfg.PreopenDir != ""
+	switch {
+	case cfg.FS != nil:
 		if cfg.StdlibDir == "" {
 			cfg.StdlibDir = "/"
 		}
-	} else if cfg.StdlibDir == "" {
-		dir, sErr := ExtractStdlib()
-		if sErr != nil {
-			return nil, fmt.Errorf("extract embedded stdlib: %w", sErr)
+	case hostMode:
+		if cfg.StdlibDir == "" {
+			dir, sErr := ExtractStdlib()
+			if sErr != nil {
+				return nil, fmt.Errorf("extract embedded stdlib: %w", sErr)
+			}
+			cfg.StdlibDir = dir
 		}
-		cfg.StdlibDir = dir
+	default:
+		fsys, sErr := NewStdlibMemFS()
+		if sErr != nil {
+			return nil, fmt.Errorf("build in-memory stdlib: %w", sErr)
+		}
+		cfg.FS = fsys
+		cfg.StdlibDir = "/"
 	}
 
 	m := &Module{}
