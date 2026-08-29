@@ -16,19 +16,20 @@ run Perl.
 package main
 
 import (
+	"context"
 	"fmt"
 
 	perl "github.com/goccy/go-perl"
 )
 
 func main() {
-	i, err := perl.NewInterpreter(perl.Config{})
+	p, err := perl.New(perl.Config{})
 	if err != nil {
 		panic(err)
 	}
-	defer i.Close()
+	defer p.Close()
 
-	r, err := i.Eval(`join(",", map { $_ * 2 } 1..5)`)
+	r, err := p.Eval(context.Background(), `join(",", map { $_ * 2 } 1..5)`)
 	if err != nil {
 		panic(err)
 	}
@@ -43,11 +44,18 @@ func main() {
   POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib
   (embedded zip, unpacked automatically — or served from an in-memory FS via
   `NewStdlibMemFS`).
-- **Sandboxed**: each `Interpreter` runs in its own WASI sandbox with a
-  pluggable filesystem backend (`Config.FS`), environment, and no ambient
-  host access.
-- **Multi-interpreter**: independent `Interpreter` instances share nothing.
-- **Interruptible**: a running `Eval` can be stopped from another goroutine.
+- **Instant start, copy-on-write**: the first `New` boots one interpreter and
+  snapshots its memory; every later `New` maps that snapshot copy-on-write, so
+  instances start without re-running interpreter init and share the read-only
+  bulk of their memory (the same machinery as
+  [go-spidermonkey](https://github.com/goccy/go-spidermonkey)).
+- **Sandboxed**: each `Perl` runs in its own WASI sandbox — a pluggable
+  filesystem backend (`Config.FS`), environment, network (`Dial`/`Resolve`)
+  and subprocess (`Exec`) policy hooks, and no ambient host access.
+- **Multi-instance**: independent `Perl` instances share nothing (writable
+  state, that is — read-only snapshot pages are shared).
+- **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
+  runaway script at the next Perl opcode.
 
 ## Supply-chain verification
 

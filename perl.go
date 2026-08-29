@@ -519,7 +519,18 @@ type Module struct {
 	cbMu      sync.RWMutex
 	callbacks map[int32]CallbackHandler
 	nextCBID  int32
+	// cbDesc is the reusable guest-memory result descriptor for callback
+	// returns on a memory64 module (see encodeCallbackResult); 0 until
+	// first use, and never touched on wasm32.
+	cbDesc wptr
 }
+
+// wptr is the guest pointer width: int32 for a wasm32 module, int64
+// for a memory64 (wasm64) one. Every pointer or length that crosses
+// the bridge boundary is a wptr; the transpiled wasm2go package's
+// export/import signatures use the same width, so the two packages
+// stay in lock-step from the one substitution the generator makes.
+type wptr = int32
 
 var (
 	globalModule *Module
@@ -535,11 +546,44 @@ type CallbackHandler interface {
 	HandleCallback(methodID int32, req []byte) ([]byte, error)
 }
 
-// Init initializes the global module. Must be called before any API
-// use. Safe to call multiple times (uses sync.Once).
-func Init() error {
+// Options configure the module the generated API runs on. The zero
+// value is what Init uses: the default WASI implementation (the host
+// filesystem, environment and stdio), the engine's own initial memory
+// reservation, and its wasm32 4 GiB ceiling.
+type Options struct {
+	// WASI replaces the wasi_snapshot_preview1 implementation the guest
+	// runs against. base.DefaultWASI() returns the default one, whose
+	// setters scope the filesystem to a directory (or an arbitrary
+	// base.FS), replace the environment and redirect stdio; any
+	// implementation of the interface will do. nil keeps the default.
+	WASI base.Wasi_snapshot_preview1Imports
+
+	// MemoryReserveBytes pre-reserves linear memory. A guest that grows
+	// to a size known up front — loading a large model or data file —
+	// otherwise reallocates and copies the whole linear memory as it
+	// goes. Zero keeps the engine's default headroom.
+	MemoryReserveBytes int
+
+	// MaxMemoryBytes caps linear-memory growth, so a workload bigger
+	// than expected fails inside the guest (memory.grow returns -1)
+	// instead of growing the host process. Zero keeps the engine's own
+	// ceiling.
+	MaxMemoryBytes uint64
+}
+
+// Init initializes the global module with the default Options. Must be
+// called before any API use. Safe to call multiple times (uses
+// sync.Once).
+func Init() error { return InitWith(Options{}) }
+
+// InitWith initializes the global module with opts. Like Init it runs at
+// most once per process: the module owns one linear memory and one C
+// heap, so there is exactly one instance and the first initialization
+// wins. A later call — with any Options — returns that instance's
+// initialization result without reconfiguring it.
+func InitWith(opts Options) error {
 	initOnce.Do(func() {
-		initErr = initModule()
+		initErr = initModule(opts)
 	})
 	return initErr
 }
@@ -553,10 +597,38 @@ func module() *Module {
 	return globalModule
 }
 
-func initModule() (retErr error) {
+// Instance returns the transpiled module the global API runs on, or nil
+// before initialization.
+//
+// It exists for base.AccessMemory, which is the only safe way to read or
+// write linear memory from a goroutine other than the one running a call
+// — an interrupt flag an embedder raises while a long call is in flight,
+// a progress word it polls. Everything else should go through the
+// generated API: calling into the module directly bypasses the lock that
+// serialises entries and the C stack would be shared with the call in
+// progress.
+func Instance() *base.Module {
+	if globalModule == nil {
+		return nil
+	}
+	return globalModule.g
+}
+
+func initModule(opts Options) (retErr error) {
 	m := &Module{}
 	env := envStubs{m: m}
-	m.g = wasm2go.New(env)
+	wasi := opts.WASI
+	if wasi == nil {
+		wasi = base.DefaultWASI()
+	}
+	if opts.MemoryReserveBytes > 0 {
+		m.g = wasm2go.NewWithWASIReserve(wasi, env, opts.MemoryReserveBytes)
+	} else {
+		m.g = wasm2go.NewWithWASI(wasi, env)
+	}
+	if opts.MaxMemoryBytes > 0 {
+		wasm2go.SetMaxMemory(m.g, opts.MaxMemoryBytes)
+	}
 	// Set globalModule eagerly so the rest of the API can run even if
 	// _initialize panics partway through C++ static-initializer code.
 	globalModule = m
@@ -571,17 +643,17 @@ func initModule() (retErr error) {
 }
 
 // invoke serializes req into wasm memory, runs the per-export caller
-// (wasm2go.Inv_<svc>_<mt>), and unpacks the (ptr<<32 | len) response.
+// (wasm2go.Inv_<svc>_<mt>), and unpacks the response via decodeResult.
 // call is the trap-safe per-export entry point: it snapshots and
 // restores the mutable wasm globals so a mid-call panic does not leak
 // an abandoned C++ activation frame.
-func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.Module, int32, int32) (int64, error)) ([]byte, error) {
+func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.Module, wptr, wptr) (int64, error)) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var reqPtr, reqLen int32
+	var reqPtr, reqLen wptr
 	if len(req) > 0 {
-		reqPtr = wasm2go.WasmAlloc(m.g, int32(len(req)))
-		reqLen = int32(len(req))
+		reqPtr = wasm2go.WasmAlloc(m.g, wptr(len(req)))
+		reqLen = wptr(len(req))
 		// Free reqPtr unconditionally on return so the request
 		// buffer never lingers in wasm memory when the call traps
 		// or the early-exit branches below fire. Guard against
@@ -590,21 +662,20 @@ func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.M
 		if reqPtr != 0 {
 			defer wasm2go.WasmFree(m.g, reqPtr)
 		}
-		copy(wasm2go.Memory(m.g)[reqPtr:], req)
+		copy(wasm2go.Memory(m.g)[wptrOff(reqPtr):], req)
 	}
 	packed, err := call(m.g, reqPtr, reqLen)
 	if err != nil {
 		return nil, err
 	}
-	respPtr := uint32(packed >> 32)
-	respLen := uint32(packed & 0xFFFFFFFF)
+	respPtr, respLen := decodeResult(m.g, packed)
 	if respLen == 0 {
 		return nil, nil
 	}
 	mem := wasm2go.Memory(m.g)
 	out := make([]byte, respLen)
 	copy(out, mem[respPtr:respPtr+respLen])
-	wasm2go.WasmFree(m.g, int32(respPtr))
+	wasm2go.WasmFree(m.g, wptr(respPtr))
 	return out, nil
 }
 
@@ -614,18 +685,17 @@ func (m *Module) resolveTypeName(ptr uint64) (string, error) {
 	buf := pbAppendUint64(pbNewBuf(), 1, ptr)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	reqPtr := wasm2go.WasmAlloc(m.g, int32(len(buf)))
-	copy(wasm2go.Memory(m.g)[reqPtr:], buf)
-	packed := wasm2go.WasmifyGetTypeName(m.g, reqPtr, int32(len(buf)))
-	respPtr := uint32(packed >> 32)
-	respLen := uint32(packed & 0xFFFFFFFF)
+	reqPtr := wasm2go.WasmAlloc(m.g, wptr(len(buf)))
+	copy(wasm2go.Memory(m.g)[wptrOff(reqPtr):], buf)
+	packed := wasm2go.WasmifyGetTypeName(m.g, reqPtr, wptr(len(buf)))
+	respPtr, respLen := decodeResult(m.g, packed)
 	defer wasm2go.WasmFree(m.g, reqPtr)
 	if respLen == 0 {
 		return "", nil
 	}
 	resp := make([]byte, respLen)
 	copy(resp, wasm2go.Memory(m.g)[respPtr:respPtr+respLen])
-	defer wasm2go.WasmFree(m.g, int32(respPtr))
+	defer wasm2go.WasmFree(m.g, wptr(respPtr))
 	if e := pbExtractError(resp); e != nil {
 		return "", e
 	}
@@ -642,7 +712,7 @@ func (m *Module) resolveTypeName(ptr uint64) (string, error) {
 // invokeMethod fans the wasm call out into the runtime, then folds in
 // the (very common) pbExtractError check on the response. call is the
 // per-export wasm2go.Inv_<svc>_<mt> entry point.
-func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, int32, int32) (int64, error)) ([]byte, error) {
+func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, wptr, wptr) (int64, error)) ([]byte, error) {
 	resp, err := module().invoke(svc, mid, req, call)
 	if err != nil {
 		return nil, err
@@ -651,6 +721,23 @@ func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, int32, int
 		return nil, e
 	}
 	return resp, nil
+}
+
+// wptrOff widens a guest pointer to an unsigned slice offset. wasm32
+// pointers are UNSIGNED i32s: past the 2 GiB line the bit pattern is
+// negative in Go, so a signed slice index would panic.
+func wptrOff(p wptr) uint64 {
+	return uint64(uint32(p))
+}
+
+func decodeResult(_ *base.Module, packed int64) (uint64, uint64) {
+	return uint64(packed) >> 32, uint64(packed) & 0xFFFFFFFF
+}
+
+func encodeCallbackResult(m *Module, resp []byte) int64 {
+	ptr := wasm2go.WasmAlloc(m.g, wptr(len(resp)))
+	copy(wasm2go.Memory(m.g)[wptrOff(ptr):], resp)
+	return int64(ptr)<<32 | int64(len(resp))
 }
 
 // envStubs implements wasm2go/base.EnvImports — the host side of the

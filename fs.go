@@ -17,7 +17,7 @@ import (
 	"github.com/goccy/perlwasm2go/base"
 )
 
-// FS is the read/write filesystem backend an Interpreter is given via
+// FS is the read/write filesystem backend a Perl instance is given via
 // Config.FS. It is a write-capable superset of io/fs.FS.
 type FS = base.FS
 
@@ -44,7 +44,7 @@ func NewStdlibMemFS() (*MemFS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open embedded stdlib: %w", err)
 	}
-	fsys := base.NewMemFS()
+	fsys := NewMemFS()
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			if err := fsys.MkdirAll(f.Name, 0o755); err != nil {
