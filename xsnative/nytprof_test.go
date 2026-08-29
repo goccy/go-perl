@@ -78,17 +78,36 @@ func TestDevelNYTProf(t *testing.T) {
 		'armed';
 	`, "armed")
 
-	// The profiled workload: statement hooks fire per line, entersub hooks
-	// per call (fib(12) is exactly 465 calls), leave hooks per scope exit,
-	// and each perl-sub call parks a save-stack destructor for its timing.
+	// The profiled workload runs from a real file so line attribution is
+	// comparable with a native-perl NYTProf run of the same file (the
+	// expected counts below were verified identical against real perl +
+	// natively built Devel::NYTProf). Statement hooks fire per line,
+	// entersub hooks per call (fib(12) is exactly 465 calls), leave hooks
+	// per scope exit, and each perl-sub call parks a save-stack destructor
+	// for its timing.
+	workload := filepath.Join(t.TempDir(), "workload.pl")
+	if err := os.WriteFile(workload, []byte(`use strict;
+use warnings;
+
+sub fib { my $n = shift; $n < 2 ? $n : fib($n-1) + fib($n-2) }
+
+sub greet { my $who = shift; return "hello, $who" }
+
+my $x = 0;
+for my $i (1 .. 50) {
+    $x += $i;
+}
+
+my $f = fib(12);
+my $g = greet('gopher');
+our $RESULT = "$x|$f|$g";
+1;
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mustEval("workload", `
-		sub fib { my $n = shift; $n < 2 ? $n : fib($n-1) + fib($n-2) }
-		sub greet { my $who = shift; "hello, $who" }
-		my $x = 0;
-		for my $i (1 .. 50) { $x += $i }
-		my $f = fib(12);
-		my $g = greet('gopher');
-		"$x|$f|$g";
+		do '`+workload+`' or die "do failed: $@ $!";
+		$main::RESULT;
 	`, "1275|144|hello, gopher")
 
 	mustEval("finish", `DB::finish_profile(); 'finished';`, "finished")
@@ -123,5 +142,28 @@ func TestDevelNYTProf(t *testing.T) {
 	`, "")
 	if subs != "main::fib:465|main::greet:1" {
 		t.Fatalf("profiled subs = %q, want main::fib:465|main::greet:1", subs)
+	}
+
+	// Statement-level ground truth: per-line execution counts, verified
+	// identical against a native-perl NYTProf run of the same file
+	// (line 4 = fib body, two statements x 465 calls; line 10 = the
+	// loop body).
+	lines := mustEval("line counts", `
+		my $data = Devel::NYTProf::Data->new({filename => '`+out+`', quiet => 1});
+		my ($fi) = grep { $_->filename =~ /workload\.pl$/ } $data->all_fileinfos;
+		die "workload fid not found" unless $fi;
+		my $ltd = $fi->line_time_data([0]);
+		my @out;
+		for my $line (0 .. $#$ltd) {
+			my $d = $ltd->[$line] or next;
+			next unless $d->[1];
+			push @out, "$line=" . $d->[1];
+		}
+		join(",", @out);
+	`, "")
+	for _, want := range []string{"4=930", "10=50", "13=1", "14=1"} {
+		if !strings.Contains(","+lines+",", ","+want+",") {
+			t.Fatalf("line counts %q missing %q (ground truth from native perl)", lines, want)
+		}
 	}
 }
