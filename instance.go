@@ -80,6 +80,12 @@ type Perl struct {
 	// magicFree handles teardown of host-side MAGIC mirrors when the guest
 	// frees an anchored SV (reserved callback method id -2).
 	magicFree func(id uint32)
+	// ppHook handles pp-hook dispatch for op types a native module claimed
+	// (reserved callback method id -3).
+	ppHook func(req []byte) []byte
+	// dtorFire handles save-stack destructors registered by native modules
+	// (reserved callback method id -4).
+	dtorFire func(id uint32)
 
 	// closed flips when Close runs; every public entry point checks it so a
 	// straggler — including a *Ref Free racing a Close — errors out instead

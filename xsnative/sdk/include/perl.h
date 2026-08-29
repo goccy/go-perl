@@ -52,11 +52,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#include <float.h>
+#include <sys/param.h>
 #include <sys/stat.h>
+#include <sys/times.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
-#define GOPERL_XS_ABI 3u
+#define GOPERL_XS_ABI 4u
 
 /* The perl this SDK targets (the embedded interpreter's version). */
 #define PERL_REVISION 5
@@ -166,10 +172,44 @@ typedef enum {
 #define OPf_WANT_VOID 1
 #define OPf_WANT_SCALAR 2
 #define OPf_WANT_LIST 3
+#define OPf_KIDS 4
 
-/* Opcode numbers this SDK knows how to run through RUN_PP_SCRATCH. */
-#define OP_FLOP 182
-#define OP_max 443
+/* Opcode numbers and names, pinned to the embedded perl (generated). */
+#include "goperl_opnames.h"
+
+/* Context types (cop.h, real perl 5.42 values). */
+#define CXTYPEMASK 0xf
+#define CXt_NULL 0
+#define CXt_WHEN 1
+#define CXt_BLOCK 2
+#define CXt_GIVEN 3
+#define CXt_LOOP_ARY 4
+#define CXt_LOOP_LAZYSV 5
+#define CXt_LOOP_LAZYIV 6
+#define CXt_LOOP_LIST 7
+#define CXt_LOOP_PLAIN 8
+#define CXt_SUB 9
+#define CXt_FORMAT 10
+#define CXt_EVAL 11
+#define CXt_SUBST 12
+#define CXt_DEFER 13
+
+/* Debugger flags ($^P) and exit flags (real perl 5.42 values). */
+#define PERLDBf_SUB 0x01
+#define PERLDBf_LINE 0x02
+#define PERLDBf_NOOPT 0x04
+#define PERLDBf_INTER 0x08
+#define PERLDBf_SUBLINE 0x10
+#define PERLDBf_SINGLE 0x20
+#define PERLDBf_NONAME 0x40
+#define PERLDBf_GOTO 0x80
+#define PERLDBf_NAMEEVAL 0x100
+#define PERLDBf_NAMEANON 0x200
+#define PERLDBf_SAVESRC 0x400
+#define PERLDBf_SAVESRC_NOSUBS 0x800
+#define PERLDBf_SAVESRC_INVALID 0x1000
+#define PERL_EXIT_DESTRUCT_END 0x02
+#define GV_ADDWARN 0x04
 
 /* MAGIC type characters (mg_vtable.h). */
 #define PERL_MAGIC_ext '~'
@@ -256,10 +296,28 @@ struct magic {
     char *mg_ptr;
 };
 
-/* ---- host-side OP model (for the scratch-op / PL_ppaddr idiom) ---------- */
-
+/* ---- host-side OP model --------------------------------------------------
+ *
+ * One struct serves three roles:
+ *   - a scratch OP built by the module itself (Zero + assign, the pp_flop
+ *     "fake op" idiom): gop == 0;
+ *   - a SHADOW of a real guest OP (gop == its token), materialized through
+ *     the introspection helper ops and deduplicated in a registry so
+ *     pointer identity comparisons behave like real OP pointers;
+ *   - a COP view of the same shadow (cop_* fields filled when the op is a
+ *     nextstate/dbstate), so (COP*)op casts work as in real perl.
+ *
+ * Scalar fields are filled at shadow creation. Pointer fields (op_next,
+ * op_sibparent, op_first, op_redoop) are filled when the shadow is
+ * materialized "full"; a thin shadow reached through another shadow's
+ * pointer has them NULL, so a deep optree walk degrades (stops early)
+ * rather than crashing. */
 struct op;
 typedef struct op OP;
+typedef struct op COP;
+typedef struct op UNOP;
+typedef struct op LOOP;
+typedef struct op BASEOP;
 typedef OP *(*Perl_ppaddr_t)(pTHX);
 struct op {
     OP *op_next;
@@ -270,7 +328,25 @@ struct op {
     U16 op_spare;
     U8 op_flags;
     U8 op_private;
+    /* shadow bookkeeping */
+    U8 gop_full;   /* pointer fields materialized */
+    U8 gop_iscop;
+    uint64_t gop;  /* guest OP token (0 = module-built scratch op) */
+    OP *op_first;  /* UNOP view */
+    OP *op_redoop; /* LOOP view */
+    U32 cop_line;
+    const char *cop_file;    /* interned */
+    const char *cop_stashpv; /* interned */
 };
+#define cUNOPx(o) ((UNOP *)(o))
+#define cUNOPo cUNOPx(o)
+#define cLOOPx(o) ((LOOP *)(o))
+#define cCOPx(o) ((COP *)(o))
+#define OpSIBLING(o) goperl_op_sibling(_gof, (OP *)(o))
+#define CopLINE(c) ((c)->cop_line)
+#define CopFILE(c) ((c)->cop_file)
+#define OutCopFILE(c) ((c)->cop_file)
+#define CopSTASHPV(c) ((char *)(c)->cop_stashpv)
 
 /* ---- the vtable the loader injects (field order is ABI) ----------------- */
 
@@ -298,6 +374,9 @@ typedef struct goperl_api {
     MAGIC *(*magic_chain)(goperl_frame_t *, uint64_t sv);
     void (*magic_del)(goperl_frame_t *, uint64_t sv, int32_t how,
                       const void *vtbl);
+    /* v4: register a host pp function for an op type (the PL_ppaddr proxy
+     * diff detected a module writing that slot). */
+    void (*pp_hook_set)(goperl_frame_t *, int32_t op_type, void *fn);
 } goperl_api_t;
 
 /* ---- one XSUB activation (layout is ABI, mirrored by the loader) -------- */
@@ -320,7 +399,9 @@ struct goperl_frame {
     uint64_t hook_val[2];    /* +56  pending hook assignments */
     uint64_t imm[3];         /* +72  cached &PL_sv_undef/yes/no tokens */
     OP *plop;                /* +96  PL_op host shadow */
-    uint64_t st[GOPERL_XS_STACK];   /* +104 the perl stack (tokens) */
+    uint64_t hook_op_tok;    /* +104 pp-hook frames: the op being executed */
+    void *prev_frame;        /* +112 frame nesting (goperl_cur_frame_v) */
+    uint64_t st[GOPERL_XS_STACK];   /* +120 the perl stack (tokens) */
     int32_t marks[GOPERL_XS_MARKS]; /* mark offsets into st */
     uint64_t tmp[GOPERL_XS_TMPS];   /* slots backing SV**-returning macros */
     char err[512];
@@ -486,7 +567,37 @@ enum {
     GOPERL_OP_AMAGIC_CALL = 94,
     GOPERL_OP_WARN = 95,
     GOPERL_OP_GET_HV = 96,
-    GOPERL_OP_AV_STORE_RAW = 97
+    GOPERL_OP_AV_STORE_RAW = 97,
+    GOPERL_OP_PP_HOOK_SET = 98,
+    GOPERL_OP_RUN_ORIGINAL = 99,
+    GOPERL_OP_SAVE_DESTRUCTOR = 100,
+    GOPERL_OP_OP_FIELDS = 101,
+    GOPERL_OP_OP_PTR = 102,
+    GOPERL_OP_COP_LINE = 103,
+    GOPERL_OP_COP_FILE = 104,
+    GOPERL_OP_COP_STASHPV = 105,
+    GOPERL_OP_CV_INFO = 106,
+    GOPERL_OP_CV_PTR = 107,
+    GOPERL_OP_GV_PTR = 108,
+    GOPERL_OP_GV_NAME = 109,
+    GOPERL_OP_SV_ISGV_GP = 110,
+    GOPERL_OP_HV_NAME = 111,
+    GOPERL_OP_SI_GET = 112,
+    GOPERL_OP_CX_FIELDS = 113,
+    GOPERL_OP_CX_PTR = 114,
+    GOPERL_OP_OP_NAME_STR = 115,
+    GOPERL_OP_CV_FILE = 116,
+    GOPERL_OP_GV_FETCHFILE = 117,
+    GOPERL_OP_HV_CLEAR = 118,
+    GOPERL_OP_HV_DELETE = 119,
+    GOPERL_OP_AV_EXISTS = 120,
+    GOPERL_OP_SV_UTF8_OFF = 121,
+    GOPERL_OP_SAVE_SCALAR = 122,
+    GOPERL_OP_SV_READONLY_ON = 123,
+    GOPERL_OP_EVAL_PV = 124,
+    GOPERL_OP_AV_UNSHIFT = 125,
+    GOPERL_OP_NEW_CONSTSUB = 126,
+    GOPERL_OP_SV_PVX_RAW = 127
 };
 
 /* PLVAR_GET/SET ids. */
@@ -495,6 +606,23 @@ enum {
 #define GOPERL_PL_SV_UNDEF 3
 #define GOPERL_PL_SV_YES 4
 #define GOPERL_PL_SV_NO 5
+#define GOPERL_PL_CURCOP 6
+#define GOPERL_PL_OP 7
+#define GOPERL_PL_PERLDB 8
+#define GOPERL_PL_DBSUB 9
+#define GOPERL_PL_DBSINGLE 10
+#define GOPERL_PL_ENDAV 11
+#define GOPERL_PL_CHECKAV 12
+#define GOPERL_PL_INITAV 13
+#define GOPERL_PL_MAIN_CV 14
+#define GOPERL_PL_DEBSTASH 15
+#define GOPERL_PL_SAWAMPERSAND 16
+#define GOPERL_PL_SCOPESTACK_IX 17
+#define GOPERL_PL_EXIT_FLAGS 18
+#define GOPERL_PL_BASETIME 19
+#define GOPERL_PL_MODGLOBAL 20
+#define GOPERL_PL_MINUS_C 21
+#define GOPERL_PL_CURSTASH 22
 
 #define GOPERL_TOK(sv) ((uint64_t)(uintptr_t)(sv))
 #define GOPERL_SV(tok) ((SV *)(uintptr_t)(tok))
@@ -502,11 +630,16 @@ enum {
 /* ---- the guest-op funnel: every operation flushes host state first ------ */
 
 static void goperl_flush(goperl_frame_t *f);
+static void goperl_gen_bump(void);
 
 static uint64_t goperl_do_op(goperl_frame_t *f, int32_t op, uint64_t a,
                              uint64_t b, const char *s, uint64_t slen) {
     goperl_flush(f);
-    return goperl_api_v->xs_op(f, op, a, b, s, slen);
+    uint64_t r = goperl_api_v->xs_op(f, op, a, b, s, slen);
+    /* any guest operation may have changed interpreter state the context
+     * mirrors reflect */
+    goperl_gen_bump();
+    return r;
 }
 
 #define goperl_op0(op, a, b) \
@@ -706,7 +839,7 @@ static const char *goperl_form(goperl_frame_t *f, const char *fmt, ...) {
  * frame. Perl_croak/Perl_warn/Perl_warner are called with aTHX_ — which now
  * expands to a real argument — so they must be actual variadic FUNCTIONS
  * taking pTHX_ (a macro would glue `aTHX_ fmt` into one argument). */
-#define croak(...) goperl_croakf(_gof, __VA_ARGS__)
+#define croak(...) goperl_croakf(goperl_cur_frame_v, __VA_ARGS__)
 static void Perl_croak(pTHX_ const char *fmt, ...)
     __attribute__((noreturn, unused));
 static void Perl_croak(pTHX_ const char *fmt, ...) {
@@ -737,7 +870,7 @@ static void goperl_warnf(goperl_frame_t *f, const char *fmt, ...) {
     va_end(ap);
     goperl_do_op(f, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
 }
-#define warn(...) goperl_warnf(_gof, __VA_ARGS__)
+#define warn(...) goperl_warnf(goperl_cur_frame_v, __VA_ARGS__)
 static void Perl_warn(pTHX_ const char *fmt, ...) __attribute__((unused));
 static void Perl_warn(pTHX_ const char *fmt, ...) {
     char buf[1024];
@@ -792,8 +925,17 @@ static double goperl_sv_nv(goperl_frame_t *f, SV *sv) {
     ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar)))
 #define SvPV_const(sv, lenvar) \
     goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar))
-#define SvPVX(sv) SvPV_nolen(sv)
-#define SvPVX_const(sv) SvPV_nolen_const(sv)
+/* SvPVX is the RAW buffer pointer (no get-magic, no stringification):
+ * code grows the SV and writes through it. NULL when the SV has no
+ * buffer yet — grow first, as real perl requires. */
+static char *goperl_sv_pvx(goperl_frame_t *f, SV *sv) {
+    uint64_t gp =
+        goperl_do_op(f, GOPERL_OP_SV_PVX_RAW, GOPERL_TOK(sv), 0, 0, 0);
+    if (!gp) return 0;
+    return (char *)goperl_api_v->guest_mem(f, gp);
+}
+#define SvPVX(sv) goperl_sv_pvx(_gof, (SV *)(sv))
+#define SvPVX_const(sv) ((const char *)goperl_sv_pvx(_gof, (SV *)(sv)))
 #define SvCUR(sv) \
     ((STRLEN)(uint32_t)goperl_op0(GOPERL_OP_SV_PV, GOPERL_TOK(sv), 0))
 #define SvCUR_set(sv, n) \
@@ -929,6 +1071,32 @@ static void goperl_sv_setnv(goperl_frame_t *f, SV *sv, double d) {
     ((void)goperl_ops(GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), (uint64_t)(l), (p), (uint64_t)(l)))
 #define sv_setpv(sv, p) sv_setpvn((sv), (p), strlen(p))
 #define sv_setpvs(sv, s) sv_setpvn((sv), "" s "", sizeof(s) - 1)
+static void goperl_sv_setpvf(goperl_frame_t *f, SV *sv, const char *fmt, ...)
+    __attribute__((unused));
+static void goperl_sv_setpvf(goperl_frame_t *f, SV *sv, const char *fmt,
+                             ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), strlen(buf), buf,
+                 strlen(buf));
+}
+#define sv_setpvf(sv, ...) goperl_sv_setpvf(_gof, (SV *)(sv), __VA_ARGS__)
+static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt, ...)
+    __attribute__((unused));
+static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
+                             ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    goperl_do_op(f, GOPERL_OP_SV_CATPVN, GOPERL_TOK(sv), strlen(buf), buf,
+                 strlen(buf));
+}
+#define sv_catpvf(sv, ...) goperl_sv_catpvf(_gof, (SV *)(sv), __VA_ARGS__)
 #define sv_catsv(d, s) \
     ((void)goperl_op0(GOPERL_OP_SV_CATSV, GOPERL_TOK(d), GOPERL_TOK(s)))
 #define sv_catsv_nomg(d, s) \
@@ -1161,7 +1329,10 @@ static SV **goperl_hv_fetch(goperl_frame_t *f, HV *hv, const char *key,
     GOPERL_SV(goperl_op0(GOPERL_OP_HV_ITERKEYSV, GOPERL_TOK(he), 0))
 #define hv_iterval(hv, he) \
     GOPERL_SV(goperl_op0(GOPERL_OP_HV_ITERVAL, GOPERL_TOK(hv), GOPERL_TOK(he)))
-#define HvNAME(hv) "(stash)"
+#define HvNAME(hv)                                     \
+    ((char *)goperl_intern_packed(                     \
+        _gof, goperl_op0(GOPERL_OP_HV_NAME, GOPERL_TOK(hv), 0)))
+#define HvNAME_get(hv) HvNAME(hv)
 
 /* ---- stashes / globals / blessing --------------------------------------- */
 
@@ -1258,6 +1429,27 @@ __attribute__((weak)) IV goperl_amagic_generation_v = 0;
 
 #define PL_op (_gof->plop)
 
+/* Wider interpreter-variable surface (shadow slots, see goperl_plint_ref).
+ * Reads are always fresh; assignments flush before the next guest op. */
+#define PL_perldb (*goperl_plint_ref(_gof, GOPERL_PL_PERLDB))
+#define PL_DBsub (*(GV **)goperl_plsv_ref(_gof, GOPERL_PL_DBSUB))
+#define PL_DBsingle (*goperl_plsv_ref(_gof, GOPERL_PL_DBSINGLE))
+#define PL_endav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_ENDAV))
+#define PL_checkav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_CHECKAV))
+#define PL_initav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_INITAV))
+#define PL_main_cv (*(CV **)goperl_plsv_ref(_gof, GOPERL_PL_MAIN_CV))
+#define PL_debstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_DEBSTASH))
+#define PL_sawampersand ((U8) * goperl_plint_ref(_gof, GOPERL_PL_SAWAMPERSAND))
+#define PL_scopestack_ix ((I32) * goperl_plint_ref(_gof, GOPERL_PL_SCOPESTACK_IX))
+#define PL_exit_flags (*goperl_plint_ref(_gof, GOPERL_PL_EXIT_FLAGS))
+#define PL_basetime ((Time_t) * goperl_plint_ref(_gof, GOPERL_PL_BASETIME))
+#define PL_modglobal (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_MODGLOBAL))
+#define PL_minus_c ((int)*goperl_plint_ref(_gof, GOPERL_PL_MINUS_C))
+#define PL_curstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_CURSTASH))
+
+/* The current COP, as a host shadow (cached per guest COP token). */
+#define PL_curcop goperl_curcop(_gof)
+
 /* ---- the flush: pending host state -> guest, before any guest op -------- */
 
 static void goperl_avmirror_flush(goperl_frame_t *f) {
@@ -1286,6 +1478,27 @@ static void goperl_ivmirror_flush(goperl_frame_t *f) {
     }
 }
 
+/* Interpreter-variable shadows beyond the die/warn hooks: read-through on
+ * every access, written back before the next guest operation. Slots are
+ * indexed by the GOPERL_PL_* id. */
+#define GOPERL_PLSHADOW_MAX 32
+typedef struct {
+    uint64_t val;
+    U8 dirty;
+} goperl_plshadow_t;
+__attribute__((weak)) goperl_plshadow_t goperl_plshadow_v[GOPERL_PLSHADOW_MAX];
+
+static void goperl_plshadow_flush(goperl_frame_t *f) {
+    for (int i = 0; i < GOPERL_PLSHADOW_MAX; i++)
+        if (goperl_plshadow_v[i].dirty) {
+            goperl_plshadow_v[i].dirty = 0;
+            goperl_api_v->xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)i,
+                                goperl_plshadow_v[i].val, 0, 0);
+        }
+}
+
+static void goperl_ppaddr_sync(goperl_frame_t *f);
+
 static void goperl_flush(goperl_frame_t *f) {
     if (f->hook_dirty) {
         int32_t d = f->hook_dirty;
@@ -1299,8 +1512,24 @@ static void goperl_flush(goperl_frame_t *f) {
                                 (uint64_t)GOPERL_PL_WARNHOOK, f->hook_val[1],
                                 0, 0);
     }
+    goperl_plshadow_flush(f);
     goperl_ivmirror_flush(f);
     goperl_avmirror_flush(f);
+    goperl_ppaddr_sync(f);
+}
+
+/* Take a writable reference to an interpreter variable: refresh from the
+ * guest, mark pending so the (possibly modified) value flushes back. */
+static IV *goperl_plint_ref(goperl_frame_t *f, int id) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[id];
+    if (!s->dirty)
+        s->val = goperl_api_v->xs_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)id, 0,
+                                     0, 0);
+    s->dirty = 1;
+    return (IV *)&s->val;
+}
+static SV **goperl_plsv_ref(goperl_frame_t *f, int id) {
+    return (SV **)goperl_plint_ref(f, id);
 }
 
 /* The SvIVX lvalue proxy: refreshes (after flushing pending state) and
@@ -1460,6 +1689,7 @@ static void goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
 
 /* PerlIO: the SDK routes prints to the host's stdio, through the SVf-aware
  * formatter (fprintf itself cannot digest the SVf marker). */
+typedef FILE PerlIO;
 #define PerlIO_stderr() stderr
 #define PerlIO_stdout() stdout
 static void goperl_perlio_printf(FILE *fp, const char *fmt, ...)
@@ -1520,8 +1750,12 @@ static void goperl_perlio_printf(FILE *fp, const char *fmt, ...) {
     __attribute__((visibility("default"))) void name(pTHX_ CV *cv)
 #define XS_INTERNAL(name) static void name(pTHX_ CV *cv)
 
+static void goperl_arena_free_all(void);
+static void goperl_opreg_clear(void);
+
 static void goperl_xs_leave(goperl_frame_t *f) {
     goperl_flush(f); /* pending mirror writes must land before teardown */
+    goperl_cur_frame_v = (goperl_frame_t *)f->prev_frame;
     /* Host-location saves (SAVEVPTR/save_hptr) made at the XSUB's top-level
      * scope have no host LEAVE to restore them; real perl restores them when
      * the CALLER's scope pops, which the host cannot observe. Restoring at
@@ -1539,6 +1773,8 @@ static void goperl_xs_leave(goperl_frame_t *f) {
         }
         goperl_avmirror_n = 0;
         goperl_ivmirror_n = 0;
+        goperl_arena_free_all(); /* context-stack shadows */
+        goperl_opreg_clear();    /* guest op addresses recycle across evals */
         /* a croak path may leave the scope counter high; at rest it is 0 */
         goperl_scope_v = 0;
     }
@@ -1547,6 +1783,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
 #define dXSARGS                              \
     jmp_buf _gof_jb;                         \
     _gof->jb = (void *)&_gof_jb;             \
+    _gof->prev_frame = (void *)goperl_cur_frame_v; \
     goperl_cur_frame_v = _gof;               \
     goperl_xs_depth_v++;                     \
     _gof->hostsave_base = goperl_hostsave_n; \
@@ -1597,8 +1834,38 @@ static void goperl_xs_leave(goperl_frame_t *f) {
 #define PERL_ARGS_ASSERT_CROAK_XS_USAGE
 #define croak_xs_usage(cv_ignored, params) \
     goperl_croakf(_gof, "Usage: %s(%s)", _gof->subname, params)
-#define CvGV(cv) ((GV *)(cv))
-#define GvNAME(gv) (_gof->subname)
+
+/* CV/GV introspection (real guest lookups; names are interned host copies
+ * with stable addresses, matching perl's stable-storage guarantees). */
+#define CvISXSUB(cv) \
+    ((int)(goperl_op0(GOPERL_OP_CV_INFO, GOPERL_TOK(cv), 0) & 1))
+#define CvDEPTH(cv) \
+    ((I32)(goperl_op0(GOPERL_OP_CV_INFO, GOPERL_TOK(cv), 0) >> 32))
+#define CvSTART(cv) \
+    goperl_op_shadow_full(_gof, goperl_op0(GOPERL_OP_CV_PTR, GOPERL_TOK(cv), 0))
+#define CvROOT(cv) \
+    goperl_op_shadow_full(_gof, goperl_op0(GOPERL_OP_CV_PTR, GOPERL_TOK(cv), 3))
+#define CvGV(cv) \
+    ((GV *)GOPERL_SV(goperl_op0(GOPERL_OP_CV_PTR, GOPERL_TOK(cv), 1)))
+#define CvSTASH(cv) \
+    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_CV_PTR, GOPERL_TOK(cv), 2)))
+#define CvFILE(cv)                                     \
+    ((char *)goperl_intern_packed(                     \
+        _gof, goperl_op0(GOPERL_OP_CV_FILE, GOPERL_TOK(cv), 0)))
+#define GvSTASH(gv) \
+    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 0)))
+#define GvCVu(gv) \
+    ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 1)))
+#define GvCV(gv) GvCVu(gv)
+#define GvHV(gv) \
+    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 2)))
+#define GvAV(gv) \
+    ((AV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 3)))
+#define GvNAME(gv)                                     \
+    ((char *)goperl_intern_packed(                     \
+        _gof, goperl_op0(GOPERL_OP_GV_NAME, GOPERL_TOK(gv), 0)))
+#define isGV_with_GP(sv) \
+    (goperl_op0(GOPERL_OP_SV_ISGV_GP, GOPERL_TOK(sv), 0) != 0)
 
 /* CvXSUBANY / XSANY / alias dispatch: per-CV host storage via the loader. */
 typedef union goperl_any {
@@ -1634,8 +1901,18 @@ static CV *goperl_newXS(goperl_frame_t *f, const char *name,
 #define dXSBOOTARGSXSAPIVERCHK dXSARGS
 #define dXSBOOTARGSAPIVERCHK dXSARGS
 /* Called as Perl_xs_boot_epilog(aTHX_ ax): aTHX_ folds into the single
- * macro argument, so this must swallow whatever it gets. */
-#define Perl_xs_boot_epilog(...) dNOOP
+ * macro argument, so this must swallow whatever it gets. It is the boot
+ * XSUB's RETURN path (modern xsubpp emits it instead of XSRETURN_YES), so
+ * it must do what XSRETURN does — set the return value and, crucially,
+ * run the frame-exit bookkeeping; skipping that leaks the native nesting
+ * depth and the per-activation caches never reset. */
+#define Perl_xs_boot_epilog(...)                     \
+    STMT_START {                                     \
+        ST(0) = &PL_sv_yes;                          \
+        PL_stack_sp = PL_stack_base + ax;            \
+        goperl_xs_leave(_gof);                       \
+    }                                                \
+    STMT_END
 #define DECL_BOOT(name) EXTERN_C XS(CAT2(boot_, name))
 #define CALL_BOOT(name)                             \
     STMT_START {                                    \
@@ -1786,32 +2063,211 @@ static void goperl_do_join(goperl_frame_t *f, SV *sv, SV *delim, SV **mark,
 #define do_join(sv, delim, mark, sp) \
     goperl_do_join(_gof, (sv), (delim), (mark), (sp))
 
-/* ---- PL_ppaddr proxy / scratch-op execution ------------------------------ */
+/* ---- OP shadow registry --------------------------------------------------
+ * Shadows of real guest OPs, deduplicated by token so host pointer
+ * identity matches guest OP identity. Registry entries live for the
+ * process (guest optrees are effectively stable while a module profiles
+ * them; freed-and-reused guest OPs would alias, which is documented). */
 
-static OP *goperl_pp_trampoline(pTHX) {
-    OP *o = _gof->plop;
-    if (!o) goperl_croakf(_gof, "pp trampoline: PL_op is not set");
+#define GOPERL_OPREG_BUCKETS 1024
+typedef struct goperl_opreg_ent {
+    OP op;
+    struct goperl_opreg_ent *next;
+} goperl_opreg_ent_t;
+__attribute__((weak)) goperl_opreg_ent_t *goperl_opreg_v[GOPERL_OPREG_BUCKETS];
+
+/* The registry deduplicates within one top-level native activation (so OP
+ * pointer identity holds where code compares them) but is dropped when the
+ * outermost frame returns: guest optrees are freed and their addresses
+ * reused across evals, so cross-activation caching would alias stale
+ * shadows onto new ops. */
+static void goperl_opreg_clear(void) {
+    for (int i = 0; i < GOPERL_OPREG_BUCKETS; i++) {
+        goperl_opreg_ent_t *e = goperl_opreg_v[i];
+        while (e) {
+            goperl_opreg_ent_t *n = e->next;
+            free(e);
+            e = n;
+        }
+        goperl_opreg_v[i] = 0;
+    }
+}
+
+static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
+    if (!tok) return 0;
+    uint32_t h = (uint32_t)(tok >> 3) % GOPERL_OPREG_BUCKETS;
+    for (goperl_opreg_ent_t *e = goperl_opreg_v[h]; e; e = e->next)
+        if (e->op.gop == tok) return &e->op;
+    goperl_opreg_ent_t *e =
+        (goperl_opreg_ent_t *)calloc(1, sizeof(goperl_opreg_ent_t));
+    if (!e) goperl_croakf(f, "op shadow: out of memory");
+    e->op.gop = tok;
+    uint64_t fields =
+        goperl_do_op(f, GOPERL_OP_OP_FIELDS, tok, 0, 0, 0);
+    e->op.op_type = (U16)(fields & 0xFFFF);
+    e->op.op_flags = (U8)(fields >> 16);
+    e->op.op_private = (U8)(fields >> 24);
+    e->op.op_targ = (UV)(uint32_t)(fields >> 32);
+    e->next = goperl_opreg_v[h];
+    goperl_opreg_v[h] = e;
+    return &e->op;
+}
+
+/* String interning: stable host copies of guest identity strings (file
+ * names, package names). Stability matters: modules compare and retain
+ * these pointers (real perl hands out pointers into stable structures). */
+#define GOPERL_INTERN_BUCKETS 256
+typedef struct goperl_intern_ent {
+    struct goperl_intern_ent *next;
+    char s[1];
+} goperl_intern_ent_t;
+__attribute__((weak)) goperl_intern_ent_t *goperl_intern_v[GOPERL_INTERN_BUCKETS];
+
+static const char *goperl_intern(const char *p, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)p[i]) * 16777619u;
+    h %= GOPERL_INTERN_BUCKETS;
+    for (goperl_intern_ent_t *e = goperl_intern_v[h]; e; e = e->next)
+        if (strlen(e->s) == n && memcmp(e->s, p, n) == 0) return e->s;
+    goperl_intern_ent_t *e =
+        (goperl_intern_ent_t *)malloc(sizeof(goperl_intern_ent_t) + n);
+    if (!e) return "";
+    memcpy(e->s, p, n);
+    e->s[n] = '\0';
+    e->next = goperl_intern_v[h];
+    goperl_intern_v[h] = e;
+    return e->s;
+}
+
+/* Intern a guest (ptr<<32|len) packed string; NULL when packed is 0. */
+static const char *goperl_intern_packed(goperl_frame_t *f, uint64_t packed) {
+    if (!packed) return 0;
+    const char *p = (const char *)goperl_api_v->guest_mem(f, packed >> 32);
+    if (!p) return 0;
+    return goperl_intern(p, (size_t)(uint32_t)packed);
+}
+
+static void goperl_op_fill_cop(goperl_frame_t *f, OP *o) {
+    o->gop_iscop = 1;
+    o->cop_line = (U32)goperl_do_op(f, GOPERL_OP_COP_LINE, o->gop, 0, 0, 0);
+    o->cop_file = goperl_intern_packed(
+        f, goperl_do_op(f, GOPERL_OP_COP_FILE, o->gop, 0, 0, 0));
+    o->cop_stashpv = goperl_intern_packed(
+        f, goperl_do_op(f, GOPERL_OP_COP_STASHPV, o->gop, 0, 0, 0));
+    /* dists compare these with strEQ and %s them without null checks */
+    if (!o->cop_file) o->cop_file = "";
+    if (!o->cop_stashpv) o->cop_stashpv = "";
+}
+
+static OP *goperl_op_shadow_full(goperl_frame_t *f, uint64_t tok) {
+    OP *o = goperl_op_shadow(f, tok);
+    if (!o || o->gop_full) return o;
+    o->gop_full = 1;
+    o->op_next = goperl_op_shadow(
+        f, goperl_do_op(f, GOPERL_OP_OP_PTR, tok, 0, 0, 0));
+    o->op_first = goperl_op_shadow(
+        f, goperl_do_op(f, GOPERL_OP_OP_PTR, tok, 2, 0, 0));
+    o->op_redoop = goperl_op_shadow(
+        f, goperl_do_op(f, GOPERL_OP_OP_PTR, tok, 3, 0, 0));
+    int t = o->op_type ? o->op_type : (int)o->op_targ;
+    if (!o->gop_iscop && (t == OP_NEXTSTATE || t == OP_DBSTATE))
+        goperl_op_fill_cop(f, o);
+    return o;
+}
+
+/* Materialize a token the CALLER knows is a COP (PL_curcop, blk_oldcop):
+ * static interpreter COPs like PL_compiling have op_type 0, so cop-ness
+ * cannot be inferred from the type. */
+static COP *goperl_cop_shadow(goperl_frame_t *f, uint64_t tok) {
+    OP *o = goperl_op_shadow_full(f, tok);
+    if (o && !o->gop_iscop) goperl_op_fill_cop(f, o);
+    return (COP *)o;
+}
+
+/* In an embedded interpreter PL_curcop CAN be NULL: eval_sv driven from C
+ * enters with no compiling COP, so the eval context's blk_oldcop is NULL
+ * and leaveeval restores that. Native perl code dereferences PL_curcop
+ * without checks, so hand it a stable dummy COP (line 0, package main)
+ * instead — the same shape modules already handle for optimized-away
+ * COPs. */
+__attribute__((weak)) OP goperl_nullcop_v = {
+    0, 0, 0, 0, OP_NEXTSTATE, 0, 0, 0, 1 /* gop_full */, 1 /* gop_iscop */,
+    0, 0, 0, 0, "", "main"};
+static COP *goperl_curcop(goperl_frame_t *f) {
+    uint64_t tok = goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_CURCOP, 0,
+                                0, 0);
+    if (!tok) return (COP *)&goperl_nullcop_v;
+    return goperl_cop_shadow(f, tok);
+}
+
+static OP *goperl_op_sibling(goperl_frame_t *f, OP *o) {
+    if (!o || !o->gop) return 0;
+    return goperl_op_shadow_full(
+        f, goperl_do_op(f, GOPERL_OP_OP_PTR, o->gop, 1, 0, 0));
+}
+
+#define OP_NAME(o) \
+    (PL_op_name[(o)->op_type ? (o)->op_type : (int)(o)->op_targ])
+
+/* Op-tree dumping needs interpreter internals the SDK does not model. */
+static void goperl_do_op_dump(I32 level, void *fp, const OP *o)
+    __attribute__((unused));
+static void goperl_do_op_dump(I32 level, void *fp, const OP *o) {
+    (void)level;
+    fprintf((FILE *)fp, "<op dump unavailable in the go-perl XS SDK: %s>\n",
+            o ? OP_NAME(o) : "(null)");
+}
+#define do_op_dump(l, f, o) goperl_do_op_dump((l), (void *)(f), (const OP *)(o))
+
+/* ---- PL_ppaddr proxy / pp dispatch ---------------------------------------
+ * Every slot of the proxy table is a distinct stub carrying its op type
+ * (goperl_ppslots.h), so both idioms work:
+ *   - a module CALLS a slot (run_original_op after saving the table):
+ *     dispatch runs the guest's real pp for that type;
+ *   - a module WRITES a slot (installing a pp hook): the funnel notices
+ *     the diff and routes guest-side executions of that type back to the
+ *     module's function (see goperl_ppaddr_sync).
+ * Calls with a module-built scratch op (gop == 0, the pp_flop fake-op
+ * idiom) run the op on the guest stack via RUN_PP instead. */
+
+static OP *goperl_pp_dispatch(pTHX_ int type);
+#include "goperl_ppslots.h"
+
+__attribute__((weak)) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max];
+__attribute__((weak)) uint8_t goperl_pp_installed_v[OP_max];
+__attribute__((weak)) int32_t goperl_ppaddr_inited_v = 0;
+
+static OP *goperl_pp_dispatch(pTHX_ int type) {
+    OP *cur = _gof->plop;
+    if (cur && cur->gop) {
+        /* real guest op under execution: run the true pp for `type` */
+        uint64_t next = goperl_do_op(_gof, GOPERL_OP_RUN_ORIGINAL,
+                                     (uint64_t)(uint32_t)type, 0, 0, 0);
+        return goperl_op_shadow_full(_gof, next);
+    }
+    /* module-built scratch op */
     I32 nargs;
-    switch (o->op_type) {
+    switch (type) {
     case OP_FLOP:
         nargs = 2;
         break;
     default:
-        goperl_croakf(_gof, "pp trampoline: op %d is not supported by the SDK",
-                      (int)o->op_type);
+        goperl_croakf(_gof, "pp dispatch: scratch op %d is not supported",
+                      type);
     }
     SV **base = (SV **)_gof->st;
     if ((I32)(_gof->psp - base) < nargs)
-        goperl_croakf(_gof, "pp trampoline: stack underflow");
+        goperl_croakf(_gof, "pp dispatch: stack underflow");
     char buf[64 * 4];
     for (I32 i = 0; i < nargs; i++) {
         uint32_t tok =
             (uint32_t)(uint64_t)(uintptr_t)_gof->psp[i - nargs + 1];
         memcpy(buf + i * 4, &tok, 4);
     }
+    uint32_t flags = cur ? cur->op_flags : 0;
     uint64_t packed = goperl_do_op(
         _gof, GOPERL_OP_RUN_PP,
-        ((uint64_t)(uint32_t)o->op_flags << 32) | (uint32_t)o->op_type,
+        ((uint64_t)flags << 32) | (uint32_t)type,
         (uint64_t)(nargs * 4), buf, (uint64_t)(nargs * 4));
     I32 count = (I32)((packed >> 32) & 0x7FFFFFFF);
     uint64_t avtok = (uint32_t)packed;
@@ -1827,11 +2283,267 @@ static OP *goperl_pp_trampoline(pTHX) {
 
 static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
     (void)f;
-    if (!goperl_ppaddr_v[0])
-        for (int i = 0; i < OP_max; i++) goperl_ppaddr_v[i] = goperl_pp_trampoline;
+    if (!goperl_ppaddr_inited_v) {
+        goperl_ppaddr_inited_v = 1;
+        GOPERL_PP_SLOT_INIT(goperl_ppaddr_v);
+        memcpy(goperl_ppaddr_base_v, goperl_ppaddr_v,
+               sizeof(goperl_ppaddr_base_v));
+    }
     return goperl_ppaddr_v;
 }
 #define PL_ppaddr (goperl_ppaddr_get(_gof))
+
+/* Detect module writes to the proxy table and (de)register them as guest
+ * pp hooks. Called from the funnel flush. Uses the raw vtable (never the
+ * funnel) to avoid recursion. */
+static void goperl_ppaddr_sync(goperl_frame_t *f) {
+    if (!goperl_ppaddr_inited_v) return;
+    for (int i = 0; i < OP_max; i++) {
+        int hooked = goperl_ppaddr_v[i] != goperl_ppaddr_base_v[i];
+        if (hooked && !goperl_pp_installed_v[i]) {
+            goperl_pp_installed_v[i] = 1;
+            goperl_api_v->pp_hook_set(f, i, (void *)goperl_ppaddr_v[i]);
+        } else if (!hooked && goperl_pp_installed_v[i]) {
+            goperl_pp_installed_v[i] = 0;
+            goperl_api_v->pp_hook_set(f, i, 0);
+        }
+    }
+}
+
+/* ---- save-stack destructors ----------------------------------------------
+ * save_destructor_x registers (fn, arg) host-side; the guest savestack
+ * carries the id and fires it back (callback method -4) when the scope
+ * pops — normal exit and die unwinding both included, like real perl. */
+#define GOPERL_DTOR_MAX 4096
+typedef struct {
+    void (*fn)(pTHX_ void *);
+    void *arg;
+    U8 used;
+} goperl_dtor_t;
+__attribute__((weak)) goperl_dtor_t goperl_dtor_v[GOPERL_DTOR_MAX];
+__attribute__((weak)) int32_t goperl_dtor_hint_v = 0;
+
+static void goperl_save_destructor_x(goperl_frame_t *f,
+                                     void (*fn)(pTHX_ void *), void *arg) {
+    int32_t id = -1;
+    for (int32_t k = 0; k < GOPERL_DTOR_MAX; k++) {
+        int32_t i = (goperl_dtor_hint_v + k) % GOPERL_DTOR_MAX;
+        if (!goperl_dtor_v[i].used) {
+            id = i;
+            break;
+        }
+    }
+    if (id < 0) goperl_croakf(f, "save_destructor_x: destructor table full");
+    goperl_dtor_hint_v = id + 1;
+    goperl_dtor_v[id].fn = fn;
+    goperl_dtor_v[id].arg = arg;
+    goperl_dtor_v[id].used = 1;
+    goperl_do_op(f, GOPERL_OP_SAVE_DESTRUCTOR, (uint64_t)(uint32_t)(id + 1),
+                 0, 0, 0);
+}
+#define save_destructor_x(fn, p) goperl_save_destructor_x(_gof, (fn), (p))
+#define SAVEDESTRUCTOR_X(fn, p) goperl_save_destructor_x(_gof, (fn), (p))
+
+/* Loader entry: run a fired destructor (from guest scope pop). */
+__attribute__((weak, visibility("default"), used)) void
+__goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
+    if (id1 == 0 || id1 > GOPERL_DTOR_MAX) return;
+    goperl_dtor_t d = goperl_dtor_v[id1 - 1];
+    goperl_dtor_v[id1 - 1].used = 0;
+    if (!d.used || !d.fn) return;
+    jmp_buf jb;
+    void *prev_jb = f->jb;
+    goperl_frame_t *prev_frame = goperl_cur_frame_v;
+    f->jb = (void *)&jb;
+    goperl_cur_frame_v = f;
+    if (setjmp(jb)) {
+        fprintf(stderr, "goperl native XS: croak in save-stack destructor: %s\n",
+                f->err);
+        f->failed = 0;
+        f->jb = prev_jb;
+        goperl_cur_frame_v = prev_frame;
+        return;
+    }
+    d.fn(f, d.arg);
+    f->jb = prev_jb;
+    goperl_cur_frame_v = prev_frame;
+}
+
+/* Loader entry: run a module pp hook for one guest op execution.
+ * Returns the next-op token (0 = NULL); on croak, f->failed is set and
+ * the message is in f->err. */
+__attribute__((weak, visibility("default"), used)) uint64_t
+__goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
+    OP *(*fn)(pTHX) = (OP * (*)(pTHX)) fnv;
+    jmp_buf jb;
+    f->jb = (void *)&jb;
+    f->prev_frame = (void *)goperl_cur_frame_v;
+    goperl_cur_frame_v = f;
+    goperl_xs_depth_v++;
+    f->hostsave_base = goperl_hostsave_n;
+    if (setjmp(jb)) {
+        goperl_hostsave_unwind_to(f, f->hostsave_base);
+        goperl_xs_leave(f);
+        return 0;
+    }
+    f->plop = goperl_op_shadow_full(f, f->hook_op_tok);
+    OP *next = fn(f);
+    uint64_t tok = next ? next->gop : 0;
+    goperl_xs_leave(f);
+    return tok;
+}
+
+/* ---- savestack scratch allocations (SSNEW / SSPTR) -----------------------
+ * Real perl hands out scratch memory ON the savestack, reclaimed at scope
+ * pop. Here the block is host memory and an internal save-stack destructor
+ * (registered BEFORE any user destructor in the same scope, so it fires
+ * AFTER it) frees the block at the same point. */
+#define GOPERL_SSNEW_MAX 4096
+typedef struct {
+    void *mem;
+} goperl_ssnew_t;
+__attribute__((weak)) goperl_ssnew_t goperl_ssnew_v[GOPERL_SSNEW_MAX];
+__attribute__((weak)) int32_t goperl_ssnew_hint_v = 0;
+
+static void goperl_ssnew_free_cb(pTHX_ void *p) {
+    int32_t ix = (int32_t)(intptr_t)p;
+    (void)_gof;
+    if (ix >= 0 && ix < GOPERL_SSNEW_MAX && goperl_ssnew_v[ix].mem) {
+        free(goperl_ssnew_v[ix].mem);
+        goperl_ssnew_v[ix].mem = 0;
+    }
+}
+
+static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
+    int32_t ix = -1;
+    for (int32_t k = 0; k < GOPERL_SSNEW_MAX; k++) {
+        int32_t i = (goperl_ssnew_hint_v + k) % GOPERL_SSNEW_MAX;
+        if (!goperl_ssnew_v[i].mem) {
+            ix = i;
+            break;
+        }
+    }
+    if (ix < 0) goperl_croakf(f, "SSNEW: scratch table full");
+    goperl_ssnew_hint_v = ix + 1;
+    goperl_ssnew_v[ix].mem = calloc(1, size);
+    if (!goperl_ssnew_v[ix].mem) goperl_croakf(f, "SSNEW: out of memory");
+    goperl_save_destructor_x(f, goperl_ssnew_free_cb,
+                             (void *)(intptr_t)ix);
+    return (SSize_t)ix;
+}
+#define SSNEW(size) goperl_ssnew(_gof, (size_t)(size))
+#define SSNEWa(size, align) goperl_ssnew(_gof, (size_t)(size))
+#define SSPTR(ix, type) ((type)goperl_ssnew_v[(ix)].mem)
+#define MEM_ALIGNBYTES 8
+
+/* ---- context stack shadows -----------------------------------------------
+ * PERL_CONTEXT / PERL_SI mirrors materialized from the live interpreter,
+ * refreshed whenever any guest operation may have changed them (a
+ * generation counter bumped by the funnel). Allocations go to an arena
+ * freed when the outermost native frame returns. */
+
+typedef struct goperl_si PERL_SI;
+typedef struct goperl_context {
+    U8 cx_type;
+    COP *blk_oldcop;
+    struct {
+        CV *cv;
+    } blk_sub;
+    struct {
+        OP *my_op;
+    } blk_loop;
+} PERL_CONTEXT;
+struct goperl_si {
+    uint64_t tok;
+    PERL_CONTEXT *si_cxstack;
+    I32 si_cxix;
+    I32 si_type;
+    PERL_SI *si_prev;
+};
+#undef CxTYPE
+#define CxTYPE(cx) ((cx)->cx_type)
+#define CxMULTICALL(cx) 0
+
+typedef struct goperl_arena_blk {
+    struct goperl_arena_blk *next;
+} goperl_arena_blk_t;
+__attribute__((weak)) goperl_arena_blk_t *goperl_arena_v = 0;
+__attribute__((weak)) PERL_SI *goperl_si_cache_v = 0;
+__attribute__((weak)) uint64_t goperl_gen_v = 1;
+__attribute__((weak)) uint64_t goperl_si_gen_v = 0;
+
+static void goperl_gen_bump(void) { goperl_gen_v++; }
+
+static void *goperl_arena_alloc(size_t n) {
+    goperl_arena_blk_t *b =
+        (goperl_arena_blk_t *)calloc(1, sizeof(goperl_arena_blk_t) + n);
+    if (!b) return 0;
+    b->next = goperl_arena_v;
+    goperl_arena_v = b;
+    return (void *)(b + 1);
+}
+
+static void goperl_arena_free_all(void) {
+    while (goperl_arena_v) {
+        goperl_arena_blk_t *n = goperl_arena_v->next;
+        free(goperl_arena_v);
+        goperl_arena_v = n;
+    }
+    goperl_si_cache_v = 0;
+    goperl_si_gen_v = 0;
+}
+
+static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
+                                      int depth) {
+    if (depth > 16) return 0;
+    uint64_t tok = si_tok
+                       ? si_tok
+                       : goperl_do_op(f, GOPERL_OP_SI_GET, 0, 0, 0, 0);
+    if (!tok) return 0;
+    PERL_SI *si = (PERL_SI *)goperl_arena_alloc(sizeof(PERL_SI));
+    if (!si) goperl_croakf(f, "stackinfo shadow: out of memory");
+    si->tok = tok;
+    si->si_type =
+        (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 2, 0, 0);
+    si->si_cxix =
+        (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 3, 0, 0);
+    I32 n = si->si_cxix + 1;
+    si->si_cxstack = (PERL_CONTEXT *)goperl_arena_alloc(
+        sizeof(PERL_CONTEXT) * (size_t)(n > 0 ? n : 1));
+    if (!si->si_cxstack) goperl_croakf(f, "context shadow: out of memory");
+    for (I32 i = 0; i < n; i++) {
+        PERL_CONTEXT *cx = &si->si_cxstack[i];
+        uint64_t t = goperl_do_op(f, GOPERL_OP_CX_FIELDS, tok,
+                                  (uint64_t)(int64_t)i, 0, 0);
+        cx->cx_type = (U8)t;
+        cx->blk_oldcop = goperl_cop_shadow(
+            f, goperl_do_op(f, GOPERL_OP_CX_PTR, tok,
+                            ((uint64_t)(uint32_t)i << 8) | 0, 0, 0));
+        cx->blk_sub.cv = (CV *)GOPERL_SV(goperl_do_op(
+            f, GOPERL_OP_CX_PTR, tok, ((uint64_t)(uint32_t)i << 8) | 1, 0,
+            0));
+        cx->blk_loop.my_op = goperl_op_shadow_full(
+            f, goperl_do_op(f, GOPERL_OP_CX_PTR, tok,
+                            ((uint64_t)(uint32_t)i << 8) | 2, 0, 0));
+    }
+    uint64_t prev =
+        goperl_do_op(f, GOPERL_OP_SI_GET, tok, 1, 0, 0);
+    si->si_prev = prev ? goperl_si_materialize(f, prev, depth + 1) : 0;
+    return si;
+}
+
+static PERL_SI *goperl_si_cur(goperl_frame_t *f) {
+    if (goperl_si_cache_v && goperl_si_gen_v == goperl_gen_v)
+        return goperl_si_cache_v;
+    goperl_si_cache_v = goperl_si_materialize(f, 0, 0);
+    goperl_si_gen_v = goperl_gen_v;
+    if (!goperl_si_cache_v)
+        goperl_croakf(f, "cannot materialize the context stack");
+    return goperl_si_cache_v;
+}
+#define PL_curstackinfo (goperl_si_cur(_gof))
+#define cxstack (goperl_si_cur(_gof)->si_cxstack)
+#define cxstack_ix (goperl_si_cur(_gof)->si_cxix)
 
 /* ---- MAGIC --------------------------------------------------------------- */
 
@@ -1863,12 +2575,254 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
 
 #define Newx(ptr, n, t) ((ptr) = (t *)malloc((size_t)(n) * sizeof(t)))
 #define Newxz(ptr, n, t) ((ptr) = (t *)calloc((size_t)(n), sizeof(t)))
+#define Newxc(ptr, n, t, c) ((ptr) = (c *)malloc((size_t)(n) * sizeof(t)))
+#define safemalloc(n) malloc((size_t)(n))
+#define safefree(p) free((void *)(p))
+#define SETERRNO(e, x) (errno = (e))
 #define Renew(ptr, n, t) ((ptr) = (t *)realloc((void *)(ptr), (size_t)(n) * sizeof(t)))
 #define Safefree(p) free((void *)(p))
 #define Copy(s, d, n, t) ((void)memcpy((d), (s), (size_t)(n) * sizeof(t)))
 #define Move(s, d, n, t) ((void)memmove((d), (s), (size_t)(n) * sizeof(t)))
 #define Zero(d, n, t) ((void)memset((d), 0, (size_t)(n) * sizeof(t)))
 #define StructCopy(s, d, t) (*(d) = *(s))
+/* ---- assorted core-API surface (interpreter-hooking dists) --------------- */
+
+typedef size_t Size_t;
+typedef pid_t Pid_t;
+#ifndef MAXPATHLEN
+#define MAXPATHLEN 4096
+#endif
+#define Nullsv ((SV *)0)
+#define Nullcv ((CV *)0)
+#define Nullgv ((GV *)0)
+#define Nullch ((char *)0)
+#define Nullav ((AV *)0)
+#define Nullhv ((HV *)0)
+#define CPERLscope(x) x
+#define memzero(d, n) memset((d), 0, (n))
+#define Newc(i, p, n, t, c) ((p) = (c *)malloc((size_t)(n) * sizeof(t)))
+#define my_snprintf snprintf
+#define my_vsnprintf vsnprintf
+#define HINT_STRICT_REFS 0x00000002
+#define PERLSI_UNKNOWN (-1)
+#define PERLSI_UNDEF 0
+#define PERLSI_MAIN 1
+#define PERLSI_MAGIC 2
+#define PERLSI_SORT 3
+#define PERLSI_SIGNAL 4
+#define PERLSI_OVERLOAD 5
+#define PERLSI_DESTROY 6
+#define SvGMAGICAL(sv) 0
+#define mg_get(sv) ((void)(sv))
+#define sv_free(sv) SvREFCNT_dec(sv)
+#define CxTRYBLOCK(cx) 0
+#define strnEQ(a, b, n) (strncmp((a), (b), (n)) == 0)
+#define strnNE(a, b, n) (strncmp((a), (b), (n)) != 0)
+typedef U16 OPCODE;
+typedef int opcode;
+#define CvFLAGS(cv) 0 /* diagnostic-only flag word; not modeled */
+#define GvEGV(gv) \
+    ((GV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 4)))
+#define GvNAMELEN(gv) \
+    ((U32)(uint32_t)goperl_op0(GOPERL_OP_GV_NAME, GOPERL_TOK(gv), 0))
+#define hv_clear(hv) ((void)goperl_op0(GOPERL_OP_HV_CLEAR, GOPERL_TOK(hv), 0))
+#define hv_delete(hv, key, klen, flags)                                    \
+    GOPERL_SV(goperl_ops(GOPERL_OP_HV_DELETE, GOPERL_TOK(hv),              \
+                         (uint64_t)(uint32_t)(flags), (key),               \
+                         (uint64_t)(klen)))
+#define Perl_debug_log stderr
+#define do_sv_dump(level, fp, sv, nest, maxnest, dumpops, pvlim)           \
+    fprintf((FILE *)(fp), "<sv dump unavailable in the go-perl XS SDK>\n")
+/* dTHXa: the context arg is a real-perl interpreter pointer; here context
+ * is the innermost live native frame, and the arg is NOT evaluated (its
+ * type may not even exist without MULTIPLICITY). */
+#define dTHXa(a) goperl_frame_t *_gof = goperl_cur_frame_v
+
+/* grok_number, minimally: decimal unsigned parse (perl numeric.c). */
+#define IS_NUMBER_IN_UV 0x01
+#define IS_NUMBER_GREATER_THAN_UV_MAX 0x02
+#define IS_NUMBER_NOT_INT 0x04
+#define IS_NUMBER_NEG 0x08
+#define IS_NUMBER_INFINITY 0x10
+#define IS_NUMBER_NAN 0x20
+static int goperl_grok_number(const char *pv, STRLEN len, UV *valuep)
+    __attribute__((unused));
+static int goperl_grok_number(const char *pv, STRLEN len, UV *valuep) {
+    UV v = 0;
+    STRLEN i = 0;
+    if (len == 0) return 0;
+    for (; i < len && pv[i] >= '0' && pv[i] <= '9'; i++)
+        v = v * 10 + (UV)(pv[i] - '0');
+    if (i == 0 || i != len) return 0;
+    if (valuep) *valuep = v;
+    return IS_NUMBER_IN_UV;
+}
+#define grok_number(pv, len, vp) goperl_grok_number((pv), (len), (vp))
+
+/* ninstr: find the FIRST occurrence of little in big (perl util.c). */
+static char *ninstr(const char *big, const char *bigend, const char *little,
+                    const char *lend) __attribute__((unused));
+static char *ninstr(const char *big, const char *bigend, const char *little,
+                    const char *lend) {
+    const STRLEN littlelen = (STRLEN)(lend - little);
+    if (littlelen == 0) return (char *)big;
+    for (; big + (SSize_t)littlelen <= bigend; big++)
+        if (memcmp(big, little, littlelen) == 0) return (char *)big;
+    return 0;
+}
+
+/* hv_iternextsv: iterate returning value with key pv (interned copy). */
+static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
+                                I32 *retlen) __attribute__((unused));
+static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
+                                I32 *retlen) {
+    uint64_t he =
+        goperl_do_op(f, GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv), 0, 0, 0);
+    if (!he) return 0;
+    uint64_t keysv =
+        goperl_do_op(f, GOPERL_OP_HV_ITERKEYSV, he, 0, 0, 0);
+    uint64_t klen = 0;
+    const char *kp = goperl_api_v->sv_pv(f, keysv, &klen);
+    const char *interned = kp ? goperl_intern(kp, (size_t)klen) : "";
+    if (keyp) *keyp = (char *)interned;
+    if (retlen) *retlen = (I32)klen;
+    return GOPERL_SV(
+        goperl_do_op(f, GOPERL_OP_HV_ITERVAL, GOPERL_TOK(hv), he, 0, 0));
+}
+#define hv_iternextsv(hv, keyp, retlenp) \
+    goperl_hv_iternextsv(_gof, (HV *)(hv), (keyp), (retlenp))
+
+#define av_exists(av, ix) \
+    ((int)goperl_op0(GOPERL_OP_AV_EXISTS, GOPERL_TOK(av), (uint64_t)(int64_t)(ix)))
+#define av_unshift(av, n) \
+    ((void)goperl_op0(GOPERL_OP_AV_UNSHIFT, GOPERL_TOK(av), (uint64_t)(int64_t)(n)))
+#define instr(big, little) strstr((big), (little))
+#define SvUTF8_off(sv) \
+    ((void)goperl_op0(GOPERL_OP_SV_UTF8_OFF, GOPERL_TOK(sv), 0))
+#define SvREADONLY_on(sv) \
+    ((void)goperl_op0(GOPERL_OP_SV_READONLY_ON, GOPERL_TOK(sv), 0))
+#define SvTEMP_off(sv) ((void)(sv)) /* buffer-steal hint; not modeled */
+#define sv_setuv_mg(sv, v) sv_setuv((sv), (v))
+#define C_ARRAY_LENGTH(a) (sizeof(a) / sizeof((a)[0]))
+#define save_scalar(gv) \
+    GOPERL_SV(goperl_op0(GOPERL_OP_SAVE_SCALAR, GOPERL_TOK(gv), 0))
+#define eval_pv(code, croak_on_err)                                     \
+    GOPERL_SV(goperl_ops(GOPERL_OP_EVAL_PV,                             \
+                         (uint64_t)(int64_t)(croak_on_err), 0, (code),  \
+                         strlen(code)))
+#define newCONSTSUB(stash, name, sv)                                     \
+    ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_NEW_CONSTSUB,                  \
+                                GOPERL_TOK(stash), GOPERL_TOK(sv),       \
+                                (name), strlen(name))))
+#define SVf_UTF8 0x20000000 /* only consumed by newSVpvn_flags below */
+static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
+                                 STRLEN len, U32 flags)
+    __attribute__((unused));
+static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
+                                 STRLEN len, U32 flags) {
+    goperl_flush(f);
+    uint64_t tok = goperl_api_v->new_pvn(f, p ? p : "", (uint64_t)len);
+    if (flags & SVf_UTF8)
+        goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, tok, 0, 0, 0);
+    if (flags & SVs_TEMP) tok = goperl_api_v->sv_mortal(f, tok);
+    return GOPERL_SV(tok);
+}
+#define newSVpvn_flags(p, len, flags) \
+    goperl_newSVpvn_flags(_gof, (p), (STRLEN)(len), (U32)(flags))
+#define XSRETURN_IV(iv)                            \
+    STMT_START {                                   \
+        ST(0) = sv_2mortal(newSViv(iv));           \
+        XSRETURN(1);                               \
+    }                                              \
+    STMT_END
+#define XSRETURN_PV(pv)                            \
+    STMT_START {                                   \
+        ST(0) = sv_2mortal(newSVpv((pv), 0));      \
+        XSRETURN(1);                               \
+    }                                              \
+    STMT_END
+
+#define saferealloc(p, n) realloc((p), (size_t)(n))
+#ifndef NV_DIG
+#define NV_DIG DBL_DIG
+#endif
+#define SvPVbyte(sv, lenvar) SvPV((sv), (lenvar))
+#define SvPVbyte_nolen(sv) SvPV_nolen(sv)
+/* sv_usepvn: real perl STEALS the malloc'd buffer as the SV's PV. Here the
+ * bytes are copied into the guest SV and the host buffer is freed — same
+ * ownership contract, same observable bytes (SvPVX hands back a stable
+ * pointer into the copy). Code that later frees memory reached THROUGH the
+ * stored bytes must not be driven through this shim. */
+static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len)
+    __attribute__((unused));
+static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len) {
+    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), (uint64_t)len, p,
+                 (uint64_t)len);
+    free(p);
+}
+#define sv_usepvn(sv, p, len) goperl_sv_usepvn(_gof, (SV *)(sv), (p), (len))
+#define SvPV_set(sv, p) ((void)(sv)) /* buffer detach; nothing to detach */
+#define SvLEN_set(sv, l) ((void)(sv))
+
+/* sv_inc: numeric increment (string auto-increment is not modeled). */
+static void goperl_sv_inc(goperl_frame_t *f, SV *sv) {
+    goperl_flush(f);
+    int64_t v = goperl_api_v->sv_iv(f, GOPERL_TOK(sv));
+    goperl_do_op(f, GOPERL_OP_SV_SETIV, GOPERL_TOK(sv), (uint64_t)(v + 1), 0,
+                 0);
+}
+#define sv_inc(sv) goperl_sv_inc(_gof, (SV *)(sv))
+
+#define gv_fetchfile_flags(name, namelen, flags)                          \
+    ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHFILE, 0,                \
+                                (uint64_t)(namelen), (name),              \
+                                (uint64_t)(namelen))))
+#define gv_fetchfile(name) gv_fetchfile_flags((name), strlen(name), 0)
+
+/* my_strlcat (perl's bundled strlcat) */
+static Size_t my_strlcat(char *dst, const char *src, Size_t size)
+    __attribute__((unused));
+static Size_t my_strlcat(char *dst, const char *src, Size_t size) {
+    Size_t used = strlen(dst);
+    Size_t length = strlen(src);
+    if (size > 0 && used < size - 1) {
+        Size_t copy = size - used - 1;
+        if (copy > length) copy = length;
+        memcpy(dst + used, src, copy);
+        dst[used + copy] = '\0';
+    }
+    return used + length;
+}
+
+/* rninstr: find the LAST occurrence of little in big (perl util.c). */
+static char *rninstr(const char *big, const char *bigend, const char *little,
+                     const char *lend) __attribute__((unused));
+static char *rninstr(const char *big, const char *bigend, const char *little,
+                     const char *lend) {
+    const STRLEN littlelen = (STRLEN)(lend - little);
+    const char *s, *ss;
+    if (littlelen == 0) return (char *)bigend;
+    for (s = bigend - littlelen; s >= big; s--) {
+        if (*s != *little) continue;
+        for (ss = s + 1; ss < s + (SSize_t)littlelen; ss++)
+            if (*ss != little[ss - s]) break;
+        if (ss == s + (SSize_t)littlelen) return (char *)s;
+    }
+    return 0;
+}
+
+/* tryAMAGICunDEREF (the pre-5.14 idiom pp_entersub copies use): replace
+ * *sp with the overloaded dereference when the SV overloads it. */
+#define tryAMAGICunDEREF(meth)                                            \
+    STMT_START {                                                          \
+        if (SvAMAGIC(*sp)) {                                              \
+            SV *goperl_amg_r =                                            \
+                goperl_amagic_deref_call(_gof, *sp, CAT2(meth, _amg));    \
+            if (goperl_amg_r) *sp = goperl_amg_r;                         \
+        }                                                                 \
+    }                                                                     \
+    STMT_END
+
 /* Filesystem shims: XS-level stat/unlink map to the HOST filesystem. With
  * go-perl's default Config the interpreter sees the host filesystem too, so
  * the views agree; a sandboxed Config can diverge from what Perl-level I/O

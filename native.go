@@ -21,6 +21,16 @@ const nativeXSMethodID = -1
 // the payload is the u32 host magic id.
 const magicFreeMethodID = -2
 
+// ppHookMethodID is the reserved callback method id the guest run loop
+// dispatches on for op types a native module claimed via the SDK's
+// PL_ppaddr proxy (perl.cc GOPERL_PP_HOOK_METHOD_ID).
+const ppHookMethodID = -3
+
+// destructorMethodID is the reserved callback method id fired when a guest
+// scope pops a save-stack destructor registered through the SDK (perl.cc
+// GOPERL_DTOR_METHOD_ID); the payload is the u32 host destructor id.
+const destructorMethodID = -4
+
 // SetNativeXSHandler installs the dispatcher for native XSUB calls. req is
 // the thunk's raw payload ([u32 fn_id][u32 cv_token][u32 items][u32
 // sv_tokens...]) and the returned bytes are the raw response ([1][u32 nret]
@@ -47,6 +57,34 @@ func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
 	}
 	p.funcsMu.Lock()
 	p.magicFree = fn
+	p.funcsMu.Unlock()
+	return nil
+}
+
+// SetPPHookHandler installs the dispatcher for pp hooks: op types a native
+// module claimed by writing the SDK's PL_ppaddr proxy. req is the guest's
+// raw payload ([u32 op][u32 op_type][u32 n][u32 stack-top tokens]) and the
+// returned bytes are the raw response ([1][u32 next_op] on success,
+// [0]+message to croak in the interpreter).
+func (p *Perl) SetPPHookHandler(fn func(req []byte) []byte) error {
+	if err := p.ensureDispatcher(); err != nil {
+		return err
+	}
+	p.funcsMu.Lock()
+	p.ppHook = fn
+	p.funcsMu.Unlock()
+	return nil
+}
+
+// SetDestructorHandler installs the hook for save-stack destructors
+// registered by native modules: id fires when the guest scope that holds
+// it pops.
+func (p *Perl) SetDestructorHandler(fn func(id uint32)) error {
+	if err := p.ensureDispatcher(); err != nil {
+		return err
+	}
+	p.funcsMu.Lock()
+	p.dtorFire = fn
 	p.funcsMu.Unlock()
 	return nil
 }

@@ -538,6 +538,24 @@ func (d goDispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error)
 		}
 		return []byte{1}, nil
 	}
+	if methodID == ppHookMethodID {
+		d.p.funcsMu.RLock()
+		hook := d.p.ppHook
+		d.p.funcsMu.RUnlock()
+		if hook == nil {
+			return append([]byte{0}, "no pp hook handler installed"...), nil
+		}
+		return hook(req), nil
+	}
+	if methodID == destructorMethodID {
+		d.p.funcsMu.RLock()
+		fire := d.p.dtorFire
+		d.p.funcsMu.RUnlock()
+		if fire != nil && len(req) >= 4 {
+			fire(binary.LittleEndian.Uint32(req))
+		}
+		return []byte{1}, nil
+	}
 	d.p.funcsMu.RLock()
 	fn, ok := d.p.funcs[methodID]
 	d.p.funcsMu.RUnlock()

@@ -49,7 +49,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 3
+const abiVersion = 4
 
 const (
 	maxStack = 512 // GOPERL_XS_STACK
@@ -59,12 +59,13 @@ const (
 
 // Guest xs-helper ops the loader itself uses (perl.cc perl_xs_helper).
 const (
-	opAvFetch      = 12
-	opRefcntInc    = 15
-	opRefcntDec    = 78
-	opNewXS        = 81
-	opMagicAttach  = 70
+	opAvFetch       = 12
+	opRefcntInc     = 15
+	opRefcntDec     = 78
+	opNewXS         = 81
+	opMagicAttach   = 70
 	opMagicUnattach = 72
+	opPPHookSet     = 98
 )
 
 // cFrame mirrors goperl_frame_t in sdk/include/perl.h (ABI). The trailing Go
@@ -83,6 +84,8 @@ type cFrame struct {
 	hookVal      [2]uint64
 	imm          [3]uint64
 	plop         uintptr
+	hookOpTok    uint64  // pp-hook frames: the guest op being executed
+	prevFrame    uintptr // frame nesting (SDK-maintained)
 	st           [maxStack]uint64
 	marks        [maxMarks]int32
 	tmp          [tmpSlots]uint64
@@ -113,6 +116,8 @@ type cAPI struct {
 	magicExt   uintptr
 	magicChain uintptr
 	magicDel   uintptr
+	// v4:
+	ppHookSet uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -142,22 +147,50 @@ type state struct {
 	nextMagicID uint32
 	magicBySV   map[uint64]*magicRec
 	magicByID   map[uint32]*magicRec
+
+	// pp hooks: host pp functions registered for op types (via the SDK's
+	// PL_ppaddr proxy diff), and the SDK entry points that run them and
+	// the save-stack destructors with croak protection.
+	hookFns    map[int32]uintptr
+	ppInvoke   uintptr // __goperl_pp_invoke
+	dtorInvoke uintptr // __goperl_dtor_invoke
 }
 
+// ptrIDBase splits the PTR2IV/INT2PTR value space: values below it are
+// plain integers cast through pointers (XS code legitimately packs small
+// ints into void*, e.g. savestack indexes) and round-trip as themselves;
+// values at or above it that reach encodePtr are real host pointers, which
+// cross the 32-bit guest IV as (base + registry index). 64-bit heap
+// pointers are far above the base; a real mapping below 1<<30 would be
+// misclassified, which is documented as out of scope.
+const ptrIDBase = 1 << 30
+
 func (s *state) encodePtr(p uintptr) uint64 {
+	if p < ptrIDBase {
+		return uint64(p) // plain integer in pointer clothing
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for i, q := range s.ptrs { // dedup: identity must survive round trips
+		if q == p {
+			return ptrIDBase + uint64(i)
+		}
+	}
 	s.ptrs = append(s.ptrs, p)
-	return uint64(len(s.ptrs))
+	return ptrIDBase + uint64(len(s.ptrs)-1)
 }
 
 func (s *state) decodePtr(id uint64) uintptr {
+	if id < ptrIDBase {
+		return uintptr(id)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if id == 0 || id > uint64(len(s.ptrs)) {
+	ix := id - ptrIDBase
+	if ix >= uint64(len(s.ptrs)) {
 		return 0
 	}
-	return s.ptrs[id-1]
+	return s.ptrs[ix]
 }
 
 var (
@@ -204,6 +237,7 @@ func stateFor(p *perl.Perl) *state {
 			cvFn:      map[uint64]uintptr{},
 			magicBySV: map[uint64]*magicRec{},
 			magicByID: map[uint32]*magicRec{},
+			hookFns:   map[int32]uintptr{},
 		}
 		states[p] = s
 	}
@@ -228,6 +262,12 @@ func Load(p *perl.Perl, module, path string) error {
 	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
 		return err
 	}
+	if err := p.SetPPHookHandler(s.ppHook); err != nil {
+		return err
+	}
+	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
+		return err
+	}
 	vtableOnce.Do(buildVtable)
 
 	lib, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
@@ -242,6 +282,19 @@ func Load(p *perl.Perl, module, path string) error {
 	if uint32(got) != abiVersion {
 		return fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
 	}
+	// The SDK's croak-guarded entry points for pp hooks and save-stack
+	// destructors (weak, so any SDK .so provides them).
+	if fn, err := purego.Dlsym(lib, "__goperl_pp_invoke"); err == nil {
+		s.mu.Lock()
+		s.ppInvoke = fn
+		s.mu.Unlock()
+	}
+	if fn, err := purego.Dlsym(lib, "__goperl_dtor_invoke"); err == nil {
+		s.mu.Lock()
+		s.dtorInvoke = fn
+		s.mu.Unlock()
+	}
+
 	bootName := "boot_" + strings.ReplaceAll(module, "::", "__")
 	bootFn, err := purego.Dlsym(lib, bootName)
 	if err != nil {
@@ -342,6 +395,72 @@ func (s *state) bootFrame() (*cFrame, uintptr) {
 	f.markidx = 0
 	f.psp = uintptr(unsafe.Pointer(&f.st[0]))
 	return f, pinFrame(f)
+}
+
+// ppHook runs a module's pp function for one guest op execution (reserved
+// callback method -3). Payload: [u32 op][u32 op_type][u32 n][u32 stack-top
+// tokens, bottom to top]; response [1][u32 next_op] or [0]+message.
+func (s *state) ppHook(req []byte) []byte {
+	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
+	if len(req) < 12 {
+		return fail("pp hook: short payload")
+	}
+	opTok := uint64(binary.LittleEndian.Uint32(req[0:]))
+	opType := int32(binary.LittleEndian.Uint32(req[4:]))
+	n := int(binary.LittleEndian.Uint32(req[8:]))
+	if n < 0 || n > 8 || len(req) < 12+4*n {
+		return fail("pp hook: truncated payload")
+	}
+	s.mu.Lock()
+	fn := s.hookFns[opType]
+	invoke := s.ppInvoke
+	s.mu.Unlock()
+	if fn == 0 || invoke == 0 {
+		return fail(fmt.Sprintf("pp hook: no host function for op %d", opType))
+	}
+	if xsTrace {
+		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d n=%d\n", opTok, opType, n)
+	}
+
+	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p}
+	f.hookOpTok = opTok
+	f.items = int32(n)
+	f.marks[0] = 0
+	f.markidx = 0
+	for i := 0; i < n; i++ {
+		f.st[1+i] = uint64(binary.LittleEndian.Uint32(req[12+4*i:]))
+	}
+	f.psp = uintptr(unsafe.Pointer(&f.st[0])) + uintptr(n)*8
+	fp := pinFrame(f)
+	next, _, _ := purego.SyscallN(invoke, fp, fn)
+	unpinFrame(fp)
+	if f.failed != 0 {
+		if xsTrace {
+			fmt.Fprintf(os.Stderr, "[pphook] FAILED: %s\n", f.errString())
+		}
+		return fail(f.errString())
+	}
+	if xsTrace {
+		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x\n", next)
+	}
+	resp := make([]byte, 5)
+	resp[0] = 1
+	binary.LittleEndian.PutUint32(resp[1:], uint32(next))
+	return resp
+}
+
+// dtorFired runs a save-stack destructor the guest scope pop released
+// (reserved callback method -4).
+func (s *state) dtorFired(id uint32) {
+	s.mu.Lock()
+	invoke := s.dtorInvoke
+	s.mu.Unlock()
+	if invoke == 0 {
+		return
+	}
+	_, fp := s.bootFrame()
+	purego.SyscallN(invoke, fp, uintptr(id))
+	unpinFrame(fp)
 }
 
 // MAGIC mirror layout (must match struct magic in sdk/include/perl.h):
@@ -624,11 +743,14 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		if xsTrace {
-			fmt.Fprintf(os.Stderr, "[xsop] op=%d a=%#x b=%#x slen=%d\n", op, a, b, sLen)
-		}
 		v, err := f.p.XSHelperOp(op, uint64(a), uint64(b), goBytesString(sPtr, int(sLen)))
+		if xsTrace {
+			fmt.Fprintf(os.Stderr, "[xsop] op=%d a=%#x b=%#x slen=%d -> %#x\n", op, a, b, sLen, v)
+		}
 		if err != nil {
+			// Loud on purpose: native code cannot be unwound from here, so
+			// it continues with a zero result; the operator must see why.
+			fmt.Fprintf(os.Stderr, "goperl xsnative: xs op %d failed: %v\n", op, err)
 			f.fail(fmt.Sprintf("xs op %d: %v", op, err))
 			return 0
 		}
@@ -721,6 +843,28 @@ func buildVtable() {
 			return 0
 		}
 		stateFor(f.p).magicDel(uint64(sv), how, vtbl)
+		return 0
+	})
+	vtable.ppHookSet = purego.NewCallback(func(fr uintptr, opType int32, fn uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		s := stateFor(f.p)
+		s.mu.Lock()
+		if fn != 0 {
+			s.hookFns[opType] = fn
+		} else {
+			delete(s.hookFns, opType)
+		}
+		s.mu.Unlock()
+		enable := uint64(0)
+		if fn != 0 {
+			enable = 1
+		}
+		if _, err := f.p.XSHelperOp(opPPHookSet, uint64(uint32(opType)), enable, ""); err != nil {
+			f.fail("pp hook set: " + err.Error())
+		}
 		return 0
 	})
 }
