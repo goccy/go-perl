@@ -33,6 +33,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
+	"sync/atomic"
 
 	wasm2go "github.com/goccy/perlwasm2go"
 )
@@ -52,11 +54,15 @@ func (e *PerlError) Error() string { return e.Message }
 // reference back). Returning an error makes the Perl call die with the error
 // text.
 //
-// Argument *Ref values are BORROWED: the guest releases their pins when the
-// call returns. A handler that wants to keep one beyond the call must
-// Retain it (and later Free it). fn may call back into the instance (Eval,
-// Call, Ref methods) — the invoke lock is released for the callback's
-// duration — but must not use it from other goroutines concurrently.
+// Argument *Ref values are owned like any other Ref (keep them as long as
+// needed; Free or the garbage collector releases them). fn may call back
+// into the instance (Eval, Call, Ref methods) — the invoke lock is released
+// for the callback's duration, and a nested entry from the handler's own
+// goroutine is safe. What deadlocks is HOST-side lock cycles: a handler that
+// blocks on something only the code that initiated the outer call can
+// provide (a mutex it holds, a channel it will only service after the call
+// returns) waits forever. Keep handlers self-contained or hand work to
+// other goroutines without waiting on the outer caller.
 type GoFunc func(args []any) ([]any, error)
 
 // wireNode is one tagged value on the bridge:
@@ -78,14 +84,35 @@ type wireNode struct {
 // same Perl reference always surfaces with the same handle id, and sending a
 // Ref back to Perl dereferences to the same SV.
 //
-// A Ref obtained from Call results (or retained inside a bound function) owns
-// one registry pin; Free releases it. An unreleased Ref keeps the referenced
-// Perl value alive for the instance's lifetime.
+// Lifecycle is aligned in both directions. While a Ref is reachable in Go,
+// its registry pin holds a real Perl reference count, so Perl cannot garbage
+// collect the value out from under the host. When the Ref becomes
+// unreachable in Go, a finalizer queues the pin for release — the release
+// itself runs inside the guest on the next Eval/Call, never on the finalizer
+// goroutine (which could otherwise block behind a running Eval or touch a
+// closed instance) — and once the last pin drops, Perl's own refcounting
+// resumes. Call Free for prompt, deterministic release.
 type Ref struct {
 	p       *Perl
 	id      uint64
 	class   string
 	reftype string
+	// released flips on Free (or when the instance closes underneath); a
+	// released Ref no longer owns its pin and refuses to cross the bridge.
+	released atomic.Bool
+}
+
+// newRef wraps a decoded handle. Every wire crossing of an "r" node carries
+// one guest pin the wrapper owns; the finalizer forwards that ownership to
+// the release queue if the program never calls Free.
+func newRef(p *Perl, id uint64, class, reftype string) *Ref {
+	r := &Ref{p: p, id: id, class: class, reftype: reftype}
+	runtime.SetFinalizer(r, func(r *Ref) {
+		if r.released.CompareAndSwap(false, true) {
+			r.p.queueRelease(r.id)
+		}
+	})
+	return r
 }
 
 // Class returns the package the reference is blessed into, or "" for an
@@ -143,20 +170,19 @@ func (r *Ref) Export(ctx context.Context) (any, error) {
 	return v, nil
 }
 
-// Retain adds a registry pin. A bound function that wants to keep an
-// argument Ref beyond the call it arrived in must Retain it; every Retain
-// (like every Ref returned from Call) is balanced by one Free.
-func (r *Ref) Retain(ctx context.Context) error {
-	_, err := r.p.Call(ctx, "__plwasm_retain", r.id)
-	return err
-}
-
-// Free releases this Ref's registry pin. When the last pin on a handle is
-// released the guest drops its reference and Perl's own refcounting takes
-// over. Using the Ref after its last pin is released fails with a
-// stale-handle *PerlError.
+// Free releases this Ref's registry pin now instead of waiting for the
+// garbage collector. When the last pin on a handle drops the guest releases
+// its reference and Perl's own refcounting takes over. Idempotent; a no-op
+// on a closed instance. Using the Ref afterwards fails.
 func (r *Ref) Free() error {
-	_, err := r.p.Call(context.Background(), "__plwasm_release", r.id)
+	if !r.released.CompareAndSwap(false, true) {
+		return nil
+	}
+	runtime.SetFinalizer(r, nil)
+	if r.p.closed.Load() {
+		return nil
+	}
+	_, err := r.p.call(context.Background(), "__plwasm_release", []any{r.id}, false)
 	return err
 }
 
@@ -178,6 +204,9 @@ func (p *Perl) encodeValue(v any) (wireNode, error) {
 		}
 		if x.p != p {
 			return wireNode{}, errors.New("perl.Ref belongs to a different Perl instance")
+		}
+		if x.released.Load() {
+			return wireNode{}, errors.New("perl.Ref has been freed")
 		}
 		return wireNode{K: "r", H: x.id}, nil
 	case GoFunc:
@@ -260,7 +289,7 @@ func (p *Perl) decodeValue(n wireNode) (any, error) {
 		}
 		return v, nil
 	case "r":
-		return &Ref{p: p, id: n.H, class: n.C, reftype: n.T}, nil
+		return newRef(p, n.H, n.C, n.T), nil
 	default:
 		return nil, fmt.Errorf("unknown bridge value kind %q", n.K)
 	}
@@ -293,8 +322,20 @@ type callEnvelope struct {
 // as a *PerlError; other errors are host/transport failures or a context
 // cancellation, which behaves exactly like Eval's.
 func (p *Perl) Call(ctx context.Context, name string, args ...any) ([]any, error) {
+	return p.call(ctx, name, args, true)
+}
+
+// call is Call's engine; drain=false skips the release-queue flush (the
+// flush itself and Ref.Free use that path, so a drain cannot recurse).
+func (p *Perl) call(ctx context.Context, name string, args []any, drain bool) ([]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if p.closed.Load() {
+		return nil, errClosed
+	}
+	if drain {
+		p.drainReleases(ctx)
 	}
 	if hasFuncArg(args) {
 		// A crossing Go function needs the Perl->Go dispatcher in place

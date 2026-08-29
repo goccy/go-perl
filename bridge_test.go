@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	perl "github.com/goccy/go-perl"
 )
@@ -151,8 +153,9 @@ func TestCodeRefInvoke(t *testing.T) {
 }
 
 // TestBindReceivesRefs: a reference argument to a bound Go function arrives
-// as a *Ref to the same object, is usable during the call, and can be
-// retained beyond it.
+// as a *Ref to the same object, is usable during the call, and — since the
+// handler owns it like any other Ref — simply keeping it keeps the Perl
+// object alive beyond the call.
 func TestBindReceivesRefs(t *testing.T) {
 	p := newPerl(t)
 	ctx := context.Background()
@@ -161,9 +164,6 @@ func TestBindReceivesRefs(t *testing.T) {
 		ref, ok := args[0].(*perl.Ref)
 		if !ok {
 			return nil, errors.New("expected a reference argument")
-		}
-		if err := ref.Retain(ctx); err != nil {
-			return nil, err
 		}
 		kept = ref
 		return []any{ref.Class()}, nil
@@ -368,6 +368,161 @@ func TestBindClassFromGo(t *testing.T) {
 	r, err = p.Eval(ctx, `Louder->new->who`)
 	if err != nil || !r.Ok || r.Result != "instance:Louder" {
 		t.Fatalf("subclass invocant = %q (err=%v error=%q)", r.Result, err, r.Error)
+	}
+}
+
+// TestRefKeepsPerlValueAlive is the GC-direction guarantee: while Go holds a
+// *Ref, the registry pin holds a real Perl reference count, so dropping every
+// Perl-side reference must NOT free the object under the host.
+func TestRefKeepsPerlValueAlive(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	r, err := p.Eval(ctx, `
+		package Tracked;
+		our $destroyed = 0;
+		sub new { bless { alive => 1 }, shift }
+		sub ping { "pong" }
+		sub DESTROY { $destroyed++ }
+		package main;
+		our $t = Tracked->new;
+		sub take_tracked { $t }
+		1;`)
+	if err != nil || !r.Ok {
+		t.Fatalf("define Tracked: err=%v error=%q", err, r.Error)
+	}
+	got, err := p.Call(ctx, "take_tracked")
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	obj := got[0].(*perl.Ref)
+
+	// Drop the only Perl-side reference. The registry pin must keep the
+	// object alive: DESTROY has not run and methods still work.
+	if r, err := p.Eval(ctx, `undef $main::t; $Tracked::destroyed`); err != nil || !r.Ok || r.Result != "0" {
+		t.Fatalf("destroyed after undef = %q (err=%v error=%q), want 0", r.Result, err, r.Error)
+	}
+	if out, err := obj.MethodCall(ctx, "ping"); err != nil || out[0] != "pong" {
+		t.Fatalf("method on host-retained object = %#v err=%v, want pong", out, err)
+	}
+
+	// Releasing the last pin hands the object back to Perl's refcounting:
+	// DESTROY runs.
+	if err := obj.Free(); err != nil {
+		t.Fatalf("Free: %v", err)
+	}
+	if r, err := p.Eval(ctx, `$Tracked::destroyed`); err != nil || !r.Ok || r.Result != "1" {
+		t.Fatalf("destroyed after Free = %q (err=%v error=%q), want 1", r.Result, err, r.Error)
+	}
+	// The freed Ref refuses to cross again.
+	if _, err := p.Call(ctx, "take_tracked", obj); err == nil {
+		t.Fatalf("expected a freed Ref to be rejected as an argument")
+	}
+}
+
+// TestRefFinalizerReleasesPins: *Ref wrappers dropped without Free are
+// released by the garbage collector — the finalizer queues the pin and the
+// next call drains it, so the guest registry does not grow without bound.
+func TestRefFinalizerReleasesPins(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	if r, err := p.Eval(ctx, `sub fresh_ref { { n => $_[0] } } 1;`); err != nil || !r.Ok {
+		t.Fatalf("define fresh_ref: err=%v error=%q", err, r.Error)
+	}
+	// __plwasm_release_all with no ids just reports the live-handle count.
+	liveHandles := func() int {
+		got, err := p.Call(ctx, "__plwasm_release_all")
+		if err != nil {
+			t.Fatalf("live-handle probe: %v", err)
+		}
+		return int(got[0].(float64))
+	}
+
+	base := liveHandles()
+	for i := 0; i < 50; i++ {
+		if _, err := p.Call(ctx, "fresh_ref", i); err != nil {
+			t.Fatalf("Call fresh_ref: %v", err)
+		}
+	}
+	// The 50 result Refs are unreachable now. Finalizers queue their pins;
+	// the drain at the next call releases them. Loop because finalizers run
+	// asynchronously after GC.
+	for attempt := 0; attempt < 50; attempt++ {
+		runtime.GC()
+		if liveHandles() <= base {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("registry still holds %d handles (baseline %d) after GC", liveHandles(), base)
+}
+
+// TestUseAfterClose: every entry point fails cleanly on a closed instance,
+// and a straggling Free is a no-op instead of a call into unmapped memory.
+func TestUseAfterClose(t *testing.T) {
+	p, err := perl.New(perl.Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+
+	// Take a real Ref, then close.
+	if r, err := p.Eval(ctx, `sub give_ref { {} } 1;`); err != nil || !r.Ok {
+		t.Fatalf("define give_ref: err=%v error=%q", err, r.Error)
+	}
+	vals, err := p.Call(ctx, "give_ref")
+	if err != nil {
+		t.Fatalf("Call give_ref: %v", err)
+	}
+	ref := vals[0].(*perl.Ref)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := p.Eval(ctx, `1`); err == nil {
+		t.Fatalf("Eval after Close should fail")
+	}
+	if _, err := p.Call(ctx, "give_ref"); err == nil {
+		t.Fatalf("Call after Close should fail")
+	}
+	if err := ref.Free(); err != nil {
+		t.Fatalf("Free after Close should be a no-op, got %v", err)
+	}
+}
+
+// TestCallbackDoesNotDeadlockOtherGoroutines pins the locking contract: the
+// instance lock is released while a bound Go function runs, so another
+// goroutine's Eval proceeds as a nested top-level entry instead of
+// deadlocking against the in-flight call that triggered the callback.
+func TestCallbackDoesNotDeadlockOtherGoroutines(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	inHandler := make(chan struct{})
+	otherDone := make(chan error, 1)
+	if err := p.Bind("go_wait", func(args []any) ([]any, error) {
+		close(inHandler)
+		// Block until the OTHER goroutine has completed a full Eval on this
+		// instance. If the lock were still held here, this would deadlock.
+		if err := <-otherDone; err != nil {
+			return nil, err
+		}
+		return []any{"released"}, nil
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	go func() {
+		<-inHandler
+		r, err := p.Eval(ctx, `21 * 2`)
+		if err == nil && (!r.Ok || r.Result != "42") {
+			err = fmt.Errorf("nested eval ok=%v result=%q error=%q", r.Ok, r.Result, r.Error)
+		}
+		otherDone <- err
+	}()
+	r, err := p.Eval(ctx, `go_wait()`)
+	if err != nil || !r.Ok || r.Result != "released" {
+		t.Fatalf("go_wait = ok=%v result=%q error=%q err=%v", r.Ok, r.Result, r.Error, err)
 	}
 }
 

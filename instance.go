@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	wasm2go "github.com/goccy/perlwasm2go"
 	"github.com/goccy/perlwasm2go/base"
@@ -70,6 +71,44 @@ type Perl struct {
 	funcs         map[int32]GoFunc
 	nextFuncID    int32
 	dispatcherSet bool
+
+	// closed flips when Close runs; every public entry point checks it so a
+	// straggler — including a *Ref Free racing a Close — errors out instead
+	// of calling into a destroyed (and possibly unmapped) instance.
+	closed atomic.Bool
+	// pendingRel collects handle ids whose *Ref wrappers were collected by
+	// the Go GC. Finalizers ONLY append here (a pure host-side operation —
+	// invoking the guest from the finalizer goroutine could block behind a
+	// long Eval or hit a closed instance); the queue drains through one
+	// batched guest call at the start of the next Eval/Call.
+	relMu      sync.Mutex
+	pendingRel []uint64
+}
+
+// queueRelease records a handle whose Go wrapper is gone. Safe from any
+// goroutine, including the runtime's finalizer goroutine.
+func (p *Perl) queueRelease(id uint64) {
+	p.relMu.Lock()
+	p.pendingRel = append(p.pendingRel, id)
+	p.relMu.Unlock()
+}
+
+// drainReleases releases every queued handle in one guest call. Runs on
+// user-initiated entry points only. Best-effort: a failure re-queues nothing
+// (the registry dies with the instance anyway).
+func (p *Perl) drainReleases(ctx context.Context) {
+	p.relMu.Lock()
+	ids := p.pendingRel
+	p.pendingRel = nil
+	p.relMu.Unlock()
+	if len(ids) == 0 || p.closed.Load() {
+		return
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	_, _ = p.call(ctx, "__plwasm_release_all", args, false)
 }
 
 // New builds a fresh Perl instance, applies the sandbox config, and returns
@@ -254,6 +293,10 @@ func (p *Perl) Eval(ctx context.Context, src string) (EvalResult, error) {
 	if err := ctx.Err(); err != nil {
 		return EvalResult{}, err
 	}
+	if p.closed.Load() {
+		return EvalResult{}, errClosed
+	}
+	p.drainReleases(ctx)
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, src)
@@ -315,8 +358,16 @@ func (p *Perl) armInterrupt(ctx context.Context) (disarm func() bool) {
 	}
 }
 
-// Close finalizes the instance. The Perl must not be used afterward.
+// errClosed is returned by every entry point once Close has run.
+var errClosed = fmt.Errorf("perl: instance is closed")
+
+// Close finalizes the instance. The Perl must not be used afterward: every
+// later Eval/Call errors, and outstanding *Ref handles become inert (their
+// finalizers only touch host-side state). Idempotent.
 func (p *Perl) Close() error {
+	if !p.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_1)
