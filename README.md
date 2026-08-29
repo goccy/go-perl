@@ -56,6 +56,35 @@ func main() {
   state, that is — read-only snapshot pages are shared).
 - **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
   runaway script at the next Perl opcode.
+- **Bridged**: `Call` invokes named Perl subs from Go and `Bind` makes Go
+  functions callable from Perl as ordinary subs — arguments and return lists
+  cross as JSON, and errors map to `*PerlError` / Perl `die` respectively.
+
+## Calling between Go and Perl
+
+```go
+p, _ := perl.New(perl.Config{})
+defer p.Close()
+ctx := context.Background()
+
+// Go -> Perl: call a named sub with structured arguments.
+p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`)
+sum, _ := p.Call(ctx, "add", 40, 2)
+fmt.Println(sum[0]) // 42
+
+// Perl -> Go: bind a Go function as a Perl sub.
+p.Bind("go_upper", func(args []any) ([]any, error) {
+	return []any{strings.ToUpper(args[0].(string))}, nil
+})
+r, _ := p.Eval(ctx, `go_upper("hello")`)
+fmt.Println(r.Result) // HELLO
+```
+
+A bound Go function may call back into the same instance (`Eval`/`Call`),
+so round trips compose. See
+[`examples/plack`](./examples/plack) for the bridge carrying real traffic: a
+PSGI web application (Plack + Mojolicious) served from `net/http` over a pool
+of warm instances.
 
 ## Supply-chain verification
 
