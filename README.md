@@ -16,23 +16,24 @@ run Perl.
 package main
 
 import (
+	"context"
 	"fmt"
 
 	perl "github.com/goccy/go-perl"
 )
 
 func main() {
-	i, err := perl.NewInterpreter(perl.Config{})
+	p, err := perl.New(perl.Config{})
 	if err != nil {
 		panic(err)
 	}
-	defer i.Close()
+	defer p.Close()
 
-	r, err := i.Eval(`join(",", map { $_ * 2 } 1..5)`)
+	r, err := p.Eval(context.Background(), `join(",", map { $_ * 2 } 1..5)`)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(r.Result) // 2,4,6,8,10
+	fmt.Println(r.Value.String()) // 2,4,6,8,10
 }
 ```
 
@@ -41,13 +42,70 @@ func main() {
 - **Pure Go**: works anywhere Go compiles; `CGO_ENABLED=0` friendly.
 - **Batteries included**: libperl plus every static XS extension (List::Util,
   POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib
-  (embedded zip, unpacked automatically — or served from an in-memory FS via
-  `NewStdlibMemFS`).
-- **Sandboxed**: each `Interpreter` runs in its own WASI sandbox with a
-  pluggable filesystem backend (`Config.FS`), environment, and no ambient
-  host access.
-- **Multi-interpreter**: independent `Interpreter` instances share nothing.
-- **Interruptible**: a running `Eval` can be stopped from another goroutine.
+  (embedded zip, served from a private in-memory filesystem by default).
+- **Instant start, copy-on-write**: the first `New` boots one interpreter and
+  snapshots its memory; every later `New` maps that snapshot copy-on-write, so
+  instances start without re-running interpreter init and share the read-only
+  bulk of their memory.
+- **Sandboxed by default**: each `Perl` runs in its own WASI sandbox with a
+  PRIVATE in-memory filesystem — an embedded instance touches no host files
+  unless asked to. `Config.FS` selects the backend from the
+  [`fs`](./fs) package: `fs.NewHostFS()` passes through to the operating
+  system's filesystem (how the `gperl` command behaves, matching `perl`),
+  `fs.DirFS` scopes it to one directory, `fs.NewMemFS()` or any custom
+  backend plugs in the same way — and environment, network (`Dial`/`Resolve`)
+  and subprocess (`Exec`) policy hooks complete the sandbox.
+- **Multi-instance**: independent `Perl` instances share nothing (writable
+  state, that is — read-only snapshot pages are shared).
+- **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
+  runaway script at the next Perl opcode.
+- **Bridged**: `Call` invokes named Perl subs from Go and `Bind` makes Go
+  functions callable from Perl as ordinary subs. Plain scalars cross by
+  value; Perl references — blessed objects, array/hash/code refs — cross as
+  identity-preserving handles (`*Ref`), never serialized, so the same object
+  stays the same object across any number of round trips. Errors map to
+  `*PerlError` / Perl `die` respectively.
+
+## Calling between Go and Perl
+
+```go
+p, _ := perl.New(perl.Config{})
+defer p.Close()
+ctx := context.Background()
+
+// Go -> Perl: call a named sub with structured arguments.
+p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`)
+sum, _ := p.Call(ctx, "add", 40, 2)
+fmt.Println(sum[0]) // 42
+
+// Perl objects cross as handles, not copies: the same object, its methods,
+// and its state remain live on the Go side.
+p.Eval(ctx, `package Counter; sub new { bless {n=>0}, shift } sub inc { $_[0]{n}++ }
+             package main; sub counter { our $c ||= Counter->new } 1;`)
+res, _ := p.Call(ctx, "counter")
+obj := res[0].(*perl.Ref) // Class() == "Counter"
+defer obj.Free()
+obj.MethodCall(ctx, "inc")            // mutates the object Perl sees
+p.Call(ctx, "counter")                // returns an Equal handle: same object
+
+// Perl -> Go: bind a Go function as a Perl sub.
+p.Bind("go_upper", func(args []any) ([]any, error) {
+	return []any{strings.ToUpper(args[0].(string))}, nil
+})
+r, _ := p.Eval(ctx, `go_upper("hello")`)
+fmt.Println(r.Value.String()) // HELLO
+```
+
+The value model: primitives cross as data (Perl
+scalars are value-semantic anyway), Go composites materialize as fresh Perl
+structures (data, not identity), and every Perl reference crosses by handle —
+`*Ref` supports `MethodCall`, `Invoke` (code refs), `Export` (deep copy to Go
+data), `Retain`/`Free`, and `Equal` (identity). A bound Go function may call
+back into the same instance (`Eval`/`Call`/`Ref` methods), so round trips
+compose. The [`psgi`](./psgi) package builds on the bridge to serve PSGI
+web applications from `net/http` (request/response conversion plus the
+Plack adapter); see [`examples/plack`](./examples/plack) for it carrying
+real traffic — a Mojolicious app over a pool of warm instances.
 
 ## Supply-chain verification
 

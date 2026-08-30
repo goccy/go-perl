@@ -1,6 +1,7 @@
 package perl_test
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -21,22 +22,22 @@ const (
 // definition are set up once (persistent state), so the timed region is the
 // fib(36) evaluation itself, not interpreter boot.
 func BenchmarkFib36(b *testing.B) {
-	i, err := perl.NewInterpreter(perl.Config{})
+	p, err := perl.New(perl.Config{})
 	if err != nil {
-		b.Fatalf("NewInterpreter: %v", err)
+		b.Fatalf("New: %v", err)
 	}
-	defer i.Close()
-	if _, err := i.Eval(fibDef); err != nil {
+	defer p.Close()
+	if _, err := p.Eval(context.Background(), fibDef); err != nil {
 		b.Fatalf("define fib: %v", err)
 	}
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		r, err := i.Eval(`fib(36)`)
+		r, err := p.Eval(context.Background(), `fib(36)`)
 		if err != nil {
 			b.Fatalf("Eval: %v", err)
 		}
-		if !r.Ok || r.Result != fib36Val {
-			b.Fatalf("fib(36) = %q ok=%v error=%q", r.Result, r.Ok, r.Error)
+		if r.Error != nil || r.Value.String() != fib36Val {
+			b.Fatalf("fib(36) = %q ok=%v error=%v", r.Value.String(), (r.Error == nil), r.Error)
 		}
 	}
 }

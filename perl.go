@@ -519,7 +519,18 @@ type Module struct {
 	cbMu      sync.RWMutex
 	callbacks map[int32]CallbackHandler
 	nextCBID  int32
+	// cbDesc is the reusable guest-memory result descriptor for callback
+	// returns on a memory64 module (see encodeCallbackResult); 0 until
+	// first use, and never touched on wasm32.
+	cbDesc wptr
 }
+
+// wptr is the guest pointer width: int32 for a wasm32 module, int64
+// for a memory64 (wasm64) one. Every pointer or length that crosses
+// the bridge boundary is a wptr; the transpiled wasm2go package's
+// export/import signatures use the same width, so the two packages
+// stay in lock-step from the one substitution the generator makes.
+type wptr = int32
 
 var (
 	globalModule *Module
@@ -535,11 +546,44 @@ type CallbackHandler interface {
 	HandleCallback(methodID int32, req []byte) ([]byte, error)
 }
 
-// Init initializes the global module. Must be called before any API
-// use. Safe to call multiple times (uses sync.Once).
-func Init() error {
+// Options configure the module the generated API runs on. The zero
+// value is what Init uses: the default WASI implementation (the host
+// filesystem, environment and stdio), the engine's own initial memory
+// reservation, and its wasm32 4 GiB ceiling.
+type Options struct {
+	// WASI replaces the wasi_snapshot_preview1 implementation the guest
+	// runs against. base.DefaultWASI() returns the default one, whose
+	// setters scope the filesystem to a directory (or an arbitrary
+	// base.FS), replace the environment and redirect stdio; any
+	// implementation of the interface will do. nil keeps the default.
+	WASI base.Wasi_snapshot_preview1Imports
+
+	// MemoryReserveBytes pre-reserves linear memory. A guest that grows
+	// to a size known up front — loading a large model or data file —
+	// otherwise reallocates and copies the whole linear memory as it
+	// goes. Zero keeps the engine's default headroom.
+	MemoryReserveBytes int
+
+	// MaxMemoryBytes caps linear-memory growth, so a workload bigger
+	// than expected fails inside the guest (memory.grow returns -1)
+	// instead of growing the host process. Zero keeps the engine's own
+	// ceiling.
+	MaxMemoryBytes uint64
+}
+
+// Init initializes the global module with the default Options. Must be
+// called before any API use. Safe to call multiple times (uses
+// sync.Once).
+func Init() error { return InitWith(Options{}) }
+
+// InitWith initializes the global module with opts. Like Init it runs at
+// most once per process: the module owns one linear memory and one C
+// heap, so there is exactly one instance and the first initialization
+// wins. A later call — with any Options — returns that instance's
+// initialization result without reconfiguring it.
+func InitWith(opts Options) error {
 	initOnce.Do(func() {
-		initErr = initModule()
+		initErr = initModule(opts)
 	})
 	return initErr
 }
@@ -553,10 +597,39 @@ func module() *Module {
 	return globalModule
 }
 
-func initModule() (retErr error) {
+// Instance returns the transpiled module the global API runs on, or nil
+// before initialization.
+//
+// It exists for base.AccessMemory, which is the only safe way to read or
+// write linear memory from a goroutine other than the one running a call
+// — an interrupt flag an embedder raises while a long call is in flight,
+// a progress word it polls. Everything else should go through the
+// generated API: calling into the module directly bypasses the lock that
+// serialises entries and the C stack would be shared with the call in
+// progress.
+func Instance() *base.Module {
+	if globalModule == nil {
+		return nil
+	}
+	return globalModule.g
+}
+
+func initModule(opts Options) (retErr error) {
 	m := &Module{}
 	env := envStubs{m: m}
-	m.g = wasm2go.New(env)
+	wm := wasmifyStubs{m: m}
+	wasi := opts.WASI
+	if wasi == nil {
+		wasi = base.DefaultWASI()
+	}
+	if opts.MemoryReserveBytes > 0 {
+		m.g = wasm2go.NewWithWASIReserve(wasi, env, wm, opts.MemoryReserveBytes)
+	} else {
+		m.g = wasm2go.NewWithWASI(wasi, env, wm)
+	}
+	if opts.MaxMemoryBytes > 0 {
+		wasm2go.SetMaxMemory(m.g, opts.MaxMemoryBytes)
+	}
 	// Set globalModule eagerly so the rest of the API can run even if
 	// _initialize panics partway through C++ static-initializer code.
 	globalModule = m
@@ -571,17 +644,17 @@ func initModule() (retErr error) {
 }
 
 // invoke serializes req into wasm memory, runs the per-export caller
-// (wasm2go.Inv_<svc>_<mt>), and unpacks the (ptr<<32 | len) response.
+// (wasm2go.Inv_<svc>_<mt>), and unpacks the response via decodeResult.
 // call is the trap-safe per-export entry point: it snapshots and
 // restores the mutable wasm globals so a mid-call panic does not leak
 // an abandoned C++ activation frame.
-func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.Module, int32, int32) (int64, error)) ([]byte, error) {
+func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.Module, wptr, wptr) (int64, error)) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var reqPtr, reqLen int32
+	var reqPtr, reqLen wptr
 	if len(req) > 0 {
-		reqPtr = wasm2go.WasmAlloc(m.g, int32(len(req)))
-		reqLen = int32(len(req))
+		reqPtr = wasm2go.WasmAlloc(m.g, wptr(len(req)))
+		reqLen = wptr(len(req))
 		// Free reqPtr unconditionally on return so the request
 		// buffer never lingers in wasm memory when the call traps
 		// or the early-exit branches below fire. Guard against
@@ -590,21 +663,20 @@ func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.M
 		if reqPtr != 0 {
 			defer wasm2go.WasmFree(m.g, reqPtr)
 		}
-		copy(wasm2go.Memory(m.g)[reqPtr:], req)
+		copy(wasm2go.Memory(m.g)[wptrOff(reqPtr):], req)
 	}
 	packed, err := call(m.g, reqPtr, reqLen)
 	if err != nil {
 		return nil, err
 	}
-	respPtr := uint32(packed >> 32)
-	respLen := uint32(packed & 0xFFFFFFFF)
+	respPtr, respLen := decodeResult(m.g, packed)
 	if respLen == 0 {
 		return nil, nil
 	}
 	mem := wasm2go.Memory(m.g)
 	out := make([]byte, respLen)
 	copy(out, mem[respPtr:respPtr+respLen])
-	wasm2go.WasmFree(m.g, int32(respPtr))
+	wasm2go.WasmFree(m.g, wptr(respPtr))
 	return out, nil
 }
 
@@ -614,18 +686,17 @@ func (m *Module) resolveTypeName(ptr uint64) (string, error) {
 	buf := pbAppendUint64(pbNewBuf(), 1, ptr)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	reqPtr := wasm2go.WasmAlloc(m.g, int32(len(buf)))
-	copy(wasm2go.Memory(m.g)[reqPtr:], buf)
-	packed := wasm2go.WasmifyGetTypeName(m.g, reqPtr, int32(len(buf)))
-	respPtr := uint32(packed >> 32)
-	respLen := uint32(packed & 0xFFFFFFFF)
+	reqPtr := wasm2go.WasmAlloc(m.g, wptr(len(buf)))
+	copy(wasm2go.Memory(m.g)[wptrOff(reqPtr):], buf)
+	packed := wasm2go.WasmifyGetTypeName(m.g, reqPtr, wptr(len(buf)))
+	respPtr, respLen := decodeResult(m.g, packed)
 	defer wasm2go.WasmFree(m.g, reqPtr)
 	if respLen == 0 {
 		return "", nil
 	}
 	resp := make([]byte, respLen)
 	copy(resp, wasm2go.Memory(m.g)[respPtr:respPtr+respLen])
-	defer wasm2go.WasmFree(m.g, int32(respPtr))
+	defer wasm2go.WasmFree(m.g, wptr(respPtr))
 	if e := pbExtractError(resp); e != nil {
 		return "", e
 	}
@@ -642,7 +713,7 @@ func (m *Module) resolveTypeName(ptr uint64) (string, error) {
 // invokeMethod fans the wasm call out into the runtime, then folds in
 // the (very common) pbExtractError check on the response. call is the
 // per-export wasm2go.Inv_<svc>_<mt> entry point.
-func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, int32, int32) (int64, error)) ([]byte, error) {
+func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, wptr, wptr) (int64, error)) ([]byte, error) {
 	resp, err := module().invoke(svc, mid, req, call)
 	if err != nil {
 		return nil, err
@@ -653,10 +724,96 @@ func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, int32, int
 	return resp, nil
 }
 
+// wptrOff widens a guest pointer to an unsigned slice offset. wasm32
+// pointers are UNSIGNED i32s: past the 2 GiB line the bit pattern is
+// negative in Go, so a signed slice index would panic.
+func wptrOff(p wptr) uint64 {
+	return uint64(uint32(p))
+}
+
+func decodeResult(_ *base.Module, packed int64) (uint64, uint64) {
+	return uint64(packed) >> 32, uint64(packed) & 0xFFFFFFFF
+}
+
+func encodeCallbackResult(m *Module, resp []byte) int64 {
+	ptr := wasm2go.WasmAlloc(m.g, wptr(len(resp)))
+	copy(wasm2go.Memory(m.g)[wptrOff(ptr):], resp)
+	return int64(ptr)<<32 | int64(len(resp))
+}
+
 // envStubs implements wasm2go/base.EnvImports — the host side of the
 // wasm "env" imports. The per-method definitions are emitted by the
 // generator (generateEnvStubs) since the import set is module-specific.
 type envStubs struct{ m *Module }
+
+// RegisterCallback registers a Go callback handler and returns its ID.
+// Safe to call concurrently with other Register/Unregister/callback
+// dispatch calls.
+func RegisterCallback(handler CallbackHandler) int32 {
+	m := module()
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.callbacks == nil {
+		m.callbacks = make(map[int32]CallbackHandler)
+	}
+	m.nextCBID++
+	id := m.nextCBID
+	m.callbacks[id] = handler
+	return id
+}
+
+// UnregisterCallback removes a previously registered callback handler.
+// Safe to call concurrently with other Register/Unregister/callback
+// dispatch calls.
+func UnregisterCallback(id int32) {
+	m := module()
+	m.cbMu.Lock()
+	delete(m.callbacks, id)
+	m.cbMu.Unlock()
+}
+
+func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
+	m.cbMu.RLock()
+	handler, ok := m.callbacks[callbackID]
+	m.cbMu.RUnlock()
+	if !ok {
+		return 0
+	}
+	mem := wasm2go.Memory(m.g)
+	var req []byte
+	if reqLen > 0 {
+		buf := make([]byte, reqLen)
+		copy(buf, mem[wptrOff(reqPtr):wptrOff(reqPtr)+uint64(reqLen)])
+		req = buf
+	}
+	// Release m.mu around the user handler so that nested calls
+	// back into the transpiled module can re-acquire it without
+	// deadlocking. The IIFE + defer guarantees Lock is retaken even
+	// if the handler panics, so the outer invoke's defer
+	// m.mu.Unlock() always sees a held mutex.
+	var resp []byte
+	var err error
+	func() {
+		m.mu.Unlock()
+		defer m.mu.Lock()
+		resp, err = handler.HandleCallback(methodID, req)
+	}()
+	if err != nil {
+		resp = pbAppendString(nil, 15, err.Error())
+	}
+	if len(resp) == 0 {
+		return 0
+	}
+	return encodeCallbackResult(m, resp)
+}
+
+// wasmifyStubs implements wasm2go/base.WasmifyImports: the single
+// callback_invoke entry point that the C++ bridge calls back into.
+type wasmifyStubs struct{ m *Module }
+
+func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
+	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
+}
 
 func (h envStubs) Alarm(m *base.Module, l0 int32) int32                             { return 0 }
 func (h envStubs) Bind(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
@@ -784,13 +941,44 @@ var _ = errors.New
 var _ = fmt.Errorf
 var _ = runtime.SetFinalizer
 
+// Call the named Perl subroutine in list context. `sub_name` is a fully
+// qualified sub name ("main::handler", "My::App::run") or a main:: sub name;
+// `args_json` is a JSON array of tagged value nodes (NULL/empty means no
+// arguments). Returns
+//
+//	{"ok":
+//
+// <bool
+// >,"result":
+// <array
+// of tagged nodes>,"error":
+// <string
+// >}
+//
+// On a Perl-level die (including "no such sub"), "ok" is false and "error"
+// holds $
+// .
+// Unlike perl_eval, STDOUT/STDERR are NOT redirected: prints go to
+// the instance's WASI fds.
+func PerlCall(h uint64, subName string, argsJson string) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, subName)
+	buf = pbAppendString(buf, 3, argsJson)
+	resp, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
 // Destroy the interpreter (perl_destruct + perl_free). PERL_SYS_TERM runs at
 // process teardown, not here, so the handle is fully torn down but the process
 // stays usable.
 func PerlClose(h uint64) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	_, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	_, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
 	return err
 }
 
@@ -828,7 +1016,7 @@ func PerlEval(h uint64, src string) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, src)
-	resp, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
+	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
 	if err != nil {
 		return "", err
 	}
@@ -858,7 +1046,7 @@ func PerlEval(h uint64, src string) (string, error) {
 func PerlInterruptAddr(h uint64) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
+	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
 	if err != nil {
 		return 0, err
 	}
@@ -879,7 +1067,109 @@ func PerlInterruptAddr(h uint64) (uint32, error) {
 func PerlNew(libDir string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
-	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
+	resp, err := invokeMethod(0, 4, buf, wasm2go.Inv_0_4)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
+}
+
+// Bind the generic native thunk as the Perl sub `name`; fn_id is the host's
+// key for the actual native function (stored in the CV's XSANY).
+func PerlRegisterNativeXs(h uint64, name string, fnId int32) error {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, name)
+	buf = pbAppendInt32(buf, 3, fnId)
+	_, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
+	return err
+}
+
+// Register the Go-side dispatcher for this instance. `callback_id` is the id
+// the host returned when registering its callback handler; every Perl->Go
+// call from this interpreter is routed to it. Perl code reaches Go through
+// main::__plwasm_go_invoke($func_id, $payload_json) — an XS installed by
+// perl_new that forwards to the wasmify callback import — and the
+// main::__plwasm_go_call glue that wraps it with JSON encode/decode (the
+// host binds a named Perl sub to a Go function by eval'ing a one-line sub
+// that calls the glue with the Go function's id).
+func PerlSetGoDispatcher(h uint64, callbackId int32) error {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendInt32(buf, 2, callbackId)
+	_, err := invokeMethod(0, 6, buf, wasm2go.Inv_0_6)
+	return err
+}
+
+// SV micro-operations the host-side SDK vtable is built from. The full op
+// table lives in perl.cc (and mirrors the GOPERL_OP_* enum in the go-perl
+// native SDK header); representative entries:
+//
+//	1  SV_IV       a=sv                  -> IV (as u64)
+//	2  SV_PV       a=sv                  -> (ptr
+//
+// <
+// <
+// 32)|len into linear memory
+//
+//	3  NEW_IV      a=iv                  -> new SV token
+//	4  NEW_PVN     s=bytes b=len         -> new SV token
+//	5  SV_MORTAL   a=sv                  -> sv (now mortal)
+//	...
+//	23-64          sv_setsv/setiv/setnv/catsv families, NV ops, AV/HV entry
+//	               and iterator ops, ENTER/LEAVE/SAVETMPS/FREETMPS
+//	65 CALL_SV     a=flags
+//
+// <
+// <
+// 32|sv, s+b=packed u32 arg tokens
+//
+//	-> died
+//
+// <
+// <
+// 63 | count
+// <
+// <
+// 32 | mortal-AV token of results
+//
+//	66 CALL_METHOD like CALL_SV but s = "name\0" + packed tokens
+//	68 SAVE_OP     scope-save PL_op (the SAVEOP() macro)
+//	69 RUN_PP_SCRATCH a=op_flags
+//
+// <
+// <
+// 32|op_type, s+b=arg tokens: run one pp
+//
+//	               function on a scratch OP in list context
+//	70-72          host-side MAGIC anchor attach / id lookup / unattach
+//	73-74,80       PL_* interpreter-variable get/set and local'ised hooks
+//	98-100         pp-hook table, RUN_ORIGINAL, save-stack destructors
+//	101-116        OP/COP/CV/GV/stash/context-stack introspection (host
+//	               shadow materialization for interpreter-hooking XS)
+//	117-127        gv_fetchfile, hv_clear/hv_delete, save_scalar, eval_pv,
+//	               newCONSTSUB, raw SvPVX, and friends
+//	128-133        the Class::MOP/Moose surface: stash mro pkg_gen, raw
+//	               refcount, gv_init, Gv_AMG / SvAMAGIC on-off, set-magic
+//	               anchor upgrade
+//	134-163        the CPAN-web surface (Cpanel::JSON::XS, HTML::Parser,
+//	               Time::Moment, DBI/DBD): method resolution, klen-true
+//	               hv store/fetch, eval_sv, SvPV_force/sv_chop/sv_insert,
+//	               utf8 decode/downgrade, guarded set-magic, caller
+//	               context, ckWARN, buffer sizes (SvLEN/SvCUR raw),
+//	               hv_delete_ent, av pop/shift, sv_2io + PerlIO handle
+//	               I/O, sv_force_normal, cop hints, real sv_magic for
+//	               behavioral (tie) magic
+//
+// Unknown ops return 0.
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendInt32(buf, 2, op)
+	buf = pbAppendUint64(buf, 3, a)
+	buf = pbAppendUint64(buf, 4, b)
+	buf = pbAppendString(buf, 5, s)
+	resp, err := invokeMethod(0, 7, buf, wasm2go.Inv_0_7)
 	if err != nil {
 		return 0, err
 	}

@@ -1,0 +1,7 @@
+requires 'Plack';
+requires 'Mojolicious';
+
+# An XS distribution: carton vendors its pure-Perl half like any other
+# module, and `make setup` compiles the native half against go-perl's XS SDK
+# with `gperl xs build` (see the Makefile).
+requires 'Cpanel::JSON::XS';
