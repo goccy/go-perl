@@ -1,39 +1,41 @@
 package gperl
 
-// Self re-execution for the build pipeline.
+// Executable re-entry for the build pipeline's child processes.
 //
-// The XS build drives Makefile.PL/Build.PL/cpanm on the embedded
-// interpreter by re-entering the CURRENT executable (the perl shim scripts
-// exec it with the internal "__perl" argument). That executable is not
-// always the gperl CLI: any binary that links this package — a test
-// binary, an application embedding the library — can end up as the shim
-// target. This init intercepts those re-entries before the host program's
-// own main (or the test runner) sees the process.
+// The pipeline itself never spawns a perl process — Makefile.PL,
+// Build.PL, and cpanm run on in-process interpreters. But the BUILD
+// spawns children of its own: make rules exec $(PERL), $^X
+// re-invocations exec the interpreter path, cpanm's workers exec perl.
+// Those land on the perl shim, which execs the CURRENT executable as
+// `<exe> run <perl args>` — the public `gperl run` surface, whose plain
+// mode is perl(1)-compatible.
 //
-// The trigger is deliberately narrow: BOTH the environment marker (set
-// only by the shim and the cpanm launcher) AND the "__perl" argv must be
-// present, so a child that merely inherits the environment and runs the
-// real CLI normally is left alone. The marker is dropped from the
-// environment before the interpreter starts, so processes IT spawns see a
-// clean slate (their shims re-add it for their own exec).
+// The current executable is not always the gperl CLI: a test binary or
+// an application embedding this package can host an XS build too. This
+// init serves the re-entry before the host program's own main (or the
+// test runner) sees the process. The trigger is deliberately narrow:
+// BOTH the environment marker (set only by the shim) AND the `run` argv
+// must be present, so a child that merely inherits the environment is
+// left alone. The marker is dropped before the interpreter starts, so
+// processes IT spawns see a clean environment (their shims re-add it
+// for their own exec).
 
 import (
-	"fmt"
 	"os"
 )
 
-// perlCLIEnv marks a process as an internal perl-CLI re-entry. Exported
-// nowhere; the shim scripts and cpanmCmd set it.
+// perlCLIEnv marks a process as a shim re-entry. Exported nowhere; the
+// shim scripts set it.
 const perlCLIEnv = "GPERL_INTERNAL_PERL_CLI"
 
 func init() {
-	if os.Getenv(perlCLIEnv) == "" || len(os.Args) < 2 || os.Args[1] != "__perl" {
+	if os.Getenv(perlCLIEnv) == "" || len(os.Args) < 2 || os.Args[1] != "run" {
 		return
 	}
 	os.Unsetenv(perlCLIEnv)
-	status, err := RunPerlCLI(os.Args[2:])
+	status, err := RunCLI(os.Args[2:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+		PrintRunError(err)
 	}
 	os.Exit(status)
 }

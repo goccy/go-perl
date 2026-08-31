@@ -2,6 +2,8 @@
 // the embedded (wasm2go-transpiled) interpreter with go-style tooling.
 //
 //	gperl run script.pl [args...]   resolve dependencies, then run the script
+//	gperl run [-e code|switches]    with any perl(1) switch (-e/-I/-M/-l/...),
+//	                                run exactly like the perl command instead
 //	gperl build [-o out] script.pl  produce a self-contained Go binary that
 //	                                embeds the script, its vendored modules,
 //	                                and the interpreter
@@ -27,6 +29,7 @@ import (
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   gperl run script.pl [args...]
+  gperl run [perl switches] [script] [args...]
   gperl build [-o out] script.pl
   gperl xs build [-C dir] dist [dist...]
 `)
@@ -42,7 +45,7 @@ func main() {
 		if len(os.Args) < 3 {
 			usage()
 		}
-		status, err := gperl.Run(os.Args[2], os.Args[3:])
+		status, err := gperl.RunCLI(os.Args[2:])
 		var pe *perl.PerlError
 		if errors.As(err, &pe) {
 			msg := pe.Message
@@ -83,15 +86,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
 			os.Exit(1)
 		}
-	case "__perl":
-		// Internal: the perl-compatible runner the XS build pipeline
-		// invokes (via the shim scripts it writes); not part of the CLI
-		// surface.
-		status, err := gperl.RunPerlCLI(os.Args[2:])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
-		}
-		os.Exit(status)
 	default:
 		usage()
 	}

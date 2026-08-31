@@ -90,6 +90,51 @@ func Run(script string, args []string) (status int, err error) {
 	return statusFromRun(runErr)
 }
 
+// RunCLI executes a `gperl run` command line. Two modes share the
+// entry point:
+//
+//   - `gperl run script.pl [args...]` (no perl switches) is the project
+//     runner: cpanfile dependencies resolve into ./local, the vendored
+//     tree and the script's directory join @INC, and native modules
+//     from local/xs load lazily.
+//   - Any perl(1) switch (-e, -I, -M, -l, ...) — or running as a child
+//     of the XS build pipeline (GPERL_PERL_PRELOAD set: the shim that
+//     make rules and $^X re-invocations exec) — selects plain perl
+//     semantics: the invocation behaves exactly like the perl command,
+//     with no project-level dependency resolution. A scratch dist's own
+//     cpanfile must not start vendoring mid-build.
+func RunCLI(argv []string) (status int, err error) {
+	pa, perr := parsePerlArgv(argv)
+	if perr != nil {
+		return 2, perr
+	}
+	if pa.sawFlag || envValue(os.Environ(), "GPERL_PERL_PRELOAD") != "" {
+		return runPerlCLI(argv, perlRunOpts{})
+	}
+	if pa.script == "" {
+		return 2, fmt.Errorf("no script given")
+	}
+	return Run(pa.script, pa.args)
+}
+
+// PrintRunError writes err the way the perl command would report it: an
+// uncaught die prints its message verbatim; anything else is a gperl
+// failure. Shared by the CLI and the build pipeline's re-entry hook.
+func PrintRunError(err error) {
+	var pe *perl.PerlError
+	if errors.As(err, &pe) {
+		msg := pe.Message
+		if len(msg) == 0 || msg[len(msg)-1] != '\n' {
+			msg += "\n"
+		}
+		fmt.Fprint(os.Stderr, msg)
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+	}
+}
+
 // statusFromRun maps a RunFile outcome onto the perl process conventions.
 func statusFromRun(err error) (int, error) {
 	if err == nil {

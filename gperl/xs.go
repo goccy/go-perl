@@ -7,14 +7,16 @@ package gperl
 // The build rides the dist's OWN build system — `perl Makefile.PL && make`
 // (ExtUtils::MakeMaker) or `perl Build.PL && ./Build` (Module::Build) —
 // exactly the way the CPAN toolchain normally builds XS, with two twists:
-// the perl driving the build is the EMBEDDED interpreter (a shim script on
-// PATH re-enters this binary, and a preloaded %Config overlay describes
-// the host C toolchain), and the compiler's perl-header search path is
-// redirected to the SDK (materialized from the copy embedded in the xs
-// package). Generated headers, xsubpp runs, extra C sources, and typemaps
-// all keep working. Build-time requirements: make and a C compiler — no
-// perl needs to be installed. The RUNTIME requirement stays zero: gperl
-// run only dlopens the prebuilt artifacts.
+// every perl in the pipeline is the EMBEDDED interpreter (Makefile.PL,
+// Build.PL, and cpanm run IN-PROCESS; the perl children that make rules
+// and $^X re-invocations spawn exec a shim that re-enters this executable
+// as `gperl run`, with a preloaded %Config overlay describing the host C
+// toolchain), and the compiler's perl-header search path is redirected to
+// the SDK (materialized from the copy embedded in the xs package).
+// Generated headers, xsubpp runs, extra C sources, and typemaps all keep
+// working. The only commands the pipeline execs are make and curl (cc
+// runs under make) — no perl needs to be installed. The RUNTIME
+// requirement stays zero: gperl run only dlopens the prebuilt artifacts.
 //
 // Layout produced under the project directory:
 //
@@ -89,10 +91,11 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 		return nil, err
 	}
 
-	// The build is DRIVEN by the embedded interpreter: a perl shim script
-	// re-enters this binary, and every run preloads a %Config overlay
-	// describing the host toolchain (the interpreter's own %Config is
-	// guest-true wasm32). No perl needs to be installed on the system.
+	// The build is DRIVEN by the embedded interpreter: this process runs
+	// Makefile.PL/Build.PL itself, and the shim (for the children make or
+	// $^X spawns) re-enters this executable. Every run preloads a %Config
+	// overlay describing the host toolchain (the interpreter's own
+	// %Config is guest-true wasm32). No perl needs to be installed.
 	shim, err := xsWritePerlShim(work)
 	if err != nil {
 		return nil, err
@@ -135,7 +138,7 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	}
 	switch {
 	case fileExists(filepath.Join(srcDir, "Makefile.PL")):
-		if err := runIn(srcDir, env, shim, "Makefile.PL",
+		if err := runPerlInProcess(srcDir, env, os.Stdout, "Makefile.PL",
 			"PERL="+shim, "FULLPERL="+shim); err != nil {
 			return nil, err
 		}
@@ -146,10 +149,10 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 			return nil, err
 		}
 	case fileExists(filepath.Join(srcDir, "Build.PL")):
-		if err := runIn(srcDir, env, shim, "Build.PL"); err != nil {
+		if err := runPerlInProcess(srcDir, env, os.Stdout, "Build.PL"); err != nil {
 			return nil, err
 		}
-		if err := runIn(srcDir, env, shim, "Build"); err != nil {
+		if err := runPerlInProcess(srcDir, env, os.Stdout, "Build"); err != nil {
 			return nil, err
 		}
 	default:
@@ -308,14 +311,7 @@ func xsInstallBuildDeps(srcDir, lib string) error {
 		return err
 	}
 	defer os.RemoveAll(neutral)
-	cmd, err := cpanmCmd(neutral, []string{"-L", lib, "--notest", "--installdeps", srcDir})
-	if err != nil {
-		return err
-	}
-	cmd.Dir = neutral
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCpanmArgs(neutral, neutral, []string{"-L", lib, "--notest", "--installdeps", srcDir}); err != nil {
 		return fmt.Errorf("resolve build dependencies (cpanm --installdeps): %w", err)
 	}
 	return nil
@@ -361,7 +357,7 @@ func xsWritePerlShim(work string) (string, error) {
 	script := "#!/bin/sh\n" +
 		"GPERL_INTERNAL_PERL_CLI=1\n" +
 		"export GPERL_INTERNAL_PERL_CLI\n" +
-		"exec \"" + exe + "\" __perl \"$@\"\n"
+		"exec \"" + exe + "\" run \"$@\"\n"
 	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
 		return "", err
 	}

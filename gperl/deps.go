@@ -59,14 +59,7 @@ func runCpanm(projectDir string, extra []string) error {
 	defer os.RemoveAll(work)
 
 	args := append([]string{"-L", local, "--notest"}, extra...)
-	cmd, err := cpanmCmd(work, args)
-	if err != nil {
-		return err
-	}
-	cmd.Dir = work
-	cmd.Stdout = os.Stderr // progress is progress, not program output
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCpanmArgs(work, work, args); err != nil {
 		return fmt.Errorf("cpanm: %w", err)
 	}
 	warnHostXS(local)
@@ -89,18 +82,16 @@ $app->parse_options(@ARGV);
 exit $app->doit;
 `
 
-// cpanmCmd builds the command running cpanm (the installed script when
-// present, else a copy bootstrapped from cpanmin.us into work) with the
-// given cpanm arguments on the embedded interpreter — cpanm is pure Perl,
-// so no perl needs to be installed on the system. cpanm's child builds
-// re-invoke $^X (Makefile.PL, Build.PL) and some dists shell out to a
-// bare `perl`: both resolve back into the embedded interpreter via the
-// shim, with the %Config overlay preloaded.
-func cpanmCmd(work string, cpanmArgs []string) (*exec.Cmd, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
+// runCpanmArgs runs cpanm (the installed script when present, else a copy
+// bootstrapped from cpanmin.us into work) with the given cpanm arguments
+// on an IN-PROCESS interpreter — cpanm is pure Perl, so no perl needs to
+// be installed and no perl process is spawned for it. cpanm's own child
+// builds still re-invoke $^X (Makefile.PL, Build.PL) and some dists
+// shell out to a bare `perl`: both resolve into the shim, which
+// re-enters this executable as `gperl run` with the %Config overlay
+// preloaded. cpanm progress streams to stderr (progress is progress,
+// not program output).
+func runCpanmArgs(work, dir string, cpanmArgs []string) error {
 	script := filepath.Join(work, "cpanm")
 	if path, lerr := exec.LookPath("cpanm"); lerr == nil {
 		script = path
@@ -108,45 +99,43 @@ func cpanmCmd(work string, cpanmArgs []string) (*exec.Cmd, error) {
 		curl := exec.Command("curl", "-fsSL", "-o", script, "https://cpanmin.us")
 		curl.Stderr = os.Stderr
 		if err := curl.Run(); err != nil {
-			return nil, fmt.Errorf("bootstrap cpanm: %w", err)
+			return fmt.Errorf("bootstrap cpanm: %w", err)
 		}
 	}
 	shim, err := xsWritePerlShim(work)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	stdlibDir, err := perl.ExtractStdlib()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// XS distributions cpanm builds along the way (build-time deps like
 	// Devel::PPPort) compile against the SDK, exactly like the dists
 	// `gperl xs build` drives directly.
 	sdkDir := filepath.Join(work, "sdk")
 	if err := xs.WriteSDK(sdkDir); err != nil {
-		return nil, fmt.Errorf("materialize SDK headers: %w", err)
+		return fmt.Errorf("materialize SDK headers: %w", err)
 	}
 	fakeArch := filepath.Join(work, "fakearchlib")
 	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
-		return nil, err
+		return err
 	}
 	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
-		return nil, err
+		return err
 	}
 	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	argv := append([]string{"__perl", "-e", cpanmDriver, "--"}, cpanmArgs...)
-	cmd := exec.Command(exe, argv...)
-	cmd.Env = append(os.Environ(),
-		perlCLIEnv+"=1",
+	env := append(os.Environ(),
 		"GPERL_CPANM="+script,
 		"GPERL_PERL_EXE="+shim,
 		"GPERL_PERL_PRELOAD="+overlay,
 		"PATH="+filepath.Dir(shim)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	return cmd, nil
+	argv := append([]string{"-e", cpanmDriver, "--"}, cpanmArgs...)
+	return runPerlInProcess(dir, env, os.Stderr, argv...)
 }
 
 // warnHostXS points out vendored host-perl XS objects — a local/ tree
