@@ -12,6 +12,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/xs"
 )
 
 // localLib returns the vendored module tree for the project dir (carton's
@@ -56,11 +59,10 @@ func runCpanm(projectDir string, extra []string) error {
 	defer os.RemoveAll(work)
 
 	args := append([]string{"-L", local, "--notest"}, extra...)
-	argv, err := cpanmArgv(work)
+	cmd, err := cpanmCmd(work, args)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(argv[0], append(argv[1:], args...)...)
 	cmd.Dir = work
 	cmd.Stdout = os.Stderr // progress is progress, not program output
 	cmd.Stderr = os.Stderr
@@ -71,24 +73,86 @@ func runCpanm(projectDir string, extra []string) error {
 	return nil
 }
 
-// cpanmArgv resolves how to invoke cpanm: the installed command when
-// present, else a copy bootstrapped from cpanmin.us into work.
-func cpanmArgv(work string) ([]string, error) {
-	if path, err := exec.LookPath("cpanm"); err == nil {
-		return []string{path}, nil
+// cpanmDriver is the program that runs cpanm on the embedded interpreter.
+// cpanm is a modulino: run as a plain file it only defines
+// App::cpanminus::script and enters its main under `unless (caller)` —
+// and inside an embedded interpreter the script runner is always a
+// caller. So the driver loads the file for its definitions and then
+// enters cpanm the way cpanm's own main does.
+const cpanmDriver = `
+my $r = do $ENV{GPERL_CPANM};
+die $@ if $@;
+App::cpanminus::script->can("new")
+    or die "$ENV{GPERL_CPANM}: does not define App::cpanminus::script\n";
+my $app = App::cpanminus::script->new;
+$app->parse_options(@ARGV);
+exit $app->doit;
+`
+
+// cpanmCmd builds the command running cpanm (the installed script when
+// present, else a copy bootstrapped from cpanmin.us into work) with the
+// given cpanm arguments on the embedded interpreter — cpanm is pure Perl,
+// so no perl needs to be installed on the system. cpanm's child builds
+// re-invoke $^X (Makefile.PL, Build.PL) and some dists shell out to a
+// bare `perl`: both resolve back into the embedded interpreter via the
+// shim, with the %Config overlay preloaded.
+func cpanmCmd(work string, cpanmArgs []string) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
 	}
 	script := filepath.Join(work, "cpanm")
-	curl := exec.Command("curl", "-fsSL", "-o", script, "https://cpanmin.us")
-	curl.Stderr = os.Stderr
-	if err := curl.Run(); err != nil {
-		return nil, fmt.Errorf("bootstrap cpanm: %w", err)
+	if path, lerr := exec.LookPath("cpanm"); lerr == nil {
+		script = path
+	} else {
+		curl := exec.Command("curl", "-fsSL", "-o", script, "https://cpanmin.us")
+		curl.Stderr = os.Stderr
+		if err := curl.Run(); err != nil {
+			return nil, fmt.Errorf("bootstrap cpanm: %w", err)
+		}
 	}
-	return []string{"perl", script}, nil
+	shim, err := xsWritePerlShim(work)
+	if err != nil {
+		return nil, err
+	}
+	stdlibDir, err := perl.ExtractStdlib()
+	if err != nil {
+		return nil, err
+	}
+	// XS distributions cpanm builds along the way (build-time deps like
+	// Devel::PPPort) compile against the SDK, exactly like the dists
+	// `gperl xs build` drives directly.
+	sdkDir := filepath.Join(work, "sdk")
+	if err := xs.WriteSDK(sdkDir); err != nil {
+		return nil, fmt.Errorf("materialize SDK headers: %w", err)
+	}
+	fakeArch := filepath.Join(work, "fakearchlib")
+	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
+		return nil, err
+	}
+	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
+	if err != nil {
+		return nil, err
+	}
+	argv := append([]string{"__perl", "-e", cpanmDriver, "--"}, cpanmArgs...)
+	cmd := exec.Command(exe, argv...)
+	cmd.Env = append(os.Environ(),
+		perlCLIEnv+"=1",
+		"GPERL_CPANM="+script,
+		"GPERL_PERL_EXE="+shim,
+		"GPERL_PERL_PRELOAD="+overlay,
+		"PATH="+filepath.Dir(shim)+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	return cmd, nil
 }
 
-// warnHostXS points out vendored host-perl XS objects: cpanm builds XS
-// against the HOST perl, and those shared objects never load into the
-// embedded interpreter. The .pm halves it installed are fine; the native
+// warnHostXS points out vendored host-perl XS objects — a local/ tree
+// populated by a host perl toolchain (carton install, a system cpanm)
+// contains shared objects built against that perl, and those never load
+// into the embedded interpreter. The .pm halves are fine; the native
 // halves come from `gperl xs build <dist>`, which compiles the same
 // distribution against the go-perl XS SDK.
 func warnHostXS(local string) {

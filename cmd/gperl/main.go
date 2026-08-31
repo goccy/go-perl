@@ -83,6 +83,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
 			os.Exit(1)
 		}
+	case "__perl":
+		// Internal: the perl-compatible runner the XS build pipeline
+		// invokes (via the shim scripts it writes); not part of the CLI
+		// surface.
+		status, err := gperl.RunPerlCLI(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+		}
+		os.Exit(status)
 	default:
 		usage()
 	}

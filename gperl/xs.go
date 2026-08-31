@@ -5,14 +5,16 @@ package gperl
 // it from.
 //
 // The build rides the dist's OWN build system — `perl Makefile.PL && make`
-// (ExtUtils::MakeMaker) or `perl Build.PL && ./Build` (Module::Build) — run
-// with the HOST perl, exactly the way the CPAN toolchain normally builds XS.
-// Only the compiler's perl-header search path is redirected to the SDK
-// (materialized from the copy embedded in the xs package), so
-// generated headers, xsubpp runs, extra C sources, and typemaps all keep
-// working. Build-time requirements: host perl, make, and a C compiler —
-// the same set MakeMaker needs anywhere. The RUNTIME requirement stays
-// zero: gperl run only dlopens the prebuilt artifacts.
+// (ExtUtils::MakeMaker) or `perl Build.PL && ./Build` (Module::Build) —
+// exactly the way the CPAN toolchain normally builds XS, with two twists:
+// the perl driving the build is the EMBEDDED interpreter (a shim script on
+// PATH re-enters this binary, and a preloaded %Config overlay describes
+// the host C toolchain), and the compiler's perl-header search path is
+// redirected to the SDK (materialized from the copy embedded in the xs
+// package). Generated headers, xsubpp runs, extra C sources, and typemaps
+// all keep working. Build-time requirements: make and a C compiler — no
+// perl needs to be installed. The RUNTIME requirement stays zero: gperl
+// run only dlopens the prebuilt artifacts.
 //
 // Layout produced under the project directory:
 //
@@ -32,8 +34,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
+	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/xs"
 )
 
@@ -85,11 +89,43 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 		return nil, err
 	}
 
+	// The build is DRIVEN by the embedded interpreter: a perl shim script
+	// re-enters this binary, and every run preloads a %Config overlay
+	// describing the host toolchain (the interpreter's own %Config is
+	// guest-true wasm32). No perl needs to be installed on the system.
+	shim, err := xsWritePerlShim(work)
+	if err != nil {
+		return nil, err
+	}
+	// The compiler's CORE include directory is the SDK, via a fake
+	// archlib whose CORE symlinks to it (both ExtUtils::MakeMaker and
+	// Module::Build spell it $Config{archlibexp}/CORE).
+	fakeArch := filepath.Join(work, "fakearchlib")
+	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
+		return nil, err
+	}
+	stdlibDir, err := perl.ExtractStdlib()
+	if err != nil {
+		return nil, err
+	}
+	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
+	if err != nil {
+		return nil, err
+	}
 	env := append(os.Environ(), xsArchEnv()...)
+	env = append(env,
+		"GPERL_PERL_PRELOAD="+overlay,
+		"GPERL_PERL_EXE="+shim,
+		"PERL="+shim,
+		"PATH="+filepath.Dir(shim)+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
 	// Resolve the dist's OWN build-time dependencies (configure_requires /
-	// build_requires — Module::Build::XSUtil, Devel::PPPort, ...) into a
-	// scratch lib for the host perl that drives the build. Runtime deps of
-	// the PROJECT stay a cpanfile concern.
+	// build_requires — Module::Build, Devel::PPPort, ...) into a scratch
+	// lib for the build. Runtime deps of the PROJECT stay a cpanfile
+	// concern.
 	buildLib := filepath.Join(work, "buildlib")
 	if err := xsInstallBuildDeps(srcDir, buildLib); err != nil {
 		return nil, err
@@ -99,7 +135,8 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	}
 	switch {
 	case fileExists(filepath.Join(srcDir, "Makefile.PL")):
-		if err := runIn(srcDir, env, "perl", "Makefile.PL"); err != nil {
+		if err := runIn(srcDir, env, shim, "Makefile.PL",
+			"PERL="+shim, "FULLPERL="+shim); err != nil {
 			return nil, err
 		}
 		if err := xsRedirectMakefile(filepath.Join(srcDir, "Makefile"), sdkDir); err != nil {
@@ -109,29 +146,10 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 			return nil, err
 		}
 	case fileExists(filepath.Join(srcDir, "Build.PL")):
-		// Module::Build compiles with -I$Config{archlibexp}/CORE, so a
-		// fake archlib whose CORE is the SDK redirects it. Apple's system
-		// perl additionally patches ExtUtils::CBuilder to spell every
-		// include dir as -iwithsysroot (prefixing the platform SDK root),
-		// which no override can survive — the SDK therefore ALSO rides in
-		// verbatim through ccflags.
-		fakeArch := filepath.Join(work, "fakearchlib")
-		if err := os.MkdirAll(fakeArch, 0o755); err != nil {
+		if err := runIn(srcDir, env, shim, "Build.PL"); err != nil {
 			return nil, err
 		}
-		if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
-			return nil, err
-		}
-		ccflags, err := hostPerlConfig("ccflags")
-		if err != nil {
-			return nil, err
-		}
-		if err := runIn(srcDir, env, "perl", "Build.PL",
-			"--config", "archlibexp="+fakeArch,
-			"--config", "ccflags="+ccflags+" -I"+sdkDir); err != nil {
-			return nil, err
-		}
-		if err := runIn(srcDir, env, "perl", "Build"); err != nil {
+		if err := runIn(srcDir, env, shim, "Build"); err != nil {
 			return nil, err
 		}
 	default:
@@ -280,22 +298,20 @@ func xsInstallBlib(projectDir, blib string) ([]string, error) {
 	return modules, nil
 }
 
-// xsInstallBuildDeps runs `cpanm --installdeps` for the dist into lib
-// (cpanm bootstraps from cpanmin.us when not installed, matching gperl
-// get). Run from a neutral directory: on a case-insensitive filesystem
-// cpanm resolves bare module names against look-alike local paths.
+// xsInstallBuildDeps runs `cpanm --installdeps` for the dist into lib on
+// the embedded interpreter. Run from a neutral directory: on a
+// case-insensitive filesystem cpanm resolves bare module names against
+// look-alike local paths.
 func xsInstallBuildDeps(srcDir, lib string) error {
 	neutral, err := os.MkdirTemp("", "gperl-xsdeps-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(neutral)
-	argv, err := cpanmArgv(neutral)
+	cmd, err := cpanmCmd(neutral, []string{"-L", lib, "--notest", "--installdeps", srcDir})
 	if err != nil {
 		return err
 	}
-	args := append(argv[1:], "-L", lib, "--notest", "--installdeps", srcDir)
-	cmd := exec.Command(argv[0], args...)
 	cmd.Dir = neutral
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -305,13 +321,103 @@ func xsInstallBuildDeps(srcDir, lib string) error {
 	return nil
 }
 
-// hostPerlConfig reads one %Config value from the host perl.
-func hostPerlConfig(key string) (string, error) {
-	out, err := exec.Command("perl", "-MConfig", "-e", "print $Config{"+key+"}").Output()
-	if err != nil {
-		return "", fmt.Errorf("read host perl %%Config{%s}: %w", key, err)
+// hostToolchain is the %Config overlay describing the HOST C toolchain:
+// the embedded interpreter's own %Config is guest-true (wasm32), and the
+// build must emit host-native compile/link rules. These are the platform
+// conventions a native perl build would have configured.
+func hostToolchain() map[string]string {
+	common := map[string]string{
+		"cc": "cc", "ld": "cc", "ar": "ar", "full_ar": "ar",
+		"ranlib": "ranlib", "make": "make",
+		"ccflags":  "-fno-strict-aliasing -fstack-protector-strong -DPERL_USE_SAFE_PUTENV",
+		"optimize": "-O2", "ldflags": "", "cccdlflags": "-fPIC",
+		"ccdlflags": "", "obj_ext": ".o", "exe_ext": "", "lib_ext": ".a",
+		"usedl": "define", "dlsrc": "dl_dlopen.xs", "useshrplib": "false",
 	}
-	return strings.TrimSpace(string(out)), nil
+	switch runtime.GOOS {
+	case "darwin":
+		common["osname"] = "darwin"
+		common["so"] = "dylib"
+		common["dlext"] = "bundle"
+		common["lddlflags"] = "-bundle -undefined dynamic_lookup -fstack-protector-strong"
+		common["cccdlflags"] = "" // PIC is the darwin default
+	default: // linux and friends
+		common["osname"] = runtime.GOOS
+		common["so"] = "so"
+		common["dlext"] = "so"
+		common["lddlflags"] = "-shared"
+	}
+	return common
+}
+
+// xsWritePerlShim writes the executable the build system knows as "perl":
+// a wrapper that re-enters this gperl binary's embedded interpreter.
+func xsWritePerlShim(work string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	shim := filepath.Join(work, "perl")
+	script := "#!/bin/sh\n" +
+		"GPERL_INTERNAL_PERL_CLI=1\n" +
+		"export GPERL_INTERNAL_PERL_CLI\n" +
+		"exec \"" + exe + "\" __perl \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		return "", err
+	}
+	return shim, nil
+}
+
+// xsWriteConfigOverlay writes the preload every build-driving perl run
+// executes first: it replaces the guest-true toolchain/path keys of
+// %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
+// generate a build for THIS machine while everything else about %Config
+// (version, ivsize, ...) stays guest-true.
+func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, error) {
+	tc := hostToolchain()
+	if sdkDir != "" {
+		tc["ccflags"] = tc["ccflags"] + " -I" + sdkDir
+	}
+	// paths: modules and xsubpp resolve from the extracted stdlib; the
+	// compiler's CORE directory is the SDK (via the fake archlib).
+	tc["privlibexp"] = stdlibDir
+	tc["privlib"] = stdlibDir
+	tc["archlibexp"] = fakeArch
+	tc["archlib"] = fakeArch
+	tc["sitelibexp"] = ""
+	tc["sitearchexp"] = ""
+	tc["vendorlibexp"] = ""
+	tc["vendorarchexp"] = ""
+	tc["installprivlib"] = stdlibDir
+	tc["installarchlib"] = fakeArch
+
+	var b strings.Builder
+	b.WriteString("use Config ();\n")
+	b.WriteString("my %over = (\n")
+	keys := make([]string, 0, len(tc))
+	for k := range tc {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := strings.ReplaceAll(tc[k], "'", "\\'")
+		b.WriteString("    '" + k + "' => '" + v + "',\n")
+	}
+	b.WriteString(");\n")
+	// %Config is a tied read-only view; replace it with a writable copy
+	// carrying the overlay.
+	b.WriteString("my %full = %Config::Config;\n")
+	b.WriteString("untie %Config::Config;\n")
+	b.WriteString("%Config::Config = (%full, %over);\n")
+	// Build tools branch on $^O, not just $Config{osname}: the build must
+	// look like the host it targets.
+	b.WriteString("$^O = '" + tc["osname"] + "';\n1;\n")
+
+	path := filepath.Join(work, "config-overlay.pl")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func runIn(dir string, env []string, name string, args ...string) error {

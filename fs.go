@@ -16,6 +16,7 @@ import (
 	iofs "io/fs"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
@@ -41,6 +42,18 @@ type MemFS = goperlfs.MemFS
 func withDevNull(fsys FS) FS { return devNullFS{FS: fsys} }
 
 type devNullFS struct{ FS }
+
+// Chmod forwards to the wrapped backend when it supports changing modes
+// (the runtime discovers the capability by interface assertion, which an
+// embedded interface field would otherwise hide).
+func (d devNullFS) Chmod(name string, mode iofs.FileMode) error {
+	if ch, ok := d.FS.(interface {
+		Chmod(string, iofs.FileMode) error
+	}); ok {
+		return ch.Chmod(name, mode)
+	}
+	return &iofs.PathError{Op: "chmod", Path: name, Err: syscall.ENOSYS}
+}
 
 const devNullName = "dev/null"
 

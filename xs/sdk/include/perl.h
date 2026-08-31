@@ -285,6 +285,15 @@ typedef enum {
 #define GOPERL_INFO_ISUV 8192
 #define GOPERL_INFO_RMAGICAL 16384
 #define GOPERL_INFO_OBJECT 32768
+#define GOPERL_INFO_AMAGIC 65536
+#define GOPERL_INFO_IOKp 131072
+#define GOPERL_INFO_NOKp 262144
+/* The private has-a-value flags map to their own synthetic bits, so
+ * SvFLAGS masks that mix public and private tests (Params::Classify's
+ * number checks) keep their meaning. */
+#define SVp_IOK GOPERL_INFO_IOKp
+#define SVp_NOK GOPERL_INFO_NOKp
+#define SVp_POK GOPERL_INFO_POKp
 #define SVs_TEMP 0x00080000 /* only consumed by newSVpvs_flags below */
 
 /* ---- host-side MAGIC mirror (layout is ABI: the loader writes it) ------- */
@@ -5635,6 +5644,8 @@ static OP *goperl_ck_entersub_unsup(goperl_frame_t *f) {
 }
 #define ck_entersub_args_proto_or_list(o, namegv, ckobj) \
     goperl_ck_entersub_unsup(_gof)
+#define ck_entersub_args_proto(o, namegv, protosv) goperl_ck_entersub_unsup(_gof)
+#define ck_entersub_args_list(o) goperl_ck_entersub_unsup(_gof)
 
 /* interpreter globals the parse surface reads */
 #define PL_defgv \

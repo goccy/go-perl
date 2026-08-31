@@ -66,6 +66,7 @@ func (o hostFS) OpenFile(name string, flag int, perm os.FileMode) (File, error) 
 	return f, nil
 }
 func (o hostFS) Mkdir(name string, perm os.FileMode) error { return os.Mkdir(o.join(name), perm) }
+func (o hostFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(o.join(name), mode) }
 func (o hostFS) Remove(name string) error                  { return os.Remove(o.join(name)) }
 func (o hostFS) Rename(a, b string) error                  { return os.Rename(o.join(a), o.join(b)) }
 func (o hostFS) Stat(name string) (os.FileInfo, error)     { return os.Stat(o.join(name)) }
