@@ -820,8 +820,6 @@ func (h envStubs) Bind(m *base.Module, l0 int32, l1 int32, l2 int32) int32      
 func (h envStubs) Chown(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
 func (h envStubs) Chroot(m *base.Module, l0 int32) int32                            { return 0 }
 func (h envStubs) Cuserid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Dup(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Dup2(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
 func (h envStubs) Endgrent(m *base.Module)                                          {}
 func (h envStubs) Endhostent(m *base.Module)                                        {}
 func (h envStubs) Endnetent(m *base.Module)                                         {}
@@ -849,7 +847,6 @@ func (h envStubs) Getlogin(m *base.Module) int32                                
 func (h envStubs) Getnetbyaddr(m *base.Module, l0 int32, l1 int32) int32            { return 0 }
 func (h envStubs) Getnetbyname(m *base.Module, l0 int32) int32                      { return 0 }
 func (h envStubs) Getnetent(m *base.Module) int32                                   { return 0 }
-func (h envStubs) Getpeername(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
 func (h envStubs) Getpgid(m *base.Module, l0 int32) int32                           { return 0 }
 func (h envStubs) Getpid(m *base.Module) int32                                      { return 0 }
 func (h envStubs) Getppid(m *base.Module) int32                                     { return 0 }
@@ -863,7 +860,6 @@ func (h envStubs) Getpwuid(m *base.Module, l0 int32) int32                      
 func (h envStubs) Getservbyname(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
 func (h envStubs) Getservbyport(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
 func (h envStubs) Getservent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getsockname(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
 func (h envStubs) Getuid(m *base.Module) int32                                      { return 0 }
 func (h envStubs) Kill(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
 func (h envStubs) Killpg(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }

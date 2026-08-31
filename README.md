@@ -4,7 +4,7 @@
 `perl`, one static binary.**
 
 The interpreter is
-[Perl 5.42.2 compiled to WebAssembly](https://github.com/goccy/perl-wasm) and
+[Perl 5.44.0 compiled to WebAssembly](https://github.com/goccy/perl-wasm) and
 then [translated to Go](https://github.com/goccy/wasm2go) — no wasm runtime is
 involved at run time — published as the
 [`perlwasm2go`](https://github.com/goccy/perlwasm2go) module this package
@@ -127,13 +127,13 @@ attestation-verified vendoring on its side.
 ## License
 
 - **The Go source code of this repository is licensed under [MIT](./LICENSE).**
-- **`stdlib.zip` is not MIT**: it is a repackaged subset of the Perl 5.42.2
+- **`stdlib.zip` is not MIT**: it is a repackaged subset of the Perl 5.44.0
   standard library — a derivative work of
   [Perl 5](https://github.com/Perl/perl5) — and keeps Perl's own dual license:
   the GNU General Public License version 1 or (at your option) any later
   version ([`LICENSE-GPL`](./LICENSE-GPL)), **or** the "Artistic License"
   ([`LICENSE-ARTISTIC`](./LICENSE-ARTISTIC)), at your choice. Both texts are
-  vendored verbatim from the pinned Perl 5.42.2 sources.
+  vendored verbatim from the pinned Perl 5.44.0 sources.
 - The [`perlwasm2go`](https://github.com/goccy/perlwasm2go) dependency (the
   translated interpreter) is likewise dual-licensed under Perl's terms in its
   own repository.

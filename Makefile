@@ -1,5 +1,5 @@
 PERL_WASM_REPO     ?= goccy/perl-wasm
-PERL_WASM_VERSION  ?= v0.1.2
+PERL_WASM_VERSION  ?= v0.2.0
 # perl-wasm emits its release attestations from release.yml (the v* tag
 # workflow), NOT build.yml — releasing lives only in release.yml there.
 PERL_WASM_WORKFLOW ?= goccy/perl-wasm/.github/workflows/release.yml
