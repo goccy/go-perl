@@ -18,10 +18,6 @@ type Config struct {
 	// Env is the environment the guest sees (%ENV). nil means an empty
 	// environment — the host process os.Environ() is NOT leaked.
 	Env []string
-	// FSAccess, when non-nil, is a per-open/create/unlink whitelist. It
-	// receives the guest path (relative to the preopen) and whether the
-	// access is a write; returning false denies it (the guest open fails).
-	FSAccess func(path string, write bool) bool
 	// NetAccess, when non-nil, gates the socket accept/recv/send surface.
 	// op is "accept"/"recv"/"send"; returning false denies it.
 	NetAccess func(op string) bool

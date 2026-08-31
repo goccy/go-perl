@@ -58,7 +58,6 @@ type InstanceOptions struct {
 	StdlibDir string
 	Env       []string
 	FS        goperlfs.FS
-	FSAccess  func(path string, write bool) bool
 	NetAccess func(op string) bool
 	Dial      func(network, host, ip string, port int) bool
 	Resolve   func(host string) bool
@@ -218,9 +217,6 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	wasi.SetEnv(opts.Env)
 	if opts.FS != nil {
 		wasi.SetFS(opts.FS)
-	}
-	if opts.FSAccess != nil {
-		wasi.SetFSAccessHook(opts.FSAccess)
 	}
 	if opts.NetAccess != nil {
 		wasi.SetNetAccessHook(opts.NetAccess)
