@@ -1,4 +1,4 @@
-package perl
+package internal
 
 // Process-wide, copy-on-write snapshots of started Perl interpreters.
 //
@@ -15,7 +15,7 @@ package perl
 //   - the stdlib dir: perl_new(stdlibDir) writes it into @INC;
 //   - the environment: wasi libc caches environ at startup, so %ENV reflects
 //     what the snapshotted instance was booted with.
-// Everything else in Config (FS backend, hooks, stdio, memory caps) lives on
+// Everything else in Options (FS backend, hooks, stdio, memory caps) lives on
 // the host side of the WASI boundary and is freely per-instance.
 
 import (
@@ -100,8 +100,12 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 		// instance's own first eval re-does — and privately dirties — far less.
 		// A bare expression leaves no package-level state; the isolation tests
 		// guard that it stays so.
-		if _, err := tmp.Eval(context.Background(), "1 + 1;"); err != nil {
+		res, err := tmp.Eval(context.Background(), "1 + 1;")
+		if err != nil {
 			return nil, fmt.Errorf("snapshot warmup: %w", err)
+		}
+		if !res.Ok {
+			return nil, fmt.Errorf("snapshot warmup died: %s", res.Error)
 		}
 		handle = h
 		return mod.g, nil

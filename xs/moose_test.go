@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/xs"
 )
 
 // TestMoose runs Moose — the metaclass-heavy XS dist Catalyst is built on —
@@ -42,9 +40,7 @@ func TestMoose(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "Moose", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "Moose", so)
 
 	if r, err := p.Eval(ctx, `sub __t_minc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)

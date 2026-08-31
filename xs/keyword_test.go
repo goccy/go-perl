@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/xs"
 )
 
 // TestSyntaxKeywordMatch runs Syntax::Keyword::Match (on XS::Parse::Keyword)
@@ -38,12 +36,8 @@ func TestSyntaxKeywordMatch(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "XS::Parse::Keyword", filepath.Join(dir, "XS-Parse-Keyword.so")); err != nil {
-		t.Fatalf("Load XPK: %v", err)
-	}
-	if err := xs.Load(p, "Syntax::Keyword::Match", filepath.Join(dir, "Syntax-Keyword-Match.so")); err != nil {
-		t.Fatalf("Load SKM: %v", err)
-	}
+	loadXSModule(t, p, "XS::Parse::Keyword", filepath.Join(dir, "XS-Parse-Keyword.so"))
+	loadXSModule(t, p, "Syntax::Keyword::Match", filepath.Join(dir, "Syntax-Keyword-Match.so"))
 
 	if r, err := p.Eval(ctx, `sub __t_kinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)

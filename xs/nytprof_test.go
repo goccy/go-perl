@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-perl/xs"
 )
 
 // TestDevelNYTProf runs Devel::NYTProf — an XS dist that hooks the
@@ -42,9 +40,7 @@ func TestDevelNYTProf(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "Devel::NYTProf", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "Devel::NYTProf", so)
 	if r, err := p.Eval(ctx, `sub __t_ninc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}

@@ -268,7 +268,7 @@ func main() {
 		if dir == "" {
 			continue
 		}
-		if err := xs.LoadDir(p, dir); err != nil {
+		if err := p.AddXSDir(dir); err != nil {
 			fatal(err)
 		}
 	}

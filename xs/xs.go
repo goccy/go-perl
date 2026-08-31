@@ -42,7 +42,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
-	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 )
 
 // xsTrace logs every guest micro-op to stderr (GOPERL_XS_TRACE=1); the
@@ -97,7 +97,7 @@ type cFrame struct {
 	err          [512]byte
 
 	// Go-only:
-	p *perl.Perl
+	p *internal.Perl
 }
 
 // cAPI mirrors goperl_api_t (ABI).
@@ -141,8 +141,8 @@ type magicRec struct {
 }
 
 func init() {
-	// Back (*perl.Perl).AddXSDir with this package's directory loader.
-	perl.RegisterXSDirLoader(LoadDir)
+	// Back (*internal.Perl).AddXSDir with this package's directory loader.
+	internal.RegisterXSDirLoader(loadDir)
 }
 
 // ArchTag names the per-architecture native-module directory
@@ -155,7 +155,7 @@ func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
 // package separator spelled "-"). Registration is cheap — each module's
 // boot runs lazily when Perl code first `use`s it. A missing dir is not an
 // error (the project simply has no native modules).
-func LoadDir(p *perl.Perl, dir string) error {
+func loadDir(p *internal.Perl, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -168,7 +168,7 @@ func LoadDir(p *perl.Perl, dir string) error {
 			continue
 		}
 		module := strings.ReplaceAll(strings.TrimSuffix(e.Name(), ".so"), "-", "::")
-		if err := Load(p, module, filepath.Join(dir, e.Name())); err != nil {
+		if err := load(p, module, filepath.Join(dir, e.Name())); err != nil {
 			return fmt.Errorf("load native module %s: %w", module, err)
 		}
 	}
@@ -177,7 +177,7 @@ func LoadDir(p *perl.Perl, dir string) error {
 
 // state is the per-instance loader state.
 type state struct {
-	p       *perl.Perl
+	p       *internal.Perl
 	mu      sync.Mutex
 	fns     []uintptr // fnID -> native XSUB pointer
 	fnNames [][]byte  // fnID -> NUL-terminated sub name (frame.subname points here)
@@ -232,7 +232,7 @@ type state struct {
 // tables those ids resolve through are carried over; runtime state (magic
 // mirrors, scope bookkeeping) starts empty, exactly like the guest side
 // does at rest.
-func (s *state) adoptClone(clone *perl.Perl) error {
+func (s *state) adoptClone(clone *internal.Perl) error {
 	s.mu.Lock()
 	if len(s.magicBySV) > 0 || len(s.magicByID) > 0 {
 		s.mu.Unlock()
@@ -342,7 +342,7 @@ func (s *state) decodePtr(id uint64) uintptr {
 
 var (
 	statesMu sync.Mutex
-	states   = map[*perl.Perl]*state{}
+	states   = map[*internal.Perl]*state{}
 
 	vtableOnce sync.Once
 	vtable     *cAPI
@@ -373,7 +373,7 @@ func lookupFrame(addr uintptr) *cFrame {
 	return nil
 }
 
-func stateFor(p *perl.Perl) *state {
+func stateFor(p *internal.Perl) *state {
 	statesMu.Lock()
 	defer statesMu.Unlock()
 	s, ok := states[p]
@@ -401,7 +401,7 @@ func stateFor(p *perl.Perl) *state {
 // a stock `use Module;` (whose .pm calls XSLoader::load) boots the native
 // module lazily at use time with no loader-side patching. module is the Perl
 // package the .xs declared (e.g. "Compiler::Lexer").
-func Load(p *perl.Perl, module, path string) error {
+func load(p *internal.Perl, module, path string) error {
 	libcInit()
 	if libcErr != nil {
 		return libcErr

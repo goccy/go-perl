@@ -14,17 +14,21 @@ import (
 	"os"
 	"runtime"
 
-	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 )
+
+func init() {
+	internal.RegisterXSDirLoader(loadDir)
+}
 
 // ArchTag names the per-architecture native-module directory
 // (local/xs/<tag>), following the running binary.
 func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
 
-// LoadDir keeps the real implementation's contract — a missing dir means
+// loadDir keeps the real implementation's contract — a missing dir means
 // the project simply has no native modules and is not an error — and
 // reports the platform gap only when there actually is something to load.
-func LoadDir(p *perl.Perl, dir string) error {
+func loadDir(p *internal.Perl, dir string) error {
 	if _, err := os.Stat(dir); err != nil {
 		return nil
 	}

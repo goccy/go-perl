@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/xs"
 )
 
 // TestPerlIOUtf8Strict runs PerlIO::utf8_strict — a dist whose whole point
@@ -48,9 +46,7 @@ func TestPerlIOUtf8Strict(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "PerlIO::utf8_strict", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "PerlIO::utf8_strict", so)
 
 	if r, err := p.Eval(ctx, `sub __t_pinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)

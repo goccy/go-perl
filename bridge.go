@@ -26,7 +26,6 @@ package perl
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +33,7 @@ import (
 	"runtime"
 	"sync/atomic"
 
-	wasm2go "github.com/goccy/perlwasm2go"
+	"github.com/goccy/go-perl/internal"
 )
 
 // PerlError is a Perl-level die surfaced by Call and the Ref operations:
@@ -62,20 +61,6 @@ func (e *PerlError) Error() string { return e.Message }
 // returns) waits forever. Keep handlers self-contained or hand work to
 // other goroutines without waiting on the outer caller.
 type GoFunc func(args []any) ([]any, error)
-
-// wireNode is one tagged value on the bridge:
-//
-//	k="u"                 undef / nil
-//	k="d" v=<scalar>      plain scalar by value
-//	k="j" v=<structure>   composite data by value (fresh structures on decode)
-//	k="r" h=<id> t/c      a Perl reference by handle (t=reftype, c=class)
-type wireNode struct {
-	K string          `json:"k"`
-	V json.RawMessage `json:"v,omitempty"`
-	H uint64          `json:"h,omitempty"`
-	T string          `json:"t,omitempty"`
-	C string          `json:"c,omitempty"`
-}
 
 // Ref is a handle to a Perl reference — a blessed object, an array/hash/code
 // ref — held alive in the interpreter's registry. It preserves identity: the
@@ -107,7 +92,7 @@ func newRef(p *Perl, id uint64, class, reftype string) *Ref {
 	r := &Ref{p: p, id: id, class: class, reftype: reftype}
 	runtime.SetFinalizer(r, func(r *Ref) {
 		if r.released.CompareAndSwap(false, true) {
-			r.p.queueRelease(r.id)
+			r.p.raw.QueueRelease(r.id)
 		}
 	})
 	return r
@@ -124,8 +109,8 @@ func (c *Perl) AdoptRef(r *Ref) (*Ref, error) {
 	if r == nil || r.released.Load() {
 		return nil, fmt.Errorf("perl: AdoptRef of a released reference")
 	}
-	if c.closed.Load() {
-		return nil, errClosed
+	if c.raw.Closed() {
+		return nil, internal.ErrClosed
 	}
 	return newRef(c, r.id, r.class, r.reftype), nil
 }
@@ -194,11 +179,7 @@ func (r *Ref) Free() error {
 		return nil
 	}
 	runtime.SetFinalizer(r, nil)
-	if r.p.closed.Load() {
-		return nil
-	}
-	_, err := r.p.call(context.Background(), "__plwasm_release", []any{r.id}, false)
-	return err
+	return r.p.raw.ReleaseHandle(r.id)
 }
 
 // MarshalJSON refuses: a Ref inside composite data would silently serialise
@@ -209,21 +190,21 @@ func (r *Ref) MarshalJSON() ([]byte, error) {
 }
 
 // encodeValue converts one Go argument into its wire node.
-func (p *Perl) encodeValue(v any) (wireNode, error) {
+func (p *Perl) encodeValue(v any) (internal.WireNode, error) {
 	switch x := v.(type) {
 	case nil:
-		return wireNode{K: "u"}, nil
+		return internal.WireNode{K: "u"}, nil
 	case *Ref:
 		if x == nil {
-			return wireNode{K: "u"}, nil
+			return internal.WireNode{K: "u"}, nil
 		}
 		if x.p != p {
-			return wireNode{}, errors.New("perl.Ref belongs to a different Perl instance")
+			return internal.WireNode{}, errors.New("perl.Ref belongs to a different Perl instance")
 		}
 		if x.released.Load() {
-			return wireNode{}, errors.New("perl.Ref has been freed")
+			return internal.WireNode{}, errors.New("perl.Ref has been freed")
 		}
-		return wireNode{K: "r", H: x.id}, nil
+		return internal.WireNode{K: "r", H: x.id}, nil
 	case GoFunc:
 		return p.encodeGoFunc(x)
 	case func(args []any) ([]any, error):
@@ -234,15 +215,15 @@ func (p *Perl) encodeValue(v any) (wireNode, error) {
 		float32, float64, json.Number:
 		raw, err := json.Marshal(x)
 		if err != nil {
-			return wireNode{}, err
+			return internal.WireNode{}, err
 		}
-		return wireNode{K: "d", V: raw}, nil
+		return internal.WireNode{K: "d", V: raw}, nil
 	default:
 		raw, err := json.Marshal(x)
 		if err != nil {
-			return wireNode{}, fmt.Errorf("encode composite argument: %w", err)
+			return internal.WireNode{}, fmt.Errorf("encode composite argument: %w", err)
 		}
-		return wireNode{K: "j", V: raw}, nil
+		return internal.WireNode{K: "j", V: raw}, nil
 	}
 }
 
@@ -253,9 +234,9 @@ func (p *Perl) encodeValue(v any) (wireNode, error) {
 // so avoid passing per-request closures in hot paths (bind a named function
 // instead). The dispatcher must already be registered; Call arranges that
 // before encoding.
-func (p *Perl) encodeGoFunc(fn GoFunc) (wireNode, error) {
+func (p *Perl) encodeGoFunc(fn GoFunc) (internal.WireNode, error) {
 	if fn == nil {
-		return wireNode{K: "u"}, nil
+		return internal.WireNode{K: "u"}, nil
 	}
 	p.funcsMu.Lock()
 	if p.funcs == nil {
@@ -265,7 +246,7 @@ func (p *Perl) encodeGoFunc(fn GoFunc) (wireNode, error) {
 	id := p.nextFuncID
 	p.funcs[id] = fn
 	p.funcsMu.Unlock()
-	return wireNode{K: "f", H: uint64(id)}, nil
+	return internal.WireNode{K: "f", H: uint64(id)}, nil
 }
 
 // hasFuncArg reports whether any argument is a Go function value (which
@@ -280,8 +261,8 @@ func hasFuncArg(args []any) bool {
 	return false
 }
 
-func (p *Perl) encodeArgs(args []any) ([]byte, error) {
-	nodes := make([]wireNode, len(args))
+func (p *Perl) encodeArgs(args []any) ([]internal.WireNode, error) {
+	nodes := make([]internal.WireNode, len(args))
 	for i, a := range args {
 		n, err := p.encodeValue(a)
 		if err != nil {
@@ -289,11 +270,11 @@ func (p *Perl) encodeArgs(args []any) ([]byte, error) {
 		}
 		nodes[i] = n
 	}
-	return json.Marshal(nodes)
+	return nodes, nil
 }
 
 // decodeValue converts one wire node into its Go value.
-func (p *Perl) decodeValue(n wireNode) (any, error) {
+func (p *Perl) decodeValue(n internal.WireNode) (any, error) {
 	switch n.K {
 	case "u":
 		return nil, nil
@@ -310,7 +291,7 @@ func (p *Perl) decodeValue(n wireNode) (any, error) {
 	}
 }
 
-func (p *Perl) decodeValues(nodes []wireNode) ([]any, error) {
+func (p *Perl) decodeValues(nodes []internal.WireNode) ([]any, error) {
 	out := make([]any, len(nodes))
 	for i, n := range nodes {
 		v, err := p.decodeValue(n)
@@ -322,15 +303,6 @@ func (p *Perl) decodeValues(nodes []wireNode) ([]any, error) {
 	return out, nil
 }
 
-// callEnvelope is the decoded perl_call response document. Exit is set (and
-// Ok false) when the guest called exit() and the bridge caught the unwind.
-type callEnvelope struct {
-	Ok     bool       `json:"ok"`
-	Result []wireNode `json:"result"`
-	Exit   *int       `json:"exit"`
-	Error  string     `json:"error"`
-}
-
 // Call invokes the named Perl subroutine in list context and returns its
 // return list. name is a fully qualified sub name ("My::App::handler") or a
 // main:: sub name ("handler"). Scalar results arrive by value; reference
@@ -339,21 +311,6 @@ type callEnvelope struct {
 // as a *PerlError; other errors are host/transport failures or a context
 // cancellation, which behaves exactly like Eval's.
 func (p *Perl) Call(ctx context.Context, name string, args ...any) ([]any, error) {
-	return p.call(ctx, name, args, true)
-}
-
-// call is Call's engine; drain=false skips the release-queue flush (the
-// flush itself and Ref.Free use that path, so a drain cannot recurse).
-func (p *Perl) call(ctx context.Context, name string, args []any, drain bool) ([]any, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if p.closed.Load() {
-		return nil, errClosed
-	}
-	if drain {
-		p.drainReleases(ctx)
-	}
 	if hasFuncArg(args) {
 		// A crossing Go function needs the Perl->Go dispatcher in place
 		// before the guest can call it.
@@ -361,41 +318,19 @@ func (p *Perl) call(ctx context.Context, name string, args []any, drain bool) ([
 			return nil, err
 		}
 	}
-	argsJSON, err := p.encodeArgs(args)
+	nodes, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-
-	var buf []byte
-	buf = pbAppendUint64(buf, 1, p.h)
-	buf = pbAppendString(buf, 2, name)
-	buf = pbAppendString(buf, 3, string(argsJSON))
-
-	disarm := p.armInterrupt(ctx)
-	resp, invokeErr := p.m.invoke(0, midCall, buf, wasm2go.Inv_0_0)
-	interrupted := disarm()
-
-	if invokeErr != nil {
-		return nil, invokeErr
-	}
-	if e := pbExtractError(resp); e != nil {
-		return nil, e
-	}
-	js := readScalarAtField(resp, 1, (*pbReader).readString)
-	var env callEnvelope
-	if err := json.Unmarshal([]byte(js), &env); err != nil {
-		return nil, fmt.Errorf("decode call result %q: %w", js, err)
-	}
-	if !env.Ok {
-		if env.Exit != nil {
-			return nil, &exitStatusError{code: *env.Exit}
+	res, err := p.raw.Call(ctx, name, nodes)
+	if err != nil {
+		var died *internal.PerlDied
+		if errors.As(err, &died) {
+			return nil, &PerlError{Message: died.Message}
 		}
-		if interrupted {
-			return nil, ctx.Err()
-		}
-		return nil, &PerlError{Message: env.Error}
+		return nil, err
 	}
-	return p.decodeValues(env.Result)
+	return p.decodeValues(res)
 }
 
 // perlSubName pins what Bind accepts: a Perl identifier, optionally
@@ -484,138 +419,41 @@ func (p *Perl) BindClass(name string, methods map[string]GoFunc) error {
 	return nil
 }
 
-// ensureDispatcher registers this instance's callback handler with the
-// generated bridge machinery and tells the guest its callback id. Runs once
-// per instance.
+// ensureDispatcher makes sure the instance's guest-side callback dispatcher
+// is registered and this wrapper's function table exists.
 func (p *Perl) ensureDispatcher() error {
 	p.funcsMu.Lock()
-	if p.dispatcherSet {
-		p.funcsMu.Unlock()
-		return nil
-	}
 	if p.funcs == nil {
 		p.funcs = map[int32]GoFunc{}
 	}
 	p.funcsMu.Unlock()
-
-	// Register on this instance's Module (NOT the package-level
-	// RegisterCallback, which addresses the global single-instance binding).
-	p.m.cbMu.Lock()
-	if p.m.callbacks == nil {
-		p.m.callbacks = map[int32]CallbackHandler{}
-	}
-	p.m.nextCBID++
-	cbID := p.m.nextCBID
-	p.m.callbacks[cbID] = goDispatcher{p: p}
-	p.m.cbMu.Unlock()
-
-	var buf []byte
-	buf = pbAppendUint64(buf, 1, p.h)
-	buf = pbAppendInt32(buf, 2, cbID)
-	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_6)
-	if err != nil {
-		return fmt.Errorf("set Go dispatcher: %w", err)
-	}
-	if e := pbExtractError(resp); e != nil {
-		return fmt.Errorf("set Go dispatcher: %w", e)
-	}
-
-	p.funcsMu.Lock()
-	p.dispatcherSet = true
-	p.funcsMu.Unlock()
-	return nil
+	return p.raw.EnsureDispatcher()
 }
 
-// goDispatcher is the per-instance CallbackHandler behind every bound Perl
-// sub. methodID carries the bound function's id; req/resp carry the tagged
-// value lists. The response is ALWAYS the in-band JSON envelope — a Go error
-// return would be protobuf-encoded by the generated dispatch and misparse
-// guest-side, so failures are reported in-band instead.
-type goDispatcher struct{ p *Perl }
-
-func (d goDispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
-	if methodID == nativeXSMethodID {
-		d.p.funcsMu.RLock()
-		native := d.p.nativeXS
-		d.p.funcsMu.RUnlock()
-		if native == nil {
-			return append([]byte{0}, "no native XS handler installed"...), nil
-		}
-		return native(req), nil
-	}
-	if methodID == magicFreeMethodID {
-		d.p.funcsMu.RLock()
-		free := d.p.magicFree
-		d.p.funcsMu.RUnlock()
-		if free != nil && len(req) >= 4 {
-			free(binary.LittleEndian.Uint32(req))
-		}
-		return []byte{1}, nil
-	}
-	if methodID == setMagicMethodID {
-		d.p.funcsMu.RLock()
-		set := d.p.magicSet
-		d.p.funcsMu.RUnlock()
-		if set != nil && len(req) >= 4 {
-			set(binary.LittleEndian.Uint32(req))
-		}
-		return []byte{1}, nil
-	}
-	if methodID == ppHookMethodID {
-		d.p.funcsMu.RLock()
-		hook := d.p.ppHook
-		d.p.funcsMu.RUnlock()
-		if hook == nil {
-			return append([]byte{0}, "no pp hook handler installed"...), nil
-		}
-		return hook(req), nil
-	}
-	if methodID == keywordMethodID {
-		d.p.funcsMu.RLock()
-		hook := d.p.keywordHook
-		d.p.funcsMu.RUnlock()
-		if hook == nil {
-			// no parse-surface module loaded: decline so the guest chain runs
-			return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, nil
-		}
-		return hook(req), nil
-	}
-	if methodID == perlioMethodID {
-		d.p.funcsMu.RLock()
-		hook := d.p.perlioHook
-		d.p.funcsMu.RUnlock()
-		if hook == nil {
-			return append([]byte{0}, "no PerlIO layer handler installed"...), nil
-		}
-		return hook(req), nil
-	}
-	if methodID == destructorMethodID {
-		d.p.funcsMu.RLock()
-		fire := d.p.dtorFire
-		d.p.funcsMu.RUnlock()
-		if fire != nil && len(req) >= 4 {
-			fire(binary.LittleEndian.Uint32(req))
-		}
-		return []byte{1}, nil
-	}
-	d.p.funcsMu.RLock()
-	fn, ok := d.p.funcs[methodID]
-	d.p.funcsMu.RUnlock()
+// handleUserCallback serves the Perl->Go function bridge: methodID carries
+// the bound function's id; req/resp carry the tagged value lists. The
+// response is ALWAYS the in-band JSON envelope — a Go error return would be
+// protobuf-encoded by the generated dispatch and misparse guest-side, so
+// failures are reported in-band instead.
+func (p *Perl) handleUserCallback(methodID int32, req []byte) ([]byte, error) {
+	p.funcsMu.RLock()
+	fn, ok := p.funcs[methodID]
+	p.funcsMu.RUnlock()
 	if !ok {
-		return d.response(nil, fmt.Errorf("no Go function bound for id %d", methodID)), nil
+		return p.callbackResponse(nil, fmt.Errorf("no Go function bound for id %d", methodID)), nil
 	}
-	var nodes []wireNode
+	var nodes []internal.WireNode
 	if len(req) > 0 {
 		if err := json.Unmarshal(req, &nodes); err != nil {
-			return d.response(nil, fmt.Errorf("decode arguments: %w", err)), nil
+			return p.callbackResponse(nil, fmt.Errorf("decode arguments: %w", err)), nil
 		}
 	}
-	args, err := d.p.decodeValues(nodes)
+	args, err := p.decodeValues(nodes)
 	if err != nil {
-		return d.response(nil, fmt.Errorf("decode arguments: %w", err)), nil
+		return p.callbackResponse(nil, fmt.Errorf("decode arguments: %w", err)), nil
 	}
 	results, err := safeCall(fn, args)
-	return d.response(results, err), nil
+	return p.callbackResponse(results, err), nil
 }
 
 // safeCall contains a panicking GoFunc so a guest-triggered call cannot take
@@ -629,17 +467,17 @@ func safeCall(fn GoFunc, args []any) (results []any, err error) {
 	return fn(args)
 }
 
-// response encodes the in-band Perl-facing response envelope.
-func (d goDispatcher) response(results []any, err error) []byte {
+// callbackResponse encodes the in-band Perl-facing response envelope.
+func (p *Perl) callbackResponse(results []any, err error) []byte {
 	type envelope struct {
-		Ok     bool       `json:"ok"`
-		Result []wireNode `json:"result"`
-		Error  string     `json:"error"`
+		Ok     bool                `json:"ok"`
+		Result []internal.WireNode `json:"result"`
+		Error  string              `json:"error"`
 	}
-	env := envelope{Ok: err == nil, Result: []wireNode{}}
+	env := envelope{Ok: err == nil, Result: []internal.WireNode{}}
 	if err == nil {
 		for i, v := range results {
-			n, eErr := d.p.encodeValue(v)
+			n, eErr := p.encodeValue(v)
 			if eErr != nil {
 				err = fmt.Errorf("encode Go result %d: %w", i, eErr)
 				break
@@ -648,11 +486,11 @@ func (d goDispatcher) response(results []any, err error) []byte {
 		}
 	}
 	if err != nil {
-		env = envelope{Ok: false, Result: []wireNode{}, Error: err.Error()}
+		env = envelope{Ok: false, Result: []internal.WireNode{}, Error: err.Error()}
 	}
 	out, mErr := json.Marshal(env)
 	if mErr != nil {
-		out, _ = json.Marshal(envelope{Ok: false, Result: []wireNode{},
+		out, _ = json.Marshal(envelope{Ok: false, Result: []internal.WireNode{},
 			Error: fmt.Sprintf("encode Go response: %v", mErr)})
 	}
 	return out

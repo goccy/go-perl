@@ -13,7 +13,6 @@ import (
 
 	perl "github.com/goccy/go-perl"
 	goperlfs "github.com/goccy/go-perl/fs"
-	"github.com/goccy/go-perl/xs"
 )
 
 // buildDemo compiles the checked-in xsubpp output of Demo.xs against the SDK
@@ -67,9 +66,7 @@ func TestNativeXSModule(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "Demo::XS", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "Demo::XS", so)
 
 	// `use Demo::XS` resolves the .pm half from @INC like any module.
 	libdir := t.TempDir()
@@ -180,9 +177,7 @@ func TestNativeCppObjectModule(t *testing.T) {
 
 	p := newHostPerl(t)
 	ctx := context.Background()
-	if err := xs.Load(p, "Obj::Demo", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "Obj::Demo", so)
 	libdir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(libdir, "Obj"), 0o755); err != nil {
 		t.Fatal(err)

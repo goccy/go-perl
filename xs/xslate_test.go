@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-perl/xs"
 )
 
 // TestTextXslate runs a real-world XS dist — Text::Xslate — through the
@@ -44,9 +42,7 @@ func TestTextXslate(t *testing.T) {
 	p := newHostPerl(t)
 	ctx := context.Background()
 
-	if err := xs.Load(p, "Text::Xslate", so); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	loadXSModule(t, p, "Text::Xslate", so)
 
 	inc := []any{filepath.Join(dir, "lib"), filepath.Join(dir, "deps", "lib", "perl5")}
 	entries, _ := os.ReadDir(filepath.Join(dir, "deps", "lib", "perl5"))

@@ -1,23 +1,23 @@
-package perl
-
-// Perl is a hand-written, multi-instance API layered on top of the generated
-// single-global binding in perl.go. Each Perl owns its own wasm module
-// (independent linear memory + WASI host) and one Perl runtime, so several
-// instances run concurrently and in isolation. Construction goes through the
-// process-wide copy-on-write snapshot when possible (see snapshot.go), so an
-// instance boots by mapping an already-initialized interpreter image instead
-// of re-running perl_new.
+// Package internal holds the machinery under the public go-perl API: the
+// generated wasm2go binding (perl.go), the per-instance bridge transport,
+// the copy-on-write snapshot/clone plumbing, and the native-XS hook surface
+// the xs subpackage drives. Nothing here is application API — the public
+// package wraps a *Perl from this package and exposes only what users
+// should call.
+package internal
 
 import (
 	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
+	goperlfs "github.com/goccy/go-perl/fs"
 	wasm2go "github.com/goccy/perlwasm2go"
 	"github.com/goccy/perlwasm2go/base"
 )
@@ -37,26 +37,44 @@ const (
 	midXSHelper         = 7
 )
 
-// Result is the outcome of one Eval (or Load): the expression's value and
-// the Perl-level error state. A die/croak/compile error is a fact ABOUT
-// the evaluation, so it lives here as Error (*PerlError, $@'s text), not in
-// Eval's own error return — that one reports host and transport failures.
-type Result struct {
-	// Value is the evaluated expression's value (the last statement, in
-	// scalar context), valid when Error is nil. See Value for the Perl
-	// coercions its accessors apply.
-	Value Value
-	// Error is non-nil when the eval died: a Perl-level die/croak or a
-	// compile error, carrying $@ as a *PerlError.
-	Error error
-	// Stdout / Stderr capture what the eval printed to STDOUT / STDERR
-	// (the bridge redirects both onto in-memory scalars for the duration).
-	Stdout string
-	Stderr string
+// InstanceOptions is the resolved per-instance configuration. The public package
+// maps its Config here after applying defaults (the FS arrives non-nil and
+// already carrying a working /dev/null).
+type InstanceOptions struct {
+	StdlibDir string
+	Env       []string
+	FS        goperlfs.FS
+	FSAccess  func(path string, write bool) bool
+	NetAccess func(op string) bool
+	Dial      func(network, host, ip string, port int) bool
+	Resolve   func(host string) bool
+	Exec      func(path string, argv []string) bool
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+
+	MaxMemoryBytes     int
+	MemoryReserveBytes int
 }
 
-// evalEnvelope is the decoded form of the JSON document perl_eval returns.
-type evalEnvelope struct {
+// WireNode is one tagged value on the bridge (JSON is only the carrier; the
+// tag is the semantics):
+//
+//	k="u"                 undef / nil
+//	k="d" v=<scalar>      plain scalar by value
+//	k="j" v=<structure>   composite data by value (fresh structures on decode)
+//	k="r" h=<id> t/c      a Perl reference by handle (t=reftype, c=class)
+//	k="f" h=<id>          a host function by id (decodes to a Perl closure)
+type WireNode struct {
+	K string          `json:"k"`
+	V json.RawMessage `json:"v,omitempty"`
+	H uint64          `json:"h,omitempty"`
+	T string          `json:"t,omitempty"`
+	C string          `json:"c,omitempty"`
+}
+
+// EvalResult is the decoded perl_eval response envelope.
+type EvalResult struct {
 	Ok     bool   `json:"ok"`
 	Result string `json:"result"`
 	Stdout string `json:"stdout"`
@@ -64,7 +82,33 @@ type evalEnvelope struct {
 	Error  string `json:"error"`
 }
 
-// Perl is one isolated Perl interpreter instance.
+// callEnvelope is the decoded perl_call response document. Exit is set (and
+// Ok false) when the guest called exit() and the bridge caught the unwind.
+type callEnvelope struct {
+	Ok     bool       `json:"ok"`
+	Result []WireNode `json:"result"`
+	Exit   *int       `json:"exit"`
+	Error  string     `json:"error"`
+}
+
+// PerlDied reports a Perl-level die/croak (its Message is $@'s text). The
+// public package converts it to its user-facing error type.
+type PerlDied struct {
+	Message string
+}
+
+func (e *PerlDied) Error() string { return e.Message }
+
+// ExitError is a guest exit() the perl_call bridge caught cleanly: the guest
+// unwound back to the call frame, so the interpreter is still flushable and
+// destructible.
+type ExitError struct{ Code int }
+
+func (e *ExitError) Error() string { return fmt.Sprintf("perl: exit(%d)", e.Code) }
+
+// Perl is one isolated Perl interpreter instance's machinery: the wasm
+// module, the interpreter handle, the interrupt watchdog, the handle-release
+// queue, and the callback dispatch tables.
 type Perl struct {
 	m    *Module
 	wasi *base.WasiStubs
@@ -78,12 +122,13 @@ type Perl struct {
 	// that booted privately.
 	mapped []byte
 
-	// Go-function bridge state (bridge.go). funcs maps the ids baked into the
-	// bound Perl subs to their Go functions; dispatcherSet records whether the
-	// per-instance callback handler has been registered with the guest.
-	funcsMu       sync.RWMutex
-	funcs         map[int32]GoFunc
-	nextFuncID    int32
+	// UserHandler receives every callback whose method id is not one of the
+	// reserved hook ids: the Perl->Go function bridge. The public package
+	// sets it once at construction, before any dispatcher registration.
+	UserHandler func(methodID int32, req []byte) ([]byte, error)
+
+	// hookMu guards the reserved-id hook fields and dispatcherSet.
+	hookMu        sync.RWMutex
 	dispatcherSet bool
 	// nativeXS handles native-XSUB dispatch (the reserved callback method
 	// id); see native.go and the xs subpackage.
@@ -97,24 +142,21 @@ type Perl struct {
 	// magicSet runs mirror svt_set hooks when the guest reports an
 	// assignment to an SV whose anchor magic was upgraded to fire them.
 	magicSet func(id uint32)
-
 	// dtorFire handles save-stack destructors registered by native modules
 	// (reserved callback method id -4).
 	dtorFire func(id uint32)
-
 	// perlioHook handles PerlIO layer-slot dispatch for layers a native
 	// module registered (reserved callback method id -6).
 	perlioHook func(req []byte) []byte
-
 	// keywordHook handles keyword/infix plugin forwarding while the guest
 	// parser compiles (reserved callback method id -7).
 	keywordHook func(req []byte) []byte
 
-	// closed flips when Close runs; every public entry point checks it so a
-	// straggler — including a *Ref Free racing a Close — errors out instead
-	// of calling into a destroyed (and possibly unmapped) instance.
+	// closed flips when Close runs; every entry point checks it so a
+	// straggler — including a handle release racing a Close — errors out
+	// instead of calling into a destroyed (and possibly unmapped) instance.
 	closed atomic.Bool
-	// pendingRel collects handle ids whose *Ref wrappers were collected by
+	// pendingRel collects handle ids whose host wrappers were collected by
 	// the Go GC. Finalizers ONLY append here (a pure host-side operation —
 	// invoking the guest from the finalizer goroutine could block behind a
 	// long Eval or hit a closed instance); the queue drains through one
@@ -122,9 +164,9 @@ type Perl struct {
 	relMu      sync.Mutex
 	pendingRel []uint64
 
-	// cfg is the resolved configuration the instance booted with; Clone
+	// opts is the resolved configuration the instance booted with; Clone
 	// builds its workers' WASI stubs from it.
-	cfg Config
+	opts InstanceOptions
 	// cloneImg is the lazily built copy-on-write image Clone maps new
 	// instances from (see clone.go).
 	cloneImg cloneImage
@@ -132,9 +174,12 @@ type Perl struct {
 	cloneHooks []func(clone *Perl) error
 }
 
-// queueRelease records a handle whose Go wrapper is gone. Safe from any
+// Closed reports whether Close has run.
+func (p *Perl) Closed() bool { return p.closed.Load() }
+
+// QueueRelease records a handle whose host wrapper is gone. Safe from any
 // goroutine, including the runtime's finalizer goroutine.
-func (p *Perl) queueRelease(id uint64) {
+func (p *Perl) QueueRelease(id uint64) {
 	p.relMu.Lock()
 	p.pendingRel = append(p.pendingRel, id)
 	p.relMu.Unlock()
@@ -151,41 +196,39 @@ func (p *Perl) drainReleases(ctx context.Context) {
 	if len(ids) == 0 || p.closed.Load() {
 		return
 	}
-	args := make([]any, len(ids))
+	nodes := make([]WireNode, len(ids))
 	for i, id := range ids {
-		args[i] = id
+		raw, err := json.Marshal(id)
+		if err != nil {
+			return
+		}
+		nodes[i] = WireNode{K: "d", V: raw}
 	}
-	_, _ = p.call(ctx, "__plwasm_release_all", args, false)
+	_, _ = p.call(ctx, "__plwasm_release_all", nodes, false)
 }
 
-// New builds a fresh Perl instance, applies the sandbox config, and returns
-// it ready to Eval. When the config permits (see snapshot.go) the instance is
-// mapped copy-on-write from a process-wide snapshot of an already-initialized
-// interpreter, so construction is cheap and the instances share the read-only
-// bulk of their memory.
-func New(cfg Config) (p *Perl, err error) {
-	// Resolve the filesystem and standard library location: every file the
-	// instance opens goes through Config.FS, and StdlibDir is a path inside
-	// it. With a supplied backend the stdlib must live in the FS (host
-	// backends pair with ExtractStdlib; NewStdlibMemFS pre-loads a MemFS).
-	// The nil default is a PRIVATE in-memory filesystem pre-loaded with the
-	// stdlib - sandboxed, nothing touches the host disk.
-	if cfg.FS == nil {
-		fsys, sErr := NewStdlibMemFS()
-		if sErr != nil {
-			return nil, fmt.Errorf("build in-memory stdlib: %w", sErr)
-		}
-		cfg.FS = fsys
+// ReleaseHandle releases one registry pin now instead of waiting for the
+// next drain. A no-op on a closed instance.
+func (p *Perl) ReleaseHandle(id uint64) error {
+	if p.closed.Load() {
+		return nil
 	}
-	if cfg.StdlibDir == "" {
-		cfg.StdlibDir = "/"
+	raw, err := json.Marshal(id)
+	if err != nil {
+		return err
 	}
+	_, err = p.call(context.Background(), "__plwasm_release", []WireNode{{K: "d", V: raw}}, false)
+	return err
+}
 
+// New boots a fresh instance from opts, mapping the process-wide
+// copy-on-write snapshot when possible (see snapshot.go).
+func New(opts InstanceOptions) (p *Perl, err error) {
 	m := &Module{}
-	wasi := buildWASI(cfg)
-	p = &Perl{m: m, wasi: wasi, cfg: cfg}
+	wasi := buildWASI(opts)
+	p = &Perl{m: m, wasi: wasi, opts: opts}
 
-	if err := p.boot(cfg, wasi); err != nil {
+	if err := p.boot(opts, wasi); err != nil {
 		return nil, err
 	}
 
@@ -210,48 +253,45 @@ func New(cfg Config) (p *Perl, err error) {
 	return p, nil
 }
 
-// buildWASI assembles the per-instance WASI host from the config. Sandbox by
-// default: no host environment, no host stdio.
-func buildWASI(cfg Config) *base.WasiStubs {
+// buildWASI assembles the per-instance WASI host from the options. Sandbox
+// by default: no host environment, no host stdio.
+func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	wasi := base.DefaultWASI()
-	wasi.SetEnv(cfg.Env)
-	if cfg.FS != nil {
-		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
-		// bit bucket as its script filehandle); synthesize one over any
-		// custom backend.
-		wasi.SetFS(withDevNull(cfg.FS))
+	wasi.SetEnv(opts.Env)
+	if opts.FS != nil {
+		wasi.SetFS(opts.FS)
 	}
-	if cfg.FSAccess != nil {
-		wasi.SetFSAccessHook(cfg.FSAccess)
+	if opts.FSAccess != nil {
+		wasi.SetFSAccessHook(opts.FSAccess)
 	}
-	if cfg.NetAccess != nil {
-		wasi.SetNetAccessHook(cfg.NetAccess)
+	if opts.NetAccess != nil {
+		wasi.SetNetAccessHook(opts.NetAccess)
 	}
-	if cfg.Dial != nil {
-		wasi.SetDialHook(cfg.Dial)
+	if opts.Dial != nil {
+		wasi.SetDialHook(opts.Dial)
 	}
-	if cfg.Resolve != nil {
-		wasi.SetResolveHook(cfg.Resolve)
+	if opts.Resolve != nil {
+		wasi.SetResolveHook(opts.Resolve)
 	}
-	if cfg.Exec != nil {
-		wasi.SetExecHook(cfg.Exec)
+	if opts.Exec != nil {
+		wasi.SetExecHook(opts.Exec)
 	}
 	// Sandbox stdio by default: an unset stream does NOT fall through to the
 	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
-	// stderr to discard. (Perl-level print output is still captured into
-	// Result by the bridge; these back the raw guest fds 0/1/2.)
-	if cfg.Stdin != nil {
-		wasi.SetStdin(cfg.Stdin)
+	// stderr to discard. (Perl-level print output is still captured into the
+	// eval envelope by the bridge; these back the raw guest fds 0/1/2.)
+	if opts.Stdin != nil {
+		wasi.SetStdin(opts.Stdin)
 	} else {
 		wasi.SetStdin(bytes.NewReader(nil))
 	}
-	if cfg.Stdout != nil {
-		wasi.SetStdout(cfg.Stdout)
+	if opts.Stdout != nil {
+		wasi.SetStdout(opts.Stdout)
 	} else {
 		wasi.SetStdout(io.Discard)
 	}
-	if cfg.Stderr != nil {
-		wasi.SetStderr(cfg.Stderr)
+	if opts.Stderr != nil {
+		wasi.SetStderr(opts.Stderr)
 	} else {
 		wasi.SetStderr(io.Discard)
 	}
@@ -260,12 +300,12 @@ func buildWASI(cfg Config) *base.WasiStubs {
 
 // boot brings the instance's wasm module up and obtains the interpreter
 // handle — via the copy-on-write snapshot when possible, privately otherwise.
-func (p *Perl) boot(cfg Config, wasi *base.WasiStubs) error {
-	if snap := sharedSnapshot(cfg.StdlibDir, cfg.Env); snap.err == nil {
+func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
+	if snap := sharedSnapshot(opts.StdlibDir, opts.Env); snap.err == nil {
 		ceiling := snapshotCeiling
-		if cfg.MaxMemoryBytes > 0 {
+		if opts.MaxMemoryBytes > 0 {
 			const wasmPage = 65536
-			max := cfg.MaxMemoryBytes / wasmPage * wasmPage
+			max := opts.MaxMemoryBytes / wasmPage * wasmPage
 			if max < ceiling && uint64(max) >= snap.img.Size() {
 				ceiling = max
 			}
@@ -279,23 +319,23 @@ func (p *Perl) boot(cfg Config, wasi *base.WasiStubs) error {
 		}
 		// Mapping failed (exotic platform / fd exhaustion): boot privately.
 	}
-	return p.bootPrivate(cfg, wasi)
+	return p.bootPrivate(opts, wasi)
 }
 
 // bootPrivate is the no-snapshot path: run the reactor initializer and
 // perl_new on a private linear memory.
-func (p *Perl) bootPrivate(cfg Config, wasi *base.WasiStubs) (err error) {
-	if cfg.MemoryReserveBytes > 0 {
-		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, cfg.MemoryReserveBytes)
+func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err error) {
+	if opts.MemoryReserveBytes > 0 {
+		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, opts.MemoryReserveBytes)
 	} else {
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
 	// instead of growing the host process unbounded. Round down to a wasm
 	// page; ignore values below the module's initial memory.
-	if cfg.MaxMemoryBytes > 0 {
+	if opts.MaxMemoryBytes > 0 {
 		const wasmPage = 65536
-		max := uint64(cfg.MaxMemoryBytes) / wasmPage * wasmPage
+		max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage
 		if max >= uint64(len(wasm2go.Memory(p.m.g))) {
 			wasm2go.SetMaxMemory(p.m.g, max)
 		}
@@ -316,34 +356,30 @@ func (p *Perl) bootPrivate(cfg Config, wasi *base.WasiStubs) (err error) {
 		return err
 	}
 
-	h, err := p.perlNew(cfg.StdlibDir)
+	h, err := p.perlNew(opts.StdlibDir)
 	if err != nil {
 		return fmt.Errorf("perl_new: %w", err)
 	}
 	if h == 0 {
-		return fmt.Errorf("perl_new returned 0 (interpreter init failed; check StdlibDir=%q)", cfg.StdlibDir)
+		return fmt.Errorf("perl_new returned 0 (interpreter init failed; check StdlibDir=%q)", opts.StdlibDir)
 	}
 	p.h = h
 	return nil
 }
 
-// Eval compiles and runs src in this instance's persistent package (its
-// main::) and returns the structured result. A Perl-level die is reported via
-// Result.Error (*PerlError), not as Eval's own error; a Go error indicates a
-// host/transport failure (a wasm trap, encoding problem, ...) or a context
-// cancellation.
-//
-// Cancelling ctx while the eval runs stops it at the next Perl opcode (the
-// interpreter runs a pluggable run loop that tests a host-writable flag; see
-// perl-wasm's bridge) and Eval returns ctx.Err(). A single long-running
-// opcode — a pathological regex, a big sort — is not preempted until it
-// returns to the run loop.
-func (p *Perl) Eval(ctx context.Context, src string) (Result, error) {
+// ErrClosed is returned by every entry point once Close has run.
+var ErrClosed = fmt.Errorf("perl: instance is closed")
+
+// Eval compiles and runs src in the interpreter's persistent package and
+// returns the decoded envelope. A Perl-level die is reported inside the
+// envelope (Ok=false, Error=$@); an error return is a host/transport failure
+// or a context cancellation.
+func (p *Perl) Eval(ctx context.Context, src string) (EvalResult, error) {
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return EvalResult{}, err
 	}
 	if p.closed.Load() {
-		return Result{}, errClosed
+		return EvalResult{}, ErrClosed
 	}
 	p.drainReleases(ctx)
 	var buf []byte
@@ -355,27 +391,79 @@ func (p *Perl) Eval(ctx context.Context, src string) (Result, error) {
 	interrupted := disarm()
 
 	if invokeErr != nil {
-		return Result{}, invokeErr
+		return EvalResult{}, invokeErr
 	}
 	if e := pbExtractError(resp); e != nil {
-		return Result{}, e
+		return EvalResult{}, e
 	}
 	js := readScalarAtField(resp, 1, (*pbReader).readString)
-	var env evalEnvelope
+	var env EvalResult
 	if err := json.Unmarshal([]byte(js), &env); err != nil {
-		return Result{}, fmt.Errorf("decode eval result %q: %w", js, err)
+		return EvalResult{}, fmt.Errorf("decode eval result %q: %w", js, err)
 	}
 	if interrupted && !env.Ok {
 		// We tripped the interrupt and the eval died: report the
 		// cancellation, not the croak text it surfaced as.
-		return Result{}, ctx.Err()
+		return EvalResult{}, ctx.Err()
 	}
-	r := Result{Value: scalar{env.Result}, Stdout: env.Stdout, Stderr: env.Stderr}
+	return env, nil
+}
+
+// Call invokes the named Perl subroutine in list context with the given
+// argument nodes and returns the result nodes. A Perl-level die comes back
+// as *PerlDied, a caught guest exit() as *ExitError; other errors are
+// host/transport failures or a context cancellation.
+func (p *Perl) Call(ctx context.Context, name string, args []WireNode) ([]WireNode, error) {
+	return p.call(ctx, name, args, true)
+}
+
+// call is Call's engine; drain=false skips the release-queue flush (the
+// flush itself and handle releases use that path, so a drain cannot recurse).
+func (p *Perl) call(ctx context.Context, name string, args []WireNode, drain bool) ([]WireNode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
+	if drain {
+		p.drainReleases(ctx)
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendString(buf, 2, name)
+	buf = pbAppendString(buf, 3, string(argsJSON))
+
+	disarm := p.armInterrupt(ctx)
+	resp, invokeErr := p.m.invoke(0, midCall, buf, wasm2go.Inv_0_0)
+	interrupted := disarm()
+
+	if invokeErr != nil {
+		return nil, invokeErr
+	}
+	if e := pbExtractError(resp); e != nil {
+		return nil, e
+	}
+	js := readScalarAtField(resp, 1, (*pbReader).readString)
+	var env callEnvelope
+	if err := json.Unmarshal([]byte(js), &env); err != nil {
+		return nil, fmt.Errorf("decode call result %q: %w", js, err)
+	}
 	if !env.Ok {
-		r.Value = scalar{}
-		r.Error = &PerlError{Message: env.Error}
+		if env.Exit != nil {
+			return nil, &ExitError{Code: *env.Exit}
+		}
+		if interrupted {
+			return nil, ctx.Err()
+		}
+		return nil, &PerlDied{Message: env.Error}
 	}
-	return r, nil
+	return env.Result, nil
 }
 
 // armInterrupt starts the cancellation watchdog for ctx: on ctx cancellation
@@ -412,12 +500,8 @@ func (p *Perl) armInterrupt(ctx context.Context) (disarm func() bool) {
 	}
 }
 
-// errClosed is returned by every entry point once Close has run.
-var errClosed = fmt.Errorf("perl: instance is closed")
-
-// Close finalizes the instance. The Perl must not be used afterward: every
-// later Eval/Call errors, and outstanding *Ref handles become inert (their
-// finalizers only touch host-side state). Idempotent.
+// Close finalizes the instance. It must not be used afterward: every later
+// Eval/Call errors, and outstanding handles become inert. Idempotent.
 func (p *Perl) Close() error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
@@ -490,4 +574,19 @@ func (p *Perl) clearInterrupt() {
 	base.AccessMemory(p.m.g, func(mem []byte) {
 		binary.LittleEndian.PutUint32(mem[p.intrAddr:], 0)
 	})
+}
+
+// WasiExitCode reports whether err is the guest terminating itself — a
+// caught Perl-level exit() (*ExitError) or a raw wasi proc_exit — and
+// returns the exit status.
+func WasiExitCode(err error) (int, bool) {
+	var ee *ExitError
+	if errors.As(err, &ee) {
+		return ee.Code, true
+	}
+	var we *base.WasiExitError
+	if errors.As(err, &we) {
+		return int(we.Code), true
+	}
+	return 0, false
 }

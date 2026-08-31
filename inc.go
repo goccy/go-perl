@@ -7,8 +7,8 @@ package perl
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"runtime"
+
+	"github.com/goccy/go-perl/internal"
 )
 
 // AddInc prepends dirs to the instance's @INC, so `use`/`require` resolve
@@ -34,28 +34,21 @@ func (p *Perl) AddInc(ctx context.Context, dirs ...string) error {
 	return nil
 }
 
-// xsDirLoader is installed by the xs package (its init) so AddXSDir works
-// without application code importing the loader; the psgi and gperl entry
-// points link it in.
-var xsDirLoader func(p *Perl, dir string) error
-
-// RegisterXSDirLoader wires the native-module directory loader AddXSDir
-// dispatches to. Called by the xs package's init; not for application use.
-func RegisterXSDirLoader(fn func(p *Perl, dir string) error) { xsDirLoader = fn }
-
-// AddXSDir registers the native XS modules built under dir — the `gperl xs
-// build` output layout, dir/<goos>_<goarch>/<Module-Name>.so — with the
-// instance, the way AddInc registers a module tree: pass the xs root
-// (typically "local/xs") and the running binary's architecture directory is
-// selected underneath it. Registration is cheap (each module boots lazily
-// on first `use`), and a missing directory simply registers nothing.
+// AddXSDir registers the native XS modules in dir with the instance, the
+// way AddInc registers a module tree. Each <Module-Name>.so in dir (the
+// package separator spelled "-", the `gperl xs build` output naming) is
+// registered under its module name; the architecture-specific project
+// layout is dir = local/xs/<goos>_<goarch> (see the xs package's ArchTag).
+// Registration is cheap (each module boots lazily on first `use`), and a
+// missing directory simply registers nothing.
 //
 // The loader itself lives in the go-perl/xs package; using AddXSDir from a
 // binary that links neither psgi nor gperl requires importing it
 // (`import _ "github.com/goccy/go-perl/xs"`).
 func (p *Perl) AddXSDir(dir string) error {
-	if xsDirLoader == nil {
+	linked, err := internal.XSDirLoad(p.raw, dir)
+	if !linked {
 		return fmt.Errorf("perl: native XS support is not linked into this binary; import github.com/goccy/go-perl/xs")
 	}
-	return xsDirLoader(p, filepath.Join(dir, runtime.GOOS+"_"+runtime.GOARCH))
+	return err
 }

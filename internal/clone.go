@@ -1,4 +1,4 @@
-package perl
+package internal
 
 // Cloning a prepared instance.
 //
@@ -6,7 +6,7 @@ package perl
 // far — and maps new instances copy-on-write from that image. This is what
 // lets a server prepare one interpreter (modules vendored, application
 // compiled) and then scale it to N workers without re-running any of that
-// work per worker: the psgi package's Workers is built on it.
+// work per worker.
 
 import (
 	"fmt"
@@ -28,9 +28,9 @@ type cloneImage struct {
 // for the instance (the xs package's native-module loader) use it to attach
 // their own per-clone state.
 func (p *Perl) AddCloneHook(fn func(clone *Perl) error) {
-	p.funcsMu.Lock()
+	p.hookMu.Lock()
 	p.cloneHooks = append(p.cloneHooks, fn)
-	p.funcsMu.Unlock()
+	p.hookMu.Unlock()
 }
 
 // Clone returns a new instance mapped copy-on-write from this instance's
@@ -38,12 +38,16 @@ func (p *Perl) AddCloneHook(fn func(clone *Perl) error) {
 // exists in the clone, and from here the two diverge privately, sharing the
 // read-only bulk of their memory.
 //
+// userHandler becomes the clone's UserHandler and is installed BEFORE the
+// dispatcher re-registration and the clone hooks run, so guest->host calls
+// they trigger already route to the new owner.
+//
 // Take clones at rest — between requests, never while an Eval/Call is
 // running in p. The first Clone builds the image (a full memory copy);
 // subsequent clones of the same instance reuse it, so p must not run
 // anything between clones of one batch either. The clone inherits p's
-// configuration (filesystem, environment, hooks) and its Go bindings.
-func (p *Perl) Clone() (*Perl, error) {
+// configuration (filesystem, environment, hooks).
+func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error)) (*Perl, error) {
 	if p.closed.Load() {
 		return nil, fmt.Errorf("perl: Clone on a closed instance")
 	}
@@ -63,31 +67,23 @@ func (p *Perl) Clone() (*Perl, error) {
 	}
 
 	m := &Module{}
-	wasi := buildWASI(p.cfg)
-	c := &Perl{m: m, wasi: wasi, cfg: p.cfg}
+	wasi := buildWASI(p.opts)
+	c := &Perl{m: m, wasi: wasi, opts: p.opts, UserHandler: userHandler}
 	m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: m}, wasmifyStubs{m: m}, mem, img.Size(), img.Globals())
 	c.mapped = mem
 	c.h = p.h
 	c.intrAddr = p.intrAddr
 
-	// The guest memory carries p's compiled state, including the Go-bridge
-	// function ids baked into bound subs and the registered dispatcher; the
-	// host tables those ids resolve through come along.
-	p.funcsMu.RLock()
-	c.funcs = make(map[int32]GoFunc, len(p.funcs))
-	for id, fn := range p.funcs {
-		c.funcs[id] = fn
-	}
-	c.nextFuncID = p.nextFuncID
+	p.hookMu.RLock()
 	hadDispatcher := p.dispatcherSet
 	hooks := append([]func(*Perl) error(nil), p.cloneHooks...)
-	p.funcsMu.RUnlock()
+	p.hookMu.RUnlock()
 
 	// The guest memory holds a callback handle from p's registration, but
 	// callback registries are per-module host state: register the clone's
 	// own dispatcher so the handle the guest uses resolves here.
 	if hadDispatcher {
-		if err := c.ensureDispatcher(); err != nil {
+		if err := c.EnsureDispatcher(); err != nil {
 			c.Close()
 			return nil, fmt.Errorf("perl: clone dispatcher: %w", err)
 		}

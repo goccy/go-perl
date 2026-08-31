@@ -22,7 +22,6 @@ import (
 
 	perl "github.com/goccy/go-perl"
 	goperlfs "github.com/goccy/go-perl/fs"
-	"github.com/goccy/go-perl/xs"
 )
 
 // Run executes the Perl script on the embedded interpreter with the host's
@@ -78,7 +77,7 @@ func Run(script string, args []string) (status int, err error) {
 	}
 	// Native XS modules built by `gperl xs build` register lazily; a
 	// stock `use Module;` boots them through the XSLoader contract.
-	if err := xs.LoadDir(p, xsDir(projectDir)); err != nil {
+	if err := p.AddXSDir(xsDir(projectDir)); err != nil {
 		p.Close()
 		return 1, err
 	}
