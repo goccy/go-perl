@@ -1,5 +1,8 @@
 # go-perl
 
+[![CI](https://github.com/goccy/go-perl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/goccy/go-perl/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/goccy/go-perl.svg)](https://pkg.go.dev/github.com/goccy/go-perl)
+
 **Perl 5 in pure Go — embed and run Perl anywhere Go runs. No cgo, no external
 `perl`, one static binary.**
 
@@ -38,39 +41,66 @@ func main() {
 }
 ```
 
-## Features
+## Highlights
 
-- **Pure Go**: works anywhere Go compiles; `CGO_ENABLED=0` friendly.
+- **Pure Go, cross-compile anywhere**: the interpreter is ordinary Go code —
+  no cgo, no shared libraries, `CGO_ENABLED=0` friendly. Plain
+  `GOOS`/`GOARCH` cross compilation produces a single static binary for any
+  target Go supports; CI cross-builds every package for linux, macOS,
+  Windows, and even wasip1.
 - **Batteries included**: libperl plus every static XS extension (List::Util,
-  POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib
-  (embedded zip, served from a private in-memory filesystem by default).
-- **Instant start, copy-on-write**: the first `New` boots one interpreter and
-  snapshots its memory; every later `New` maps that snapshot copy-on-write, so
-  instances start without re-running interpreter init and share the read-only
-  bulk of their memory.
-- **Sandboxed by default**: each `Perl` runs in its own WASI sandbox with a
-  PRIVATE in-memory filesystem — an embedded instance touches no host files
-  unless asked to. `Config.FS` selects the backend from the
-  [`fs`](./fs) package: `fs.NewHostFS()` passes through to the operating
-  system's filesystem (how the `gperl` command behaves, matching `perl`),
-  `fs.DirFS` scopes it to one directory, `fs.NewMemFS()` or any custom
-  backend plugs in the same way. The capability hooks are FAIL-CLOSED: with
-  a zero `Config`, outbound connections (`Dial`), name resolution
-  (`Resolve`), and subprocess spawns (`Exec`) are all denied — each
-  capability is granted explicitly by setting its hook.
-- **Multi-instance**: independent `Perl` instances share nothing (writable
-  state, that is — read-only snapshot pages are shared).
-- **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
-  runaway script at the next Perl opcode.
-- **Bridged, typed**: every value crosses the boundary typed, following
-  Perl's own structure — `ScalarValue` (SV), `RefValue` (RV), `ArrayValue`
-  (AV), `HashValue` (HV), `CodeValue` (CV) — nothing is stringified in
-  transit and byte strings cross raw (`Bytes()` next to `String()`). `Call`
-  invokes named Perl subs from Go and `Bind` makes Go functions callable
-  from Perl as ordinary subs. Perl references — blessed objects,
-  array/hash/code refs — cross as identity-preserving handles, never
-  serialized, so the same object stays the same object across any number of
-  round trips. Errors map to `*PerlError` / Perl `die` respectively.
+  POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib are
+  embedded in the binary (served from a private in-memory filesystem by
+  default) — nothing to install or deploy next to your executable.
+- **Native XS support, unmodified modules**: real CPAN XS distributions
+  compile against go-perl's XS SDK with their own `Makefile.PL`/`Build.PL`
+  and load into the running interpreter as shared libraries — no source
+  changes. Moose, Text::Xslate, Devel::NYTProf, DBD::mysql,
+  PerlIO::utf8_strict, and keyword plugins like Syntax::Keyword::Match run
+  as-is (exercised by the test suite). `gperl xs build` drives the whole
+  pipeline with the embedded interpreter, so no host `perl` is needed even
+  at build time; at run time loading is a `dlopen`, no compiler required.
+  Native loading is available on linux/amd64, linux/arm64, and darwin/arm64.
+- **Go and Perl call each other in-process**: because the interpreter *is*
+  Go code, the two languages meet at the Go ABI — crossing the boundary is
+  a function call, not FFI or IPC. `Call` invokes named Perl subs from Go,
+  `Bind`/`BindClass` expose Go functions to Perl as ordinary subs (which may
+  call back into Perl, so round trips compose). Every value crosses typed —
+  see [Calling between Go and Perl](#calling-between-go-and-perl).
+- **PSGI**: the [`psgi`](./psgi) package serves PSGI applications straight
+  from `net/http`, so an existing Plack app runs on a Go HTTP server —
+  see [`examples/plack`](./examples/plack) for a Mojolicious app carrying
+  real traffic over a pool of warm workers.
+- **Many interpreters, shared memory**: the first `New` boots one
+  interpreter and snapshots its memory; every later `New` maps that snapshot
+  copy-on-write, so instances start without re-running interpreter init.
+  `Clone` does the same from a *live* instance's current state — modules
+  compiled once are inherited by every clone. Writable state is fully
+  private per instance; the read-only bulk of memory is shared, so one
+  process can hold many interpreters cheaply.
+- **Sandboxed by default, capability-controlled**: the translation to Go
+  keeps the wasm linear-memory model and the WASI syscall boundary, so every
+  filesystem, network, and process access funnels through hooks you control.
+  Each `Perl` runs against a PRIVATE in-memory filesystem unless configured
+  otherwise — `Config.FS` selects the backend from the [`fs`](./fs) package
+  (`fs.NewHostFS()` passes through to the OS, matching `perl`; `fs.DirFS`
+  scopes to one directory; `fs.NewMemFS()` or any custom backend plugs in
+  the same way). The capability hooks are FAIL-CLOSED: with a zero `Config`,
+  outbound connections (`Dial`), name resolution (`Resolve`), and subprocess
+  spawns (`Exec`) are all denied — each capability is granted explicitly.
+- **Cancellable**: cancelling the `context.Context` passed to `Eval`/`Call`
+  stops a runaway script at the next Perl opcode.
+- **Go-style tooling for Perl**: the [`gperl`](./cmd/gperl) command runs
+  scripts (`gperl run`, with `perl(1)` switches), builds self-contained
+  binaries that embed a script and its vendored CPAN modules
+  (`gperl build`), and compiles XS distributions (`gperl xs build`) —
+  resolving cpanfile dependencies with an embedded cpanminus. Everything it
+  does is also available programmatically via the
+  [`gperl`](https://pkg.go.dev/github.com/goccy/go-perl/gperl) library.
+- **Supply-chain verified**: the Perl-derived artifacts are consumed as
+  attested release binaries, verified against SLSA build provenance on every
+  refresh and re-verified in CI — see
+  [Supply-chain verification](#supply-chain-verification).
 
 ## Calling between Go and Perl
 
@@ -107,35 +137,77 @@ s, _ := perl.As[perl.ScalarValue](r.Value)
 fmt.Println(s.String()) // HELLO
 ```
 
-The value model follows Perl's own type structure. A `Value` is one of the
-sealed concrete types — `ScalarValue`, `RefValue`, `ArrayValue`,
-`HashValue`, `CodeValue`, `GlobValue`, `IOValue` — inspected either with a
-Go type switch or with `perl.As[T]` when the expected type is known up
-front; `Kind()` reports the runtime kind (mirroring `reflect.Value.Kind`).
-Scalars coerce the way Perl would (`Bool`/`Int`/`Float`/`String`, plus
-`Bytes` for the raw byte string), references dereference with
-`RefValue.Deref` (the `reflect.Value.Elem` analog), and aggregates operate
-in place through `ArrayValue`/`HashValue`/`CodeValue` — real element
-accesses in the interpreter, so ties and overloads behave as in plain
-Perl. `NewArray`/`NewHash` materialize Go data as guest aggregates in one
+Every value crosses the boundary typed, following Perl's own structure:
+a `Value` is one of the sealed concrete types — `ScalarValue` (SV),
+`RefValue` (RV), `ArrayValue` (AV), `HashValue` (HV), `CodeValue` (CV),
+`GlobValue`, `IOValue` — inspected either with a Go type switch or with
+`perl.As[T]` when the expected type is known up front; `Kind()` reports the
+runtime kind (mirroring `reflect.Value.Kind`). Nothing is stringified in
+transit and byte strings cross raw (`Bytes()` next to `String()`). Scalars
+coerce the way Perl would (`Bool`/`Int`/`Float`/`String`), references
+dereference with `RefValue.Deref` (the `reflect.Value.Elem` analog), and
+aggregates operate in place through `ArrayValue`/`HashValue`/`CodeValue` —
+real element accesses in the interpreter, so ties and overloads behave as
+in plain Perl. Perl references — blessed objects, array/hash/code refs —
+cross as identity-preserving handles, never serialized, so the same object
+stays the same object across any number of round trips.
+`NewArray`/`NewHash` materialize Go data as guest aggregates in one
 crossing, and an `ArrayValue`/`HashValue` in an argument list flattens
-exactly like `f(@a, %h)`. A bound Go function may call back into the same
-instance, so round trips compose. The [`psgi`](./psgi) package builds on
-the bridge to serve PSGI web applications from `net/http` — the `.psgi`
-file's last evaluated value
-is the application, exactly as PSGI specifies; see
-[`examples/plack`](./examples/plack) for it carrying real traffic — a
-Mojolicious app over a pool of warm instances.
+exactly like `f(@a, %h)`. Errors map to `*PerlError` / Perl `die`
+respectively.
+
+## Serving PSGI applications
+
+The [`psgi`](./psgi) package supplies the server side of PSGI on top of the
+bridge: the `.psgi` file's last evaluated value is the application, exactly
+as PSGI specifies, and every request builds the environment as a guest hash
+and calls it — no serialisation format sits between Go and the application.
+`psgi.Server` is a fixed pool of warm interpreter workers (the
+starman/starlet model): prepare ONE instance, and every other worker is a
+copy-on-write clone that adopts the same loaded application, so the loading
+work runs once no matter the worker count.
+
+```go
+stdlib, _ := perl.ExtractStdlib()
+p, _ := perl.New(perl.Config{FS: fs.NewHostFS(), StdlibDir: stdlib})
+p.AddInc(ctx, "local/lib/perl5")
+p.AddXSDir("local/xs/" + xs.ArchTag())
+server, _ := psgi.New(p, 4, "app.psgi")
+server.ListenAndServe(":8091") // or http.ListenAndServe(addr, server)
+```
+
+## The gperl command
+
+`gperl` is the perl-meets-go toolchain: it runs Perl programs on the
+embedded interpreter with go-style workflows.
+
+```sh
+gperl run script.pl [args...]   # resolve cpanfile deps, then run
+gperl run -e '...' [switches]   # any perl(1) switch (-e/-I/-M/-l/...)
+gperl build [-o out] script.pl  # self-contained Go binary: script +
+                                # vendored modules + interpreter
+gperl xs build dist...          # compile XS dists (dir or .tar.gz)
+                                # against the native XS SDK into ./local/xs
+```
+
+`gperl run` and the binaries `gperl build` produces behave like `perl`:
+host filesystem, host environment, no sandbox (the library's zero `Config`
+is the opposite — deny by default). XS builds ride each distribution's own
+`Makefile.PL`/`Build.PL` with every `perl` in the pipeline being the
+embedded interpreter, so the only tools required are `make` and a C
+compiler; the artifacts land in `local/xs/<goos>_<goarch>/` and load
+automatically.
 
 ## Supply-chain verification
 
 Two files in this repository are release artifacts of
 [perl-wasm](https://github.com/goccy/perl-wasm), not hand-written code:
-`perl.go` (the generated bridge) and `stdlib.zip` (the embeddable stdlib).
+`internal/perl.go` (the generated bridge) and `stdlib.zip` (the embeddable
+stdlib).
 They are refreshed with:
 
 ```sh
-make perl PERL_WASM_VERSION=v0.1.1
+make perl PERL_WASM_VERSION=v0.2.1
 ```
 
 which downloads both from the perl-wasm release and verifies each against the
