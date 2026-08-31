@@ -670,3 +670,82 @@ func TestBindRejectsInvalidName(t *testing.T) {
 		t.Fatalf("expected invalid sub name to be rejected")
 	}
 }
+
+// TestHashArgumentFlattening: a HashValue in an argument list flattens to
+// its key/value pairs, like f(%h).
+func TestHashArgumentFlattening(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	if r, err := p.Eval(ctx, `sub kv { my %h = @_; join ",", map { "$_=$h{$_}" } sort keys %h } 1;`); err != nil || r.Error != nil {
+		t.Fatalf("define kv: err=%v error=%v", err, r.Error)
+	}
+	h, err := p.NewHash(ctx,
+		perl.Pair{K: "a", V: perl.ValueOf(1)},
+		perl.Pair{K: "b", V: perl.ValueOf(2)},
+	)
+	if err != nil {
+		t.Fatalf("NewHash: %v", err)
+	}
+	got, err := p.Call(ctx, "kv", h)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if scalarOf(t, got[0]).String() != "a=1,b=2" {
+		t.Fatalf("flattened hash = %#v, want a=1,b=2", got[0])
+	}
+}
+
+// TestBindMultiValueReturn: a bound Go function's whole return slice
+// becomes the Perl call's return list in list context.
+func TestBindMultiValueReturn(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	if err := p.Bind("go_three", func(args []perl.Value) ([]perl.Value, error) {
+		return []perl.Value{perl.ValueOf("x"), perl.ValueOf(2), perl.ValueOf(true)}, nil
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	r, err := p.Eval(ctx, `my @r = go_three(); scalar(@r) . ":" . join("|", @r)`)
+	if err != nil || r.Error != nil {
+		t.Fatalf("Eval: err=%v error=%v", err, r.Error)
+	}
+	if resultStr(r) != "3:x|2|1" {
+		t.Fatalf("list-context return = %q, want 3:x|2|1", resultStr(r))
+	}
+}
+
+// TestExitDuringCall: a guest exit() inside Call unwinds cleanly and is the
+// error ExitCode recognises; the interpreter is still destructible.
+func TestExitDuringCall(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	if r, err := p.Eval(ctx, `sub bail { exit 7 } 1;`); err != nil || r.Error != nil {
+		t.Fatalf("define bail: err=%v error=%v", err, r.Error)
+	}
+	_, err := p.Call(ctx, "bail")
+	if code, ok := perl.ExitCode(err); !ok || code != 7 {
+		t.Fatalf("Call bail = %v (code=%d ok=%v), want exit 7", err, code, ok)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close after exit: %v", err)
+	}
+}
+
+// TestCallContextCancel: cancelling the context stops a runaway sub the
+// same way it stops a runaway eval.
+func TestCallContextCancel(t *testing.T) {
+	p := newPerl(t)
+	if r, err := p.Eval(context.Background(), `sub spin { my $n = 0; while (1) { $n++ } } 1;`); err != nil || r.Error != nil {
+		t.Fatalf("define spin: err=%v error=%v", err, r.Error)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := p.Call(ctx, "spin")
+	if err == nil || err != ctx.Err() {
+		t.Fatalf("Call spin = %v, want ctx.Err() (%v)", err, ctx.Err())
+	}
+	// The instance stays usable after a cancelled call.
+	if r, err := p.Eval(context.Background(), `41 + 1`); err != nil || r.Error != nil || resultStr(r) != "42" {
+		t.Fatalf("post-cancel eval: err=%v error=%v", err, r.Error)
+	}
+}

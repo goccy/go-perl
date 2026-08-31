@@ -58,6 +58,50 @@ func TestScalarBytes(t *testing.T) {
 	}
 }
 
+// TestKindReporting: every concrete type reports its kind, Kind renders a
+// name, and the numeric ValueOf variants map to KindInt.
+func TestKindReporting(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	r, err := p.Eval(ctx, `[\my @a2, \my %h2, sub { 5 }, *STDOUT{IO}]`)
+	if err != nil || r.Error != nil {
+		t.Fatalf("Eval: err=%v error=%v", err, r.Error)
+	}
+	parts, err := derefAs[perl.ArrayValue](t, ctx, r.Value).Values(ctx)
+	if err != nil || len(parts) != 4 {
+		t.Fatalf("setup: %#v/%v", parts, err)
+	}
+	arr := derefAs[perl.ArrayValue](t, ctx, parts[0])
+	hash := derefAs[perl.HashValue](t, ctx, parts[1])
+	code := derefAs[perl.CodeValue](t, ctx, parts[2])
+	io := derefAs[perl.IOValue](t, ctx, parts[3])
+	if arr.Kind() != perl.KindArray || hash.Kind() != perl.KindHash ||
+		code.Kind() != perl.KindCode || io.Kind() != perl.KindIO {
+		t.Fatalf("view kinds = %s/%s/%s/%s", arr.Kind(), hash.Kind(), code.Kind(), io.Kind())
+	}
+	if io.Ref().Kind() != perl.KindRef || hash.Ref().Kind() != perl.KindRef {
+		t.Fatalf("Ref kinds wrong")
+	}
+	// A code ref rebuilt from the view is the same subroutine.
+	if out, err := p.Call(ctx, "__t_kind_probe", code.Ref()); err == nil {
+		_ = out
+		t.Fatalf("expected undefined sub to die")
+	}
+	if out, err := code.Call(ctx); err != nil || scalarOf(t, out[0]).Int() != 5 {
+		t.Fatalf("code via view = %#v/%v, want 5", out, err)
+	}
+	if perl.KindUndef.String() != "undef" || perl.Kind(200).String() == "" {
+		t.Fatalf("Kind.String rendering broken")
+	}
+	if perl.ValueOf(int32(7)).Int() != 7 || perl.ValueOf(uint32(8)).Int() != 8 ||
+		perl.ValueOf(int64(9)).Int() != 9 {
+		t.Fatalf("numeric ValueOf variants broken")
+	}
+	if string(perl.ValueOf(42).Bytes()) != "42" {
+		t.Fatalf("Bytes of a non-string scalar = %q", perl.ValueOf(42).Bytes())
+	}
+}
+
 // TestAsExtraction: As succeeds on the matching concrete type and errors —
 // never panics — on a mismatch.
 func TestAsExtraction(t *testing.T) {
@@ -254,5 +298,56 @@ func TestAdoptAcrossClone(t *testing.T) {
 	}
 	if out, err := code.CallScalar(ctx, perl.ValueOf(2)); err != nil || scalarOf(t, out).Int() != 102 {
 		t.Fatalf("prototype call = %#v/%v, want 102 (independent state)", out, err)
+	}
+}
+
+// TestAdoptEveryKind: Adopt rebinds each handle-bearing concrete type, and
+// passes scalars through unchanged.
+func TestAdoptEveryKind(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	r, err := p.Eval(ctx, `our @aa = (1); our %hh = (k => "v"); [\@aa, \%hh, \*STDOUT]`)
+	if err != nil || r.Error != nil {
+		t.Fatalf("Eval: err=%v error=%v", err, r.Error)
+	}
+	parts, err := derefAs[perl.ArrayValue](t, ctx, r.Value).Values(ctx)
+	if err != nil || len(parts) != 3 {
+		t.Fatalf("setup: %#v/%v", parts, err)
+	}
+	arr := derefAs[perl.ArrayValue](t, ctx, parts[0])
+	hash := derefAs[perl.HashValue](t, ctx, parts[1])
+	glob := derefAs[perl.GlobValue](t, ctx, parts[2])
+	if glob.Kind() != perl.KindGlob || glob.Ref().Kind() != perl.KindRef {
+		t.Fatalf("glob view kind = %s", glob.Kind())
+	}
+
+	c, err := p.Clone()
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	defer c.Close()
+
+	if s, err := perl.Adopt(c, perl.ValueOf("plain")); err != nil || s.String() != "plain" {
+		t.Fatalf("Adopt scalar = %#v/%v", s, err)
+	}
+	ca, err := perl.Adopt(c, arr)
+	if err != nil {
+		t.Fatalf("Adopt array: %v", err)
+	}
+	if n, err := ca.Len(ctx); err != nil || n != 1 {
+		t.Fatalf("adopted array Len = %d/%v", n, err)
+	}
+	ch, err := perl.Adopt(c, hash)
+	if err != nil {
+		t.Fatalf("Adopt hash: %v", err)
+	}
+	if v, ok, err := ch.Get(ctx, "k"); err != nil || !ok || scalarOf(t, v).String() != "v" {
+		t.Fatalf("adopted hash Get = %#v/%v/%v", v, ok, err)
+	}
+	if _, err := perl.Adopt(c, glob); err != nil {
+		t.Fatalf("Adopt glob: %v", err)
+	}
+	if _, err := perl.Adopt(c, arr.Ref()); err != nil {
+		t.Fatalf("Adopt ref: %v", err)
 	}
 }

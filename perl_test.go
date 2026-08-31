@@ -2,11 +2,14 @@ package perl_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	perl "github.com/goccy/go-perl"
+	goperlfs "github.com/goccy/go-perl/fs"
 )
 
 // resultStr renders an Eval result's scalar as its Perl string form; a
@@ -159,6 +162,36 @@ func TestInstanceIsolation(t *testing.T) {
 	}
 	if r.Error != nil || resultStr(r) != "clean" {
 		t.Fatalf("isolation: ok=%v result=%q (error=%v)", (r.Error == nil), resultStr(r), r.Error)
+	}
+}
+
+// TestAddInc: directories prepended to @INC resolve modules through the
+// instance's filesystem.
+func TestAddInc(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "My"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "My", "IncProbe.pm"),
+		[]byte("package My::IncProbe;\nsub answer { 42 }\n1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("ExtractStdlib: %v", err)
+	}
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
+	ctx := context.Background()
+	if err := p.AddInc(ctx, dir); err != nil {
+		t.Fatalf("AddInc: %v", err)
+	}
+	r, err := p.Eval(ctx, `use My::IncProbe; My::IncProbe::answer()`)
+	if err != nil || r.Error != nil || resultStr(r) != "42" {
+		t.Fatalf("module via AddInc: err=%v error=%v result=%q", err, r.Error, resultStr(r))
 	}
 }
 
