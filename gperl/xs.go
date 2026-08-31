@@ -14,9 +14,9 @@ package gperl
 // toolchain), and the compiler's perl-header search path is redirected to
 // the SDK (materialized from the copy embedded in the xs package).
 // Generated headers, xsubpp runs, extra C sources, and typemaps all keep
-// working. The only commands the pipeline execs are make and curl (cc
-// runs under make) — no perl needs to be installed. The RUNTIME
-// requirement stays zero: gperl run only dlopens the prebuilt artifacts.
+// working. The only command the pipeline execs is make (cc runs under
+// it) — no perl needs to be installed. The RUNTIME requirement stays
+// zero: gperl run only dlopens the prebuilt artifacts.
 //
 // Layout produced under the project directory:
 //

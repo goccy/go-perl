@@ -7,9 +7,9 @@ package gperl
 // Makefile, cpanm — and all of them are pure Perl. The pipeline runs them
 // on IN-PROCESS interpreters, so building native modules needs no perl
 // installed on the system and spawns no perl processes of its own: gperl
-// IS the perl that drives the build. The only externals it execs are make
-// and curl (cc runs under make); the perl children that make itself (or
-// guest code) spawns come back as `gperl run` through the shim.
+// IS the perl that drives the build. The only external it execs is make
+// (cc runs under it); the perl children that make itself (or guest code)
+// spawns come back as `gperl run` through the shim.
 //
 // The flag surface is the subset those build tools use: -e, -I, -M/-m, -w,
 // `--`, and script execution. Anything else is rejected loudly rather than
