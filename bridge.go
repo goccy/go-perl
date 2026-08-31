@@ -113,6 +113,23 @@ func newRef(p *Perl, id uint64, class, reftype string) *Ref {
 	return r
 }
 
+// AdoptRef returns r as seen by c, a clone of the instance r was obtained
+// from. Cloning copies the guest memory wholesale — the handle registry
+// included — so a reference obtained in the prototype BEFORE its first
+// Clone designates the same (copied) value in every clone under the same
+// handle. Each returned Ref is independently owned: instance registries
+// are separate memories, so the prototype's wrapper and every adopted
+// wrapper release against their own instance.
+func (c *Perl) AdoptRef(r *Ref) (*Ref, error) {
+	if r == nil || r.released.Load() {
+		return nil, fmt.Errorf("perl: AdoptRef of a released reference")
+	}
+	if c.closed.Load() {
+		return nil, errClosed
+	}
+	return newRef(c, r.id, r.class, r.reftype), nil
+}
+
 // Class returns the package the reference is blessed into, or "" for an
 // unblessed reference.
 func (r *Ref) Class() string { return r.class }
