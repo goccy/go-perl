@@ -65,10 +65,22 @@ my $mk_input = sub {
 };
 my $read_body = sub {
     my ($fh) = @_;
-    local $/;
-    my $data = <$fh>;
-    eval { close $fh };
-    return defined $data ? $data : '';
+    my $out = '';
+    # PSGI's second body form: a filehandle OR any object with getline/close.
+    # A blessed handle-like object drains through getline (Plack's own
+    # precedence); an unblessed glob reads directly (->can dies on it, so
+    # probe under eval).
+    my $can_getline = do { local $@; eval { $fh->can('getline') } };
+    if ($can_getline) {
+        while (defined(my $chunk = $fh->getline)) { $out .= $chunk }
+    } else {
+        local $/;
+        my $data = <$fh>;
+        $out = $data if defined $data;
+    }
+    do { local $@; eval { $fh->close } };
+    do { local $@; eval { close $fh } } unless $can_getline;
+    return $out;
 };
 [$mk_input, $read_body, \*STDERR];
 `
@@ -424,45 +436,46 @@ func writeResponse(ctx context.Context, wk worker, w http.ResponseWriter, res []
 	return err
 }
 
-// responseBody drains the PSGI body: an arrayref of byte strings, or a
-// filehandle (read through the guest, where the handle lives).
+// responseBody drains the PSGI body. The spec allows two forms: an
+// arrayref of byte strings, or a filehandle-like value — a real
+// filehandle, or any blessed object with getline/close (what Mojolicious
+// and friends return). Plack's precedence applies: a blessed body drains
+// through the handle path even when its underlying type is an aggregate.
 func responseBody(ctx context.Context, wk worker, v perl.Value) ([]byte, error) {
 	ref, err := perl.As[perl.RefValue](v)
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ref.Deref(ctx)
+	if _, blessed := ref.Class(); !blessed {
+		inner, err := ref.Deref(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if arr, ok := inner.(perl.ArrayValue); ok {
+			chunks, err := arr.Values(ctx)
+			if err != nil {
+				return nil, err
+			}
+			var out []byte
+			for i, c := range chunks {
+				sv, err := perl.As[perl.ScalarValue](c)
+				if err != nil {
+					return nil, fmt.Errorf("body element %d: %w", i, err)
+				}
+				out = append(out, sv.Bytes()...)
+			}
+			return out, nil
+		}
+	}
+	data, err := wk.readBody.CallScalar(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	switch x := inner.(type) {
-	case perl.ArrayValue:
-		chunks, err := x.Values(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var out []byte
-		for i, c := range chunks {
-			sv, err := perl.As[perl.ScalarValue](c)
-			if err != nil {
-				return nil, fmt.Errorf("body element %d: %w", i, err)
-			}
-			out = append(out, sv.Bytes()...)
-		}
-		return out, nil
-	case perl.GlobValue, perl.IOValue:
-		data, err := wk.readBody.CallScalar(ctx, ref)
-		if err != nil {
-			return nil, err
-		}
-		sv, err := perl.As[perl.ScalarValue](data)
-		if err != nil {
-			return nil, err
-		}
-		return sv.Bytes(), nil
-	default:
-		return nil, fmt.Errorf("unsupported body form %s", inner.Kind())
+	sv, err := perl.As[perl.ScalarValue](data)
+	if err != nil {
+		return nil, err
 	}
+	return sv.Bytes(), nil
 }
 
 // Close shuts down every worker. Callers stop serving first; Close does not

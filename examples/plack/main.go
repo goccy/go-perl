@@ -26,6 +26,7 @@ import (
 	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/fs"
 	"github.com/goccy/go-perl/psgi"
+	"github.com/goccy/go-perl/xs"
 )
 
 // newPrototype builds the one instance every worker clones: the host
@@ -77,7 +78,7 @@ func appHandler(size int) (http.Handler, func(), error) {
 	if _, err := os.Stat(libDir); err != nil {
 		return nil, nil, fmt.Errorf("%s not found - run `make setup` to vendor the cpanfile modules: %w", libDir, err)
 	}
-	xsDir, err := filepath.Abs(filepath.Join("local", "xs"))
+	xsDir, err := filepath.Abs(filepath.Join("local", "xs", xs.ArchTag()))
 	if err != nil {
 		return nil, nil, err
 	}
