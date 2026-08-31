@@ -45,7 +45,7 @@ func TestDevelNYTProf(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_ninc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_ninc", perl.NewValue(filepath.Join(dir, "lib"))); err != nil {
+	if _, err := p.Call(ctx, "__t_ninc", perl.ValueOf(filepath.Join(dir, "lib"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 

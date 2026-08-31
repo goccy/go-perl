@@ -18,17 +18,17 @@ func TestScalarCoercions(t *testing.T) {
 		b    bool
 	}{
 		{"undef", perl.Undef(), "", 0, 0, false},
-		{"true", perl.NewValue(true), "1", 1, 1, true},
-		{"false", perl.NewValue(false), "", 0, 0, false},
-		{"int", perl.NewValue(42), "42", 42, 42, true},
-		{"zero", perl.NewValue(0), "0", 0, 0, false},
-		{"float", perl.NewValue(2.5), "2.5", 2, 2.5, true},
-		{"string", perl.NewValue("perl"), "perl", 0, 0, true},
-		{"numeric prefix", perl.NewValue("42abc"), "42abc", 42, 42, true},
-		{"exponent", perl.NewValue("1.5e2xyz"), "1.5e2xyz", 150, 150, true},
-		{"zero string", perl.NewValue("0"), "0", 0, 0, false},
-		{"empty string", perl.NewValue(""), "", 0, 0, false},
-		{"bytes", perl.NewValue([]byte{'4', '2'}), "42", 42, 42, true},
+		{"true", perl.ValueOf(true), "1", 1, 1, true},
+		{"false", perl.ValueOf(false), "", 0, 0, false},
+		{"int", perl.ValueOf(42), "42", 42, 42, true},
+		{"zero", perl.ValueOf(0), "0", 0, 0, false},
+		{"float", perl.ValueOf(2.5), "2.5", 2, 2.5, true},
+		{"string", perl.ValueOf("perl"), "perl", 0, 0, true},
+		{"numeric prefix", perl.ValueOf("42abc"), "42abc", 42, 42, true},
+		{"exponent", perl.ValueOf("1.5e2xyz"), "1.5e2xyz", 150, 150, true},
+		{"zero string", perl.ValueOf("0"), "0", 0, 0, false},
+		{"empty string", perl.ValueOf(""), "", 0, 0, false},
+		{"bytes", perl.ValueOf([]byte{'4', '2'}), "42", 42, 42, true},
 	}
 	for _, c := range cases {
 		if got := c.v.String(); got != c.str {
@@ -49,7 +49,7 @@ func TestScalarCoercions(t *testing.T) {
 // TestScalarBytes: Bytes returns the raw byte string without re-encoding.
 func TestScalarBytes(t *testing.T) {
 	raw := []byte{0x00, 0xFF, 'x'}
-	v := perl.NewValue(raw)
+	v := perl.ValueOf(raw)
 	if got := v.Bytes(); string(got) != string(raw) {
 		t.Fatalf("Bytes = %x, want %x", got, raw)
 	}
@@ -61,7 +61,7 @@ func TestScalarBytes(t *testing.T) {
 // TestAsExtraction: As succeeds on the matching concrete type and errors —
 // never panics — on a mismatch.
 func TestAsExtraction(t *testing.T) {
-	var v perl.Value = perl.NewValue(7)
+	var v perl.Value = perl.ValueOf(7)
 	if s, err := perl.As[perl.ScalarValue](v); err != nil || s.Int() != 7 {
 		t.Fatalf("As[ScalarValue] = %v/%v", s, err)
 	}
@@ -135,14 +135,14 @@ func TestUtf8StringRoundTrip(t *testing.T) {
 		t.Fatalf("define: err=%v error=%v", err, r.Error)
 	}
 	const s = "こんにちは" // 5 characters, 15 UTF-8 bytes
-	got, err := p.Call(ctx, "charlen", perl.NewValue(s))
+	got, err := p.Call(ctx, "charlen", perl.ValueOf(s))
 	if err != nil {
 		t.Fatalf("charlen: %v", err)
 	}
 	if scalarOf(t, got[0]).Int() != 5 {
 		t.Fatalf("character length = %v, want 5", got[0])
 	}
-	back, err := p.Call(ctx, "mirror3", perl.NewValue(s))
+	back, err := p.Call(ctx, "mirror3", perl.ValueOf(s))
 	if err != nil {
 		t.Fatalf("mirror3: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestNewArrayNewHashRoundTrip(t *testing.T) {
 	p := newPerl(t)
 	ctx := context.Background()
 
-	arr, err := p.NewArray(ctx, perl.NewValue("a"), perl.NewValue(2), perl.NewValue(true))
+	arr, err := p.NewArray(ctx, perl.ValueOf("a"), perl.ValueOf(2), perl.ValueOf(true))
 	if err != nil {
 		t.Fatalf("NewArray: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestNewArrayNewHashRoundTrip(t *testing.T) {
 	}
 
 	h, err := p.NewHash(ctx,
-		perl.Pair{K: "name", V: perl.NewValue("go-perl")},
+		perl.Pair{K: "name", V: perl.ValueOf("go-perl")},
 		perl.Pair{K: "nested", V: arr.Ref()},
 	)
 	if err != nil {
@@ -201,7 +201,7 @@ func TestNewArrayNewHashRoundTrip(t *testing.T) {
 func TestSingleSlotRejectsBareAggregate(t *testing.T) {
 	p := newPerl(t)
 	ctx := context.Background()
-	arr, err := p.NewArray(ctx, perl.NewValue(1))
+	arr, err := p.NewArray(ctx, perl.ValueOf(1))
 	if err != nil {
 		t.Fatalf("NewArray: %v", err)
 	}
@@ -249,10 +249,10 @@ func TestAdoptAcrossClone(t *testing.T) {
 		t.Fatalf("Adopt: %v", err)
 	}
 	// The clone's copy advances independently of the prototype's.
-	if out, err := adopted.CallScalar(ctx, perl.NewValue(1)); err != nil || scalarOf(t, out).Int() != 101 {
+	if out, err := adopted.CallScalar(ctx, perl.ValueOf(1)); err != nil || scalarOf(t, out).Int() != 101 {
 		t.Fatalf("clone call = %#v/%v, want 101", out, err)
 	}
-	if out, err := code.CallScalar(ctx, perl.NewValue(2)); err != nil || scalarOf(t, out).Int() != 102 {
+	if out, err := code.CallScalar(ctx, perl.ValueOf(2)); err != nil || scalarOf(t, out).Int() != 102 {
 		t.Fatalf("prototype call = %#v/%v, want 102 (independent state)", out, err)
 	}
 }

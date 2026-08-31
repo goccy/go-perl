@@ -80,7 +80,7 @@ func TestNativeXSModule(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_add_inc { unshift @INC, $_[0]; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("define inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_add_inc", perl.NewValue(libdir)); err != nil {
+	if _, err := p.Call(ctx, "__t_add_inc", perl.ValueOf(libdir)); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestNativeXSModule(t *testing.T) {
 	}
 
 	// Native XSUBs interleave with everything else on the instance.
-	got, err := p.Call(ctx, "Demo::XS::add", perl.NewValue(20), perl.NewValue(22))
+	got, err := p.Call(ctx, "Demo::XS::add", perl.ValueOf(20), perl.ValueOf(22))
 	if err != nil {
 		t.Fatalf("Call add: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestNativeCppObjectModule(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_inc2 { unshift @INC, $_[0]; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_inc2", perl.NewValue(libdir)); err != nil {
+	if _, err := p.Call(ctx, "__t_inc2", perl.ValueOf(libdir)); err != nil {
 		t.Fatal(err)
 	}
 

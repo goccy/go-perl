@@ -79,7 +79,7 @@ ctx := context.Background()
 
 // Go -> Perl: call a named sub. Arguments and results are typed Values.
 p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`)
-sum, _ := p.Call(ctx, "add", perl.NewValue(40), perl.NewValue(2))
+sum, _ := p.Call(ctx, "add", perl.ValueOf(40), perl.ValueOf(2))
 n, _ := perl.As[perl.ScalarValue](sum[0])
 fmt.Println(n.Int()) // 42
 
@@ -98,7 +98,7 @@ p.Bind("go_upper", func(args []perl.Value) ([]perl.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []perl.Value{perl.NewValue(strings.ToUpper(s.String()))}, nil
+	return []perl.Value{perl.ValueOf(strings.ToUpper(s.String()))}, nil
 })
 r, _ := p.Eval(ctx, `go_upper("hello")`)
 s, _ := perl.As[perl.ScalarValue](r.Value)

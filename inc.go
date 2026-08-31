@@ -21,7 +21,7 @@ func (p *Perl) AddInc(ctx context.Context, dirs ...string) error {
 	}
 	vals := make([]Value, len(dirs))
 	for i, d := range dirs {
-		vals[i] = NewValue(d)
+		vals[i] = ValueOf(d)
 	}
 	if err := p.Bind("__goperl_inc_dirs", func([]Value) ([]Value, error) { return vals, nil }); err != nil {
 		return fmt.Errorf("bind inc dirs: %w", err)

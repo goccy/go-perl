@@ -192,7 +192,7 @@ func loadWorker(ctx context.Context, p *perl.Perl, appPath string) (worker, erro
 		return worker{}, fmt.Errorf("install request helpers: %w", err)
 	}
 
-	version, err := p.NewArray(ctx, perl.NewValue(1), perl.NewValue(1))
+	version, err := p.NewArray(ctx, perl.ValueOf(1), perl.ValueOf(1))
 	if err != nil {
 		return worker{}, fmt.Errorf("build psgi.version: %w", err)
 	}
@@ -294,7 +294,7 @@ func serve(ctx context.Context, wk worker, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return err
 	}
-	input, err := wk.mkInput.CallScalar(ctx, perl.NewValue(body))
+	input, err := wk.mkInput.CallScalar(ctx, perl.ValueOf(body))
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return fmt.Errorf("build psgi.input: %w", err)
@@ -331,28 +331,28 @@ func requestEnv(r *http.Request, wk worker, bodyLen int, input perl.Value, multi
 		scheme = "https"
 	}
 	pairs := []perl.Pair{
-		{K: "REQUEST_METHOD", V: perl.NewValue(r.Method)},
-		{K: "SCRIPT_NAME", V: perl.NewValue("")},
-		{K: "PATH_INFO", V: perl.NewValue(r.URL.Path)},
-		{K: "REQUEST_URI", V: perl.NewValue(r.URL.RequestURI())},
-		{K: "QUERY_STRING", V: perl.NewValue(r.URL.RawQuery)},
-		{K: "SERVER_NAME", V: perl.NewValue(host)},
-		{K: "SERVER_PORT", V: perl.NewValue(port)},
-		{K: "SERVER_PROTOCOL", V: perl.NewValue(r.Proto)},
-		{K: "REMOTE_ADDR", V: perl.NewValue(remote)},
-		{K: "CONTENT_LENGTH", V: perl.NewValue(bodyLen)},
+		{K: "REQUEST_METHOD", V: perl.ValueOf(r.Method)},
+		{K: "SCRIPT_NAME", V: perl.ValueOf("")},
+		{K: "PATH_INFO", V: perl.ValueOf(r.URL.Path)},
+		{K: "REQUEST_URI", V: perl.ValueOf(r.URL.RequestURI())},
+		{K: "QUERY_STRING", V: perl.ValueOf(r.URL.RawQuery)},
+		{K: "SERVER_NAME", V: perl.ValueOf(host)},
+		{K: "SERVER_PORT", V: perl.ValueOf(port)},
+		{K: "SERVER_PROTOCOL", V: perl.ValueOf(r.Proto)},
+		{K: "REMOTE_ADDR", V: perl.ValueOf(remote)},
+		{K: "CONTENT_LENGTH", V: perl.ValueOf(bodyLen)},
 		{K: "psgi.version", V: wk.version},
-		{K: "psgi.url_scheme", V: perl.NewValue(scheme)},
+		{K: "psgi.url_scheme", V: perl.ValueOf(scheme)},
 		{K: "psgi.input", V: input},
 		{K: "psgi.errors", V: wk.stderr},
-		{K: "psgi.multithread", V: perl.NewValue(false)},
-		{K: "psgi.multiprocess", V: perl.NewValue(multiproc)},
-		{K: "psgi.run_once", V: perl.NewValue(false)},
-		{K: "psgi.streaming", V: perl.NewValue(false)},
-		{K: "psgi.nonblocking", V: perl.NewValue(false)},
+		{K: "psgi.multithread", V: perl.ValueOf(false)},
+		{K: "psgi.multiprocess", V: perl.ValueOf(multiproc)},
+		{K: "psgi.run_once", V: perl.ValueOf(false)},
+		{K: "psgi.streaming", V: perl.ValueOf(false)},
+		{K: "psgi.nonblocking", V: perl.ValueOf(false)},
 	}
 	if ct := r.Header.Get("Content-Type"); ct != "" {
-		pairs = append(pairs, perl.Pair{K: "CONTENT_TYPE", V: perl.NewValue(ct)})
+		pairs = append(pairs, perl.Pair{K: "CONTENT_TYPE", V: perl.ValueOf(ct)})
 	}
 	for k, vs := range r.Header {
 		switch k {
@@ -361,7 +361,7 @@ func requestEnv(r *http.Request, wk worker, bodyLen int, input perl.Value, multi
 		}
 		pairs = append(pairs, perl.Pair{
 			K: "HTTP_" + strings.ReplaceAll(strings.ToUpper(k), "-", "_"),
-			V: perl.NewValue(strings.Join(vs, ", ")),
+			V: perl.ValueOf(strings.Join(vs, ", ")),
 		})
 	}
 	return pairs

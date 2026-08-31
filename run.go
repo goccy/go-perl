@@ -50,16 +50,16 @@ func (p *Perl) RunFile(ctx context.Context, path string, incDirs []string, args 
 	}
 	incVals := make([]Value, len(incDirs))
 	for i, d := range incDirs {
-		incVals[i] = NewValue(d)
+		incVals[i] = ValueOf(d)
 	}
 	inc, err := p.NewArray(ctx, incVals...)
 	if err != nil {
 		return fmt.Errorf("build @INC list: %w", err)
 	}
 	callArgs := make([]Value, 0, len(args)+2)
-	callArgs = append(callArgs, NewValue(path), inc.Ref())
+	callArgs = append(callArgs, ValueOf(path), inc.Ref())
 	for _, a := range args {
-		callArgs = append(callArgs, NewValue(a))
+		callArgs = append(callArgs, ValueOf(a))
 	}
 	_, err = p.Call(ctx, "__goperl_run_file", callArgs...)
 	return err

@@ -26,7 +26,7 @@ func TestCloneInheritsAndDiverges(t *testing.T) {
 	if err := p.Bind("go_add", func(args []perl.Value) ([]perl.Value, error) {
 		a := scalarOf(t, args[0])
 		b := scalarOf(t, args[1])
-		return []perl.Value{perl.NewValue(a.Int() + b.Int())}, nil
+		return []perl.Value{perl.ValueOf(a.Int() + b.Int())}, nil
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}

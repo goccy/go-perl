@@ -45,11 +45,11 @@ func TestTextXslate(t *testing.T) {
 
 	loadXSModule(t, p, "Text::Xslate", so)
 
-	inc := []perl.Value{perl.NewValue(filepath.Join(dir, "lib")), perl.NewValue(filepath.Join(dir, "deps", "lib", "perl5"))}
+	inc := []perl.Value{perl.ValueOf(filepath.Join(dir, "lib")), perl.ValueOf(filepath.Join(dir, "deps", "lib", "perl5"))}
 	entries, _ := os.ReadDir(filepath.Join(dir, "deps", "lib", "perl5"))
 	for _, e := range entries {
 		if e.IsDir() && strings.Contains(e.Name(), "-") { // archname dirs
-			inc = append(inc, perl.NewValue(filepath.Join(dir, "deps", "lib", "perl5", e.Name())))
+			inc = append(inc, perl.ValueOf(filepath.Join(dir, "deps", "lib", "perl5", e.Name())))
 		}
 	}
 	if r, err := p.Eval(ctx, `sub __t_xinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {

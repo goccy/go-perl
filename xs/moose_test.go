@@ -47,8 +47,8 @@ func TestMoose(t *testing.T) {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
 	if _, err := p.Call(ctx, "__t_minc",
-		perl.NewValue(filepath.Join(dir, "lib")),
-		perl.NewValue(filepath.Join(dir, "deps", "lib", "perl5"))); err != nil {
+		perl.ValueOf(filepath.Join(dir, "lib")),
+		perl.ValueOf(filepath.Join(dir, "deps", "lib", "perl5"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 

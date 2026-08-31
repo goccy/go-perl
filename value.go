@@ -197,15 +197,15 @@ func (v ScalarValue) Bytes() []byte {
 	return []byte(v.String())
 }
 
-// ScalarType constrains the Go types NewValue accepts as one Perl scalar.
+// ScalarType constrains the Go types ValueOf accepts as one Perl scalar.
 type ScalarType interface {
 	bool | int | int32 | int64 | uint32 | float64 | string | []byte
 }
 
-// NewValue builds the scalar for a Go value: a bool crosses as a Perl core
+// ValueOf builds the scalar for a Go value: a bool crosses as a Perl core
 // boolean, integers as IVs, floats as NVs, a string as a utf8 character
 // string, and a []byte as a raw byte string.
-func NewValue[T ScalarType](v T) ScalarValue {
+func ValueOf[T ScalarType](v T) ScalarValue {
 	switch x := any(v).(type) {
 	case bool:
 		return ScalarValue{kind: KindBool, b: x}
@@ -332,7 +332,7 @@ func (v RefValue) MethodCall(ctx context.Context, method string, args ...Value) 
 // Isa reports $ref->isa(class) — whether the reference's class is or
 // inherits from class.
 func (v RefValue) Isa(ctx context.Context, class string) (bool, error) {
-	res, err := v.MethodCall(ctx, "isa", NewValue(class))
+	res, err := v.MethodCall(ctx, "isa", ValueOf(class))
 	if err != nil {
 		return false, err
 	}
@@ -341,7 +341,7 @@ func (v RefValue) Isa(ctx context.Context, class string) (bool, error) {
 
 // Can reports $ref->can(method) — whether the class provides the method.
 func (v RefValue) Can(ctx context.Context, method string) (bool, error) {
-	res, err := v.MethodCall(ctx, "can", NewValue(method))
+	res, err := v.MethodCall(ctx, "can", ValueOf(method))
 	if err != nil {
 		return false, err
 	}

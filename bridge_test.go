@@ -52,7 +52,7 @@ func TestCallNamedSub(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("define add: err=%v error=%v", err, r.Error)
 	}
-	got, err := p.Call(ctx, "add", perl.NewValue(40), perl.NewValue(2))
+	got, err := p.Call(ctx, "add", perl.ValueOf(40), perl.ValueOf(2))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -72,11 +72,11 @@ func TestCallListReturnAndAggregateArgs(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("define shape: err=%v error=%v", err, r.Error)
 	}
-	items, err := p.NewArray(ctx, perl.NewValue(1), perl.NewValue(2), perl.NewValue(3))
+	items, err := p.NewArray(ctx, perl.ValueOf(1), perl.ValueOf(2), perl.ValueOf(3))
 	if err != nil {
 		t.Fatalf("NewArray: %v", err)
 	}
-	opts, err := p.NewHash(ctx, perl.Pair{K: "name", V: perl.NewValue("perl")})
+	opts, err := p.NewHash(ctx, perl.Pair{K: "name", V: perl.ValueOf("perl")})
 	if err != nil {
 		t.Fatalf("NewHash: %v", err)
 	}
@@ -109,12 +109,12 @@ func TestArgumentFlattening(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub count_args { scalar @_ } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("define count_args: err=%v error=%v", err, r.Error)
 	}
-	arr, err := p.NewArray(ctx, perl.NewValue(1), perl.NewValue(2), perl.NewValue(3))
+	arr, err := p.NewArray(ctx, perl.ValueOf(1), perl.ValueOf(2), perl.ValueOf(3))
 	if err != nil {
 		t.Fatalf("NewArray: %v", err)
 	}
 	// Flattened: 3 elements + 1 scalar = 4 arguments.
-	got, err := p.Call(ctx, "count_args", arr, perl.NewValue("x"))
+	got, err := p.Call(ctx, "count_args", arr, perl.ValueOf("x"))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestArgumentFlattening(t *testing.T) {
 		t.Fatalf("flattened arg count = %v, want 4", got[0])
 	}
 	// By reference: 1 arrayref + 1 scalar = 2 arguments.
-	got, err = p.Call(ctx, "count_args", arr.Ref(), perl.NewValue("x"))
+	got, err = p.Call(ctx, "count_args", arr.Ref(), perl.ValueOf("x"))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -207,15 +207,15 @@ func TestCodeValueCall(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub make_adder { my ($n) = @_; my $sum = $n; sub { $sum += $_[0]; $sum } } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("define make_adder: err=%v error=%v", err, r.Error)
 	}
-	res, err := p.Call(ctx, "make_adder", perl.NewValue(10))
+	res, err := p.Call(ctx, "make_adder", perl.ValueOf(10))
 	if err != nil {
 		t.Fatalf("Call make_adder: %v", err)
 	}
 	adder := derefAs[perl.CodeValue](t, ctx, res[0])
-	if out, err := adder.Call(ctx, perl.NewValue(5)); err != nil || scalarOf(t, out[0]).Int() != 15 {
+	if out, err := adder.Call(ctx, perl.ValueOf(5)); err != nil || scalarOf(t, out[0]).Int() != 15 {
 		t.Fatalf("first Call = %#v err=%v, want 15", out, err)
 	}
-	if out, err := adder.CallScalar(ctx, perl.NewValue(7)); err != nil || scalarOf(t, out).Int() != 22 {
+	if out, err := adder.CallScalar(ctx, perl.ValueOf(7)); err != nil || scalarOf(t, out).Int() != 22 {
 		t.Fatalf("CallScalar = %#v err=%v, want 22 (closure state must persist)", out, err)
 	}
 }
@@ -239,10 +239,10 @@ func TestArrayAndHashOperations(t *testing.T) {
 	if v, err := arr.Index(ctx, -1); err != nil || scalarOf(t, v).Float() != 30.5 {
 		t.Fatalf("Index(-1) = %#v/%v, want 30.5", v, err)
 	}
-	if err := arr.SetIndex(ctx, 0, perl.NewValue(11)); err != nil {
+	if err := arr.SetIndex(ctx, 0, perl.ValueOf(11)); err != nil {
 		t.Fatalf("SetIndex: %v", err)
 	}
-	if err := arr.Push(ctx, perl.NewValue("tail")); err != nil {
+	if err := arr.Push(ctx, perl.ValueOf("tail")); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	// The Perl side observes every mutation (same array, not a copy).
@@ -262,7 +262,7 @@ func TestArrayAndHashOperations(t *testing.T) {
 	if _, ok, err := hash.Get(ctx, "absent"); err != nil || ok {
 		t.Fatalf("Get(absent) exists=%v err=%v, want false", ok, err)
 	}
-	if err := hash.Set(ctx, "scheme", perl.NewValue("https")); err != nil {
+	if err := hash.Set(ctx, "scheme", perl.ValueOf("https")); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	if err := hash.Delete(ctx, "port"); err != nil {
@@ -291,14 +291,14 @@ func TestByteStringRoundTrip(t *testing.T) {
 		t.Fatalf("define mirror: err=%v error=%v", err, r.Error)
 	}
 	raw := []byte{0x00, 0xFF, 0xFE, 'a', 0x00, 0x80, 'z'}
-	got, err := p.Call(ctx, "mirror", perl.NewValue(raw))
+	got, err := p.Call(ctx, "mirror", perl.ValueOf(raw))
 	if err != nil {
 		t.Fatalf("Call mirror: %v", err)
 	}
 	if string(scalarOf(t, got[0]).Bytes()) != string(raw) {
 		t.Fatalf("mirror = %x, want %x", scalarOf(t, got[0]).Bytes(), raw)
 	}
-	n, err := p.Call(ctx, "bytelen", perl.NewValue(raw))
+	n, err := p.Call(ctx, "bytelen", perl.ValueOf(raw))
 	if err != nil {
 		t.Fatalf("Call bytelen: %v", err)
 	}
@@ -320,10 +320,10 @@ func TestScalarKindsAcrossBridge(t *testing.T) {
 		kind perl.Kind
 	}{
 		{perl.Undef(), perl.KindUndef},
-		{perl.NewValue(true), perl.KindBool},
-		{perl.NewValue(41), perl.KindInt},
-		{perl.NewValue(2.5), perl.KindFloat},
-		{perl.NewValue("text"), perl.KindString},
+		{perl.ValueOf(true), perl.KindBool},
+		{perl.ValueOf(41), perl.KindInt},
+		{perl.ValueOf(2.5), perl.KindFloat},
+		{perl.ValueOf("text"), perl.KindString},
 	}
 	for _, c := range cases {
 		got, err := p.Call(ctx, "mirror2", c.in)
@@ -359,7 +359,7 @@ func TestBindReceivesRefs(t *testing.T) {
 		}
 		kept = ref
 		class, _ := ref.Class()
-		return []perl.Value{perl.NewValue(class)}, nil
+		return []perl.Value{perl.ValueOf(class)}, nil
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestBindGoFunction(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return []perl.Value{perl.NewValue(strings.ToUpper(s.String()))}, nil
+		return []perl.Value{perl.ValueOf(strings.ToUpper(s.String()))}, nil
 	})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
@@ -496,15 +496,15 @@ func TestBindClassFromGo(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return []perl.Value{perl.NewValue(strings.ToUpper(sv.String()))}, nil
+			return []perl.Value{perl.ValueOf(strings.ToUpper(sv.String()))}, nil
 		},
 		"who": func(args []perl.Value) ([]perl.Value, error) {
 			switch inv := args[0].(type) {
 			case perl.RefValue:
 				class, _ := inv.Class()
-				return []perl.Value{perl.NewValue("instance:" + class)}, nil
+				return []perl.Value{perl.ValueOf("instance:" + class)}, nil
 			case perl.ScalarValue:
-				return []perl.Value{perl.NewValue("class:" + inv.String())}, nil
+				return []perl.Value{perl.ValueOf("class:" + inv.String())}, nil
 			default:
 				return nil, fmt.Errorf("unexpected invocant kind %s", args[0].Kind())
 			}
@@ -645,7 +645,7 @@ func TestCallbackDoesNotDeadlockOtherGoroutines(t *testing.T) {
 		if err := <-otherDone; err != nil {
 			return nil, err
 		}
-		return []perl.Value{perl.NewValue("released")}, nil
+		return []perl.Value{perl.ValueOf("released")}, nil
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}

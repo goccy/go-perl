@@ -52,14 +52,14 @@ func TestPerlIOUtf8Strict(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_pinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_pinc", perl.NewValue(filepath.Join(dir, "lib"))); err != nil {
+	if _, err := p.Call(ctx, "__t_pinc", perl.ValueOf(filepath.Join(dir, "lib"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 	if r, err := p.Eval(ctx,
 		`sub __t_pfiles { our ($VALID, $BAD) = @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("file helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_pfiles", perl.NewValue(valid), perl.NewValue(bad)); err != nil {
+	if _, err := p.Call(ctx, "__t_pfiles", perl.ValueOf(valid), perl.ValueOf(bad)); err != nil {
 		t.Fatalf("pass files: %v", err)
 	}
 
