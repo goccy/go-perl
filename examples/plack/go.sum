@@ -1,4 +1,2 @@
 github.com/ebitengine/purego v0.10.2 h1:W809HbnvzAxgdm+aOvlSekrM16wGCdT/e76+9tS7gzE=
 github.com/ebitengine/purego v0.10.2/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
-github.com/goccy/perlwasm2go v0.2.1 h1:N9vJKr6t0eewy65KUIYeNTEk8ysLkMbOuaTxM+F2x90=
-github.com/goccy/perlwasm2go v0.2.1/go.mod h1:IVQQlYJJCQpJNZEyZUg2xh2Wq1xpSQj09U+gtpnjO6A=

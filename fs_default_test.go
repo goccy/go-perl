@@ -33,8 +33,8 @@ func TestDefaultFSIsSandboxed(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("host visibility probe: err=%v error=%v", err, r.Error)
 	}
-	if r.Value.String() != "hidden" {
-		t.Fatalf("sandboxed instance sees host file: %q", r.Value.String())
+	if resultStr(r) != "hidden" {
+		t.Fatalf("sandboxed instance sees host file: %q", resultStr(r))
 	}
 
 	// Writes land in the private FS and read back within the instance...
@@ -50,8 +50,8 @@ func TestDefaultFSIsSandboxed(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("private write/read: err=%v error=%v", err, r.Error)
 	}
-	if r.Value.String() != "private" {
-		t.Fatalf("private FS round trip = %q", r.Value.String())
+	if resultStr(r) != "private" {
+		t.Fatalf("private FS round trip = %q", resultStr(r))
 	}
 
 	// ...but never reach the host disk.
@@ -69,8 +69,8 @@ func TestDefaultFSIsSandboxed(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("isolation probe: err=%v error=%v", err, r.Error)
 	}
-	if r.Value.String() != "isolated" {
-		t.Fatalf("instances share filesystem state: %q", r.Value.String())
+	if resultStr(r) != "isolated" {
+		t.Fatalf("instances share filesystem state: %q", resultStr(r))
 	}
 }
 
@@ -106,8 +106,8 @@ func TestHostFSOptIn(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("host read/write: err=%v error=%v", err, r.Error)
 	}
-	if r.Value.String() != "from host" {
-		t.Fatalf("host read = %q", r.Value.String())
+	if resultStr(r) != "from host" {
+		t.Fatalf("host read = %q", resultStr(r))
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
 	if err != nil || !strings.EqualFold(string(data), "from host") {

@@ -38,9 +38,9 @@ func TestTimeHiResRealXS(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("Time::HiRes eval: err=%v error=%v", err, r.Error)
 	}
-	parts := strings.Split(r.Value.String(), "|")
+	parts := strings.Split(resultStr(r), "|")
 	if len(parts) != 6 {
-		t.Fatalf("unexpected result shape: %q", r.Value.String())
+		t.Fatalf("unexpected result shape: %q", resultStr(r))
 	}
 	if drift, _ := strconv.Atoi(parts[0]); drift > 1 {
 		t.Errorf("gettimeofday seconds drift from CORE::time = %s (want <= 1)", parts[0])
@@ -64,7 +64,7 @@ func TestTimeHiResRealXS(t *testing.T) {
 	if err != nil || r.Error != nil {
 		t.Fatalf("VERSION: err=%v error=%v", err, r.Error)
 	}
-	if r.Value.String() != "xs-booted" {
-		t.Fatalf("VERSION probe = %q", r.Value.String())
+	if resultStr(r) != "xs-booted" {
+		t.Fatalf("VERSION probe = %q", resultStr(r))
 	}
 }

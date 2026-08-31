@@ -36,8 +36,8 @@ func BenchmarkFib36(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Eval: %v", err)
 		}
-		if r.Error != nil || r.Value.String() != fib36Val {
-			b.Fatalf("fib(36) = %q ok=%v error=%v", r.Value.String(), (r.Error == nil), r.Error)
+		if r.Error != nil || resultStr(r) != fib36Val {
+			b.Fatalf("fib(36) = %q ok=%v error=%v", resultStr(r), (r.Error == nil), r.Error)
 		}
 	}
 }

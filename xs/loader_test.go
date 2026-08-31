@@ -11,6 +11,14 @@ import (
 	perl "github.com/goccy/go-perl"
 )
 
+// resultStr renders an Eval result's scalar as its Perl string form.
+func resultStr(r perl.Result) string {
+	if s, err := perl.As[perl.ScalarValue](r.Value); err == nil {
+		return s.String()
+	}
+	return r.Value.Kind().String()
+}
+
 // loadXSModule registers one prebuilt native module with the instance
 // through the public path: it stages the .so under a temp directory with
 // the conventional <Module-Name>.so spelling ("::" as "-") and hands the

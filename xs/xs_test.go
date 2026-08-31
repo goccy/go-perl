@@ -80,7 +80,7 @@ func TestNativeXSModule(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_add_inc { unshift @INC, $_[0]; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("define inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_add_inc", libdir); err != nil {
+	if _, err := p.Call(ctx, "__t_add_inc", perl.NewValue(libdir)); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 
@@ -88,16 +88,16 @@ func TestNativeXSModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval use+add: %v", err)
 	}
-	if r.Error != nil || r.Value.String() != "42" {
-		t.Fatalf("add = ok=%v result=%q error=%v", (r.Error == nil), r.Value.String(), r.Error)
+	if r.Error != nil || resultStr(r) != "42" {
+		t.Fatalf("add = ok=%v result=%q error=%v", (r.Error == nil), resultStr(r), r.Error)
 	}
 
 	r, err = p.Eval(ctx, `Demo::XS::greet("gopher")`)
 	if err != nil {
 		t.Fatalf("Eval greet: %v", err)
 	}
-	if r.Error != nil || r.Value.String() != "hello, gopher" {
-		t.Fatalf("greet = ok=%v result=%q error=%v", (r.Error == nil), r.Value.String(), r.Error)
+	if r.Error != nil || resultStr(r) != "hello, gopher" {
+		t.Fatalf("greet = ok=%v result=%q error=%v", (r.Error == nil), resultStr(r), r.Error)
 	}
 
 	// Wrong arity: the SDK's croak crosses back as an ordinary Perl die.
@@ -105,17 +105,17 @@ func TestNativeXSModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval usage croak: %v", err)
 	}
-	if r.Error != nil || !strings.Contains(r.Value.String(), "Usage: Demo::XS::add(a, b)") {
-		t.Fatalf("usage croak = %q (ok=%v error=%v)", r.Value.String(), (r.Error == nil), r.Error)
+	if r.Error != nil || !strings.Contains(resultStr(r), "Usage: Demo::XS::add(a, b)") {
+		t.Fatalf("usage croak = %q (ok=%v error=%v)", resultStr(r), (r.Error == nil), r.Error)
 	}
 
 	// Native XSUBs interleave with everything else on the instance.
-	got, err := p.Call(ctx, "Demo::XS::add", 20, 22)
+	got, err := p.Call(ctx, "Demo::XS::add", perl.NewValue(20), perl.NewValue(22))
 	if err != nil {
 		t.Fatalf("Call add: %v", err)
 	}
-	if got[0] != float64(42) {
-		t.Fatalf("Call add = %#v, want 42", got[0])
+	if sv, err := perl.As[perl.ScalarValue](got[0]); err != nil || sv.Int() != 42 {
+		t.Fatalf("Call add = %#v (err=%v), want 42", got[0], err)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestNativeCppObjectModule(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_inc2 { unshift @INC, $_[0]; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_inc2", libdir); err != nil {
+	if _, err := p.Call(ctx, "__t_inc2", perl.NewValue(libdir)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,7 +207,7 @@ func TestNativeCppObjectModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
-	if want := "42|Obj::Demo::Stats|hits|42"; r.Error != nil || r.Value.String() != want {
-		t.Fatalf("ObjDemo = ok=%v result=%q error=%v, want %q", (r.Error == nil), r.Value.String(), r.Error, want)
+	if want := "42|Obj::Demo::Stats|hits|42"; r.Error != nil || resultStr(r) != want {
+		t.Fatalf("ObjDemo = ok=%v result=%q error=%v, want %q", (r.Error == nil), resultStr(r), r.Error, want)
 	}
 }

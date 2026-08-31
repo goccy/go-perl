@@ -4,6 +4,7 @@ package xs_test
 
 import (
 	"context"
+	perl "github.com/goccy/go-perl"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,14 +52,14 @@ func TestPerlIOUtf8Strict(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_pinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_pinc", filepath.Join(dir, "lib")); err != nil {
+	if _, err := p.Call(ctx, "__t_pinc", perl.NewValue(filepath.Join(dir, "lib"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 	if r, err := p.Eval(ctx,
 		`sub __t_pfiles { our ($VALID, $BAD) = @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("file helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_pfiles", valid, bad); err != nil {
+	if _, err := p.Call(ctx, "__t_pfiles", perl.NewValue(valid), perl.NewValue(bad)); err != nil {
 		t.Fatalf("pass files: %v", err)
 	}
 
@@ -68,8 +69,8 @@ func TestPerlIOUtf8Strict(t *testing.T) {
 		if err != nil || r.Error != nil {
 			t.Fatalf("%s: err=%v ok=%v error=%v", what, err, (r.Error == nil), r.Error)
 		}
-		if want != "" && r.Value.String() != want {
-			t.Fatalf("%s = %q, want %q", what, r.Value.String(), want)
+		if want != "" && resultStr(r) != want {
+			t.Fatalf("%s = %q, want %q", what, resultStr(r), want)
 		}
 	}
 

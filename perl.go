@@ -103,16 +103,11 @@ func New(cfg Config) (*Perl, error) {
 // opcode — a pathological regex, a big sort — is not preempted until it
 // returns to the run loop.
 func (p *Perl) Eval(ctx context.Context, src string) (Result, error) {
-	env, err := p.raw.Eval(ctx, src)
+	resp, interrupted, err := p.raw.EvalOp(ctx, src)
 	if err != nil {
 		return Result{}, err
 	}
-	r := Result{Value: scalar{env.Result}, Stdout: env.Stdout, Stderr: env.Stderr}
-	if !env.Ok {
-		r.Value = scalar{}
-		r.Error = &PerlError{Message: env.Error}
-	}
-	return r, nil
+	return p.decodeEvalResult(ctx, resp, interrupted)
 }
 
 // Clone returns a new instance mapped copy-on-write from this instance's

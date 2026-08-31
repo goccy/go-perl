@@ -66,7 +66,13 @@ func devReplaces(t *testing.T) string {
 	}
 	re := regexp.MustCompile(`(?m)^replace\s+(\S+)\s*=>\s*(\S+)`)
 	for _, m := range re.FindAllStringSubmatch(string(gomod), -1) {
-		pairs = append(pairs, m[1]+"="+m[2])
+		target := m[2]
+		// A relative replace target is relative to go-perl's go.mod; the
+		// generated program lives elsewhere, so absolutize it.
+		if strings.HasPrefix(target, ".") {
+			target = filepath.Join(root, target)
+		}
+		pairs = append(pairs, m[1]+"="+target)
 	}
 	return strings.Join(pairs, ",")
 }

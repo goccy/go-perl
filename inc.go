@@ -19,11 +19,11 @@ func (p *Perl) AddInc(ctx context.Context, dirs ...string) error {
 	if len(dirs) == 0 {
 		return nil
 	}
-	vals := make([]any, len(dirs))
+	vals := make([]Value, len(dirs))
 	for i, d := range dirs {
-		vals[i] = d
+		vals[i] = NewValue(d)
 	}
-	if err := p.Bind("__goperl_inc_dirs", func([]any) ([]any, error) { return vals, nil }); err != nil {
+	if err := p.Bind("__goperl_inc_dirs", func([]Value) ([]Value, error) { return vals, nil }); err != nil {
 		return fmt.Errorf("bind inc dirs: %w", err)
 	}
 	if r, err := p.Eval(ctx, `unshift @INC, __goperl_inc_dirs(); 1;`); err != nil {

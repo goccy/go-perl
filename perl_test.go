@@ -9,6 +9,16 @@ import (
 	perl "github.com/goccy/go-perl"
 )
 
+// resultStr renders an Eval result's scalar as its Perl string form; a
+// non-scalar result renders as its kind (tests asserting on strings then
+// fail with a readable value).
+func resultStr(r perl.Result) string {
+	if s, err := perl.As[perl.ScalarValue](r.Value); err == nil {
+		return s.String()
+	}
+	return r.Value.Kind().String()
+}
+
 // newPerl builds an instance backed by the embedded stdlib and closes it on
 // test cleanup.
 func newPerl(t *testing.T) *perl.Perl {
@@ -30,8 +40,8 @@ func TestEvalArithmetic(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("eval not ok: error=%v stderr=%q", r.Error, r.Stderr)
 	}
-	if r.Value.String() != "2" {
-		t.Fatalf("1 + 1 = %q, want %q", r.Value.String(), "2")
+	if resultStr(r) != "2" {
+		t.Fatalf("1 + 1 = %q, want %q", resultStr(r), "2")
 	}
 }
 
@@ -47,8 +57,8 @@ func TestEvalPrint(t *testing.T) {
 	if r.Stdout != "hello\n" {
 		t.Fatalf("stdout = %q, want %q", r.Stdout, "hello\n")
 	}
-	if r.Value.String() != "42" {
-		t.Fatalf("result = %q, want %q", r.Value.String(), "42")
+	if resultStr(r) != "42" {
+		t.Fatalf("result = %q, want %q", resultStr(r), "42")
 	}
 }
 
@@ -59,7 +69,7 @@ func TestEvalDie(t *testing.T) {
 		t.Fatalf("Eval (transport): %v", err)
 	}
 	if r.Error == nil {
-		t.Fatalf("expected eval to fail, got ok with result %q", r.Value.String())
+		t.Fatalf("expected eval to fail, got ok with result %q", resultStr(r))
 	}
 	if !strings.Contains(r.Error.Error(), "boom") {
 		t.Fatalf("error = %q, want it to contain %q", r.Error, "boom")
@@ -76,8 +86,8 @@ func TestEvalUseModule(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("eval not ok: error=%v stderr=%q", r.Error, r.Stderr)
 	}
-	if r.Value.String() != "10" {
-		t.Fatalf("sum(1..4) = %q, want %q", r.Value.String(), "10")
+	if resultStr(r) != "10" {
+		t.Fatalf("sum(1..4) = %q, want %q", resultStr(r), "10")
 	}
 }
 
@@ -96,8 +106,8 @@ func TestDeleteStashBackref(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("eval not ok: error=%v stderr=%q", r.Error, r.Stderr)
 	}
-	if r.Value.String() != "done" {
-		t.Fatalf("result = %q, want %q", r.Value.String(), "done")
+	if resultStr(r) != "done" {
+		t.Fatalf("result = %q, want %q", resultStr(r), "done")
 	}
 }
 
@@ -115,8 +125,8 @@ func TestListUtilFunctions(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("eval not ok: error=%v stderr=%q", r.Error, r.Stderr)
 	}
-	if r.Value.String() != "55,9,6,15,123" {
-		t.Fatalf("List::Util result = %q, want %q", r.Value.String(), "55,9,6,15,123")
+	if resultStr(r) != "55,9,6,15,123" {
+		t.Fatalf("List::Util result = %q, want %q", resultStr(r), "55,9,6,15,123")
 	}
 }
 
@@ -129,8 +139,8 @@ func TestPersistentState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval get: %v", err)
 	}
-	if r.Error != nil || r.Value.String() != "42" {
-		t.Fatalf("persistent $x: ok=%v result=%q (error=%v)", (r.Error == nil), r.Value.String(), r.Error)
+	if r.Error != nil || resultStr(r) != "42" {
+		t.Fatalf("persistent $x: ok=%v result=%q (error=%v)", (r.Error == nil), resultStr(r), r.Error)
 	}
 }
 
@@ -147,8 +157,8 @@ func TestInstanceIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval in b: %v", err)
 	}
-	if r.Error != nil || r.Value.String() != "clean" {
-		t.Fatalf("isolation: ok=%v result=%q (error=%v)", (r.Error == nil), r.Value.String(), r.Error)
+	if r.Error != nil || resultStr(r) != "clean" {
+		t.Fatalf("isolation: ok=%v result=%q (error=%v)", (r.Error == nil), resultStr(r), r.Error)
 	}
 }
 
@@ -170,7 +180,7 @@ func TestEvalContextCancel(t *testing.T) {
 	}
 	// The instance stays usable after a cancelled eval.
 	r, err := p.Eval(context.Background(), `1 + 2`)
-	if err != nil || r.Error != nil || r.Value.String() != "3" {
-		t.Fatalf("post-cancel eval: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), r.Value.String(), r.Error)
+	if err != nil || r.Error != nil || resultStr(r) != "3" {
+		t.Fatalf("post-cancel eval: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), resultStr(r), r.Error)
 	}
 }

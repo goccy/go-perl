@@ -10,3 +10,5 @@ require (
 )
 
 replace github.com/goccy/go-perl => ../..
+
+replace github.com/goccy/perlwasm2go => ../../../perlwasm2go

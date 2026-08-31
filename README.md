@@ -33,7 +33,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(r.Value.String()) // 2,4,6,8,10
+	s, _ := perl.As[perl.ScalarValue](r.Value)
+	fmt.Println(s.String()) // 2,4,6,8,10
 }
 ```
 
@@ -59,12 +60,15 @@ func main() {
   state, that is — read-only snapshot pages are shared).
 - **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a
   runaway script at the next Perl opcode.
-- **Bridged**: `Call` invokes named Perl subs from Go and `Bind` makes Go
-  functions callable from Perl as ordinary subs. Plain scalars cross by
-  value; Perl references — blessed objects, array/hash/code refs — cross as
-  identity-preserving handles (`*Ref`), never serialized, so the same object
-  stays the same object across any number of round trips. Errors map to
-  `*PerlError` / Perl `die` respectively.
+- **Bridged, typed**: every value crosses the boundary typed, following
+  Perl's own structure — `ScalarValue` (SV), `RefValue` (RV), `ArrayValue`
+  (AV), `HashValue` (HV), `CodeValue` (CV) — nothing is stringified in
+  transit and byte strings cross raw (`Bytes()` next to `String()`). `Call`
+  invokes named Perl subs from Go and `Bind` makes Go functions callable
+  from Perl as ordinary subs. Perl references — blessed objects,
+  array/hash/code refs — cross as identity-preserving handles, never
+  serialized, so the same object stays the same object across any number of
+  round trips. Errors map to `*PerlError` / Perl `die` respectively.
 
 ## Calling between Go and Perl
 
@@ -73,39 +77,53 @@ p, _ := perl.New(perl.Config{})
 defer p.Close()
 ctx := context.Background()
 
-// Go -> Perl: call a named sub with structured arguments.
+// Go -> Perl: call a named sub. Arguments and results are typed Values.
 p.Eval(ctx, `sub add { my ($a, $b) = @_; $a + $b } 1;`)
-sum, _ := p.Call(ctx, "add", 40, 2)
-fmt.Println(sum[0]) // 42
+sum, _ := p.Call(ctx, "add", perl.NewValue(40), perl.NewValue(2))
+n, _ := perl.As[perl.ScalarValue](sum[0])
+fmt.Println(n.Int()) // 42
 
 // Perl objects cross as handles, not copies: the same object, its methods,
 // and its state remain live on the Go side.
 p.Eval(ctx, `package Counter; sub new { bless {n=>0}, shift } sub inc { $_[0]{n}++ }
              package main; sub counter { our $c ||= Counter->new } 1;`)
 res, _ := p.Call(ctx, "counter")
-obj := res[0].(*perl.Ref) // Class() == "Counter"
-defer obj.Free()
+obj, _ := perl.As[perl.RefValue](res[0]) // Class() == ("Counter", true)
 obj.MethodCall(ctx, "inc")            // mutates the object Perl sees
 p.Call(ctx, "counter")                // returns an Equal handle: same object
 
 // Perl -> Go: bind a Go function as a Perl sub.
-p.Bind("go_upper", func(args []any) ([]any, error) {
-	return []any{strings.ToUpper(args[0].(string))}, nil
+p.Bind("go_upper", func(args []perl.Value) ([]perl.Value, error) {
+	s, err := perl.As[perl.ScalarValue](args[0])
+	if err != nil {
+		return nil, err
+	}
+	return []perl.Value{perl.NewValue(strings.ToUpper(s.String()))}, nil
 })
 r, _ := p.Eval(ctx, `go_upper("hello")`)
-fmt.Println(r.Value.String()) // HELLO
+s, _ := perl.As[perl.ScalarValue](r.Value)
+fmt.Println(s.String()) // HELLO
 ```
 
-The value model: primitives cross as data (Perl
-scalars are value-semantic anyway), Go composites materialize as fresh Perl
-structures (data, not identity), and every Perl reference crosses by handle —
-`*Ref` supports `MethodCall`, `Invoke` (code refs), `Export` (deep copy to Go
-data), `Retain`/`Free`, and `Equal` (identity). A bound Go function may call
-back into the same instance (`Eval`/`Call`/`Ref` methods), so round trips
-compose. The [`psgi`](./psgi) package builds on the bridge to serve PSGI
-web applications from `net/http` (request/response conversion plus the
-Plack adapter); see [`examples/plack`](./examples/plack) for it carrying
-real traffic — a Mojolicious app over a pool of warm instances.
+The value model follows Perl's own type structure. A `Value` is one of the
+sealed concrete types — `ScalarValue`, `RefValue`, `ArrayValue`,
+`HashValue`, `CodeValue`, `GlobValue`, `IOValue` — inspected either with a
+Go type switch or with `perl.As[T]` when the expected type is known up
+front; `Kind()` reports the runtime kind (mirroring `reflect.Value.Kind`).
+Scalars coerce the way Perl would (`Bool`/`Int`/`Float`/`String`, plus
+`Bytes` for the raw byte string), references dereference with
+`RefValue.Deref` (the `reflect.Value.Elem` analog), and aggregates operate
+in place through `ArrayValue`/`HashValue`/`CodeValue` — real element
+accesses in the interpreter, so ties and overloads behave as in plain
+Perl. `NewArray`/`NewHash` materialize Go data as guest aggregates in one
+crossing, and an `ArrayValue`/`HashValue` in an argument list flattens
+exactly like `f(@a, %h)`. A bound Go function may call back into the same
+instance, so round trips compose. The [`psgi`](./psgi) package builds on
+the bridge to serve PSGI web applications from `net/http` — the `.psgi`
+file's last evaluated value
+is the application, exactly as PSGI specifies; see
+[`examples/plack`](./examples/plack) for it carrying real traffic — a
+Mojolicious app over a pool of warm instances.
 
 ## Supply-chain verification
 

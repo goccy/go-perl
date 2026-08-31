@@ -23,8 +23,10 @@ func TestCloneInheritsAndDiverges(t *testing.T) {
 	if r, err := p.Eval(ctx, `our $state = 'proto'; sub whoami { $main::state } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("prepare prototype: err=%v error=%v", err, r.Error)
 	}
-	if err := p.Bind("go_add", func(args []any) ([]any, error) {
-		return []any{args[0].(float64) + args[1].(float64)}, nil
+	if err := p.Bind("go_add", func(args []perl.Value) ([]perl.Value, error) {
+		a := scalarOf(t, args[0])
+		b := scalarOf(t, args[1])
+		return []perl.Value{perl.NewValue(a.Int() + b.Int())}, nil
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
@@ -36,19 +38,19 @@ func TestCloneInheritsAndDiverges(t *testing.T) {
 	defer c.Close()
 
 	// The clone inherits compiled subs, package state, and Go bindings.
-	if r, err := c.Eval(ctx, `whoami()`); err != nil || r.Error != nil || r.Value.String() != "proto" {
-		t.Fatalf("clone inherit: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), r.Value.String(), r.Error)
+	if r, err := c.Eval(ctx, `whoami()`); err != nil || r.Error != nil || resultStr(r) != "proto" {
+		t.Fatalf("clone inherit: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), resultStr(r), r.Error)
 	}
-	if r, err := c.Eval(ctx, `go_add(20, 22)`); err != nil || r.Error != nil || r.Value.String() != "42" {
-		t.Fatalf("clone binding: err=%v result=%q error=%v", err, r.Value.String(), r.Error)
+	if r, err := c.Eval(ctx, `go_add(20, 22)`); err != nil || r.Error != nil || resultStr(r) != "42" {
+		t.Fatalf("clone binding: err=%v result=%q error=%v", err, resultStr(r), r.Error)
 	}
 
 	// Divergence: writes in one are invisible in the other.
-	if r, err := c.Eval(ctx, `$main::state = 'clone'; whoami()`); err != nil || r.Error != nil || r.Value.String() != "clone" {
-		t.Fatalf("clone write: err=%v result=%q error=%v", err, r.Value.String(), r.Error)
+	if r, err := c.Eval(ctx, `$main::state = 'clone'; whoami()`); err != nil || r.Error != nil || resultStr(r) != "clone" {
+		t.Fatalf("clone write: err=%v result=%q error=%v", err, resultStr(r), r.Error)
 	}
-	if r, err := p.Eval(ctx, `whoami()`); err != nil || r.Error != nil || r.Value.String() != "proto" {
-		t.Fatalf("prototype isolated: err=%v result=%q error=%v", err, r.Value.String(), r.Error)
+	if r, err := p.Eval(ctx, `whoami()`); err != nil || r.Error != nil || resultStr(r) != "proto" {
+		t.Fatalf("prototype isolated: err=%v result=%q error=%v", err, resultStr(r), r.Error)
 	}
 
 	// A second clone starts from the image, not from the first clone.
@@ -57,8 +59,8 @@ func TestCloneInheritsAndDiverges(t *testing.T) {
 		t.Fatalf("second Clone: %v", err)
 	}
 	defer c2.Close()
-	if r, err := c2.Eval(ctx, `whoami()`); err != nil || r.Error != nil || r.Value.String() != "proto" {
-		t.Fatalf("second clone: err=%v result=%q error=%v", err, r.Value.String(), r.Error)
+	if r, err := c2.Eval(ctx, `whoami()`); err != nil || r.Error != nil || resultStr(r) != "proto" {
+		t.Fatalf("second clone: err=%v result=%q error=%v", err, resultStr(r), r.Error)
 	}
 }
 
@@ -92,8 +94,8 @@ func TestClonesRunConcurrently(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 25; i++ {
 				r, err := c.Eval(ctx, `work(1000)`)
-				if err != nil || r.Error != nil || r.Value.String() != "500500" {
-					errs <- fmt.Errorf("work: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), r.Value.String(), r.Error)
+				if err != nil || r.Error != nil || resultStr(r) != "500500" {
+					errs <- fmt.Errorf("work: err=%v ok=%v result=%q error=%v", err, (r.Error == nil), resultStr(r), r.Error)
 					return
 				}
 			}

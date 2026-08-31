@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,18 +22,33 @@ import (
 )
 
 // Method IDs of the perl bridge service (service 0), in the order the proto
-// declares them (alphabetical over the pl.h exports): perl_call, perl_close,
-// perl_eval, perl_interrupt_addr, perl_new, perl_register_native_xs,
-// perl_set_go_dispatcher, perl_xs_helper.
+// declares them (alphabetical over the pl.h exports). ONE added export
+// renumbers every later id — re-check this table against the regenerated
+// perl.go on every pl.h change.
 const (
-	midCall             = 0
-	midClose            = 1
-	midEval             = 2
-	midInterruptAddr    = 3
-	midNew              = 4
-	midRegisterNativeXS = 5
-	midSetGoDispatcher  = 6
-	midXSHelper         = 7
+	midArrayGet         = 0
+	midArrayLen         = 1
+	midArrayPush        = 2
+	midArraySet         = 3
+	midArrayValues      = 4
+	midCall             = 5
+	midClose            = 6
+	midDeref            = 7
+	midEval             = 8
+	midHashDelete       = 9
+	midHashGet          = 10
+	midHashKeys         = 11
+	midHashSet          = 12
+	midInterruptAddr    = 13
+	midInvoke           = 14
+	midMethodCall       = 15
+	midNew              = 16
+	midNewArray         = 17
+	midNewHash          = 18
+	midRegisterNativeXS = 19
+	midRelease          = 20
+	midSetGoDispatcher  = 21
+	midXSHelper         = 22
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package
@@ -57,50 +71,8 @@ type InstanceOptions struct {
 	MemoryReserveBytes int
 }
 
-// WireNode is one tagged value on the bridge (JSON is only the carrier; the
-// tag is the semantics):
-//
-//	k="u"                 undef / nil
-//	k="d" v=<scalar>      plain scalar by value
-//	k="j" v=<structure>   composite data by value (fresh structures on decode)
-//	k="r" h=<id> t/c      a Perl reference by handle (t=reftype, c=class)
-//	k="f" h=<id>          a host function by id (decodes to a Perl closure)
-type WireNode struct {
-	K string          `json:"k"`
-	V json.RawMessage `json:"v,omitempty"`
-	H uint64          `json:"h,omitempty"`
-	T string          `json:"t,omitempty"`
-	C string          `json:"c,omitempty"`
-}
-
-// EvalResult is the decoded perl_eval response envelope.
-type EvalResult struct {
-	Ok     bool   `json:"ok"`
-	Result string `json:"result"`
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
-	Error  string `json:"error"`
-}
-
-// callEnvelope is the decoded perl_call response document. Exit is set (and
-// Ok false) when the guest called exit() and the bridge caught the unwind.
-type callEnvelope struct {
-	Ok     bool       `json:"ok"`
-	Result []WireNode `json:"result"`
-	Exit   *int       `json:"exit"`
-	Error  string     `json:"error"`
-}
-
-// PerlDied reports a Perl-level die/croak (its Message is $@'s text). The
-// public package converts it to its user-facing error type.
-type PerlDied struct {
-	Message string
-}
-
-func (e *PerlDied) Error() string { return e.Message }
-
-// ExitError is a guest exit() the perl_call bridge caught cleanly: the guest
-// unwound back to the call frame, so the interpreter is still flushable and
+// ExitError is a guest exit() the bridge caught cleanly: the guest unwound
+// back to the call frame, so the interpreter is still flushable and
 // destructible.
 type ExitError struct{ Code int }
 
@@ -188,7 +160,7 @@ func (p *Perl) QueueRelease(id uint64) {
 // drainReleases releases every queued handle in one guest call. Runs on
 // user-initiated entry points only. Best-effort: a failure re-queues nothing
 // (the registry dies with the instance anyway).
-func (p *Perl) drainReleases(ctx context.Context) {
+func (p *Perl) drainReleases() {
 	p.relMu.Lock()
 	ids := p.pendingRel
 	p.pendingRel = nil
@@ -196,29 +168,15 @@ func (p *Perl) drainReleases(ctx context.Context) {
 	if len(ids) == 0 || p.closed.Load() {
 		return
 	}
-	nodes := make([]WireNode, len(ids))
-	for i, id := range ids {
-		raw, err := json.Marshal(id)
-		if err != nil {
-			return
-		}
-		nodes[i] = WireNode{K: "d", V: raw}
+	packed := make([]byte, 0, len(ids)*8)
+	for _, id := range ids {
+		packed = binary.LittleEndian.AppendUint64(packed, id)
 	}
-	_, _ = p.call(ctx, "__plwasm_release_all", nodes, false)
-}
-
-// ReleaseHandle releases one registry pin now instead of waiting for the
-// next drain. A no-op on a closed instance.
-func (p *Perl) ReleaseHandle(id uint64) error {
-	if p.closed.Load() {
-		return nil
-	}
-	raw, err := json.Marshal(id)
-	if err != nil {
-		return err
-	}
-	_, err = p.call(context.Background(), "__plwasm_release", []WireNode{{K: "d", V: raw}}, false)
-	return err
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendBytes(buf, 2, packed)
+	buf = pbAppendUint64(buf, 3, uint64(len(packed)))
+	_, _ = p.m.invoke(0, midRelease, buf, wasm2go.Inv_0_20)
 }
 
 // New boots a fresh instance from opts, mapping the process-wide
@@ -370,100 +328,193 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 // ErrClosed is returned by every entry point once Close has run.
 var ErrClosed = fmt.Errorf("perl: instance is closed")
 
-// Eval compiles and runs src in the interpreter's persistent package and
-// returns the decoded envelope. A Perl-level die is reported inside the
-// envelope (Ok=false, Error=$@); an error return is a host/transport failure
-// or a context cancellation.
-func (p *Perl) Eval(ctx context.Context, src string) (EvalResult, error) {
+// invoker matches the generated per-method entry points (wasm2go.Inv_0_N).
+type invoker = func(*base.Module, wptr, wptr) (int64, error)
+
+// valueOp sends one bridge operation and returns the raw response envelope
+// bytes (the typed-value protocol documented in perl-wasm's pl.h; the public
+// package decodes them). interrupted reports whether the ctx watchdog fired
+// while the guest ran — a die envelope then means the interruption, not a
+// user-level die.
+func (p *Perl) valueOp(ctx context.Context, mid int32, inv invoker, buf []byte) (resp []byte, interrupted bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return EvalResult{}, err
+		return nil, false, err
 	}
 	if p.closed.Load() {
-		return EvalResult{}, ErrClosed
+		return nil, false, ErrClosed
 	}
-	p.drainReleases(ctx)
+	p.drainReleases()
+
+	disarm := p.armInterrupt(ctx)
+	out, invokeErr := p.m.invoke(0, mid, buf, inv)
+	interrupted = disarm()
+
+	if invokeErr != nil {
+		return nil, interrupted, invokeErr
+	}
+	if e := pbExtractError(out); e != nil {
+		return nil, interrupted, e
+	}
+	return readScalarAtField(out, 1, (*pbReader).readBytes), interrupted, nil
+}
+
+// EvalOp evaluates src (string eval, scalar context) and returns the raw
+// eval envelope (result node + captured stdout/stderr).
+func (p *Perl) EvalOp(ctx context.Context, src string) ([]byte, bool, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, src)
-
-	disarm := p.armInterrupt(ctx)
-	resp, invokeErr := p.m.invoke(0, midEval, buf, wasm2go.Inv_0_2)
-	interrupted := disarm()
-
-	if invokeErr != nil {
-		return EvalResult{}, invokeErr
-	}
-	if e := pbExtractError(resp); e != nil {
-		return EvalResult{}, e
-	}
-	js := readScalarAtField(resp, 1, (*pbReader).readString)
-	var env EvalResult
-	if err := json.Unmarshal([]byte(js), &env); err != nil {
-		return EvalResult{}, fmt.Errorf("decode eval result %q: %w", js, err)
-	}
-	if interrupted && !env.Ok {
-		// We tripped the interrupt and the eval died: report the
-		// cancellation, not the croak text it surfaced as.
-		return EvalResult{}, ctx.Err()
-	}
-	return env, nil
+	return p.valueOp(ctx, midEval, wasm2go.Inv_0_8, buf)
 }
 
-// Call invokes the named Perl subroutine in list context with the given
-// argument nodes and returns the result nodes. A Perl-level die comes back
-// as *PerlDied, a caught guest exit() as *ExitError; other errors are
-// host/transport failures or a context cancellation.
-func (p *Perl) Call(ctx context.Context, name string, args []WireNode) ([]WireNode, error) {
-	return p.call(ctx, name, args, true)
-}
-
-// call is Call's engine; drain=false skips the release-queue flush (the
-// flush itself and handle releases use that path, so a drain cannot recurse).
-func (p *Perl) call(ctx context.Context, name string, args []WireNode, drain bool) ([]WireNode, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if p.closed.Load() {
-		return nil, ErrClosed
-	}
-	if drain {
-		p.drainReleases(ctx)
-	}
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-
+// CallOp invokes the named sub in list context with an encoded node list.
+func (p *Perl) CallOp(ctx context.Context, name string, args []byte) ([]byte, bool, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, name)
-	buf = pbAppendString(buf, 3, string(argsJSON))
+	buf = pbAppendBytes(buf, 3, args)
+	buf = pbAppendUint64(buf, 4, uint64(len(args)))
+	return p.valueOp(ctx, midCall, wasm2go.Inv_0_5, buf)
+}
 
-	disarm := p.armInterrupt(ctx)
-	resp, invokeErr := p.m.invoke(0, midCall, buf, wasm2go.Inv_0_0)
-	interrupted := disarm()
+// InvokeOp calls the CODE reference behind a handle; scalarCtx selects
+// scalar calling context.
+func (p *Perl) InvokeOp(ctx context.Context, code uint64, scalarCtx bool, args []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, code)
+	if scalarCtx {
+		buf = pbAppendUint64(buf, 3, 1)
+	}
+	buf = pbAppendBytes(buf, 4, args)
+	buf = pbAppendUint64(buf, 5, uint64(len(args)))
+	return p.valueOp(ctx, midInvoke, wasm2go.Inv_0_14, buf)
+}
 
-	if invokeErr != nil {
-		return nil, invokeErr
-	}
-	if e := pbExtractError(resp); e != nil {
-		return nil, e
-	}
-	js := readScalarAtField(resp, 1, (*pbReader).readString)
-	var env callEnvelope
-	if err := json.Unmarshal([]byte(js), &env); err != nil {
-		return nil, fmt.Errorf("decode call result %q: %w", js, err)
-	}
-	if !env.Ok {
-		if env.Exit != nil {
-			return nil, &ExitError{Code: *env.Exit}
-		}
-		if interrupted {
-			return nil, ctx.Err()
-		}
-		return nil, &PerlDied{Message: env.Error}
-	}
-	return env.Result, nil
+// MethodCallOp invokes $obj->method(args...) on the reference behind obj.
+func (p *Perl) MethodCallOp(ctx context.Context, obj uint64, method string, args []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, obj)
+	buf = pbAppendString(buf, 3, method)
+	buf = pbAppendBytes(buf, 4, args)
+	buf = pbAppendUint64(buf, 5, uint64(len(args)))
+	return p.valueOp(ctx, midMethodCall, wasm2go.Inv_0_15, buf)
+}
+
+// DerefOp dereferences the SCALAR/REF reference behind ref ($$ref).
+func (p *Perl) DerefOp(ctx context.Context, ref uint64) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, ref)
+	return p.valueOp(ctx, midDeref, wasm2go.Inv_0_7, buf)
+}
+
+// ArrayLenOp returns the envelope carrying scalar @{$av}.
+func (p *Perl) ArrayLenOp(ctx context.Context, av uint64) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, av)
+	return p.valueOp(ctx, midArrayLen, wasm2go.Inv_0_1, buf)
+}
+
+// ArrayGetOp returns the envelope carrying $av->[idx].
+func (p *Perl) ArrayGetOp(ctx context.Context, av uint64, idx int64) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendInt64(buf, 3, idx)
+	return p.valueOp(ctx, midArrayGet, wasm2go.Inv_0_0, buf)
+}
+
+// ArraySetOp performs $av->[idx] = val (val: one encoded node).
+func (p *Perl) ArraySetOp(ctx context.Context, av uint64, idx int64, val []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendInt64(buf, 3, idx)
+	buf = pbAppendBytes(buf, 4, val)
+	buf = pbAppendUint64(buf, 5, uint64(len(val)))
+	return p.valueOp(ctx, midArraySet, wasm2go.Inv_0_3, buf)
+}
+
+// ArrayPushOp appends the encoded node list to @{$av}.
+func (p *Perl) ArrayPushOp(ctx context.Context, av uint64, vals []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendBytes(buf, 3, vals)
+	buf = pbAppendUint64(buf, 4, uint64(len(vals)))
+	return p.valueOp(ctx, midArrayPush, wasm2go.Inv_0_2, buf)
+}
+
+// ArrayValuesOp returns the envelope carrying @{$av} as a node list.
+func (p *Perl) ArrayValuesOp(ctx context.Context, av uint64) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, av)
+	return p.valueOp(ctx, midArrayValues, wasm2go.Inv_0_4, buf)
+}
+
+// HashGetOp returns the envelope carrying (exists, $hv->{key}); key is one
+// encoded string node.
+func (p *Perl) HashGetOp(ctx context.Context, hv uint64, key []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendBytes(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(len(key)))
+	return p.valueOp(ctx, midHashGet, wasm2go.Inv_0_10, buf)
+}
+
+// HashSetOp performs $hv->{key} = val.
+func (p *Perl) HashSetOp(ctx context.Context, hv uint64, key, val []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendBytes(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(len(key)))
+	buf = pbAppendBytes(buf, 5, val)
+	buf = pbAppendUint64(buf, 6, uint64(len(val)))
+	return p.valueOp(ctx, midHashSet, wasm2go.Inv_0_12, buf)
+}
+
+// HashDeleteOp performs delete $hv->{key}.
+func (p *Perl) HashDeleteOp(ctx context.Context, hv uint64, key []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendBytes(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(len(key)))
+	return p.valueOp(ctx, midHashDelete, wasm2go.Inv_0_9, buf)
+}
+
+// HashKeysOp returns the envelope carrying keys %{$hv} as a node list.
+func (p *Perl) HashKeysOp(ctx context.Context, hv uint64) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendUint64(buf, 2, hv)
+	return p.valueOp(ctx, midHashKeys, wasm2go.Inv_0_11, buf)
+}
+
+// NewArrayOp materialises a fresh guest array from the node list and returns
+// the envelope carrying its ref node.
+func (p *Perl) NewArrayOp(ctx context.Context, vals []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendBytes(buf, 2, vals)
+	buf = pbAppendUint64(buf, 3, uint64(len(vals)))
+	return p.valueOp(ctx, midNewArray, wasm2go.Inv_0_17, buf)
+}
+
+// NewHashOp materialises a fresh guest hash from the alternating key/value
+// node list and returns the envelope carrying its ref node.
+func (p *Perl) NewHashOp(ctx context.Context, pairs []byte) ([]byte, bool, error) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, p.h)
+	buf = pbAppendBytes(buf, 2, pairs)
+	buf = pbAppendUint64(buf, 3, uint64(len(pairs)))
+	return p.valueOp(ctx, midNewHash, wasm2go.Inv_0_18, buf)
 }
 
 // armInterrupt starts the cancellation watchdog for ctx: on ctx cancellation
@@ -508,7 +559,7 @@ func (p *Perl) Close() error {
 	}
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_1)
+	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_6)
 	if err == nil {
 		err = pbExtractError(resp)
 	}
@@ -528,7 +579,7 @@ func (p *Perl) releaseMapping() {
 func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
-	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_4)
+	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
 	}
@@ -543,7 +594,7 @@ func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 func (p *Perl) interruptAddr() (uint32, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_3)
+	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}

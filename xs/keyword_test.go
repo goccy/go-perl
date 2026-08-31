@@ -4,6 +4,7 @@ package xs_test
 
 import (
 	"context"
+	perl "github.com/goccy/go-perl"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,7 +43,7 @@ func TestSyntaxKeywordMatch(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_kinc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_kinc", filepath.Join(dir, "lib")); err != nil {
+	if _, err := p.Call(ctx, "__t_kinc", perl.NewValue(filepath.Join(dir, "lib"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 
@@ -52,8 +53,8 @@ func TestSyntaxKeywordMatch(t *testing.T) {
 		if err != nil || r.Error != nil {
 			t.Fatalf("%s: err=%v ok=%v error=%v", what, err, (r.Error == nil), r.Error)
 		}
-		if want != "" && r.Value.String() != want {
-			t.Fatalf("%s = %q, want %q", what, r.Value.String(), want)
+		if want != "" && resultStr(r) != want {
+			t.Fatalf("%s = %q, want %q", what, resultStr(r), want)
 		}
 	}
 

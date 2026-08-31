@@ -5,6 +5,7 @@ package xs_test
 import (
 	"context"
 	"fmt"
+	perl "github.com/goccy/go-perl"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,7 @@ func TestDevelNYTProf(t *testing.T) {
 	if r, err := p.Eval(ctx, `sub __t_ninc { unshift @INC, @_; 1 } 1;`); err != nil || r.Error != nil {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
-	if _, err := p.Call(ctx, "__t_ninc", filepath.Join(dir, "lib")); err != nil {
+	if _, err := p.Call(ctx, "__t_ninc", perl.NewValue(filepath.Join(dir, "lib"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 
@@ -56,7 +57,7 @@ func TestDevelNYTProf(t *testing.T) {
 		if err != nil || r.Error != nil {
 			t.Fatalf("%s: err=%v ok=%v error=%v", what, err, (r.Error == nil), r.Error)
 		}
-		res := fmt.Sprint(r.Value.String())
+		res := fmt.Sprint(resultStr(r))
 		if want != "" && res != want {
 			t.Fatalf("%s = %q, want %q", what, res, want)
 		}

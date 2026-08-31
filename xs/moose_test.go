@@ -4,6 +4,7 @@ package xs_test
 
 import (
 	"context"
+	perl "github.com/goccy/go-perl"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,8 +47,8 @@ func TestMoose(t *testing.T) {
 		t.Fatalf("inc helper: err=%v error=%v", err, r.Error)
 	}
 	if _, err := p.Call(ctx, "__t_minc",
-		filepath.Join(dir, "lib"),
-		filepath.Join(dir, "deps", "lib", "perl5")); err != nil {
+		perl.NewValue(filepath.Join(dir, "lib")),
+		perl.NewValue(filepath.Join(dir, "deps", "lib", "perl5"))); err != nil {
 		t.Fatalf("add inc: %v", err)
 	}
 
@@ -57,8 +58,8 @@ func TestMoose(t *testing.T) {
 		if err != nil || r.Error != nil {
 			t.Fatalf("%s: err=%v ok=%v error=%v", what, err, (r.Error == nil), r.Error)
 		}
-		if want != "" && r.Value.String() != want {
-			t.Fatalf("%s = %q, want %q", what, r.Value.String(), want)
+		if want != "" && resultStr(r) != want {
+			t.Fatalf("%s = %q, want %q", what, resultStr(r), want)
 		}
 	}
 

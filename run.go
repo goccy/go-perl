@@ -48,14 +48,18 @@ func (p *Perl) RunFile(ctx context.Context, path string, incDirs []string, args 
 	if r.Error != nil {
 		return fmt.Errorf("install script runner: %w", r.Error)
 	}
-	callArgs := make([]any, 0, len(args)+2)
-	inc := make([]any, len(incDirs))
+	incVals := make([]Value, len(incDirs))
 	for i, d := range incDirs {
-		inc[i] = d
+		incVals[i] = NewValue(d)
 	}
-	callArgs = append(callArgs, path, inc)
+	inc, err := p.NewArray(ctx, incVals...)
+	if err != nil {
+		return fmt.Errorf("build @INC list: %w", err)
+	}
+	callArgs := make([]Value, 0, len(args)+2)
+	callArgs = append(callArgs, NewValue(path), inc.Ref())
 	for _, a := range args {
-		callArgs = append(callArgs, a)
+		callArgs = append(callArgs, NewValue(a))
 	}
 	_, err = p.Call(ctx, "__goperl_run_file", callArgs...)
 	return err

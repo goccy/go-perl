@@ -909,6 +909,15 @@ func (h envStubs) Socketpair(m *base.Module, l0 int32, l1 int32, l2 int32, l3 in
 func (h envStubs) Ttyname(m *base.Module, l0 int32) int32                                  { return 0 }
 func (h envStubs) Tzset(m *base.Module)                                                    {}
 func (h envStubs) Umask(m *base.Module, l0 int32) int32                                    { return 0 }
+func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
+	if l0 == 0 {
+		l0 = 64
+	}
+	return wasm2go.WasmAlloc(m, l0)
+}
+func (h envStubs) X__cxa_throw(m *base.Module, l0 int32, l1 int32, l2 int32) {
+	panic("wasm: C++ exception thrown")
+}
 
 var _ = fmt.Errorf
 var _ = sort.Search
@@ -937,31 +946,82 @@ var _ = errors.New
 var _ = fmt.Errorf
 var _ = runtime.SetFinalizer
 
+func PerlArrayGet(h uint64, av uint64, idx int64) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendInt64(buf, 3, idx)
+	resp, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+// Array operations. Every `av` parameter is a ref handle whose referent is
+// an ARRAY; ties and overloads run like ordinary Perl code, and a die
+// surfaces as a die envelope.
+func PerlArrayLen(h uint64, av uint64) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, av)
+	resp, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlArrayPush(h uint64, av uint64, vals string, valsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendString(buf, 3, vals)
+	buf = pbAppendUint64(buf, 4, uint64(valsLen))
+	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlArraySet(h uint64, av uint64, idx int64, val string, valLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, av)
+	buf = pbAppendInt64(buf, 3, idx)
+	buf = pbAppendString(buf, 4, val)
+	buf = pbAppendUint64(buf, 5, uint64(valLen))
+	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlArrayValues(h uint64, av uint64) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, av)
+	resp, err := invokeMethod(0, 4, buf, wasm2go.Inv_0_4)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
 // Call the named Perl subroutine in list context. `sub_name` is a fully
 // qualified sub name ("main::handler", "My::App::run") or a main:: sub name;
-// `args_json` is a JSON array of tagged value nodes (NULL/empty means no
-// arguments). Returns
-//
-//	{"ok":
-//
-// <bool
-// >,"result":
-// <array
-// of tagged nodes>,"error":
-// <string
-// >}
-//
-// On a Perl-level die (including "no such sub"), "ok" is false and "error"
-// holds $
-// .
-// Unlike perl_eval, STDOUT/STDERR are NOT redirected: prints go to
-// the instance's WASI fds.
-func PerlCall(h uint64, subName string, argsJson string) (string, error) {
+// `args`/`args_len` is a node list (empty means no arguments). ok payload:
+// the return list as a node list. Unlike perl_eval, STDOUT/STDERR are NOT
+// redirected: prints go to the instance's WASI fds.
+func PerlCall(h uint64, subName string, args string, argsLen uint32) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, subName)
-	buf = pbAppendString(buf, 3, argsJson)
-	resp, err := invokeMethod(0, 0, buf, wasm2go.Inv_0_0)
+	buf = pbAppendString(buf, 3, args)
+	buf = pbAppendUint64(buf, 4, uint64(argsLen))
+	resp, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
 	if err != nil {
 		return "", err
 	}
@@ -974,45 +1034,92 @@ func PerlCall(h uint64, subName string, argsJson string) (string, error) {
 func PerlClose(h uint64) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	_, err := invokeMethod(0, 1, buf, wasm2go.Inv_0_1)
+	_, err := invokeMethod(0, 6, buf, wasm2go.Inv_0_6)
 	return err
 }
 
-// Evaluate `src` in the interpreter and return the result as a JSON string:
+// Dereference the SCALAR (or REF) reference behind `ref`: $$ref. ok payload:
+// one node (a ref-to-ref yields a fresh ref node). ARRAY/HASH/CODE handles
+// need no guest call to view — their operations below take the ref handle
+// directly.
+func PerlDeref(h uint64, ref uint64) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, ref)
+	resp, err := invokeMethod(0, 7, buf, wasm2go.Inv_0_7)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+// Evaluate `src` (a string eval in scalar context, REPL-like state
+// persistence). ok payload:
 //
-//	{"ok":
+//	result:node stdout:(u32 len + bytes) stderr:(u32 len + bytes)
 //
-// <bool
-// >,"result":
-// <string
-// >,"stdout":
-// <string
-// >,"stderr":
-// <string
-// >,
-//
-//	"error":
-//
-// <string
-// >}
-//
-// `src` is run via eval_pv (a string eval in scalar context). "result" holds
-// the stringification of the returned scalar. "stdout"/"stderr" hold anything
-// printed to STDOUT/STDERR during the eval (captured by reopening them onto
-// in-memory scalars around the call). On a Perl-level die (or a host interrupt,
-// see below), "ok" is false and "error" holds $
-// @
-// (the contents of ERRSV).
-// Package/lexical-our state persists across calls on the same handle (REPL-like).
-//
-// A single JSON string return is used because the bridge generator surfaces
-// only one response value to Go; bundling the outputs keeps one round-trip and
-// one atomic result. The Go wrapper unmarshals it.
+// A die envelope (status 1) is followed by the same stdout/stderr pair —
+// what the eval printed before dying is still delivered.
 func PerlEval(h uint64, src string) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, src)
-	resp, err := invokeMethod(0, 2, buf, wasm2go.Inv_0_2)
+	resp, err := invokeMethod(0, 8, buf, wasm2go.Inv_0_8)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlHashDelete(h uint64, hv uint64, key string, keyLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendString(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(keyLen))
+	resp, err := invokeMethod(0, 9, buf, wasm2go.Inv_0_9)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+// Hash operations. Every `hv` parameter is a ref handle whose referent is a
+// HASH. Keys travel as ONE string node (tag 4), so byte keys and utf8 keys
+// both round-trip exactly.
+func PerlHashGet(h uint64, hv uint64, key string, keyLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendString(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(keyLen))
+	resp, err := invokeMethod(0, 10, buf, wasm2go.Inv_0_10)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlHashKeys(h uint64, hv uint64) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, hv)
+	resp, err := invokeMethod(0, 11, buf, wasm2go.Inv_0_11)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, valLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, hv)
+	buf = pbAppendString(buf, 3, key)
+	buf = pbAppendUint64(buf, 4, uint64(keyLen))
+	buf = pbAppendString(buf, 5, val)
+	buf = pbAppendUint64(buf, 6, uint64(valLen))
+	resp, err := invokeMethod(0, 12, buf, wasm2go.Inv_0_12)
 	if err != nil {
 		return "", err
 	}
@@ -1027,8 +1134,8 @@ func PerlEval(h uint64, src string) (string, error) {
 // eval-breaker: the run loop is pluggable (PL_runops). perl_new installs a
 // custom loop that, on every opcode, tests a host-writable flag word and, when
 // set, calls Perl_croak("Perl execution interrupted"). The croak longjmps to
-// the eval_pv trap, so perl_eval returns cleanly with ok=false and the message
-// in "error" — exactly like a Perl-level die.
+// the eval trap, so the eval returns cleanly with a die envelope — exactly
+// like a Perl-level die.
 //
 // To interrupt, the host performs a single plain 32-bit store into linear
 // memory (no call into the instance):
@@ -1042,11 +1149,45 @@ func PerlEval(h uint64, src string) (string, error) {
 func PerlInterruptAddr(h uint64) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 3, buf, wasm2go.Inv_0_3)
+	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}
 	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
+// Call the CODE reference behind `code` (a ref handle). want_scalar selects
+// the calling context: 0 = list context (ok payload: node list), 1 = scalar
+// context (ok payload: node list holding the single result).
+func PerlInvoke(h uint64, code uint64, wantScalar uint32, args string, argsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, code)
+	buf = pbAppendUint64(buf, 3, uint64(wantScalar))
+	buf = pbAppendString(buf, 4, args)
+	buf = pbAppendUint64(buf, 5, uint64(argsLen))
+	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+// Invoke $obj->method(args...) in list context on the reference behind
+// `obj`, dispatched by Perl's own method resolution (inheritance, AUTOLOAD).
+// ok payload: the return list as a node list.
+func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendUint64(buf, 2, obj)
+	buf = pbAppendString(buf, 3, method)
+	buf = pbAppendString(buf, 4, args)
+	buf = pbAppendUint64(buf, 5, uint64(argsLen))
+	resp, err := invokeMethod(0, 15, buf, wasm2go.Inv_0_15)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
 // Initialize a Perl interpreter and return an opaque handle (0 on failure).
@@ -1063,11 +1204,38 @@ func PerlInterruptAddr(h uint64) (uint32, error) {
 func PerlNew(libDir string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
-	resp, err := invokeMethod(0, 4, buf, wasm2go.Inv_0_4)
+	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
 	}
 	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
+}
+
+// Materialise a fresh array/hash in the guest from a node list and return a
+// ref node to it (ok payload: one node). perl_new_hash's list alternates
+// key nodes and value nodes.
+func PerlNewArray(h uint64, vals string, valsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, vals)
+	buf = pbAppendUint64(buf, 3, uint64(valsLen))
+	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
+}
+
+func PerlNewHash(h uint64, pairs string, pairsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, pairs)
+	buf = pbAppendUint64(buf, 3, uint64(pairsLen))
+	resp, err := invokeMethod(0, 18, buf, wasm2go.Inv_0_18)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
 // Bind the generic native thunk as the Perl sub `name`; fn_id is the host's
@@ -1077,23 +1245,36 @@ func PerlRegisterNativeXs(h uint64, name string, fnId int32) error {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, name)
 	buf = pbAppendInt32(buf, 3, fnId)
-	_, err := invokeMethod(0, 5, buf, wasm2go.Inv_0_5)
+	_, err := invokeMethod(0, 19, buf, wasm2go.Inv_0_19)
 	return err
+}
+
+// Release registry pins: `ids` is a packed array of u64 handle ids (host
+// finalizer queue drains through one call). ok payload: empty.
+func PerlRelease(h uint64, ids string, idsLen uint32) (string, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, ids)
+	buf = pbAppendUint64(buf, 3, uint64(idsLen))
+	resp, err := invokeMethod(0, 20, buf, wasm2go.Inv_0_20)
+	if err != nil {
+		return "", err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
 // Register the Go-side dispatcher for this instance. `callback_id` is the id
 // the host returned when registering its callback handler; every Perl->Go
 // call from this interpreter is routed to it. Perl code reaches Go through
-// main::__plwasm_go_invoke($func_id, $payload_json) — an XS installed by
-// perl_new that forwards to the wasmify callback import — and the
-// main::__plwasm_go_call glue that wraps it with JSON encode/decode (the
-// host binds a named Perl sub to a Go function by eval'ing a one-line sub
-// that calls the glue with the Go function's id).
+// closures over main::__plwasm_go_call (an XS installed by perl_new that
+// speaks the node protocol over the wasmify callback import); the host binds
+// a named Perl sub to a Go function by eval'ing a one-line sub that calls
+// the glue with the Go function's id.
 func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, callbackId)
-	_, err := invokeMethod(0, 6, buf, wasm2go.Inv_0_6)
+	_, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
 	return err
 }
 
@@ -1165,7 +1346,7 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, err
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendString(buf, 5, s)
-	resp, err := invokeMethod(0, 7, buf, wasm2go.Inv_0_7)
+	resp, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
 	if err != nil {
 		return 0, err
 	}

@@ -100,12 +100,14 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 		// instance's own first eval re-does — and privately dirties — far less.
 		// A bare expression leaves no package-level state; the isolation tests
 		// guard that it stays so.
-		res, err := tmp.Eval(context.Background(), "1 + 1;")
+		resp, _, err := tmp.EvalOp(context.Background(), "1 + 1;")
 		if err != nil {
 			return nil, fmt.Errorf("snapshot warmup: %w", err)
 		}
-		if !res.Ok {
-			return nil, fmt.Errorf("snapshot warmup died: %s", res.Error)
+		// The envelope's leading status byte is 0 on success (the public
+		// package owns the full decoder; success is all the warmup needs).
+		if len(resp) == 0 || resp[0] != 0 {
+			return nil, fmt.Errorf("snapshot warmup died")
 		}
 		handle = h
 		return mod.g, nil

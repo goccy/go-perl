@@ -158,7 +158,7 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, name)
 	buf = pbAppendInt32(buf, 3, fnID)
-	resp, err := p.m.invoke(0, midRegisterNativeXS, buf, wasm2go.Inv_0_5)
+	resp, err := p.m.invoke(0, midRegisterNativeXS, buf, wasm2go.Inv_0_19)
 	if err != nil {
 		return err
 	}
@@ -175,7 +175,7 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendString(buf, 5, s)
-	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_7)
+	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_22)
 	if err != nil {
 		return 0, err
 	}
@@ -219,7 +219,7 @@ func (p *Perl) EnsureDispatcher() error {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, cbID)
-	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_6)
+	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_21)
 	if err != nil {
 		return fmt.Errorf("set Go dispatcher: %w", err)
 	}
