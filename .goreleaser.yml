@@ -1,0 +1,56 @@
+---
+version: 2
+project_name: gperl
+
+builds:
+  - main: ./cmd/gperl
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - LICENSE-ARTISTIC
+      - LICENSE-GPL
+      - README.md
+
+nfpms:
+  - file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}-1_{{ .Arch }}
+    homepage: https://github.com/goccy/go-perl
+    maintainer: goccy
+    description: Perl 5 in pure Go - embed and run Perl anywhere Go runs
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  prerelease: auto
