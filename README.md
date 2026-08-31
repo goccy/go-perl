@@ -134,6 +134,12 @@ attestation-verified vendoring on its side.
   version ([`LICENSE-GPL`](./LICENSE-GPL)), **or** the "Artistic License"
   ([`LICENSE-ARTISTIC`](./LICENSE-ARTISTIC)), at your choice. Both texts are
   vendored verbatim from the pinned Perl 5.44.0 sources.
+- **`gperl/cpanm` is not MIT**: it is the fatpacked
+  [cpanminus](https://github.com/miyagawa/cpanminus) program, vendored
+  verbatim from the App-cpanminus 1.7049 CPAN release and embedded so the
+  XS build pipeline can resolve CPAN dependencies without downloading or
+  consulting a host installation. It stays under its own terms — the same
+  dual license as Perl itself (see the script's POD).
 - The [`perlwasm2go`](https://github.com/goccy/perlwasm2go) dependency (the
   translated interpreter) is likewise dual-licensed under Perl's terms in its
   own repository.

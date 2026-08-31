@@ -5,16 +5,13 @@ package gperl
 // @INC gains local/lib/perl5.
 
 import (
+	_ "embed"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/xs"
@@ -85,10 +82,20 @@ $app->parse_options(@ARGV);
 exit $app->doit;
 `
 
-// runCpanmArgs runs cpanm (the installed script when present, else a copy
-// bootstrapped from cpanmin.us into work) with the given cpanm arguments
-// on an IN-PROCESS interpreter — cpanm is pure Perl, so no perl needs to
-// be installed and no perl process is spawned for it. cpanm's own child
+// cpanmScript is the fatpacked cpanm program, vendored verbatim from the
+// App-cpanminus 1.7049 CPAN release (bin/cpanm; Perl 5 license, see the
+// script's own POD). cpanminus is in maintenance mode with roughly one
+// release a year, so a pinned copy stays current for a long time; bump it
+// by replacing this file from the newer dist. Embedding it means the
+// pipeline downloads nothing and consults no host installation — the
+// interpreter loads this exact program every time.
+//
+//go:embed cpanm
+var cpanmScript []byte
+
+// runCpanmArgs runs the embedded cpanm with the given cpanm arguments on
+// an IN-PROCESS interpreter — cpanm is pure Perl, so no perl needs to be
+// installed and no perl process is spawned for it. cpanm's own child
 // builds still re-invoke $^X (Makefile.PL, Build.PL) and some dists
 // shell out to a bare `perl`: both resolve into the shim, which
 // re-enters this executable as `gperl run` with the %Config overlay
@@ -96,10 +103,8 @@ exit $app->doit;
 // not program output).
 func runCpanmArgs(work, dir string, cpanmArgs []string) error {
 	script := filepath.Join(work, "cpanm")
-	if path, lerr := exec.LookPath("cpanm"); lerr == nil {
-		script = path
-	} else if err := fetchCpanm(script); err != nil {
-		return fmt.Errorf("bootstrap cpanm: %w", err)
+	if err := os.WriteFile(script, cpanmScript, 0o644); err != nil {
+		return err
 	}
 	shim, err := xsWritePerlShim(work)
 	if err != nil {
@@ -135,30 +140,6 @@ func runCpanmArgs(work, dir string, cpanmArgs []string) error {
 	)
 	argv := append([]string{"-e", cpanmDriver, "--"}, cpanmArgs...)
 	return runPerlInProcess(dir, env, os.Stderr, argv...)
-}
-
-// fetchCpanm downloads the fatpacked cpanm script to path. cpanm is the
-// one thing the pipeline cannot run before it has it; everything after
-// this flows through the embedded interpreter's own networking.
-func fetchCpanm(path string) error {
-	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Get("https://cpanmin.us")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET https://cpanmin.us: %s", resp.Status)
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }
 
 // warnHostXS points out vendored host-perl XS objects — a local/ tree
