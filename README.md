@@ -54,8 +54,10 @@ func main() {
   [`fs`](./fs) package: `fs.NewHostFS()` passes through to the operating
   system's filesystem (how the `gperl` command behaves, matching `perl`),
   `fs.DirFS` scopes it to one directory, `fs.NewMemFS()` or any custom
-  backend plugs in the same way — and environment, network (`Dial`/`Resolve`)
-  and subprocess (`Exec`) policy hooks complete the sandbox.
+  backend plugs in the same way. The capability hooks are FAIL-CLOSED: with
+  a zero `Config`, outbound connections (`Dial`), name resolution
+  (`Resolve`), and subprocess spawns (`Exec`) are all denied — each
+  capability is granted explicitly by setting its hook.
 - **Multi-instance**: independent `Perl` instances share nothing (writable
   state, that is — read-only snapshot pages are shared).
 - **Cancellable**: cancelling the `context.Context` passed to `Eval` stops a

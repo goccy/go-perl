@@ -165,6 +165,33 @@ func TestInstanceIsolation(t *testing.T) {
 	}
 }
 
+// TestZeroConfigDeniesCapabilities: the capability hooks are fail-closed —
+// with a zero Config, outbound connections, name resolution, and subprocess
+// spawns are all denied.
+func TestZeroConfigDeniesCapabilities(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+
+	r, err := p.Eval(ctx, `
+		use IO::Socket::INET;
+		my $s = IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => 1,
+		                              Proto => "tcp", Timeout => 2);
+		$s ? "connected" : "denied";`)
+	if err != nil || r.Error != nil || resultStr(r) != "denied" {
+		t.Fatalf("dial under zero Config = %q (err=%v error=%v), want denied", resultStr(r), err, r.Error)
+	}
+
+	r, err = p.Eval(ctx, `my @a = gethostbyname("localhost"); @a ? "resolved" : "denied"`)
+	if err != nil || r.Error != nil || resultStr(r) != "denied" {
+		t.Fatalf("resolve under zero Config = %q (err=%v error=%v), want denied", resultStr(r), err, r.Error)
+	}
+
+	r, err = p.Eval(ctx, `my $rc = system("/usr/bin/true"); $rc == 0 ? "ran" : "denied"`)
+	if err != nil || r.Error != nil || resultStr(r) != "denied" {
+		t.Fatalf("spawn under zero Config = %q (err=%v error=%v), want denied", resultStr(r), err, r.Error)
+	}
+}
+
 // TestAddInc: directories prepended to @INC resolve modules through the
 // instance's filesystem.
 func TestAddInc(t *testing.T) {

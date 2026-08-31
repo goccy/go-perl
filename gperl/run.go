@@ -34,13 +34,21 @@ import (
 // it is nil for success and for a plain exit().
 // HostConfig is the perl-like base configuration every gperl entry point
 // (and every binary `gperl build` produces) starts from: the operating
-// system's filesystem, with the embedded stdlib extracted onto it.
+// system's filesystem with the embedded stdlib extracted onto it, and
+// every capability hook allowing — perl(1) does not sandbox, so neither
+// does gperl (the library's zero Config denies these instead).
 func HostConfig() (perl.Config, error) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
 		return perl.Config{}, fmt.Errorf("extract embedded stdlib: %w", err)
 	}
-	return perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib}, nil
+	return perl.Config{
+		FS:        goperlfs.NewHostFS(),
+		StdlibDir: stdlib,
+		Dial:      func(string, string, string, int) bool { return true },
+		Resolve:   func(string) bool { return true },
+		Exec:      func(string, []string) bool { return true },
+	}, nil
 }
 
 func Run(script string, args []string) (status int, err error) {

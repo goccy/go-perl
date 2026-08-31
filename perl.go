@@ -72,7 +72,6 @@ func New(cfg Config) (*Perl, error) {
 		// bit bucket as its script filehandle); synthesize one over any
 		// backend.
 		FS:                 withDevNull(cfg.FS),
-		NetAccess:          cfg.NetAccess,
 		Dial:               cfg.Dial,
 		Resolve:            cfg.Resolve,
 		Exec:               cfg.Exec,

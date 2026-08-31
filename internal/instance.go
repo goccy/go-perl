@@ -58,7 +58,6 @@ type InstanceOptions struct {
 	StdlibDir string
 	Env       []string
 	FS        goperlfs.FS
-	NetAccess func(op string) bool
 	Dial      func(network, host, ip string, port int) bool
 	Resolve   func(host string) bool
 	Exec      func(path string, argv []string) bool
@@ -218,18 +217,24 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	if opts.FS != nil {
 		wasi.SetFS(opts.FS)
 	}
-	if opts.NetAccess != nil {
-		wasi.SetNetAccessHook(opts.NetAccess)
+	// The capability hooks are FAIL-CLOSED: the runtime allows when a hook
+	// is unset, so a nil hook installs an explicit deny-all here — the zero
+	// configuration grants nothing.
+	dial := opts.Dial
+	if dial == nil {
+		dial = func(string, string, string, int) bool { return false }
 	}
-	if opts.Dial != nil {
-		wasi.SetDialHook(opts.Dial)
+	wasi.SetDialHook(dial)
+	resolve := opts.Resolve
+	if resolve == nil {
+		resolve = func(string) bool { return false }
 	}
-	if opts.Resolve != nil {
-		wasi.SetResolveHook(opts.Resolve)
+	wasi.SetResolveHook(resolve)
+	exec := opts.Exec
+	if exec == nil {
+		exec = func(string, []string) bool { return false }
 	}
-	if opts.Exec != nil {
-		wasi.SetExecHook(opts.Exec)
-	}
+	wasi.SetExecHook(exec)
 	// Sandbox stdio by default: an unset stream does NOT fall through to the
 	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
 	// stderr to discard. (Perl-level print output is still captured into the
