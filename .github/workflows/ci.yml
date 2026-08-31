@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    name: Verify perl.go / stdlib.zip attestations
+    name: Verify internal/perl.go / stdlib.zip attestations
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

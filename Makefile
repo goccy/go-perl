@@ -1,5 +1,5 @@
 PERL_WASM_REPO     ?= goccy/perl-wasm
-PERL_WASM_VERSION  ?= v0.2.0
+PERL_WASM_VERSION  ?= v0.2.1
 # perl-wasm emits its release attestations from release.yml (the v* tag
 # workflow), NOT build.yml — releasing lives only in release.yml there.
 PERL_WASM_WORKFLOW ?= goccy/perl-wasm/.github/workflows/release.yml
@@ -9,7 +9,7 @@ PERL_WASM_WORKFLOW ?= goccy/perl-wasm/.github/workflows/release.yml
 # the left, in-tree filename on the right (the rename is cosmetic; gh
 # attestation verify matches by content digest).
 BRIDGE_ASSET := perl_wasm2go.go
-BRIDGE_FILE  := perl.go
+BRIDGE_FILE  := internal/perl.go
 STDLIB_ASSET := perl_stdlib.zip
 STDLIB_FILE  := stdlib.zip
 RELEASE_URL       = https://github.com/$(PERL_WASM_REPO)/releases/download/$(PERL_WASM_VERSION)
