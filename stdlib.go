@@ -54,9 +54,12 @@ func extractStdlibTo(parent string) (string, error) {
 		return "", fmt.Errorf("open embedded stdlib: %w", err)
 	}
 	for _, f := range zr.File {
+		if filepath.Clean(f.Name) == "." {
+			continue
+		}
 		// Guard against zip-slip: the cleaned target must stay under dir.
 		target := filepath.Join(dir, f.Name)
-		if !strings.HasPrefix(target, filepath.Clean(dir)+string(os.PathSeparator)) && target != filepath.Clean(dir) {
+		if !strings.HasPrefix(target, filepath.Clean(dir)+string(os.PathSeparator)) {
 			return "", fmt.Errorf("illegal path in stdlib zip: %q", f.Name)
 		}
 		if f.FileInfo().IsDir() {
