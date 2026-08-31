@@ -52,12 +52,13 @@ import (
 	_ "github.com/goccy/go-perl/xs"
 )
 
-// MaxRequestBody caps how much of a request body a worker reads.
-const MaxRequestBody = 32 << 20
+// maxRequestBody caps how much of a request body a worker reads.
+const maxRequestBody = 32 << 20
 
-// Env flattens the request into the CGI-style PSGI environment. The psgi.*
-// runtime keys are filled in Perl-side when the application runs.
-func Env(r *http.Request, bodyLen int) map[string]any {
+// requestEnv flattens the request into the CGI-style PSGI environment.
+// The psgi.* runtime keys are filled in Perl-side when the application
+// runs.
+func requestEnv(r *http.Request, bodyLen int) map[string]any {
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		host, port = r.Host, "80"
@@ -94,9 +95,9 @@ func Env(r *http.Request, bodyLen int) map[string]any {
 	return env
 }
 
-// WriteResponse maps the application's (status, header pairs, base64 body)
+// writeResponse maps the application's (status, header pairs, base64 body)
 // return list onto the ResponseWriter.
-func WriteResponse(w http.ResponseWriter, res []any) error {
+func writeResponse(w http.ResponseWriter, res []any) error {
 	if len(res) != 3 {
 		return fmt.Errorf("PSGI response crossed as %d values, want 3", len(res))
 	}
@@ -321,12 +322,12 @@ func (ws *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the PSGI env's psgi.multiprocess key (true when other workers may serve
 // concurrently).
 func serve(ctx context.Context, wk worker, w http.ResponseWriter, r *http.Request, multiproc bool) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return err
 	}
-	env := Env(r, len(body))
+	env := requestEnv(r, len(body))
 	if multiproc {
 		// Workers are isolated interpreters serving at the same time: the
 		// PSGI flag for "another copy of the app may run concurrently and
@@ -338,7 +339,7 @@ func serve(ctx context.Context, wk worker, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return err
 	}
-	return WriteResponse(w, res)
+	return writeResponse(w, res)
 }
 
 // Close shuts down every worker. Callers stop serving first; Close does not
