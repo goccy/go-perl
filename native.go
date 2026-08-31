@@ -167,15 +167,6 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 	return pbExtractError(resp)
 }
 
-// XS helper opcodes (perl.cc perl_xs_helper).
-const (
-	xsOpSvIV     = 1
-	xsOpSvPV     = 2
-	xsOpNewIV    = 3
-	xsOpNewPVN   = 4
-	xsOpSvMortal = 5
-)
-
 // XSHelperOp performs one SV micro-operation inside the guest. It is the
 // primitive the native SDK vtable is built from; see perl.cc perl_xs_helper
 // for the opcode table.

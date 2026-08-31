@@ -17,12 +17,10 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 
-	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/gperl"
 )
 
@@ -46,15 +44,8 @@ func main() {
 			usage()
 		}
 		status, err := gperl.RunCLI(os.Args[2:])
-		var pe *perl.PerlError
-		if errors.As(err, &pe) {
-			msg := pe.Message
-			if len(msg) == 0 || msg[len(msg)-1] != '\n' {
-				msg += "\n"
-			}
-			fmt.Fprint(os.Stderr, msg)
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+		if err != nil {
+			gperl.PrintRunError(err)
 		}
 		os.Exit(status)
 	case "build":

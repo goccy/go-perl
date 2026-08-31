@@ -158,7 +158,7 @@ struct goperl_he {
     uint64_t goperl_tok; /* guest HE token; 0 = fabricated by the dist */
 };
 
-/* svtype: the REAL perl 5.42 enum values, and the guest reports raw
+/* svtype: the REAL perl 5.44 enum values, and the guest reports raw
  * SvTYPE, so comparisons like SvTYPE(sv) <= SVt_PVMG agree exactly. */
 typedef enum {
     SVt_NULL = 0,
@@ -181,7 +181,7 @@ typedef enum {
     SVt_LAST = 17
 } svtype;
 
-/* Context / call flags (real perl 5.42 values; they cross to the guest). */
+/* Context / call flags (real perl 5.44 values; they cross to the guest). */
 #define G_VOID 1
 #define G_SCALAR 2
 #define G_LIST 3
@@ -198,7 +198,7 @@ typedef enum {
 #define GV_ADDMULTI 0x02
 #define GV_NOADD_NOINIT 0x00 /* unused placeholder */
 
-/* overload (amagic) — real perl 5.42 values used by deref overloading. */
+/* overload (amagic) — real perl 5.44 values used by deref overloading. */
 #define fallback_amg 0
 #define to_sv_amg 1
 #define to_av_amg 2
@@ -221,7 +221,7 @@ typedef enum {
 /* Opcode numbers and names, pinned to the embedded perl (generated). */
 #include "goperl_opnames.h"
 
-/* Context types (cop.h, real perl 5.42 values). */
+/* Context types (cop.h, real perl 5.44 values). */
 #define CXTYPEMASK 0xf
 #define CXt_NULL 0
 #define CXt_WHEN 1
@@ -238,7 +238,7 @@ typedef enum {
 #define CXt_SUBST 12
 #define CXt_DEFER 13
 
-/* Debugger flags ($^P) and exit flags (real perl 5.42 values). */
+/* Debugger flags ($^P) and exit flags (real perl 5.44 values). */
 #define PERLDBf_SUB 0x01
 #define PERLDBf_LINE 0x02
 #define PERLDBf_NOOPT 0x04
@@ -3732,7 +3732,7 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
 #define pWARN_NONE ((char *)0)
 #define pWARN_STD ((char *)0)
 #define pWARN_ALL ((char *)1)
-#define WARN_UTF8 44 /* perl 5.42 warnings.h */
+#define WARN_UTF8 44 /* perl 5.44 warnings.h (categories the SDK uses sit below the 5.44 renumbering) */
 #ifndef I32_MAX
 #define I32_MAX INT32_MAX
 #define I32_MIN INT32_MIN
@@ -4300,7 +4300,7 @@ static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
         if (SvUTF8(ssv)) SvUTF8_on(dsv);               \
         else SvUTF8_off(dsv);                          \
     } while (0)
-/* Overload (amagic) calls: the *_amg indexes below are perl 5.42's
+/* Overload (amagic) calls: the *_amg indexes below are perl 5.44's
  * overload.h values — the guest passes them straight to amagic_call. */
 enum {
     bool__amg = 8,

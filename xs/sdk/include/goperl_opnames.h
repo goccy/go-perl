@@ -1,5 +1,5 @@
 /* go-perl native XS SDK -- opcode numbers and names, pinned to the embedded
- * interpreter (perl v5.42.2). GENERATED from perl5's opnames.h/opcode.h; do
+ * interpreter (perl v5.44.0). GENERATED from perl5's opnames.h/opcode.h; do
  * not edit by hand. */
 #ifndef GOPERL_OPNAMES_H
 #define GOPERL_OPNAMES_H
@@ -430,10 +430,12 @@
 #define OP_METHSTART 423
 #define OP_INITFIELD 424
 #define OP_CLASSNAME 425
-
-#define OP_max 426
+#define OP_MULTIPARAM 426
+#define OP_PARAMTEST 427
+#define OP_PARAMSTORE 428
+#define OP_max 429
 #ifndef MAXO
-#define MAXO 426
+#define MAXO 429
 #endif
 
 static const char *const goperl_op_name_v[] = {
@@ -863,6 +865,9 @@ static const char *const goperl_op_name_v[] = {
     "methstart",
     "initfield",
     "classname",
+    "multiparam",
+    "paramtest",
+    "paramstore",
     "freed",
 };
 #define PL_op_name goperl_op_name_v
