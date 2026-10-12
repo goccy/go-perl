@@ -114,3 +114,41 @@ func TestHostFSOptIn(t *testing.T) {
 		t.Fatalf("host write-back = %q, err=%v", data, err)
 	}
 }
+
+// TestDefaultStdlibIsReadOnly pins how the library default serves the
+// standard library: mounted read-only at perl.StdlibDir and loaded from
+// there, while the rest of the filesystem is the instance's own MemFS.
+func TestDefaultStdlibIsReadOnly(t *testing.T) {
+	p, err := perl.New(perl.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx := context.Background()
+	eval := func(src string) string {
+		t.Helper()
+		r, err := p.Eval(ctx, src)
+		if err != nil || r.Error != nil {
+			t.Fatalf("%s: err=%v error=%v", src, err, r.Error)
+		}
+		return resultStr(r)
+	}
+
+	lib := perl.StdlibDir
+	if got := eval(`require File::Spec; $INC{'File/Spec.pm'}`); got != lib+"/File/Spec.pm" {
+		t.Errorf("File::Spec loaded from %q", got)
+	}
+	for _, src := range []string{
+		`open(my $fh, '>>', '` + lib + `/strict.pm') ? "writable" : "$!"`,
+		`open(my $fh, '>', '` + lib + `/New.pm') ? "writable" : "$!"`,
+		`unlink('` + lib + `/strict.pm') ? "removed" : "$!"`,
+		`mkdir('` + lib + `/newdir') ? "created" : "$!"`,
+	} {
+		if got := eval(src); got != "Permission denied" {
+			t.Errorf("%s = %q, want Permission denied", src, got)
+		}
+	}
+	if got := eval(`open(my $fh, '>', '/scratch.txt') ? "ok" : "$!"`); got != "ok" {
+		t.Errorf("writing outside the library: %q", got)
+	}
+}

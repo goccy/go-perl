@@ -13,8 +13,8 @@ import "io"
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
 	// holding the Perl standard library (the assembled lib/ tree); it
-	// becomes @INC via perl_new. Empty defaults to "/" — right for the
-	// library default and for NewStdlibMemFS. An instance on the host
+	// becomes @INC via perl_new. Empty defaults to StdlibDir — right for the
+	// library default and for WithStdlib. An instance on the host
 	// filesystem (fs.NewHostFS) points this at a host directory, e.g. the
 	// one ExtractStdlib returns.
 	StdlibDir string
@@ -74,8 +74,10 @@ type Config struct {
 	// fs.DirFS (the host filesystem scoped to one directory), or any other
 	// fs.FS implementation.
 	//
-	// When nil, the instance gets a PRIVATE in-memory filesystem
-	// pre-loaded with the standard library (NewStdlibMemFS), so a library
-	// embedding never touches the host disk unless explicitly asked to.
+	// When nil, the instance gets a PRIVATE in-memory filesystem with the
+	// standard library mounted read-only at StdlibDir
+	// (WithStdlib(fs.NewMemFS())), so a library embedding never touches the
+	// host disk unless explicitly asked to. The library itself is shared by
+	// every such instance.
 	FS FS
 }

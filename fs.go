@@ -4,18 +4,15 @@ package perl
 //
 // An instance opens every file through an FS backend (Config.FS); the
 // backends themselves live in the go-perl/fs package (fs.NewMemFS,
-// fs.NewHostFS, fs.DirFS). This file re-exports the types Config needs,
-// provides NewStdlibMemFS (the library default's filesystem), and wraps
-// every backend with a working /dev/null (perl requires one to boot).
+// fs.NewHostFS, fs.DirFS). This file re-exports the types Config needs and
+// wraps every backend with a working /dev/null (perl requires one to boot);
+// stdlibfs.go mounts the standard library for the library default.
 
 import (
-	"archive/zip"
-	"bytes"
 	"fmt"
 	"io"
 	iofs "io/fs"
 	"os"
-	"sync"
 	"syscall"
 	"time"
 
@@ -116,77 +113,3 @@ func (fi nullFileInfo) Mode() iofs.FileMode { return fi.mode }
 func (fi nullFileInfo) ModTime() time.Time  { return time.Time{} }
 func (fi nullFileInfo) IsDir() bool         { return fi.mode.IsDir() }
 func (fi nullFileInfo) Sys() any            { return nil }
-
-// stdlibEntries caches the DECOMPRESSED embedded stdlib once per process:
-// building a MemFS per instance then only pays for copying bytes in
-// (MemFS.WriteFile copies, so instances stay fully isolated).
-var (
-	stdlibEntriesOnce sync.Once
-	stdlibEntries     []stdlibEntry
-	stdlibEntriesErr  error
-)
-
-type stdlibEntry struct {
-	name string
-	dir  bool
-	data []byte
-}
-
-func loadStdlibEntries() ([]stdlibEntry, error) {
-	stdlibEntriesOnce.Do(func() {
-		zr, err := zip.NewReader(bytes.NewReader(stdlibZip), int64(len(stdlibZip)))
-		if err != nil {
-			stdlibEntriesErr = fmt.Errorf("open embedded stdlib: %w", err)
-			return
-		}
-		for _, f := range zr.File {
-			if f.FileInfo().IsDir() {
-				stdlibEntries = append(stdlibEntries, stdlibEntry{name: f.Name, dir: true})
-				continue
-			}
-			rc, err := f.Open()
-			if err != nil {
-				stdlibEntriesErr = err
-				return
-			}
-			var buf bytes.Buffer
-			if _, err := buf.ReadFrom(rc); err != nil {
-				rc.Close()
-				stdlibEntriesErr = err
-				return
-			}
-			rc.Close()
-			stdlibEntries = append(stdlibEntries, stdlibEntry{name: f.Name, data: buf.Bytes()})
-		}
-	})
-	return stdlibEntries, stdlibEntriesErr
-}
-
-// NewStdlibMemFS returns an in-memory filesystem pre-loaded with the embedded
-// Perl standard library at the root, ready to back an Interpreter:
-//
-//	fs := perl.NewStdlibMemFS()
-//	interp, _ := perl.NewInterpreter(perl.Config{FS: fs}) // StdlibDir = "/"
-//
-// Each call returns an independent FS, so interpreters built from separate
-// NewStdlibMemFS() values share no filesystem state. This is also the
-// filesystem an instance gets by default (Config with a nil FS).
-func NewStdlibMemFS() (*MemFS, error) {
-	entries, err := loadStdlibEntries()
-	if err != nil {
-		return nil, err
-	}
-	fsys := goperlfs.NewMemFS()
-	for _, e := range entries {
-		if e.dir {
-			if err := fsys.MkdirAll(e.name, 0o755); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if err := fsys.WriteFile(e.name, e.data, 0o644); err != nil {
-			return nil, err
-		}
-	}
-	return fsys, nil
-}
