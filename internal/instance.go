@@ -35,20 +35,21 @@ const (
 	midClose            = 6
 	midDeref            = 7
 	midEval             = 8
-	midHashDelete       = 9
-	midHashGet          = 10
-	midHashKeys         = 11
-	midHashSet          = 12
-	midInterruptAddr    = 13
-	midInvoke           = 14
-	midMethodCall       = 15
-	midNew              = 16
-	midNewArray         = 17
-	midNewHash          = 18
-	midRegisterNativeXS = 19
-	midRelease          = 20
-	midSetGoDispatcher  = 21
-	midXSHelper         = 22
+	midForkChild        = 9
+	midHashDelete       = 10
+	midHashGet          = 11
+	midHashKeys         = 12
+	midHashSet          = 13
+	midInterruptAddr    = 14
+	midInvoke           = 15
+	midMethodCall       = 16
+	midNew              = 17
+	midNewArray         = 18
+	midNewHash          = 19
+	midRegisterNativeXS = 20
+	midRelease          = 21
+	midSetGoDispatcher  = 22
+	midXSHelper         = 23
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package
@@ -61,9 +62,12 @@ type InstanceOptions struct {
 	Dial      func(network, host, ip string, port int) bool
 	Resolve   func(host string) bool
 	Exec      func(path string, argv []string) bool
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
+	// Fork lets the guest fork: each fork runs a copy of the instance as a
+	// pseudo-process inside this host process (see fork.go).
+	Fork   bool
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 
 	MaxMemoryBytes     int
 	MemoryReserveBytes int
@@ -142,6 +146,26 @@ type Perl struct {
 	cloneImg cloneImage
 	// cloneHooks run on every Clone (AddCloneHook).
 	cloneHooks []func(clone *Perl) error
+
+	// OnFork runs on every fork child of this instance before it starts,
+	// so the public package can give the child its own callback routing
+	// (UserHandler) and OnFork.
+	OnFork func(child *Perl)
+	// family is shared by an instance and every pseudo-process forked from
+	// it, directly or not. The instance that was not itself forked waits
+	// for the whole family when it closes: the host process is what keeps
+	// the pseudo-processes alive, so it cannot end before they do.
+	family *forkFamily
+	// killed is the terminating signal delivered to this fork child (0 =
+	// none). It is the only record of the signal: the guest reports a
+	// signal death as an ordinary exit.
+	killed atomic.Int32
+}
+
+// forkFamily tracks the running pseudo-processes forked from one instance.
+type forkFamily struct {
+	origin  *Perl
+	running sync.WaitGroup
 }
 
 // Closed reports whether Close has run.
@@ -174,7 +198,7 @@ func (p *Perl) drainReleases() {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, packed)
 	buf = pbAppendUint64(buf, 3, uint64(len(packed)))
-	_, _ = p.m.invoke(0, midRelease, buf, wasm2go.Inv_0_20)
+	_, _ = p.m.invoke(0, midRelease, buf, wasm2go.Inv_0_21)
 }
 
 // New boots a fresh instance from opts, mapping the process-wide
@@ -183,10 +207,12 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	m := &Module{}
 	wasi := buildWASI(opts)
 	p = &Perl{m: m, wasi: wasi, opts: opts}
+	p.family = &forkFamily{origin: p}
 
 	if err := p.boot(opts, wasi); err != nil {
 		return nil, err
 	}
+	p.installForkHook()
 
 	// Resolve the interrupt-flag address up front so Eval's context watchdog
 	// can fire without calling into a busy instance.
@@ -389,7 +415,7 @@ func (p *Perl) InvokeOp(ctx context.Context, code uint64, scalarCtx bool, args [
 	}
 	buf = pbAppendBytes(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(len(args)))
-	return p.valueOp(ctx, midInvoke, wasm2go.Inv_0_14, buf)
+	return p.valueOp(ctx, midInvoke, wasm2go.Inv_0_15, buf)
 }
 
 // MethodCallOp invokes $obj->method(args...) on the reference behind obj.
@@ -400,7 +426,7 @@ func (p *Perl) MethodCallOp(ctx context.Context, obj uint64, method string, args
 	buf = pbAppendString(buf, 3, method)
 	buf = pbAppendBytes(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(len(args)))
-	return p.valueOp(ctx, midMethodCall, wasm2go.Inv_0_15, buf)
+	return p.valueOp(ctx, midMethodCall, wasm2go.Inv_0_16, buf)
 }
 
 // DerefOp dereferences the SCALAR/REF reference behind ref ($$ref).
@@ -465,7 +491,7 @@ func (p *Perl) HashGetOp(ctx context.Context, hv uint64, key []byte) ([]byte, bo
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendBytes(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
-	return p.valueOp(ctx, midHashGet, wasm2go.Inv_0_10, buf)
+	return p.valueOp(ctx, midHashGet, wasm2go.Inv_0_11, buf)
 }
 
 // HashSetOp performs $hv->{key} = val.
@@ -477,7 +503,7 @@ func (p *Perl) HashSetOp(ctx context.Context, hv uint64, key, val []byte) ([]byt
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
 	buf = pbAppendBytes(buf, 5, val)
 	buf = pbAppendUint64(buf, 6, uint64(len(val)))
-	return p.valueOp(ctx, midHashSet, wasm2go.Inv_0_12, buf)
+	return p.valueOp(ctx, midHashSet, wasm2go.Inv_0_13, buf)
 }
 
 // HashDeleteOp performs delete $hv->{key}.
@@ -487,7 +513,7 @@ func (p *Perl) HashDeleteOp(ctx context.Context, hv uint64, key []byte) ([]byte,
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendBytes(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
-	return p.valueOp(ctx, midHashDelete, wasm2go.Inv_0_9, buf)
+	return p.valueOp(ctx, midHashDelete, wasm2go.Inv_0_10, buf)
 }
 
 // HashKeysOp returns the envelope carrying keys %{$hv} as a node list.
@@ -495,7 +521,7 @@ func (p *Perl) HashKeysOp(ctx context.Context, hv uint64) ([]byte, bool, error) 
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendUint64(buf, 2, hv)
-	return p.valueOp(ctx, midHashKeys, wasm2go.Inv_0_11, buf)
+	return p.valueOp(ctx, midHashKeys, wasm2go.Inv_0_12, buf)
 }
 
 // NewArrayOp materialises a fresh guest array from the node list and returns
@@ -505,7 +531,7 @@ func (p *Perl) NewArrayOp(ctx context.Context, vals []byte) ([]byte, bool, error
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, vals)
 	buf = pbAppendUint64(buf, 3, uint64(len(vals)))
-	return p.valueOp(ctx, midNewArray, wasm2go.Inv_0_17, buf)
+	return p.valueOp(ctx, midNewArray, wasm2go.Inv_0_18, buf)
 }
 
 // NewHashOp materialises a fresh guest hash from the alternating key/value
@@ -515,7 +541,7 @@ func (p *Perl) NewHashOp(ctx context.Context, pairs []byte) ([]byte, bool, error
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, pairs)
 	buf = pbAppendUint64(buf, 3, uint64(len(pairs)))
-	return p.valueOp(ctx, midNewHash, wasm2go.Inv_0_18, buf)
+	return p.valueOp(ctx, midNewHash, wasm2go.Inv_0_19, buf)
 }
 
 // armInterrupt starts the cancellation watchdog for ctx: on ctx cancellation
@@ -564,8 +590,29 @@ func (p *Perl) Close() error {
 	if err == nil {
 		err = pbExtractError(resp)
 	}
+	return errors.Join(err, p.releaseHostState())
+}
+
+// releaseHostState gives back what the host holds for an instance that
+// will never be entered again: its open descriptors and its memory mapping.
+// Descriptors go first and before the wait below — a fork child reading a
+// pipe from this instance sees end-of-file only once this end is closed.
+func (p *Perl) releaseHostState() error {
+	err := p.wasi.CloseAll()
+	if p.family != nil && p.family.origin == p {
+		p.family.running.Wait()
+	}
 	p.releaseMapping()
 	return err
+}
+
+// stderr is where the host reports failures of a pseudo-process that has no
+// caller to return them to.
+func (p *Perl) stderr() io.Writer {
+	if p.opts.Stderr != nil {
+		return p.opts.Stderr
+	}
+	return io.Discard
 }
 
 // releaseMapping returns the instance's copy-on-write mapping to the OS. Must
@@ -580,7 +627,7 @@ func (p *Perl) releaseMapping() {
 func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
-	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_16)
+	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
 	}
@@ -595,7 +642,7 @@ func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 func (p *Perl) interruptAddr() (uint32, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_13)
+	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return 0, err
 	}

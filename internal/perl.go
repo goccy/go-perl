@@ -826,13 +826,10 @@ func (h envStubs) Endnetent(m *base.Module)                                     
 func (h envStubs) Endprotoent(m *base.Module)                                       {}
 func (h envStubs) Endpwent(m *base.Module)                                          {}
 func (h envStubs) Endservent(m *base.Module)                                        {}
-func (h envStubs) Execl(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
 func (h envStubs) Execv(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
-func (h envStubs) Execvp(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
 func (h envStubs) Fchdir(m *base.Module, l0 int32) int32                            { return 0 }
 func (h envStubs) Fchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
 func (h envStubs) Flock(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
-func (h envStubs) Fork(m *base.Module) int32                                        { return 0 }
 func (h envStubs) Getegid(m *base.Module) int32                                     { return 0 }
 func (h envStubs) Geteuid(m *base.Module) int32                                     { return 0 }
 func (h envStubs) Getgid(m *base.Module) int32                                      { return 0 }
@@ -848,8 +845,6 @@ func (h envStubs) Getnetbyaddr(m *base.Module, l0 int32, l1 int32) int32        
 func (h envStubs) Getnetbyname(m *base.Module, l0 int32) int32                      { return 0 }
 func (h envStubs) Getnetent(m *base.Module) int32                                   { return 0 }
 func (h envStubs) Getpgid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Getpid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Getppid(m *base.Module) int32                                     { return 0 }
 func (h envStubs) Getpriority(m *base.Module, l0 int32, l1 int32) int32             { return 0 }
 func (h envStubs) Getprotobyname(m *base.Module, l0 int32) int32                    { return 0 }
 func (h envStubs) Getprotobynumber(m *base.Module, l0 int32) int32                  { return 0 }
@@ -861,7 +856,6 @@ func (h envStubs) Getservbyname(m *base.Module, l0 int32, l1 int32) int32       
 func (h envStubs) Getservbyport(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
 func (h envStubs) Getservent(m *base.Module) int32                                  { return 0 }
 func (h envStubs) Getuid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Kill(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
 func (h envStubs) Killpg(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
 func (h envStubs) Lchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
 func (h envStubs) Listen(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
@@ -1071,13 +1065,36 @@ func PerlEval(h uint64, src string) (string, error) {
 	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
+// Run a forked child to its end.
+//
+// fork is emulated the way perl emulates it on Windows: when the guest
+// forks, the host duplicates the whole instance (the proc_fork host import)
+// and the duplicate becomes the child. The host calls this once on the NEW
+// instance, before any other entry point, with the pid it registered the
+// child under. The call resumes the program right after the forking op,
+// with fork's result being 0, and returns when the child's program ends.
+//
+// Returns the child's exit status (0..255), or UINT32_MAX when the instance
+// is not a freshly forked child. perl_close must follow, as after an exit
+// envelope: it flushes PerlIO and runs END blocks and destructors.
+func PerlForkChild(h uint64, pid int32) (uint32, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendInt32(buf, 2, pid)
+	resp, err := invokeMethod(0, 9, buf, wasm2go.Inv_0_9)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
 func PerlHashDelete(h uint64, hv uint64, key string, keyLen uint32) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendString(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
-	resp, err := invokeMethod(0, 9, buf, wasm2go.Inv_0_9)
+	resp, err := invokeMethod(0, 10, buf, wasm2go.Inv_0_10)
 	if err != nil {
 		return "", err
 	}
@@ -1093,7 +1110,7 @@ func PerlHashGet(h uint64, hv uint64, key string, keyLen uint32) (string, error)
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendString(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
-	resp, err := invokeMethod(0, 10, buf, wasm2go.Inv_0_10)
+	resp, err := invokeMethod(0, 11, buf, wasm2go.Inv_0_11)
 	if err != nil {
 		return "", err
 	}
@@ -1104,7 +1121,7 @@ func PerlHashKeys(h uint64, hv uint64) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendUint64(buf, 2, hv)
-	resp, err := invokeMethod(0, 11, buf, wasm2go.Inv_0_11)
+	resp, err := invokeMethod(0, 12, buf, wasm2go.Inv_0_12)
 	if err != nil {
 		return "", err
 	}
@@ -1119,7 +1136,7 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
 	buf = pbAppendString(buf, 5, val)
 	buf = pbAppendUint64(buf, 6, uint64(valLen))
-	resp, err := invokeMethod(0, 12, buf, wasm2go.Inv_0_12)
+	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return "", err
 	}
@@ -1146,10 +1163,14 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 // offsets (wasm32). Like CPython's eval-breaker, this only fires at opcode
 // boundaries: a single long-running op (a pathological regex, a big sort) is
 // not preempted until it returns to the run loop.
+//
+// Storing 0x100 | signal instead delivers a terminating signal to the
+// (pseudo-)process: no eval can catch it, and the program ends with exit
+// status 128 + signal at the next opcode boundary.
 func PerlInterruptAddr(h uint64) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
+	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return 0, err
 	}
@@ -1166,7 +1187,7 @@ func PerlInvoke(h uint64, code uint64, wantScalar uint32, args string, argsLen u
 	buf = pbAppendUint64(buf, 3, uint64(wantScalar))
 	buf = pbAppendString(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(argsLen))
-	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
+	resp, err := invokeMethod(0, 15, buf, wasm2go.Inv_0_15)
 	if err != nil {
 		return "", err
 	}
@@ -1183,7 +1204,7 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 	buf = pbAppendString(buf, 3, method)
 	buf = pbAppendString(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(argsLen))
-	resp, err := invokeMethod(0, 15, buf, wasm2go.Inv_0_15)
+	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return "", err
 	}
@@ -1204,7 +1225,7 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 func PerlNew(libDir string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
-	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
+	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
 	}
@@ -1219,7 +1240,7 @@ func PerlNewArray(h uint64, vals string, valsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, vals)
 	buf = pbAppendUint64(buf, 3, uint64(valsLen))
-	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
+	resp, err := invokeMethod(0, 18, buf, wasm2go.Inv_0_18)
 	if err != nil {
 		return "", err
 	}
@@ -1231,7 +1252,7 @@ func PerlNewHash(h uint64, pairs string, pairsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, pairs)
 	buf = pbAppendUint64(buf, 3, uint64(pairsLen))
-	resp, err := invokeMethod(0, 18, buf, wasm2go.Inv_0_18)
+	resp, err := invokeMethod(0, 19, buf, wasm2go.Inv_0_19)
 	if err != nil {
 		return "", err
 	}
@@ -1245,7 +1266,7 @@ func PerlRegisterNativeXs(h uint64, name string, fnId int32) error {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, name)
 	buf = pbAppendInt32(buf, 3, fnId)
-	_, err := invokeMethod(0, 19, buf, wasm2go.Inv_0_19)
+	_, err := invokeMethod(0, 20, buf, wasm2go.Inv_0_20)
 	return err
 }
 
@@ -1256,7 +1277,7 @@ func PerlRelease(h uint64, ids string, idsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, ids)
 	buf = pbAppendUint64(buf, 3, uint64(idsLen))
-	resp, err := invokeMethod(0, 20, buf, wasm2go.Inv_0_20)
+	resp, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
 	if err != nil {
 		return "", err
 	}
@@ -1274,7 +1295,7 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, callbackId)
-	_, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
+	_, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
 	return err
 }
 
@@ -1346,7 +1367,7 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, err
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendString(buf, 5, s)
-	resp, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
+	resp, err := invokeMethod(0, 23, buf, wasm2go.Inv_0_23)
 	if err != nil {
 		return 0, err
 	}

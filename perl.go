@@ -71,10 +71,13 @@ func New(cfg Config) (*Perl, error) {
 		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
 		// bit bucket as its script filehandle); synthesize one over any
 		// backend.
-		FS:                 withDevNull(cfg.FS),
-		Dial:               cfg.Dial,
-		Resolve:            cfg.Resolve,
-		Exec:               cfg.Exec,
+		FS:      withDevNull(cfg.FS),
+		Dial:    cfg.Dial,
+		Resolve: cfg.Resolve,
+		Exec:    cfg.Exec,
+		// Forking is granted with process spawning: an instance that may
+		// start host processes may also run copies of itself.
+		Fork:               cfg.Exec != nil,
 		Stdin:              cfg.Stdin,
 		Stdout:             cfg.Stdout,
 		Stderr:             cfg.Stderr,
@@ -85,8 +88,25 @@ func New(cfg Config) (*Perl, error) {
 		return nil, err
 	}
 	raw.UserHandler = p.handleUserCallback
+	raw.OnFork = p.adoptForkChild
 	p.raw = raw
 	return p, nil
+}
+
+// adoptForkChild gives a pseudo-process forked from p its own host side of
+// the Go bridge: the child's memory holds the function ids of every sub p
+// bound, so the child resolves them through a copy of p's table.
+func (p *Perl) adoptForkChild(raw *internal.Perl) {
+	c := &Perl{raw: raw}
+	p.funcsMu.RLock()
+	c.funcs = make(map[int32]GoFunc, len(p.funcs))
+	for id, fn := range p.funcs {
+		c.funcs[id] = fn
+	}
+	c.nextFuncID = p.nextFuncID
+	p.funcsMu.RUnlock()
+	raw.UserHandler = c.handleUserCallback
+	raw.OnFork = c.adoptForkChild
 }
 
 // Eval compiles and runs src in this instance's persistent package (its
@@ -137,6 +157,7 @@ func (p *Perl) Clone() (*Perl, error) {
 	if err != nil {
 		return nil, err
 	}
+	raw.OnFork = c.adoptForkChild
 	c.raw = raw
 	return c, nil
 }

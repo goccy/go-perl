@@ -1,0 +1,173 @@
+package internal
+
+// fork, as a pseudo-process.
+//
+// WASI has no fork and the guest cannot duplicate itself, so the host does
+// it — the way perl emulates fork on Windows, with the whole instance
+// standing in for perl_clone. When the guest forks (the proc_fork host
+// import), forkGuest snapshots the instance's linear memory and globals
+// into a NEW instance that also gets a copy of the fd table (its slots
+// share the parent's open descriptors, as a fork child's do), and runs that
+// instance on its own goroutine as the child. The guest is single-threaded
+// and suspended inside the import while the snapshot is taken, so the image
+// is consistent.
+//
+// The child has the parent's memory but none of its native call stack, so
+// it is entered through one bridge call (perl_fork_child) that resumes the
+// program right after the forking op and returns when the child's program
+// ends. Its exit status is published to the parent's process table, where
+// waitpid finds it like any spawned process's.
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math"
+
+	wasm2go "github.com/goccy/perlwasm2go"
+	"github.com/goccy/perlwasm2go/base"
+)
+
+// interruptSignal marks an interrupt-flag value as a terminating signal
+// (its low bits are the signal number); see perl-wasm's pl.h.
+const interruptSignal = 0x100
+
+// The signals whose delivery to a child is modelled: the ones that
+// terminate a process that has not asked for anything else. Signal
+// handlers do not run in a pseudo-process, so any other signal is refused
+// rather than silently dropped or turned into a kill.
+const (
+	sigHUP  = 1
+	sigINT  = 2
+	sigQUIT = 3
+	sigKILL = 9
+	sigTERM = 15
+)
+
+// installForkHook lets the guest fork when the configuration allows it.
+// Without the hook the import reports ENOSYS and fork returns undef.
+func (p *Perl) installForkHook() {
+	if p.opts.Fork {
+		p.wasi.SetForkHook(p.forkGuest)
+	}
+}
+
+// forkGuest is the fork hook: it builds the child instance from p's current
+// state and starts it. It runs on the guest's goroutine, inside the
+// proc_fork import.
+func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, exited func(status int32)) (kill func(sig int32) error, err error) {
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
+	img := base.NewSharedSnapshot(func() (*base.Module, error) { return p.m.g, nil })
+	if err := img.Err(); err != nil {
+		return nil, fmt.Errorf("perl: snapshot the forking instance: %w", err)
+	}
+	mem, err := img.Memory(snapshotCeiling)
+	// The image serves this one child: its mapping keeps the pages.
+	closeErr := img.Close()
+	if err != nil {
+		return nil, fmt.Errorf("perl: map the fork child's memory: %w", err)
+	}
+	if closeErr != nil {
+		base.UnmapMemory(mem)
+		return nil, fmt.Errorf("perl: release the fork image: %w", closeErr)
+	}
+
+	m := &Module{}
+	c := &Perl{m: m, wasi: childWASI, opts: p.opts, mapped: mem, h: p.h, intrAddr: p.intrAddr, family: p.family}
+	m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, mem, img.Size(), img.Globals())
+	// The copied fd table came with the parent's hook; the child's forks
+	// must snapshot the child.
+	c.installForkHook()
+	if p.OnFork != nil {
+		p.OnFork(c)
+	}
+	if err := p.handOver(c); err != nil {
+		c.discard()
+		return nil, err
+	}
+
+	p.family.running.Add(1)
+	go func() {
+		defer p.family.running.Done()
+		exited(c.runForkChild(pid))
+	}()
+	return c.signalForkChild, nil
+}
+
+// runForkChild runs the child's program to its end, tears the instance
+// down, and returns the POSIX wait status to report to the parent.
+func (c *Perl) runForkChild(pid int32) (status int32) {
+	var buf []byte
+	buf = pbAppendUint64(buf, 1, c.h)
+	buf = pbAppendInt32(buf, 2, pid)
+	resp, err := c.m.invoke(0, midForkChild, buf, wasm2go.Inv_0_9)
+	if err == nil {
+		err = pbExtractError(resp)
+	}
+
+	exitCode := 255
+	// destruct: whether the interpreter gets its orderly end (PerlIO flush,
+	// END blocks, destructors). A process that left through the raw
+	// _exit, a signal, or a host failure does not.
+	destruct := false
+	var raw *base.WasiExitError
+	switch {
+	case errors.As(err, &raw):
+		exitCode = int(raw.Code)
+	case err != nil:
+		fmt.Fprintf(c.stderr(), "perl: fork child %d: %v\n", pid, err)
+	default:
+		if code := readScalarAtField(resp, 1, (*pbReader).readUint32); code != math.MaxUint32 {
+			exitCode = int(code)
+			destruct = true
+		} else {
+			fmt.Fprintf(c.stderr(), "perl: fork child %d: the instance holds no pending fork\n", pid)
+		}
+	}
+	sig := c.killed.Load()
+	if sig != 0 {
+		destruct = false
+	}
+	if destruct {
+		if err := c.Close(); err != nil {
+			fmt.Fprintf(c.stderr(), "perl: fork child %d: close: %v\n", pid, err)
+		}
+	} else {
+		c.discard()
+	}
+	if sig != 0 {
+		return sig & 0x7f
+	}
+	return int32(exitCode&0xff) << 8
+}
+
+// signalForkChild delivers sig to a running fork child: the proc_kill path
+// for a pseudo-process.
+func (c *Perl) signalForkChild(sig int32) error {
+	switch sig {
+	case sigHUP, sigINT, sigQUIT, sigKILL, sigTERM:
+	default:
+		return fmt.Errorf("perl: signal %d cannot be delivered to a fork child", sig)
+	}
+	if c.closed.Load() {
+		return nil // already finished; like signalling a zombie
+	}
+	if !c.killed.CompareAndSwap(0, sig) {
+		return nil // already dying of an earlier signal
+	}
+	base.AccessMemory(c.m.g, func(mem []byte) {
+		binary.LittleEndian.PutUint32(mem[c.intrAddr:], interruptSignal|uint32(sig))
+	})
+	return nil
+}
+
+// discard drops an instance without running the interpreter's teardown:
+// the end of a child that was killed, left through _exit, or never started.
+func (c *Perl) discard() {
+	if !c.closed.CompareAndSwap(false, true) {
+		return
+	}
+	c.releaseHostState()
+}
