@@ -30,6 +30,23 @@ func TestRunSuccess(t *testing.T) {
 	}
 }
 
+// A program succeeds when it runs to its end, whatever its last statement
+// evaluates to and whatever errno an earlier, handled failure left behind.
+func TestRunLastStatementUndefAfterFailedSyscall(t *testing.T) {
+	script := writeScript(t, "undef.pl", `open(my $fh, '<', '/nonexistent/file') and die "opened"; undef;`)
+	status, err := gperl.Run(script, nil)
+	if err != nil || status != 0 {
+		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
+	}
+}
+
+func TestRunMissingScript(t *testing.T) {
+	status, err := gperl.Run(filepath.Join(t.TempDir(), "absent.pl"), nil)
+	if err == nil || status == 0 {
+		t.Fatalf("Run = (%d, %v), want a failure", status, err)
+	}
+}
+
 func TestRunExitStatus(t *testing.T) {
 	script := writeScript(t, "exit.pl", `exit 7;`)
 	status, err := gperl.Run(script, nil)

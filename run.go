@@ -20,11 +20,15 @@ sub main::__goperl_run_file {
     unshift @INC, @$inc;
     local @ARGV = @args;
     local $0 = $path;
-    my $ok = do $path;
-    if (!defined $ok) {
-        die $@ if $@;
-        die "$path: $!\n";
-    }
+    # do FILE returns undef both when it cannot read the file and when the
+    # program's last statement evaluates to undef, and $! holds whatever an
+    # earlier failed call left there. So readability is established up
+    # front, and afterwards only $@ (which do resets on a clean run)
+    # tells a failed program from a finished one.
+    open(my $fh, '<', $path) or die "Can't open perl script \"$path\": $!\n";
+    close $fh;
+    do $path;
+    die $@ if $@;
     return 1;
 }
 1;
