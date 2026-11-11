@@ -22,18 +22,20 @@
 #include "perl.h"
 #include <stddef.h>
 
-/* Retire the plain-dist FILE* view. */
+/* The layer-author view replaces the handle type, and the handle functions
+ * a layer calls on the layer below it (defined further down). The other
+ * handle functions of perl.h stay: they take any handle of the interpreter. */
 #undef PerlIO
-#undef PerlIO_open
-#undef PerlIO_close
 #undef PerlIO_flush
-#undef PerlIO_write
-#undef PerlIO_puts
-#undef PerlIO_printf
-#undef PerlIO_vprintf
-#undef PerlIO_setlinebuf
-#undef PerlIO_stderr
-#undef PerlIO_stdout
+#undef PerlIO_read
+#undef PerlIO_eof
+#undef PerlIO_error
+#undef PerlIO_fill
+#undef PerlIO_get_ptr
+#undef PerlIO_get_cnt
+#undef PerlIO_set_ptrcnt
+#undef PerlIO_get_base
+#undef PerlIO_fast_gets
 
 typedef struct _PerlIO PerlIOl;
 typedef struct _PerlIO_funcs PerlIO_funcs;

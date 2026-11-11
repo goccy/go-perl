@@ -36,7 +36,9 @@ enum {
     GOPERL_SVSLOT_UV = 3,
     GOPERL_SVSLOT_NV = 4,
     GOPERL_SVSLOT_PV = 5,
-    GOPERL_SVSLOT_LEN = 6
+    GOPERL_SVSLOT_LEN = 6,
+    GOPERL_SVSLOT_GV_STASH = 7,
+    GOPERL_SVSLOT_GV_CVGEN = 8
 };
 
 /* SV_CALL selectors. */
@@ -91,7 +93,9 @@ enum {
     GOPERL_SVCALL_IO_FLAGS = 47,
     GOPERL_SVCALL_IO_LINES = 48,
     GOPERL_SVCALL_SETPV_BUFSIZE = 49,
-    GOPERL_SVCALL_THROW = 50
+    GOPERL_SVCALL_THROW = 50,
+    GOPERL_SVCALL_2PVBYTE = 51,
+    GOPERL_SVCALL_HV_KSPLIT = 52
 };
 
 /* GV_CALL selectors: the ones below FIRST_CV take a glob, the rest a CV. */
@@ -131,7 +135,8 @@ enum {
     GOPERL_SVSTR_GV_FETCHPVN = 6,
     GOPERL_SVSTR_GET_CVN = 7,
     GOPERL_SVSTR_WHICHSIG = 8,
-    GOPERL_SVSTR_COP_HINT = 9
+    GOPERL_SVSTR_COP_HINT = 9,
+    GOPERL_SVSTR_SETENV = 10
 };
 
 /* PLVAR_GET/SET ids beyond the shadowed ones of perl.h. */
@@ -164,6 +169,7 @@ enum {
 #define GOPERL_PL_DESTRUCT_LEVEL 55
 #define GOPERL_PL_LASTGV 56
 #define GOPERL_PL_COP_SEQMAX 57
+#define GOPERL_PL_ERRSV 58
 
 #define GOPERL_SVCALL(fn, sv, b)                                           \
     goperl_do_op(_gof, GOPERL_OP_SV_CALL,                                  \
@@ -624,7 +630,7 @@ static MAGIC *goperl_mg_findext(goperl_frame_t *f, const SV *sv, int type,
 
 /* ---- taint ---------------------------------------------------------------- */
 
-#define PL_tainting (GOPERL_PLVAR(GOPERL_PL_TAINTING) != 0)
+#define PL_tainting (*goperl_plint_ref(_gof, GOPERL_PL_TAINTING))
 #define PL_tainted (*goperl_plint_ref(_gof, GOPERL_PL_TAINTED))
 #define TAINTING_get PL_tainting
 #define TAINT_get PL_tainted
@@ -1184,8 +1190,8 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_statgv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_STATGV)))
 #define PL_last_in_gv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_LASTGV)))
 #define PL_rs (*goperl_plsv_ref(_gof, GOPERL_PL_RS))
-#define PL_beginav ((AV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_BEGINAV)))
-#define PL_unitcheckav ((AV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_UNITCHECKAV)))
+#define PL_beginav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_BEGINAV))
+#define PL_unitcheckav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_UNITCHECKAV))
 #define PL_strtab ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_STRTAB)))
 #define PL_sv_zero (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_ZERO)))
 #define PL_sv_placeholder (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_PLACEHOLDER)))
@@ -1538,6 +1544,62 @@ static char *goperl_sv_pv_force_nolen(goperl_frame_t *f, SV *sv) {
 #define SvPV_force_nolen(sv) goperl_sv_pv_force_nolen(_gof, (SV *)(sv))
 #define SvPV_force_mutable(sv, lenvar) SvPV_force(sv, lenvar)
 #define SvPV_mutable(sv, lenvar) SvPV(sv, lenvar)
+/* The bytes of a string: a string held as UTF-8 is converted to its byte
+ * form first, and one with a character above 255 has none ("Wide character"). */
+static char *goperl_sv_pvbyte(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                              U32 flags) __attribute__((unused));
+static char *goperl_sv_pvbyte(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                              U32 flags) {
+    uint64_t r = goperl_do_op(
+        f, GOPERL_OP_SV_CALL,
+        ((uint64_t)GOPERL_SVCALL_2PVBYTE << 32) | (uint32_t)GOPERL_TOK(sv),
+        flags, 0, 0);
+    if (lenp) *lenp = (STRLEN)(uint32_t)r;
+    if (!(r >> 32)) return 0;
+    return (char *)goperl_api_v->guest_mem(f, r >> 32);
+}
+#define SvPVbyte(sv, lenvar) \
+    goperl_sv_pvbyte(_gof, (SV *)(sv), &(lenvar), SV_GMAGIC)
+#define SvPVbyte_nolen(sv) goperl_sv_pvbyte(_gof, (SV *)(sv), 0, SV_GMAGIC)
+#define SvPVbytex(sv, lenvar) SvPVbyte(sv, lenvar)
+#define SvPVbytex_nolen(sv) SvPVbyte_nolen(sv)
+#define SvPVbyte_nomg(sv, lenvar) \
+    goperl_sv_pvbyte(_gof, (SV *)(sv), &(lenvar), 0)
+#define sv_2pvbyte(sv, lenp) \
+    goperl_sv_pvbyte(_gof, (SV *)(sv), (lenp), SV_GMAGIC)
+#define sv_2pvbyte_nolen(sv) SvPVbyte_nolen(sv)
+
+/* my_setenv: the environment of the interpreter (what %ENV's magic and the
+ * programs it starts see) and the C environment of the host process (what
+ * getenv in native code sees) are two, and both follow. */
+static void goperl_my_setenv(goperl_frame_t *f, const char *nam,
+                             const char *val) __attribute__((unused));
+static void goperl_my_setenv(goperl_frame_t *f, const char *nam,
+                             const char *val) {
+    size_t nl = strlen(nam), vl = val ? strlen(val) : 0;
+    char *buf = (char *)malloc(nl + vl + 2);
+    if (!buf) goperl_croakf(f, "Out of memory!");
+    memcpy(buf, nam, nl + 1);
+    memcpy(buf + nl + 1, val ? val : "", vl + 1);
+    goperl_do_op(f, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_SETENV << 32,
+                 ((uint64_t)(val ? 0 : 1) << 32) | (uint32_t)(nl + vl + 2), buf,
+                 nl + vl + 2);
+    free(buf);
+    if (val)
+        setenv(nam, val, 1);
+    else
+        unsetenv(nam);
+}
+#define my_setenv(nam, val) goperl_my_setenv(_gof, (nam), (val))
+#define hv_ksplit(hv, newmax)                                             \
+    ((void)goperl_do_op(_gof, GOPERL_OP_SV_CALL,                          \
+                        ((uint64_t)GOPERL_SVCALL_HV_KSPLIT << 32) |       \
+                            (uint32_t)GOPERL_TOK(hv),                     \
+                        (uint64_t)(int64_t)(newmax), 0, 0))
+#define SV_CHECK_THINKFIRST(sv) \
+    if (SvTHINKFIRST(sv)) sv_force_normal_flags(sv, 0)
+#define SV_CHECK_THINKFIRST_COW_DROP(sv) \
+    if (SvTHINKFIRST(sv)) sv_force_normal_flags(sv, SV_COW_DROP_PV)
 #define SvPVbyte_force(sv, lenvar) \
     (sv_utf8_downgrade((SV *)(sv), 0), SvPV_force(sv, lenvar))
 #define newSVpvn_utf8(s, len, u) newSVpvn_flags((s), (len), (u) ? SVf_UTF8 : 0)

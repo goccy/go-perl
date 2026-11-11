@@ -409,6 +409,394 @@ XS(XS_PerlAPI_direct_then_croak) {
     croak("after the direct call");
 }
 
+/* ---- integers and pointers at the native width ---------------------------- */
+
+/* A heap pointer kept in an SV by plain casts, as XS code written for a perl
+ * whose IV is as wide as a pointer does, and read back each way. */
+XS(XS_PerlAPI_pointer_roundtrip) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        char *block = (char *)malloc(64);
+        SV *plain = sv_2mortal(newSViv((IV)block));
+        SV *set = sv_newmortal();
+        SV *obj = sv_newmortal();
+        const char *bad = 0;
+        sv_setiv(set, (IV)block);
+        sv_setref_pv(obj, "PerlAPI::Ptr", (void *)block);
+        if ((char *)SvIV(plain) != block) bad = "newSViv/SvIV";
+        else if ((char *)SvIV(set) != block) bad = "sv_setiv/SvIV";
+        else if ((char *)SvUV(set) != block) bad = "sv_setiv/SvUV";
+        else if (INT2PTR(char *, SvIV(SvRV(obj))) != block) bad = "sv_setref_pv/INT2PTR";
+        else if ((char *)SvIVX(SvRV(obj)) != block) bad = "sv_setref_pv/SvIVX";
+        else if (INT2PTR(char *, PTR2IV(block)) != block) bad = "PTR2IV/INT2PTR";
+        else if (!sv_isa(obj, "PerlAPI::Ptr")) bad = "class";
+        else if (!SvIOK(plain) || !SvIOK(SvRV(obj))) bad = "SvIOK";
+        else if (!(SvFLAGS(set) & SVf_IOK)) bad = "SVf_IOK";
+        free(block);
+        ST(0) = sv_2mortal(newSVpv(bad ? bad : "same", 0));
+        XSRETURN(1);
+    }
+}
+
+/* SvIV and SvUV of the argument, printed by C at their full width. */
+XS(XS_PerlAPI_wide_values) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%lld/%llu", (long long)SvIV(ST(0)),
+                 (unsigned long long)SvUV(ST(0)));
+        ST(0) = sv_2mortal(newSVpv(buf, 0));
+        XSRETURN(1);
+    }
+}
+
+/* Integers beyond 32 bits made by each constructor. */
+XS(XS_PerlAPI_wide_made) {
+    dXSARGS;
+    SP -= items;
+    {
+        SV *set = sv_newmortal();
+        sv_setuv(set, (UV)1 << 41);
+        XPUSHs(sv_2mortal(newSViv((IV)1 << 40)));
+        XPUSHs(sv_2mortal(newSViv(-((IV)1 << 40))));
+        XPUSHs(sv_2mortal(newSVuv((UV)3000000000u)));
+        XPUSHs(set);
+        XPUSHs(sv_2mortal(newSViv(-5)));
+    }
+    PUTBACK;
+    return;
+}
+
+/* ---- an interpreter death inside a direct accessor ------------------------- */
+
+/* Reads the argument as an integer (or, for how == 1, as a string) and then
+ * records that it went on: when reading dies, it must not. */
+XS(XS_PerlAPI_read_then_mark) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, how");
+    {
+        SV *mark = get_sv("PerlAPI::went_on", GV_ADD);
+        sv_setiv(mark, 0);
+        if (SvIV(ST(1)) == 1) {
+            STRLEN len;
+            (void)SvPV(ST(0), len);
+        } else {
+            (void)SvIV(ST(0));
+        }
+        sv_setiv(mark, 1);
+        XSRETURN_EMPTY;
+    }
+}
+
+/* ---- body slots and interpreter variables as lvalues ----------------------- */
+
+/* SvIVX(sv)++ on every element of an array, however many. */
+XS(XS_PerlAPI_increment_all) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "aref");
+    {
+        AV *av = (AV *)SvRV(ST(0));
+        SSize_t i, n = av_len(av) + 1;
+        for (i = 0; i < n; i++) {
+            SV **svp = av_fetch(av, i, 0);
+            if (svp) SvIVX(*svp)++;
+        }
+        XSRETURN_IV((IV)n);
+    }
+}
+
+/* A store through the address of a slot taken before other operations ran:
+ * the order a compiler is free to give `SvIVX(sv) = f()`. */
+XS(XS_PerlAPI_late_store) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        IV *slot = &SvIVX(ST(0));
+        SV *other = sv_2mortal(newSViv(1)); /* a guest operation in between */
+        *slot = 7 + SvIV(other);
+        XSRETURN_IV(SvIV(ST(0)));
+    }
+}
+
+/* Eight raw bytes in the NV slot, the way a module keeps a 64-bit integer
+ * there on a perl whose IV has 32 bits. */
+XS(XS_PerlAPI_nv_slot_bits) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *sv = ST(0);
+        char buf[40];
+        SvUPGRADE(sv, SVt_NV);
+        *(int64_t *)(&(SvNVX(sv))) = INT64_C(0x0123456789abcdef);
+        SvNOK_on(sv);
+        snprintf(buf, sizeof buf, "%llx",
+                 (unsigned long long)*(uint64_t *)(&(SvNVX(sv))));
+        ST(0) = sv_2mortal(newSVpv(buf, 0));
+        XSRETURN(1);
+    }
+}
+
+/* Assigns PL_tainted through its address after an operation, then reads it
+ * back after another one; restores the old value. */
+XS(XS_PerlAPI_late_variable_store) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        IV *slot = (IV *)&PL_tainted;
+        IV before = *slot, seen;
+        SV *other = sv_2mortal(newSViv(1));
+        *slot = 1;
+        other = sv_2mortal(newSViv(2));
+        PERL_UNUSED_VAR(other);
+        seen = PL_tainted;
+        PL_tainted = before;
+        XSRETURN_IV(seen);
+    }
+}
+
+/* PL_tainting assigned, as Taint::Runtime does. */
+XS(XS_PerlAPI_set_tainting) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "on");
+    PL_tainting = SvTRUE(ST(0)) ? 1 : 0;
+    XSRETURN_IV(PL_tainting ? 1 : 0);
+}
+
+/* ---- caller_cx ---------------------------------------------------------------- */
+
+XS(XS_PerlAPI_caller_frame) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "level");
+    {
+        const PERL_CONTEXT *cx = caller_cx((I32)SvIV(ST(0)), NULL);
+        SV *out = sv_newmortal();
+        if (!cx) {
+            sv_setpvs(out, "none");
+        } else if (CxTYPE(cx) == CXt_SUB) {
+            GV *gv = CvGV(cx->blk_sub.cv);
+            sv_setpvs(out, "sub ");
+            if (gv && isGV(gv)) {
+                SV *name = sv_newmortal();
+                gv_efullname4(name, gv, NULL, 1);
+                sv_catsv(out, name);
+            }
+            if (CxHASARGS(cx)) sv_catpvs(out, " with args");
+        } else if (CxTYPE(cx) == CXt_EVAL) {
+            sv_setpv(out, CxREALEVAL(cx) ? "eval string" : "eval block");
+        } else {
+            sv_setpvs(out, "other");
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* ---- PerlIO handles -------------------------------------------------------------- */
+
+/* Everything left on the input handle, read in small pieces. */
+XS(XS_PerlAPI_pio_slurp) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    {
+        PerlIO *in = IoIFP(sv_2io(ST(0)));
+        SV *out = sv_2mortal(newSVpvs(""));
+        char buf[7];
+        SSize_t n;
+        while ((n = PerlIO_read(in, buf, sizeof buf)) > 0) sv_catpvn(out, buf, n);
+        if (!PerlIO_eof(in)) sv_catpvs(out, "<not at eof>");
+        if (PerlIO_error(in)) sv_catpvs(out, "<error>");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+XS(XS_PerlAPI_pio_emit) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fh, text");
+    {
+        PerlIO *out = IoOFP(sv_2io(ST(0)));
+        STRLEN len;
+        const char *text = SvPV(ST(1), len);
+        SSize_t n = PerlIO_write(out, text, len);
+        n += PerlIO_printf(out, "[%d:%s]", 42, "fmt");
+        n += PerlIO_puts(out, "!");
+        PerlIO_putc(out, '\n');
+        XSRETURN_IV((IV)n);
+    }
+}
+
+/* Seeks, reports the position, and reads the next n bytes. */
+XS(XS_PerlAPI_pio_at) {
+    dXSARGS;
+    if (items != 4) croak_xs_usage(cv, "fh, offset, whence, n");
+    {
+        PerlIO *in = IoIFP(sv_2io(ST(0)));
+        char buf[32], pos[32];
+        IV n = SvIV(ST(3));
+        SV *out = sv_newmortal();
+        SSize_t got;
+        if (n > (IV)sizeof buf) n = sizeof buf;
+        if (PerlIO_seek(in, (Off_t)SvIV(ST(1)), (int)SvIV(ST(2))) != 0)
+            XSRETURN_UNDEF;
+        snprintf(pos, sizeof pos, "%ld:", (long)PerlIO_tell(in));
+        sv_setpv(out, pos);
+        got = PerlIO_read(in, buf, (Size_t)n);
+        if (got > 0) sv_catpvn(out, buf, got);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* The size fstat reports for the host descriptor behind the handle, or -1
+ * when the handle has none. */
+XS(XS_PerlAPI_pio_host_size) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    {
+        int fd = PerlIO_fileno(IoIFP(sv_2io(ST(0))));
+        struct stat st;
+        if (fd < 0) XSRETURN_IV(-1);
+        if (fstat(fd, &st) != 0) XSRETURN_IV(-2);
+        XSRETURN_IV((IV)st.st_size);
+    }
+}
+
+/* One line through the stdio stream of the handle; the stream is the same
+ * one every time it is asked for. */
+XS(XS_PerlAPI_pio_stdio_line) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    {
+        PerlIO *in = IoIFP(sv_2io(ST(0)));
+        FILE *fp = PerlIO_findFILE(in);
+        char line[128];
+        if (!fp || fp != PerlIO_findFILE(in)) XSRETURN_UNDEF;
+        if (!fgets(line, sizeof line, fp)) XSRETURN_UNDEF;
+        ST(0) = sv_2mortal(newSVpv(line, 0));
+        XSRETURN(1);
+    }
+}
+
+/* Writes through a stdio stream exported from the handle, then gives the
+ * stream back. */
+XS(XS_PerlAPI_pio_stdio_write) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fh, text");
+    {
+        PerlIO *out = IoOFP(sv_2io(ST(0)));
+        FILE *fp = PerlIO_exportFILE(out, "w");
+        int n;
+        if (!fp) XSRETURN_UNDEF;
+        n = fprintf(fp, "<%s>", SvPV_nolen(ST(1)));
+        fflush(fp);
+        PerlIO_releaseFILE(out, fp);
+        XSRETURN_IV(n);
+    }
+}
+
+XS(XS_PerlAPI_pio_std) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "text");
+    PerlIO_printf(PerlIO_stderr(), "err:%s\n", SvPV_nolen(ST(0)));
+    PerlIO_printf(PerlIO_stdout(), "out:%s\n", SvPV_nolen(ST(0)));
+    PerlIO_flush(PerlIO_stdout());
+    XSRETURN_EMPTY;
+}
+
+/* The bytes SvPVbyte gives, in hex. */
+XS(XS_PerlAPI_bytes_hex) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        STRLEN len, i;
+        const unsigned char *p = (const unsigned char *)SvPVbyte(ST(0), len);
+        SV *out = sv_2mortal(newSVpvs(""));
+        for (i = 0; i < len; i++) {
+            char hex[3];
+            snprintf(hex, sizeof hex, "%02x", p[i]);
+            sv_catpvn(out, hex, 2);
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* my_setenv, then what the C library of the host process has for the name. */
+XS(XS_PerlAPI_setenv_then_getenv) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "name, value");
+    {
+        const char *name = SvPV_nolen(ST(0));
+        const char *seen;
+        my_setenv(name, SvOK(ST(1)) ? SvPV_nolen(ST(1)) : NULL);
+        seen = getenv(name);
+        ST(0) = seen ? sv_2mortal(newSVpv(seen, 0)) : &PL_sv_undef;
+        XSRETURN(1);
+    }
+}
+
+/* Runs code with $@ localized the way XS code does it (SAVESPTR and a fresh
+ * SV); returns what the code left in the inner $@. */
+XS(XS_PerlAPI_with_local_errsv) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        SV *seen;
+        ENTER;
+        SAVETMPS;
+        SAVESPTR(ERRSV);
+        ERRSV = sv_newmortal();
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(ST(0), G_DISCARD | G_EVAL);
+        SPAGAIN;
+        seen = newSVsv(ERRSV);
+        FREETMPS;
+        LEAVE;
+        ST(0) = sv_2mortal(seen);
+        XSRETURN(1);
+    }
+}
+
+/* Looks into the read buffer of a handle: fills it, reports how much is
+ * buffered and the first two bytes, and consumes those two. */
+XS(XS_PerlAPI_pio_buffer) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    {
+        PerlIO *in = IoIFP(sv_2io(ST(0)));
+        SV *out = sv_newmortal();
+        char text[64];
+        SSize_t cnt;
+        STDCHAR *ptr;
+        if (!PerlIO_fast_gets(in) || !PerlIO_has_cntptr(in)) XSRETURN_UNDEF;
+        if (PerlIO_get_cnt(in) <= 0 && PerlIO_fill(in) != 0) XSRETURN_UNDEF;
+        cnt = PerlIO_get_cnt(in);
+        ptr = PerlIO_get_ptr(in);
+        if (cnt < 2 || !ptr) XSRETURN_UNDEF;
+        snprintf(text, sizeof text, "%ld:%c%c", (long)cnt, ptr[0], ptr[1]);
+        PerlIO_set_ptrcnt(in, ptr + 2, cnt - 2);
+        sv_setpv(out, text);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+XS(XS_PerlAPI_presize) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "href, keys");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        hv_ksplit(hv, SvIV(ST(1)));
+        if (ckWARN4_d(WARN_MISC, WARN_VOID, WARN_NUMERIC, WARN_UTF8)) {
+            /* the four-category form compiles and answers */
+        }
+        XSRETURN_IV((IV)HvMAX(hv));
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -445,5 +833,27 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::context", XS_PerlAPI_context);
     newXS_deffile("PerlAPI::number_kind", XS_PerlAPI_number_kind);
     newXS_deffile("PerlAPI::rethrow_errsv", XS_PerlAPI_rethrow_errsv);
+    newXS_deffile("PerlAPI::pointer_roundtrip", XS_PerlAPI_pointer_roundtrip);
+    newXS_deffile("PerlAPI::wide_values", XS_PerlAPI_wide_values);
+    newXS_deffile("PerlAPI::wide_made", XS_PerlAPI_wide_made);
+    newXS_deffile("PerlAPI::read_then_mark", XS_PerlAPI_read_then_mark);
+    newXS_deffile("PerlAPI::increment_all", XS_PerlAPI_increment_all);
+    newXS_deffile("PerlAPI::late_store", XS_PerlAPI_late_store);
+    newXS_deffile("PerlAPI::nv_slot_bits", XS_PerlAPI_nv_slot_bits);
+    newXS_deffile("PerlAPI::late_variable_store", XS_PerlAPI_late_variable_store);
+    newXS_deffile("PerlAPI::set_tainting", XS_PerlAPI_set_tainting);
+    newXS_deffile("PerlAPI::caller_frame", XS_PerlAPI_caller_frame);
+    newXS_deffile("PerlAPI::pio_slurp", XS_PerlAPI_pio_slurp);
+    newXS_deffile("PerlAPI::pio_emit", XS_PerlAPI_pio_emit);
+    newXS_deffile("PerlAPI::pio_at", XS_PerlAPI_pio_at);
+    newXS_deffile("PerlAPI::pio_host_size", XS_PerlAPI_pio_host_size);
+    newXS_deffile("PerlAPI::pio_stdio_line", XS_PerlAPI_pio_stdio_line);
+    newXS_deffile("PerlAPI::pio_stdio_write", XS_PerlAPI_pio_stdio_write);
+    newXS_deffile("PerlAPI::pio_std", XS_PerlAPI_pio_std);
+    newXS_deffile("PerlAPI::bytes_hex", XS_PerlAPI_bytes_hex);
+    newXS_deffile("PerlAPI::setenv_then_getenv", XS_PerlAPI_setenv_then_getenv);
+    newXS_deffile("PerlAPI::with_local_errsv", XS_PerlAPI_with_local_errsv);
+    newXS_deffile("PerlAPI::pio_buffer", XS_PerlAPI_pio_buffer);
+    newXS_deffile("PerlAPI::presize", XS_PerlAPI_presize);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

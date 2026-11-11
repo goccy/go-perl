@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 10
+const abiVersion = 11
 
 // failedThrown is the frame's failed value after croak_sv
 // (GOPERL_FAILED_THROWN in the SDK), and respThrow the dispatch response
@@ -111,17 +111,15 @@ type cFrame struct {
 
 // cAPI mirrors goperl_api_t (ABI).
 type cAPI struct {
-	abi       uint32
-	reserved  uint32
-	svIV      uintptr
-	svPV      uintptr
-	newIV     uintptr
-	newPVN    uintptr
-	svMortal  uintptr
-	regXS     uintptr
-	xsOp      uintptr
-	ptrEncode uintptr
-	ptrDecode uintptr
+	abi      uint32
+	reserved uint32
+	svIV     uintptr
+	svPV     uintptr
+	newIV    uintptr
+	newPVN   uintptr
+	svMortal uintptr
+	regXS    uintptr
+	xsOp     uintptr
 	// v3:
 	guestMem   uintptr
 	newXS      uintptr
@@ -139,6 +137,8 @@ type cAPI struct {
 	// v7: host PerlIO layer registration.
 	perlioDef uintptr
 	perOpSet  uintptr
+	// v11: the host descriptor behind a guest descriptor.
+	hostFd uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -200,10 +200,6 @@ type state struct {
 	syms    []uintptr
 	fns     []uintptr // fnID -> native XSUB pointer
 	fnNames [][]byte  // fnID -> NUL-terminated sub name (frame.subname points here)
-	// ptrs is the host-pointer registry backing T_PTROBJ: guest IVs are
-	// 32-bit, so a native object pointer crosses as (index+1) here.
-	ptrs []uintptr
-
 	// per-CV storage: CvXSUBANY slots (8 bytes of C heap each, written by
 	// the module through the vtable) and the native fn behind each CV.
 	cvAny map[uint64]uintptr
@@ -264,7 +260,6 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		syms:          append([]uintptr(nil), s.syms...),
 		fns:           append([]uintptr(nil), s.fns...),
 		fnNames:       append([][]byte(nil), s.fnNames...),
-		ptrs:          append([]uintptr(nil), s.ptrs...),
 		cvAny:         make(map[uint64]uintptr, len(s.cvAny)),
 		perlioFuncs:   make(map[uint32]uintptr, len(s.perlioFuncs)),
 		perlioNextID:  s.perlioNextID,
@@ -322,43 +317,6 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		return err
 	}
 	return clone.SetDestructorHandler(cs.dtorFired)
-}
-
-// ptrIDBase splits the PTR2IV/INT2PTR value space: values below it are
-// plain integers cast through pointers (XS code legitimately packs small
-// ints into void*, e.g. savestack indexes) and round-trip as themselves;
-// values at or above it that reach encodePtr are real host pointers, which
-// cross the 32-bit guest IV as (base + registry index). 64-bit heap
-// pointers are far above the base; a real mapping below 1<<30 would be
-// misclassified, which is documented as out of scope.
-const ptrIDBase = 1 << 30
-
-func (s *state) encodePtr(p uintptr) uint64 {
-	if p < ptrIDBase {
-		return uint64(p) // plain integer in pointer clothing
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, q := range s.ptrs { // dedup: identity must survive round trips
-		if q == p {
-			return ptrIDBase + uint64(i)
-		}
-	}
-	s.ptrs = append(s.ptrs, p)
-	return ptrIDBase + uint64(len(s.ptrs)-1)
-}
-
-func (s *state) decodePtr(id uint64) uintptr {
-	if id < ptrIDBase {
-		return uintptr(id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ix := id - ptrIDBase
-	if ix >= uint64(len(s.ptrs)) {
-		return 0
-	}
-	return s.ptrs[ix]
 }
 
 var (
@@ -1227,19 +1185,16 @@ func buildVtable() {
 		}
 		return uintptr(v)
 	})
-	vtable.ptrEncode = purego.NewCallback(func(fr, p uintptr) uintptr {
+	vtable.hostFd = purego.NewCallback(func(fr, fd uintptr) uintptr {
 		f := lookupFrame(fr)
 		if f == nil {
-			return 0
+			return ^uintptr(0)
 		}
-		return uintptr(stateFor(f.p).encodePtr(p))
-	})
-	vtable.ptrDecode = purego.NewCallback(func(fr, id uintptr) uintptr {
-		f := lookupFrame(fr)
-		if f == nil {
-			return 0
+		host, ok := f.p.HostDescriptor(int32(fd))
+		if !ok {
+			return ^uintptr(0) // -1: the handle has no descriptor of the host
 		}
-		return stateFor(f.p).decodePtr(uint64(id))
+		return host
 	})
 	vtable.regXS = purego.NewCallback(func(fr, name, fn uintptr) uintptr {
 		f := lookupFrame(fr)

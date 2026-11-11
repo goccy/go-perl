@@ -190,6 +190,14 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 // it must not be captured across calls that could grow the memory; on the
 // copy-on-write snapshot path the mapping (and therefore the base address)
 // is fixed for the instance's lifetime.
+// HostDescriptor returns the descriptor of the host process behind the
+// guest's descriptor fd; ok is false when fd is not open or is not backed
+// by a descriptor of the host (a file of an in-memory filesystem, a
+// standard stream supplied as a reader or writer).
+func (p *Perl) HostDescriptor(fd int32) (uintptr, bool) {
+	return p.wasi.HostDescriptor(fd)
+}
+
 func (p *Perl) RawMemory() []byte {
 	return wasm2go.Memory(p.m.g)
 }
