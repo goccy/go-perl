@@ -1042,6 +1042,63 @@ XS(XS_PerlAPI_caller_file) {
     }
 }
 
+/* Native state kept on a variable: a counter in C memory reached through
+ * ext magic, with a named copy of a label, released by svt_free. */
+static int perlapi_tally_freed;
+static int perlapi_tally_free(pTHX_ SV *sv, MAGIC *mg) {
+    PERL_UNUSED_VAR(sv);
+    perlapi_tally_freed++;
+    free(mg->mg_ptr);
+    mg->mg_ptr = NULL;
+    return 0;
+}
+static MGVTBL perlapi_tally_vtbl = {0, 0, 0, 0, perlapi_tally_free, 0, 0, 0};
+static MGVTBL perlapi_label_vtbl = {0, 0, 0, 0, 0, 0, 0, 0};
+
+XS(XS_PerlAPI_tally_attach) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "sv, start, label");
+    {
+        STRLEN len;
+        const char *label = SvPV(ST(2), len);
+        IV *count = (IV *)malloc(sizeof(IV));
+        *count = SvIV(ST(1));
+        sv_magicext(ST(0), NULL, PERL_MAGIC_ext, &perlapi_tally_vtbl, (const char *)count, 0);
+        sv_magicext(ST(0), NULL, PERL_MAGIC_ext, &perlapi_label_vtbl, label, (I32)len);
+        XSRETURN(0);
+    }
+}
+
+/* Adds to the counter of a variable and returns "label=count". */
+XS(XS_PerlAPI_tally_add) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, n");
+    {
+        MAGIC *tally = mg_findext(ST(0), PERL_MAGIC_ext, &perlapi_tally_vtbl);
+        MAGIC *label = mg_findext(ST(0), PERL_MAGIC_ext, &perlapi_label_vtbl);
+        if (!tally || !label) XSRETURN_UNDEF;
+        *(IV *)tally->mg_ptr += SvIV(ST(1));
+        ST(0) = sv_2mortal(newSVpvf("%s=%ld", label->mg_ptr, (long)*(IV *)tally->mg_ptr));
+        XSRETURN(1);
+    }
+}
+
+XS(XS_PerlAPI_tally_freed) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(perlapi_tally_freed));
+    XSRETURN(1);
+}
+
+/* A value kept in the XSUB's own slot (CvXSUBANY): set by a call with an
+ * argument, returned by every call. */
+XS(XS_PerlAPI_sub_slot) {
+    dXSARGS;
+    if (items > 0) CvXSUBANY(cv).any_i32 = (I32)SvIV(ST(0));
+    ST(0) = sv_2mortal(newSViv(CvXSUBANY(cv).any_i32));
+    XSRETURN(1);
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1112,5 +1169,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::callback_then_mark", XS_PerlAPI_callback_then_mark);
     newXS_deffile("PerlAPI::weak_count", XS_PerlAPI_weak_count);
     newXS_deffile("PerlAPI::caller_file", XS_PerlAPI_caller_file);
+    newXS_deffile("PerlAPI::tally_attach", XS_PerlAPI_tally_attach);
+    newXS_deffile("PerlAPI::tally_add", XS_PerlAPI_tally_add);
+    newXS_deffile("PerlAPI::tally_freed", XS_PerlAPI_tally_freed);
+    newXS_deffile("PerlAPI::sub_slot", XS_PerlAPI_sub_slot);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

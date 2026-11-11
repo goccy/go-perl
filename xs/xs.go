@@ -258,18 +258,25 @@ type state struct {
 	cloneHookSet bool
 }
 
-// adoptClone builds the loader state for a perl.Clone of this state's
-// instance. The clone's guest memory carries every loaded module — booted
-// subs, fn ids, registered layers, compiled keyword ops — so the host
-// tables those ids resolve through are carried over; runtime state (magic
-// mirrors, scope bookkeeping) starts empty, exactly like the guest side
-// does at rest.
+// adoptClone builds the loader state for a copy of this state's instance:
+// a perl.Clone, or the child of a fork. The copy's guest memory carries
+// every loaded module — booted subs, fn ids, registered layers, compiled
+// keyword ops — and every SV with its anchor of host-side magic, so the
+// host tables those ids resolve through are carried over.
+//
+// What the loader itself keeps in C memory for an SV is copied, the way
+// the copy of the guest memory copied the SV: each MAGIC of a mirror chain
+// and each CvXSUBANY slot is the copy's own from here on. The references a
+// chain holds on its mg_obj values were counted in guest memory and came
+// along with it. Memory a MODULE allocated (what an mg_ptr or a slot
+// points at) cannot be copied and is shared by both instances; this SDK is
+// a perl without ithreads, so no svt_dup or CLONE hook runs. What the
+// loader can do for that memory it does: the copies of one MAGIC are
+// released together, svt_free running once, for the last of them (see
+// magicShares). Scope bookkeeping starts empty: the native activations it
+// belongs to exist only in the original.
 func (s *state) adoptClone(clone *internal.Perl) error {
 	s.mu.Lock()
-	if len(s.magicBySV) > 0 || len(s.magicByID) > 0 {
-		s.mu.Unlock()
-		return fmt.Errorf("xs: Clone of an instance holding live host-side MAGIC mirrors is not supported; clone right after loading, before code that attaches magic runs")
-	}
 	statesMu.Lock()
 	cs := &state{
 		p:             clone,
@@ -281,8 +288,9 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		perlioFuncs:   make(map[uint32]uintptr, len(s.perlioFuncs)),
 		perlioNextID:  s.perlioNextID,
 		cvFn:          make(map[uint64]uintptr, len(s.cvFn)),
-		magicBySV:     map[uint64]*magicRec{},
-		magicByID:     map[uint32]*magicRec{},
+		nextMagicID:   s.nextMagicID,
+		magicBySV:     make(map[uint64]*magicRec, len(s.magicBySV)),
+		magicByID:     make(map[uint32]*magicRec, len(s.magicByID)),
 		hookFns:       make(map[int32]uintptr, len(s.hookFns)),
 		perOpFns:      make(map[uint64]uintptr, len(s.perOpFns)),
 		sharedRaw:     cMalloc(sharedBlockSize),
@@ -295,8 +303,15 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		cloneHookSet:  true,
 	}
 	pokeBytes(cs.sharedRaw, make([]byte, sharedBlockSize))
-	for k, v := range s.cvAny {
-		cs.cvAny[k] = v
+	for cv, slot := range s.cvAny {
+		own := cMalloc(8)
+		cMemcpy(own, slot, 8)
+		cs.cvAny[cv] = own
+	}
+	for sv, rec := range s.magicBySV {
+		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head), anchorObj: rec.anchorObj, anchorID: rec.anchorID}
+		cs.magicBySV[sv] = own
+		cs.magicByID[own.anchorID] = own
 	}
 	for k, v := range s.perlioFuncs {
 		cs.perlioFuncs[k] = v
@@ -749,8 +764,14 @@ func (s *state) dtorFired(id uint32) {
 // mg_moremagic 0, mg_virtual 8, mg_private 16, mg_type 18, mg_flags 19,
 // mg_len 20 (i32), mg_obj 24, mg_ptr 32; size 40. MGVTBL: 8 function
 // pointers, svt_free at offset 32.
+//
+// A mirror MAGIC is allocated with a trailer the module does not know of:
+// the id of the group of copies it belongs to (magicShares), 0 for a MAGIC
+// that was never copied.
 const (
 	mgSize       = 40
+	mgOffShare   = mgSize
+	mgAllocSize  = mgSize + 8
 	mgOffMore    = 0
 	mgOffVirtual = 8
 	mgOffType    = 18
@@ -761,8 +782,54 @@ const (
 	vtblOffFree  = 32
 )
 
+// magicShares counts, for every MAGIC that was copied to another instance
+// (a Clone or a fork child), the instances that still hold a copy. The
+// copies point at the same module memory, which the module's svt_free
+// releases, so that hook must run exactly once: when the last copy goes.
+// Which other instances still hold a copy is not something one instance's
+// state can tell, hence the process-wide table.
+var magicShares = struct {
+	mu      sync.Mutex
+	nextID  uint64
+	holders map[uint64]int
+}{holders: map[uint64]int{}}
+
+// shareMagic makes the copy of the MAGIC at mg, which is one more holder of
+// what the original holds.
+func shareMagic(mg uintptr, node []byte) {
+	magicShares.mu.Lock()
+	defer magicShares.mu.Unlock()
+	id := binary.LittleEndian.Uint64(node[mgOffShare:])
+	if id == 0 {
+		magicShares.nextID++
+		id = magicShares.nextID
+		magicShares.holders[id] = 1
+		binary.LittleEndian.PutUint64(node[mgOffShare:], id)
+		pokeBytes(mg+mgOffShare, node[mgOffShare:mgOffShare+8])
+	}
+	magicShares.holders[id]++
+}
+
+// lastMagicHolder ends this instance's hold on a MAGIC (node is its bytes)
+// and reports whether no other instance holds a copy any more: whether
+// svt_free is due.
+func lastMagicHolder(node []byte) bool {
+	id := binary.LittleEndian.Uint64(node[mgOffShare:])
+	if id == 0 {
+		return true
+	}
+	magicShares.mu.Lock()
+	defer magicShares.mu.Unlock()
+	magicShares.holders[id]--
+	if magicShares.holders[id] > 0 {
+		return false
+	}
+	delete(magicShares.holders, id)
+	return true
+}
+
 func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uintptr, namLen int64) uintptr {
-	mg := cMalloc(mgSize)
+	mg := cMalloc(mgAllocSize)
 	if mg == 0 {
 		f.fail("sv_magicext: out of memory")
 		return 0
@@ -784,7 +851,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		pokeBytes(mgPtr+uintptr(namLen), []byte{0})
 		mgLen = int32(namLen)
 	}
-	var buf [mgSize]byte
+	var buf [mgAllocSize]byte
 	binary.LittleEndian.PutUint64(buf[mgOffMore:], uint64(oldHead))
 	binary.LittleEndian.PutUint64(buf[mgOffVirtual:], uint64(vtbl))
 	buf[mgOffType] = byte(how)
@@ -847,6 +914,38 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		}
 	}
 	return mg
+}
+
+// copyMagicChain returns a copy of the mirror chain at head, in the same
+// order: every MAGIC, and the name sv_magicext copied for it (mg_len > 0).
+// Every other mg_ptr is the module's and is the same pointer in the copy.
+func copyMagicChain(head uintptr) uintptr {
+	var first, last uintptr
+	for mg := head; mg != 0; {
+		node := copyIn(mg, mgAllocSize)
+		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
+		mgLen := int32(binary.LittleEndian.Uint32(node[mgOffLen:]))
+		mgPtr := uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:]))
+		shareMagic(mg, node)
+		if mgLen > 0 && mgPtr != 0 {
+			name := cMalloc(int(mgLen) + 1)
+			cMemcpy(name, mgPtr, int(mgLen)+1)
+			binary.LittleEndian.PutUint64(node[mgOffPtr:], uint64(name))
+		}
+		binary.LittleEndian.PutUint64(node[mgOffMore:], 0)
+		own := cMalloc(mgAllocSize)
+		pokeBytes(own, node)
+		if last == 0 {
+			first = own
+		} else {
+			var link [8]byte
+			binary.LittleEndian.PutUint64(link[:], uint64(own))
+			pokeBytes(last+mgOffMore, link[:])
+		}
+		last = own
+		mg = next
+	}
+	return first
 }
 
 func (s *state) magicChainHead(sv uint64) uintptr {
@@ -1021,7 +1120,7 @@ func (s *state) magicFreed(id uint32) {
 		return
 	}
 	for mg := rec.head; mg != 0; {
-		node := copyIn(mg, mgSize)
+		node := copyIn(mg, mgAllocSize)
 		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
 		obj := binary.LittleEndian.Uint64(node[mgOffObj:])
 		if xsTrace {
@@ -1037,7 +1136,9 @@ func (s *state) magicFreed(id uint32) {
 		}
 		mgLen := int32(binary.LittleEndian.Uint32(node[mgOffLen:]))
 		mgPtr := uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:]))
-		s.callSvtFree(rec.svTok, mg)
+		if lastMagicHolder(node) {
+			s.callSvtFree(rec.svTok, mg)
+		}
 		// Every entry beyond the anchor's held one manually retained obj.
 		if obj != 0 && obj != rec.anchorObj {
 			_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
@@ -1063,7 +1164,7 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 	var prev uintptr
 	mg := rec.head
 	for mg != 0 {
-		node := copyIn(mg, mgSize)
+		node := copyIn(mg, mgAllocSize)
 		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
 		typ := node[mgOffType]
 		nodeVtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
@@ -1071,7 +1172,9 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 			obj := binary.LittleEndian.Uint64(node[mgOffObj:])
 			mgLen := int32(binary.LittleEndian.Uint32(node[mgOffLen:]))
 			mgPtr := uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:]))
-			s.callSvtFree(sv, mg)
+			if lastMagicHolder(node) {
+				s.callSvtFree(sv, mg)
+			}
 			if obj != 0 && obj != rec.anchorObj {
 				_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
 			}
