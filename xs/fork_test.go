@@ -108,6 +108,52 @@ func TestForkParentEndsFirstWithNativeState(t *testing.T) {
 	}
 }
 
+// Magic can point into the interpreter's own memory (DBI keeps the address
+// of a handle's structure, the string buffer of an SV, that way). After a
+// fork the child's magic points at the child's copy of that memory: what
+// the child writes there it reads back, and the parent's is untouched.
+func TestForkMagicPointsIntoTheChildsMemory(t *testing.T) {
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		// The first substr gives the string a buffer of its own, which the
+		// later one then changes in place.
+		`my $buffer = "Parent text"; substr($buffer, 0, 1, "p");`,
+		`my $holder = "h"; PerlAPI::view_attach($holder, $buffer);`,
+		`pipe(my $r, my $w) or die "pipe: $!";`,
+		`my $pid = fork // die "fork: $!";`,
+		`if (!$pid) {`,
+		`    close $r; substr($buffer, 0, 6, "child ");`,
+		`    syswrite($w, PerlAPI::view_read($holder, 11) . "\n");`,
+		`    exit 0;`,
+		`}`,
+		`close $w; my $line = <$r>; waitpid($pid, 0);`,
+		`print "child: $line", "parent: ", PerlAPI::view_read($holder, 11), "\n";`,
+	)
+	want := "child: child  text\nparent: parent text\n"
+	if status != 0 || stdout != want {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, want)
+	}
+}
+
+// The process id native code asks for is the id of the process the program
+// is: in a fork child, the child's, as $$ says.
+func TestForkChildProcessIDInNativeCode(t *testing.T) {
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		`sub ids { join ",", map { $_ == $$ ? "self" : "other" } PerlAPI::process_id() }`,
+		`pipe(my $r, my $w) or die "pipe: $!";`,
+		`my $before = ids();`,
+		`my $pid = fork // die "fork: $!";`,
+		`if (!$pid) { close $r; syswrite($w, ids() . "\n"); exit 0 }`,
+		`close $w; my $line = <$r>; waitpid($pid, 0);`,
+		`print "before: $before\nchild: $line", "parent: ", ids(), "\n";`,
+	)
+	want := "before: self,self\nchild: self,self\nparent: self,self\n"
+	if status != 0 || stdout != want {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, want)
+	}
+}
+
 // A Clone of an instance whose variables carry native magic has the magic
 // too, and closing the clone leaves the original's intact.
 func TestCloneWithNativeState(t *testing.T) {

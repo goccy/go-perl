@@ -268,14 +268,17 @@ type state struct {
 // the copy of the guest memory copied the SV: each MAGIC of a mirror chain
 // and each CvXSUBANY slot is the copy's own from here on. The references a
 // chain holds on its mg_obj values were counted in guest memory and came
-// along with it. Memory a MODULE allocated (what an mg_ptr or a slot
-// points at) cannot be copied and is shared by both instances; this SDK is
+// along with it. An mg_ptr into the original's linear memory (the string
+// buffer of an SV, say) points to the same place in the copy's. Memory a
+// MODULE allocated (what an mg_ptr or a slot otherwise points at) cannot
+// be copied and is shared by both instances; this SDK is
 // a perl without ithreads, so no svt_dup or CLONE hook runs. What the
 // loader can do for that memory it does: the copies of one MAGIC are
 // released together, svt_free running once, for the last of them (see
 // magicShares). Scope bookkeeping starts empty: the native activations it
 // belongs to exist only in the original.
 func (s *state) adoptClone(clone *internal.Perl) error {
+	from, to := spanOf(s.p.RawMemory()), spanOf(clone.RawMemory())
 	s.mu.Lock()
 	statesMu.Lock()
 	cs := &state{
@@ -309,7 +312,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		cs.cvAny[cv] = own
 	}
 	for sv, rec := range s.magicBySV {
-		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head), anchorObj: rec.anchorObj, anchorID: rec.anchorID}
+		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head, from, to), anchorObj: rec.anchorObj, anchorID: rec.anchorID}
 		cs.magicBySV[sv] = own
 		cs.magicByID[own.anchorID] = own
 	}
@@ -916,10 +919,23 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 	return mg
 }
 
+// memSpan is the place of an instance's linear memory in the process.
+type memSpan struct{ base, size uintptr }
+
+func spanOf(mem []byte) memSpan {
+	if len(mem) == 0 {
+		return memSpan{}
+	}
+	return memSpan{base: uintptr(unsafe.Pointer(&mem[0])), size: uintptr(len(mem))}
+}
+
 // copyMagicChain returns a copy of the mirror chain at head, in the same
-// order: every MAGIC, and the name sv_magicext copied for it (mg_len > 0).
-// Every other mg_ptr is the module's and is the same pointer in the copy.
-func copyMagicChain(head uintptr) uintptr {
+// order, for an instance whose linear memory is at to and is a copy of the
+// memory at from: every MAGIC, and the name sv_magicext copied for it
+// (mg_len > 0). An mg_ptr into the original's memory becomes the pointer
+// to the same place in the copy's; any other is the module's and is the
+// same pointer in the copy.
+func copyMagicChain(head uintptr, from, to memSpan) uintptr {
 	var first, last uintptr
 	for mg := head; mg != 0; {
 		node := copyIn(mg, mgAllocSize)
@@ -931,6 +947,8 @@ func copyMagicChain(head uintptr) uintptr {
 			name := cMalloc(int(mgLen) + 1)
 			cMemcpy(name, mgPtr, int(mgLen)+1)
 			binary.LittleEndian.PutUint64(node[mgOffPtr:], uint64(name))
+		} else if mgPtr >= from.base && mgPtr-from.base < from.size {
+			binary.LittleEndian.PutUint64(node[mgOffPtr:], uint64(to.base+(mgPtr-from.base)))
 		}
 		binary.LittleEndian.PutUint64(node[mgOffMore:], 0)
 		own := cMalloc(mgAllocSize)

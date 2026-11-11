@@ -5478,7 +5478,21 @@ static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
 #define SvUOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISUV) != 0)
 /* Dists pair these with a value write (sv_setiv/SvIV_set), which already
  * sets the guest flags — the standalone flag flip is then a no-op. */
-#define PerlProc_getpid() ((int)getpid())
+/* The process id is the program's. A fork child is a process of its own
+ * to the program although it runs inside the host process (perl's own
+ * fork emulation gives XS code the same view of getpid), so a module that
+ * asks who it is gets the answer $$ gives. Outside a call from the
+ * interpreter there is no program to ask, and the host's id is the answer. */
+#define GOPERL_PL_PID 61
+static pid_t goperl_getpid(void) __attribute__((unused));
+static pid_t goperl_getpid(void) {
+    goperl_frame_t *f = goperl_cur_frame_v;
+    if (!f) return getpid();
+    return (pid_t)(int64_t)goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_PID,
+                                        0, 0, 0);
+}
+#define getpid goperl_getpid
+#define PerlProc_getpid() ((int)goperl_getpid())
 #define PerlProc_getuid() ((int)getuid())
 #define PerlEnv_getenv(n) getenv(n)
 #define XSRETURN_NV(v)                            \
