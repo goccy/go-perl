@@ -905,6 +905,51 @@ XS(XS_PerlAPI_method_twice) {
     }
 }
 
+/* Calls code with $_ set to a name, the way DBI runs a callback: the SV in
+ * $_ is swapped for another and put back, never written to. Returns what
+ * the code left in its $_. */
+XS(XS_PerlAPI_with_topic) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "code, name");
+    {
+        SV *code = ST(0);
+        SV *orig = DEFSV;
+        SV *topic, *seen;
+        SAVE_DEFSV;
+        topic = sv_2mortal(newSVsv(ST(1)));
+        DEFSV_set(topic);
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(code, G_DISCARD);
+        SPAGAIN;
+        seen = sv_2mortal(newSVsv(DEFSV));
+        DEFSV_set(orig);
+        ST(0) = seen;
+        XSRETURN(1);
+    }
+}
+
+/* Leaves errno as asked: "ENOENT", "EINVAL", "ERANGE" set it (then other
+ * API calls follow, which must not disturb it), "zero" clears it, anything
+ * else does not touch it. */
+XS(XS_PerlAPI_leave_errno) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "how");
+    {
+        const char *how = SvPV_nolen(ST(0));
+        if (strEQ(how, "ENOENT")) errno = ENOENT;
+        else if (strEQ(how, "EINVAL")) errno = EINVAL;
+        else if (strEQ(how, "ERANGE")) errno = ERANGE;
+        else if (strEQ(how, "zero")) errno = 0;
+        {
+            SV *noise = sv_2mortal(newSVpvs("calls into the interpreter"));
+            sv_catpvs(noise, " in between");
+            ST(0) = sv_2mortal(newSViv((IV)SvCUR(noise)));
+        }
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -969,5 +1014,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::display", XS_PerlAPI_display);
     newXS_deffile("PerlAPI::method_cache_gen", XS_PerlAPI_method_cache_gen);
     newXS_deffile("PerlAPI::method_twice", XS_PerlAPI_method_twice);
+    newXS_deffile("PerlAPI::with_topic", XS_PerlAPI_with_topic);
+    newXS_deffile("PerlAPI::leave_errno", XS_PerlAPI_leave_errno);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

@@ -52,6 +52,9 @@ var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
 const abiVersion = 12
 
+// plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
+const plErrno = 60
+
 // failedThrown is the frame's failed value after croak_sv
 // (GOPERL_FAILED_THROWN in the SDK), and respThrow the dispatch response
 // that tells the interpreter to die with the value it was handed
@@ -81,6 +84,7 @@ const (
 	opNewXS         = 81
 	opMagicAttach   = 70
 	opMagicUnattach = 72
+	opPlvarSet      = 74
 	opPPHookSet     = 98
 	opMagicSetHook  = 133
 )
@@ -114,6 +118,9 @@ type cFrame struct {
 	marks  [maxMarks]int32
 	tmp    [tmpSlots]uint64
 	err    [512]byte
+	// xerrno is 0, or 1 + the errno the XSUB left when it returned, in the
+	// interpreter's numbering: the SDK notes it, dispatch hands it over.
+	xerrno int32
 
 	// Go-only:
 	p *internal.Perl
@@ -628,6 +635,12 @@ func (s *state) dispatch(req []byte) []byte {
 	s.mu.Unlock()
 	if epi != 0 {
 		purego.SyscallN(epi, fp)
+	}
+	if f.xerrno != 0 {
+		// What the C code left in errno is what $! says after the call.
+		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), ""); err != nil {
+			return fail("native XS dispatch: " + err.Error())
+		}
 	}
 	if f.failed == failedThrown {
 		// croak_sv: the interpreter holds the thrown value and dies with

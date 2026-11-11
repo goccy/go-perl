@@ -25,7 +25,8 @@ enum {
     GOPERL_SAVE_HASH = 4,
     GOPERL_SAVE_GP = 5,
     GOPERL_SAVE_HINTS = 6,
-    GOPERL_SAVE_COMPILE_WARNINGS = 7
+    GOPERL_SAVE_COMPILE_WARNINGS = 7,
+    GOPERL_SAVE_DEFSV = 8
 };
 
 /* SV_SLOT_SET selectors. */
@@ -171,6 +172,8 @@ enum {
 #define GOPERL_PL_LASTGV 56
 #define GOPERL_PL_COP_SEQMAX 57
 #define GOPERL_PL_ERRSV 58
+#define GOPERL_PL_DEFSV 59
+#define GOPERL_PL_ERRNO 60
 
 #define GOPERL_SVCALL(fn, sv, b)                                           \
     goperl_do_op(_gof, GOPERL_OP_SV_CALL,                                  \
@@ -621,7 +624,7 @@ static MAGIC *goperl_mg_findext(goperl_frame_t *f, const SV *sv, int type,
                                 const MGVTBL *vtbl) {
     if (!sv) return 0;
     goperl_flush(f);
-    for (MAGIC *mg = goperl_api_v->magic_chain(f, GOPERL_TOK(sv)); mg;
+    for (MAGIC *mg = goperl_api_magic_chain(f, GOPERL_TOK(sv)); mg;
          mg = mg->mg_moremagic)
         if (mg->mg_type == (char)type && mg->mg_virtual == vtbl) return mg;
     return 0;
@@ -674,7 +677,7 @@ static char *goperl_sv_pv_flags(goperl_frame_t *f, SV *sv, STRLEN *lenp,
         ((uint64_t)GOPERL_SVCALL_2PV << 32) | (uint32_t)GOPERL_TOK(sv), flags, 0, 0);
     if (lenp) *lenp = (STRLEN)(uint32_t)r;
     if (!(r >> 32)) return 0;
-    return (char *)goperl_api_v->guest_mem(f, r >> 32);
+    return (char *)goperl_guest_mem(f, r >> 32);
 }
 #define SvIV_nomg(sv) goperl_sv_iv_flags(_gof, (SV *)(sv), 0)
 #define SvUV_nomg(sv) goperl_sv_uv_flags(_gof, (SV *)(sv), 0)
@@ -753,7 +756,7 @@ static void goperl_sv_nv_set(goperl_frame_t *f, SV *sv, NV v) {
 static void goperl_sv_pv_set(goperl_frame_t *f, SV *sv, const char *p) {
     uint64_t g = 0;
     if (p) {
-        const char *base = (const char *)goperl_api_v->guest_mem(f, 0);
+        const char *base = (const char *)goperl_guest_mem(f, 0);
         if (p < base || (uint64_t)(p - base) > UINT32_MAX)
             goperl_croakf(f, "SvPV_set: the buffer is not interpreter memory");
         g = (uint64_t)(p - base);
@@ -775,7 +778,7 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
         f, GOPERL_OP_SV_CALL,
         ((uint64_t)GOPERL_SVCALL_SETPV_BUFSIZE << 32) | (uint32_t)GOPERL_TOK(sv),
         ((uint64_t)(uint32_t)cur << 32) | (uint32_t)len, 0, 0);
-    return gp ? (char *)goperl_api_v->guest_mem(f, gp) : 0;
+    return gp ? (char *)goperl_guest_mem(f, gp) : 0;
 }
 #define sv_setpv_bufsize(sv, cur, len) \
     goperl_sv_setpv_bufsize(_gof, (SV *)(sv), (STRLEN)(cur), (STRLEN)(len))
@@ -1557,7 +1560,7 @@ static char *goperl_sv_pvbyte(goperl_frame_t *f, SV *sv, STRLEN *lenp,
         flags, 0, 0);
     if (lenp) *lenp = (STRLEN)(uint32_t)r;
     if (!(r >> 32)) return 0;
-    return (char *)goperl_api_v->guest_mem(f, r >> 32);
+    return (char *)goperl_guest_mem(f, r >> 32);
 }
 #define SvPVbyte(sv, lenvar) \
     goperl_sv_pvbyte(_gof, (SV *)(sv), &(lenvar), SV_GMAGIC)
@@ -1613,7 +1616,7 @@ static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
             (uint32_t)GOPERL_TOK(ssv),
         0, 0);
     if (!(r >> 32)) return 0;
-    return (char *)goperl_api_v->guest_mem(f, r >> 32);
+    return (char *)goperl_guest_mem(f, r >> 32);
 }
 #define sv_uni_display(dsv, ssv, pvlim, flags) \
     goperl_sv_uni_display(_gof, (SV *)(dsv), (SV *)(ssv), (STRLEN)(pvlim), (UV)(flags))

@@ -207,7 +207,7 @@ static STDCHAR *goperl_tail_get_ptr(pTHX_ PerlIO *f) {
     uint32_t gp = (uint32_t)goperl_do_op(
         goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_GETPTR, sh->ff, 0, 0, 0);
     /* translate the guest pointer into host space */
-    return (STDCHAR *)goperl_api_v->guest_mem(goperl_cur_frame_v, gp);
+    return (STDCHAR *)goperl_guest_mem(goperl_cur_frame_v, gp);
 }
 static SSize_t goperl_tail_get_cnt(pTHX_ PerlIO *f) {
     goperl_iol_shadow_t *sh = goperl_iol_owner(f);
@@ -222,7 +222,7 @@ static void goperl_tail_set_ptrcnt(pTHX_ PerlIO *f, STDCHAR *ptr,
      * back by asking the guest for its current ptr and offsetting. */
     uint32_t gp = (uint32_t)goperl_do_op(
         goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_GETPTR, sh->ff, 0, 0, 0);
-    char *hp = (char *)goperl_api_v->guest_mem(goperl_cur_frame_v, gp);
+    char *hp = (char *)goperl_guest_mem(goperl_cur_frame_v, gp);
     uint32_t gnew = gp + (uint32_t)((char *)ptr - hp);
     goperl_do_op(goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_SETPTRCNT, sh->ff,
                  ((uint64_t)gnew << 32) | (uint32_t)(int32_t)cnt, 0, 0);
@@ -409,7 +409,7 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
     GOPERL_IOL_REQ(Get_cnt, PerlIOBuf_get_cnt);
     GOPERL_IOL_REQ(Set_ptrcnt, PerlIOBuf_set_ptrcnt);
 #undef GOPERL_IOL_REQ
-    uint32_t id = goperl_api_v->perlio_def(goperl_cur_frame_v, tab->name,
+    uint32_t id = goperl_api_perlio_def(goperl_cur_frame_v, tab->name,
                                            (void *)tab);
     goperl_do_op(goperl_cur_frame_v, GOPERL_OP_PERLIO_DEF_LAYER, id, mask,
                  tab->name, strlen(tab->name));
@@ -503,7 +503,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
         PerlIO *hf = &sh->fslot;
         PerlIOBuf *b = PerlIOSelf(hf, PerlIOBuf);
         goperl_iol_gbuf_v = gbuf;
-        goperl_iol_hbuf_v = (char *)goperl_api_v->guest_mem(f, gbuf);
+        goperl_iol_hbuf_v = (char *)goperl_guest_mem(f, gbuf);
         b->buf = goperl_iol_hbuf_v;
         b->bufsiz = bufsiz;
         b->ptr = b->end = b->buf;

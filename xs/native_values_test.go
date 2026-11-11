@@ -121,6 +121,25 @@ package main; 1;`
 	})
 }
 
+// The errno native code leaves when an XSUB returns is the program's $!,
+// in the interpreter's numbering; calls into the interpreter in between do
+// not disturb it, a cleared errno clears $!, and an XSUB that does not
+// touch errno leaves $! alone.
+func TestNativeErrnoIsDollarBang(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	if r, err := p.Eval(context.Background(), `use Errno (); 1;`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"ENOENT", `$! = 0; PerlAPI::leave_errno("ENOENT"); $!{ENOENT} ? "ENOENT" : "other: " . ($! + 0)`, "ENOENT"},
+		{"EINVAL", `$! = 0; PerlAPI::leave_errno("EINVAL"); $!{EINVAL} ? "EINVAL" : "other: " . ($! + 0)`, "EINVAL"},
+		{"ERANGE", `$! = 0; PerlAPI::leave_errno("ERANGE"); $!{ERANGE} ? "ERANGE" : "other: " . ($! + 0)`, "ERANGE"},
+		{"errno cleared", `$! = Errno::EPERM(); PerlAPI::leave_errno("zero"); $! + 0`, "0"},
+		{"errno not touched", `$! = Errno::EPERM(); PerlAPI::leave_errno("nothing"); $!{EPERM} ? "EPERM" : "other: " . ($! + 0)`, "EPERM"},
+	})
+}
+
 // SvPVbyte gives the byte form of a string: one held as UTF-8 is converted,
 // and one with a character above 255 has none.
 func TestNativeByteStrings(t *testing.T) {
@@ -165,6 +184,10 @@ func TestNativeLvalueAccessors(t *testing.T) {
 		{"an interpreter variable stored after later operations", `PerlAPI::late_variable_store()`, "1"},
 		{"$@ localized from C", `$@ = "outer"; my $inner = PerlAPI::with_local_errsv(sub { die "inner\n" }); "$inner$@"`, "inner\nouter"},
 		{"hv_ksplit", `my %h; PerlAPI::presize(\%h, 100) >= 99 ? "split" : "small"`, "split"},
+		{"$_ swapped around a callback", `package Counted; our $live = 0; sub new { $live++; bless {} } sub DESTROY { $live-- }
+package main; $_ = Counted->new; my $obj = $_; my $seen = PerlAPI::with_topic(sub { $_ .= "!" }, "ping");
+my $same = ($_ == $obj) ? "same object" : "changed"; undef $obj; $_ = undef; "$seen,$same,$Counted::live"`, "ping!,same object,0"},
+		{"$_ swapped inside a local", `my $out; { local $_ = "outer"; my $seen = PerlAPI::with_topic(sub { }, "inner"); $out = "$seen,$_" } $out`, "inner,outer"},
 		{"PL_tainting is assignable", `my $on = PerlAPI::set_tainting(1); my $t = ${^TAINT}; my $off = PerlAPI::set_tainting(0); "$on,$t,$off,${^TAINT}"`, "1,1,0,0"},
 	})
 }
