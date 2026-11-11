@@ -909,6 +909,242 @@ static int goperl_errno_guest(int e) {
 #endif
     return 29; /* EIO */
 }
+/* The host's errno value for a number of the interpreter's. */
+static int goperl_errno_host(int e) __attribute__((unused));
+static int goperl_errno_host(int e) {
+    switch (e) {
+    case 0: return 0;
+#ifdef E2BIG
+    case 1: return E2BIG;
+#endif
+#ifdef EACCES
+    case 2: return EACCES;
+#endif
+#ifdef EADDRINUSE
+    case 3: return EADDRINUSE;
+#endif
+#ifdef EADDRNOTAVAIL
+    case 4: return EADDRNOTAVAIL;
+#endif
+#ifdef EAFNOSUPPORT
+    case 5: return EAFNOSUPPORT;
+#endif
+#ifdef EAGAIN
+    case 6: return EAGAIN;
+#endif
+#ifdef EALREADY
+    case 7: return EALREADY;
+#endif
+#ifdef EBADF
+    case 8: return EBADF;
+#endif
+#ifdef EBADMSG
+    case 9: return EBADMSG;
+#endif
+#ifdef EBUSY
+    case 10: return EBUSY;
+#endif
+#ifdef ECANCELED
+    case 11: return ECANCELED;
+#endif
+#ifdef ECHILD
+    case 12: return ECHILD;
+#endif
+#ifdef ECONNABORTED
+    case 13: return ECONNABORTED;
+#endif
+#ifdef ECONNREFUSED
+    case 14: return ECONNREFUSED;
+#endif
+#ifdef ECONNRESET
+    case 15: return ECONNRESET;
+#endif
+#ifdef EDEADLK
+    case 16: return EDEADLK;
+#endif
+#ifdef EDESTADDRREQ
+    case 17: return EDESTADDRREQ;
+#endif
+#ifdef EDOM
+    case 18: return EDOM;
+#endif
+#ifdef EDQUOT
+    case 19: return EDQUOT;
+#endif
+#ifdef EEXIST
+    case 20: return EEXIST;
+#endif
+#ifdef EFAULT
+    case 21: return EFAULT;
+#endif
+#ifdef EFBIG
+    case 22: return EFBIG;
+#endif
+#ifdef EHOSTUNREACH
+    case 23: return EHOSTUNREACH;
+#endif
+#ifdef EIDRM
+    case 24: return EIDRM;
+#endif
+#ifdef EILSEQ
+    case 25: return EILSEQ;
+#endif
+#ifdef EINPROGRESS
+    case 26: return EINPROGRESS;
+#endif
+#ifdef EINTR
+    case 27: return EINTR;
+#endif
+#ifdef EINVAL
+    case 28: return EINVAL;
+#endif
+#ifdef EIO
+    case 29: return EIO;
+#endif
+#ifdef EISCONN
+    case 30: return EISCONN;
+#endif
+#ifdef EISDIR
+    case 31: return EISDIR;
+#endif
+#ifdef ELOOP
+    case 32: return ELOOP;
+#endif
+#ifdef EMFILE
+    case 33: return EMFILE;
+#endif
+#ifdef EMLINK
+    case 34: return EMLINK;
+#endif
+#ifdef EMSGSIZE
+    case 35: return EMSGSIZE;
+#endif
+#ifdef EMULTIHOP
+    case 36: return EMULTIHOP;
+#endif
+#ifdef ENAMETOOLONG
+    case 37: return ENAMETOOLONG;
+#endif
+#ifdef ENETDOWN
+    case 38: return ENETDOWN;
+#endif
+#ifdef ENETRESET
+    case 39: return ENETRESET;
+#endif
+#ifdef ENETUNREACH
+    case 40: return ENETUNREACH;
+#endif
+#ifdef ENFILE
+    case 41: return ENFILE;
+#endif
+#ifdef ENOBUFS
+    case 42: return ENOBUFS;
+#endif
+#ifdef ENODEV
+    case 43: return ENODEV;
+#endif
+#ifdef ENOENT
+    case 44: return ENOENT;
+#endif
+#ifdef ENOEXEC
+    case 45: return ENOEXEC;
+#endif
+#ifdef ENOLCK
+    case 46: return ENOLCK;
+#endif
+#ifdef ENOLINK
+    case 47: return ENOLINK;
+#endif
+#ifdef ENOMEM
+    case 48: return ENOMEM;
+#endif
+#ifdef ENOMSG
+    case 49: return ENOMSG;
+#endif
+#ifdef ENOPROTOOPT
+    case 50: return ENOPROTOOPT;
+#endif
+#ifdef ENOSPC
+    case 51: return ENOSPC;
+#endif
+#ifdef ENOSYS
+    case 52: return ENOSYS;
+#endif
+#ifdef ENOTCONN
+    case 53: return ENOTCONN;
+#endif
+#ifdef ENOTDIR
+    case 54: return ENOTDIR;
+#endif
+#ifdef ENOTEMPTY
+    case 55: return ENOTEMPTY;
+#endif
+#ifdef ENOTRECOVERABLE
+    case 56: return ENOTRECOVERABLE;
+#endif
+#ifdef ENOTSOCK
+    case 57: return ENOTSOCK;
+#endif
+#ifdef ENOTSUP
+    case 58: return ENOTSUP;
+#endif
+#ifdef ENOTTY
+    case 59: return ENOTTY;
+#endif
+#ifdef ENXIO
+    case 60: return ENXIO;
+#endif
+#ifdef EOVERFLOW
+    case 61: return EOVERFLOW;
+#endif
+#ifdef EOWNERDEAD
+    case 62: return EOWNERDEAD;
+#endif
+#ifdef EPERM
+    case 63: return EPERM;
+#endif
+#ifdef EPIPE
+    case 64: return EPIPE;
+#endif
+#ifdef EPROTO
+    case 65: return EPROTO;
+#endif
+#ifdef EPROTONOSUPPORT
+    case 66: return EPROTONOSUPPORT;
+#endif
+#ifdef EPROTOTYPE
+    case 67: return EPROTOTYPE;
+#endif
+#ifdef ERANGE
+    case 68: return ERANGE;
+#endif
+#ifdef EROFS
+    case 69: return EROFS;
+#endif
+#ifdef ESPIPE
+    case 70: return ESPIPE;
+#endif
+#ifdef ESRCH
+    case 71: return ESRCH;
+#endif
+#ifdef ESTALE
+    case 72: return ESTALE;
+#endif
+#ifdef ETIMEDOUT
+    case 73: return ETIMEDOUT;
+#endif
+#ifdef ETXTBSY
+    case 74: return ETXTBSY;
+#endif
+#ifdef EXDEV
+    case 75: return EXDEV;
+#endif
+#ifdef ENOTCAPABLE
+    case 76: return ENOTCAPABLE;
+#endif
+    }
+    return EIO;
+}
 /* The end of an XSUB: an errno it set is noted in the frame for the loader. */
 static void goperl_errno_leave(goperl_frame_t *f) {
     if (errno != GOPERL_ERRNO_UNSET) f->xerrno = 1 + goperl_errno_guest(errno);
@@ -1988,9 +2224,16 @@ static char *goperl_sv_grow(goperl_frame_t *f, SV *sv, STRLEN n) {
 #define newSViv(v)                                            \
     ((SV *)(uintptr_t)(goperl_flush(_gof),                    \
                        goperl_direct_new_iv(_gof, (int64_t)(v))))
-#define newSVpvn(p, l)                                        \
-    ((SV *)(uintptr_t)(goperl_flush(_gof),                    \
-                       goperl_direct_new_pvn(_gof, (p), (uint64_t)(l))))
+/* Without a string (a NULL pointer) the new SV is undefined, whatever the
+ * length says: newSVpvn(NULL, 0) is how XS code returns undef. */
+static SV *goperl_newSVpvn(goperl_frame_t *f, const char *p, STRLEN len)
+    __attribute__((unused));
+static SV *goperl_newSVpvn(goperl_frame_t *f, const char *p, STRLEN len) {
+    if (!p) return GOPERL_SV(goperl_do_op(f, GOPERL_OP_NEW_SV, 0, 0, 0, 0));
+    goperl_flush(f);
+    return (SV *)(uintptr_t)goperl_direct_new_pvn(f, p, (uint64_t)len);
+}
+#define newSVpvn(p, l) goperl_newSVpvn(_gof, (p), (STRLEN)(l))
 #define newSVpvs(s) newSVpvn("" s "", sizeof(s) - 1)
 #define newSVuv(v) GOPERL_SV(goperl_op0(GOPERL_OP_NEW_UV, (uint64_t)(v), 0))
 #define newSV(len) GOPERL_SV(goperl_op0(GOPERL_OP_NEW_SV, (uint64_t)(len), 0))
@@ -2010,9 +2253,10 @@ static SV *goperl_newSVnv(goperl_frame_t *f, double d) {
 #define newSVnv(v) goperl_newSVnv(_gof, (double)(v))
 
 static SV *goperl_newSVpv(goperl_frame_t *f, const char *s, STRLEN len) {
-    if (len == 0) len = s ? strlen(s) : 0;
+    if (!s) return GOPERL_SV(goperl_do_op(f, GOPERL_OP_NEW_SV, 0, 0, 0, 0));
+    if (len == 0) len = strlen(s);
     goperl_flush(f);
-    return (SV *)(uintptr_t)goperl_direct_new_pvn(f, s ? s : "", (uint64_t)len);
+    return (SV *)(uintptr_t)goperl_direct_new_pvn(f, s, (uint64_t)len);
 }
 #define newSVpv(s, l) goperl_newSVpv(_gof, (s), (STRLEN)(l))
 
@@ -3015,9 +3259,19 @@ enum {
     GOPERL_PIO_GET_BASE = 27,
     GOPERL_PIO_GET_BUFSIZ = 28,
     GOPERL_PIO_SET_PTRCNT = 29,
-    GOPERL_PIO_FILL = 30
+    GOPERL_PIO_FILL = 30,
+    GOPERL_PIO_APPLY_LAYERS = 31
 };
 #define GOPERL_PIO_READ_MAX 65536
+#define GOPERL_PL_ERRNO 60
+/* A handle operation of the interpreter failed. Native code looks for the
+ * reason where it looks after any failed call: in errno. */
+static void goperl_errno_from_interp(goperl_frame_t *f) __attribute__((unused));
+static void goperl_errno_from_interp(goperl_frame_t *f) {
+    const int e = (int)(int64_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET,
+                                             GOPERL_PL_ERRNO, 0, 0, 0);
+    if (e) errno = goperl_errno_host(e);
+}
 static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen)
     __attribute__((unused));
@@ -3045,7 +3299,11 @@ static SSize_t goperl_pio_read(goperl_frame_t *f, const void *h, void *buf,
         if (want > GOPERL_PIO_READ_MAX) want = GOPERL_PIO_READ_MAX;
         uint64_t r = goperl_pio(f, GOPERL_PIO_READ, h, want, 0, 0);
         int32_t n = (int32_t)(uint32_t)r;
-        if (n < 0) return total ? (SSize_t)total : -1;
+        if (n < 0) {
+            if (total) return (SSize_t)total;
+            goperl_errno_from_interp(f);
+            return -1;
+        }
         if (n > 0)
             memcpy((char *)buf + total, goperl_guest_mem(f, r >> 32),
                    (size_t)n);
@@ -3059,9 +3317,11 @@ static SSize_t goperl_pio_write(goperl_frame_t *f, const void *h,
     __attribute__((unused));
 static SSize_t goperl_pio_write(goperl_frame_t *f, const void *h,
                                 const void *buf, size_t count) {
-    return (SSize_t)(int64_t)goperl_do_op(
+    const SSize_t n = (SSize_t)(int64_t)goperl_do_op(
         f, GOPERL_OP_PERLIO_WRITE, (uint64_t)(uint32_t)(uintptr_t)h,
         (uint64_t)count, (const char *)buf, (uint64_t)count);
+    if (n < 0) goperl_errno_from_interp(f);
+    return n;
 }
 static int goperl_pio_vprintf(goperl_frame_t *f, const void *h,
                               const char *fmt, va_list ap)
@@ -3119,7 +3379,62 @@ static IV goperl_pio_seek(goperl_frame_t *f, const void *h, Off_t off,
         errno = EINVAL;
         return -1;
     }
-    return (IV)(int64_t)goperl_pio(f, sel, h, (uint64_t)off, 0, 0);
+    const IV r = (IV)(int64_t)goperl_pio(f, sel, h, (uint64_t)off, 0, 0);
+    if (r != 0) goperl_errno_from_interp(f);
+    return r;
+}
+/* The handle functions that answer 0 for success and something else for
+ * a failure (tell: a negative position). */
+static int64_t goperl_pio_status(goperl_frame_t *f, int sel, const void *h)
+    __attribute__((unused));
+static int64_t goperl_pio_status(goperl_frame_t *f, int sel, const void *h) {
+    const int64_t r = (int64_t)goperl_pio(f, sel, h, 0, 0, 0);
+    if (sel == GOPERL_PIO_TELL ? r < 0 : r != 0) goperl_errno_from_interp(f);
+    return r;
+}
+static int goperl_pio_flush(goperl_frame_t *f, const void *h)
+    __attribute__((unused));
+static int goperl_pio_flush(goperl_frame_t *f, const void *h) {
+    const int r = (int)(int64_t)goperl_do_op(
+        f, GOPERL_OP_PERLIO_FLUSH, (uint32_t)(uintptr_t)h, 0, 0, 0);
+    if (r != 0) goperl_errno_from_interp(f);
+    return r;
+}
+/* PerlIO_binmode and PerlIO_apply_layers are functions that take the
+ * interpreter (aTHX_) on perl, and are called that way. */
+static int PerlIO_binmode(pTHX_ const void *h, int iotype, int omode,
+                          const char *names) __attribute__((unused));
+static int PerlIO_binmode(pTHX_ const void *h, int iotype, int omode,
+                          const char *names) {
+    const uint64_t ok = goperl_pio(
+        _gof, GOPERL_PIO_BINMODE, h,
+        ((uint64_t)(uint32_t)iotype << 32) | (uint32_t)omode,
+        names ? names : "", names ? strlen(names) : 0);
+    if (!ok) goperl_errno_from_interp(_gof);
+    return ok ? 1 : 0;
+}
+static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
+                               const char *names) __attribute__((unused));
+static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
+                               const char *names) {
+    const size_t ml = mode ? strlen(mode) : 0, nl = names ? strlen(names) : 0;
+    char *req = (char *)malloc(ml + nl + 2);
+    if (!req) goperl_croakf(_gof, "%s", "Out of memory!");
+    if (ml) memcpy(req, mode, ml);
+    req[ml] = '\0';
+    if (nl) memcpy(req + ml + 1, names, nl);
+    req[ml + 1 + nl] = '\0';
+    goperl_flush(_gof);
+    const int32_t failed_before = _gof->failed;
+    const int r = (int)(int64_t)goperl_xs_op(
+        _gof, GOPERL_OP_PERLIO,
+        ((uint64_t)GOPERL_PIO_APPLY_LAYERS << 32) | (uint32_t)(uintptr_t)h, 0,
+        req, ml + 1 + nl + 1);
+    goperl_gen_bump();
+    free(req);
+    if (!failed_before && _gof->failed && _gof->jb) goperl_raise(_gof);
+    if (r != 0) goperl_errno_from_interp(_gof);
+    return r;
 }
 #define PerlIO_fileno(io) goperl_pio_fileno(_gof, (io))
 #define PerlIO_read(io, buf, n) \
@@ -3145,8 +3460,7 @@ static int goperl_pio_puts(goperl_frame_t *f, const void *h, const char *s2) {
     ((void)goperl_pio(_gof, GOPERL_PIO_CLEARERR, (io), 0, 0, 0))
 #define PerlIO_seek(io, off, whence) \
     goperl_pio_seek(_gof, (io), (Off_t)(off), (whence))
-#define PerlIO_tell(io) \
-    ((Off_t)(int64_t)goperl_pio(_gof, GOPERL_PIO_TELL, (io), 0, 0, 0))
+#define PerlIO_tell(io) ((Off_t)goperl_pio_status(_gof, GOPERL_PIO_TELL, (io)))
 #define PerlIO_rewind(io) \
     ({ GOPERL_ONCE(goperl_PerlIO_rewind_io_, io); \
        ((void)(goperl_pio_seek(_gof, (goperl_PerlIO_rewind_io_), 0, SEEK_SET), PerlIO_clearerr(goperl_PerlIO_rewind_io_))); })
@@ -3202,11 +3516,8 @@ static void goperl_pio_set_ptrcnt(goperl_frame_t *f, const void *h,
 #define PerlIO_get_base(io) goperl_pio_bufptr(_gof, GOPERL_PIO_GET_BASE, (io))
 #define PerlIO_set_ptrcnt(io, ptr, cnt) \
     goperl_pio_set_ptrcnt(_gof, (io), (STDCHAR *)(ptr), (SSize_t)(cnt))
-#define PerlIO_fill(io) \
-    ((int)(int64_t)goperl_pio(_gof, GOPERL_PIO_FILL, (io), 0, 0, 0))
-#define PerlIO_flush(io)                                                 \
-    ((int)(int64_t)goperl_op0(GOPERL_OP_PERLIO_FLUSH,                     \
-                              (uint32_t)(uintptr_t)(io), 0))
+#define PerlIO_fill(io) ((int)goperl_pio_status(_gof, GOPERL_PIO_FILL, (io)))
+#define PerlIO_flush(io) goperl_pio_flush(_gof, (io))
 
 /* XCPT: local exception catching (the NO_XSLOCKS surface). A croak inside
  * the TRY block longjmps to the local buffer instead of the XSUB entry. */
@@ -5256,16 +5567,19 @@ static PerlIO *goperl_perlio_open(goperl_frame_t *f, const char *path,
     if (ml + pl + 2 > sizeof buf) return 0;
     memcpy(buf, mode, ml + 1);
     memcpy(buf + ml + 1, path, pl + 1);
-    return (PerlIO *)(uintptr_t)goperl_do_op(f, GOPERL_OP_PERLIO_OPEN, 0, 0,
-                                             buf, ml + 1 + pl + 1);
+    PerlIO *const io = (PerlIO *)(uintptr_t)goperl_do_op(
+        f, GOPERL_OP_PERLIO_OPEN, 0, 0, buf, ml + 1 + pl + 1);
+    if (!io) goperl_errno_from_interp(f);
+    return io;
 }
 static int goperl_pio_close(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static int goperl_pio_close(goperl_frame_t *f, const void *h) {
     goperl_pio_release(f, h, 0);
-    return (int)(int64_t)goperl_do_op(f, GOPERL_OP_PERLIO_CLOSE,
-                                      (uint64_t)(uint32_t)(uintptr_t)h, 0, 0,
-                                      0);
+    const int r = (int)(int64_t)goperl_do_op(
+        f, GOPERL_OP_PERLIO_CLOSE, (uint64_t)(uint32_t)(uintptr_t)h, 0, 0, 0);
+    if (r != 0) goperl_errno_from_interp(f);
+    return r;
 }
 #define PerlIO_open(path, mode) goperl_perlio_open(_gof, (path), (mode))
 #define PerlIO_close(io) goperl_pio_close(_gof, (io))
@@ -5332,6 +5646,11 @@ static const char PL_hexdigit[] = "0123456789abcdef0123456789ABCDEF";
 #define UTF8_CHECK_ONLY 0x1
 #define UTF8_DISALLOW_SUPER 0x2
 #define UTF8_ALLOW_ANY 0x4
+/* An overlong sequence (more bytes than its character needs) is malformed
+ * unless one of these allows it; the first makes it U+FFFD, the second
+ * gives the character it spells. */
+#define UTF8_ALLOW_LONG 0x10
+#define UTF8_ALLOW_LONG_AND_ITS_VALUE (UTF8_ALLOW_LONG | 0x20)
 #define UTF8_DISALLOW_SURROGATE 0x8
 #define UTF8_WARN_SURROGATE 0
 #define UTF8_WARN_SUPER 0
@@ -5373,10 +5692,15 @@ static UV goperl_utf8n_to_uvchr(const U8 *s, STRLEN curlen, STRLEN *retlen,
             if (!UTF8_IS_CONTINUATION(s[i])) goto fail;
             uv = (uv << 6) | (s[i] & 0x3f);
         }
-        /* non-minimal encodings are malformed, as in the real decoder */
+        /* non-minimal encodings are malformed, as in the real decoder,
+         * unless the caller allows them */
         if ((n == 2 && uv < 0x80) || (n == 3 && uv < 0x800) ||
-            (n == 4 && uv < 0x10000))
-            goto fail;
+            (n == 4 && uv < 0x10000) || (n == 5 && uv < 0x200000) ||
+            (n == 6 && uv < 0x4000000) || (n >= 7 && uv < 0x80000000)) {
+            if (!(flags & UTF8_ALLOW_LONG)) goto fail;
+            if ((flags & UTF8_ALLOW_LONG_AND_ITS_VALUE) != UTF8_ALLOW_LONG_AND_ITS_VALUE)
+                uv = 0xFFFD;
+        }
         if ((flags & UTF8_DISALLOW_SURROGATE) && uv >= 0xD800 && uv <= 0xDFFF)
             goto fail;
         if ((flags & UTF8_DISALLOW_SUPER) && uv > 0x10FFFF)
@@ -5564,10 +5888,6 @@ static pid_t goperl_getpid(void) {
     }                                             \
     STMT_END
 #define DEBUG_v(x) ((void)0)
-/* Tie magic stays guest-side (not mirrored); every hv/av op above goes
- * through the real perl API, which honors it — so "not visibly tied" makes
- * dists take their plain path, which is then still tie-correct. */
-#define SvTIED_mg(sv, how) ((MAGIC *)0)
 #define sv_copypv(dsv, ssv) \
     ({ GOPERL_ONCE(goperl_sv_copypv_dsv_, dsv); GOPERL_ONCE(goperl_sv_copypv_ssv_, ssv); \
        do { STRLEN goperl_cl; const char *goperl_cp = SvPV((goperl_sv_copypv_ssv_), goperl_cl); sv_setpvn((goperl_sv_copypv_dsv_), goperl_cp, goperl_cl); if (SvUTF8(goperl_sv_copypv_ssv_)) SvUTF8_on(goperl_sv_copypv_dsv_); else SvUTF8_off(goperl_sv_copypv_dsv_); } while (0); })
@@ -5914,10 +6234,15 @@ static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
     __attribute__((unused));
 static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
                                  STRLEN len, U32 flags) {
-    goperl_flush(f);
-    uint64_t tok = goperl_direct_new_pvn(f, p ? p : "", (uint64_t)len);
-    if (flags & SVf_UTF8)
-        goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, tok, 0, 0, 0);
+    uint64_t tok;
+    if (p) {
+        goperl_flush(f);
+        tok = goperl_direct_new_pvn(f, p, (uint64_t)len);
+        if (flags & SVf_UTF8)
+            goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, tok, 0, 0, 0);
+    } else {
+        tok = goperl_do_op(f, GOPERL_OP_NEW_SV, 0, 0, 0, 0);
+    }
     if (flags & SVs_TEMP) tok = goperl_direct_sv_mortal(f, tok);
     return GOPERL_SV(tok);
 }

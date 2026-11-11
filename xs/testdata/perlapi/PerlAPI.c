@@ -1334,6 +1334,169 @@ XS(XS_PerlAPI_count_own_struct) {
     }
 }
 
+/* The SVs the string constructors make without a string, and one with an
+ * empty string: which of them are defined. */
+XS(XS_PerlAPI_null_strings) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        SV *made[4];
+        int i;
+        made[0] = sv_2mortal(newSVpvn(NULL, 0));
+        made[1] = sv_2mortal(newSVpv(NULL, 0));
+        made[2] = newSVpvn_flags(NULL, 0, SVs_TEMP);
+        made[3] = sv_2mortal(newSVpvn("", 0));
+        SP -= items;
+        EXTEND(SP, 4);
+        for (i = 0; i < 4; i++) PUSHs(boolSV(SvOK(made[i])));
+        PUTBACK;
+        return;
+    }
+}
+
+/* Set magic that records every value its variable is given. */
+static char perlapi_watch_log[256];
+static int perlapi_watch_set(pTHX_ SV *sv, MAGIC *mg) {
+    size_t used = strlen(perlapi_watch_log);
+    PERL_UNUSED_VAR(mg);
+    snprintf(perlapi_watch_log + used, sizeof perlapi_watch_log - used, "|%s",
+             SvOK(sv) ? SvPV_nolen(sv) : "undef");
+    return 0;
+}
+static MGVTBL perlapi_watch_vtbl = {0, perlapi_watch_set, 0, 0, 0, 0, 0, 0};
+
+XS(XS_PerlAPI_watch) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    perlapi_watch_log[0] = '\0';
+    sv_magicext(ST(0), NULL, PERL_MAGIC_ext, &perlapi_watch_vtbl, "watched", 0);
+    XSRETURN(0);
+}
+
+XS(XS_PerlAPI_watched) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpv(perlapi_watch_log, 0));
+    XSRETURN(1);
+}
+
+/* Magic whose name is an SV (HEf_SVKEY), as an accessor generator keeps
+ * the name of its slot: attach returns the reference count of the key
+ * before and after, read returns the key through the magic. */
+static MGVTBL perlapi_keyed_vtbl = {0, 0, 0, 0, 0, 0, 0, 0};
+
+XS(XS_PerlAPI_keyed_attach) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "holder, key");
+    {
+        const IV before = (IV)SvREFCNT(ST(1));
+        MAGIC *mg = sv_magicext(ST(0), NULL, PERL_MAGIC_ext, &perlapi_keyed_vtbl,
+                                (const char *)ST(1), HEf_SVKEY);
+        const IV after = (IV)SvREFCNT(ST(1));
+        const IV len = (IV)mg->mg_len;
+        SP -= items;
+        EXTEND(SP, 2);
+        mPUSHi(after - before);
+        mPUSHi(len);
+        PUTBACK;
+        return;
+    }
+}
+
+XS(XS_PerlAPI_keyed_read) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "holder");
+    {
+        MAGIC *mg = mg_findext(ST(0), PERL_MAGIC_ext, &perlapi_keyed_vtbl);
+        if (!mg || mg->mg_len != HEf_SVKEY) XSRETURN_UNDEF;
+        ST(0) = (SV *)mg->mg_ptr;
+        XSRETURN(1);
+    }
+}
+
+/* What a hash or array is tied to: the class of the object, or "not tied". */
+XS(XS_PerlAPI_tied_to) {
+    dXSARGS;
+    if (items != 1 || !SvROK(ST(0))) croak_xs_usage(cv, "ref");
+    {
+        SV *target = SvRV(ST(0));
+        MAGIC *mg = SvTIED_mg(target, PERL_MAGIC_tied);
+        if (!mg) {
+            ST(0) = sv_2mortal(newSVpvs("not tied"));
+        } else {
+            ST(0) = sv_2mortal(newSVpv(sv_reftype(SvRV(SvTIED_obj(target, mg)), 1), 0));
+        }
+        XSRETURN(1);
+    }
+}
+
+/* Decodes the first character of a byte string: "code point:length", or
+ * "malformed". how: 0 strict, 1 overlong allowed, 2 overlong with its
+ * value. */
+XS(XS_PerlAPI_decode_first) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "bytes, how");
+    {
+        STRLEN len, used = 0;
+        const U8 *bytes = (const U8 *)SvPV(ST(0), len);
+        const IV how = SvIV(ST(1));
+        const U32 flags = UTF8_CHECK_ONLY | (how == 1 ? UTF8_ALLOW_LONG : how == 2 ? UTF8_ALLOW_LONG_AND_ITS_VALUE : 0);
+        const UV uv = utf8n_to_uvchr(bytes, len, &used, flags);
+        if (used == (STRLEN)-1) {
+            ST(0) = sv_2mortal(newSVpvs("malformed"));
+        } else {
+            ST(0) = sv_2mortal(newSVpvf("%lx:%lu", (unsigned long)uv, (unsigned long)used));
+        }
+        XSRETURN(1);
+    }
+}
+
+/* Puts layers on a handle with PerlIO_binmode (how 0) or
+ * PerlIO_apply_layers (how 1); returns what the function returned. */
+XS(XS_PerlAPI_pio_layers) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "handle, layers, how");
+    {
+        PerlIO *io = IoIFP(sv_2io(ST(0)));
+        const char *layers = SvPV_nolen(ST(1));
+        int r;
+        if (SvIV(ST(2)) == 0)
+            r = PerlIO_binmode(aTHX_ io, '<', O_BINARY, layers);
+        else
+            r = PerlIO_apply_layers(aTHX_ io, "r", layers);
+        XSRETURN_IV(r);
+    }
+}
+
+/* Opens a file that may not exist and, with a handle, seeks on it: for
+ * each of the two whether it failed and the errno native code finds
+ * afterwards. */
+XS(XS_PerlAPI_pio_failures) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "path, handle");
+    {
+        PerlIO *opened, *io = IoIFP(sv_2io(ST(1)));
+        int open_failed, open_errno, seek_failed, seek_errno;
+        errno = 0;
+        opened = PerlIO_open(SvPV_nolen(ST(0)), "r");
+        open_failed = opened == NULL;
+        open_errno = errno;
+        if (opened) PerlIO_close(opened);
+        errno = 0;
+        seek_failed = PerlIO_seek(io, 0, SEEK_SET) != 0;
+        seek_errno = errno;
+        errno = 0; /* nothing of this is the XSUB's own failure */
+        SP -= items;
+        EXTEND(SP, 4);
+        mPUSHi(open_failed);
+        mPUSHs(newSVpv(open_errno == ENOENT ? "ENOENT" : open_errno == 0 ? "none" : strerror(open_errno), 0));
+        mPUSHi(seek_failed);
+        mPUSHs(newSVpv(seek_errno == ESPIPE ? "ESPIPE" : seek_errno == EINVAL ? "EINVAL" : seek_errno == 0 ? "none" : strerror(seek_errno), 0));
+        PUTBACK;
+        return;
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1420,5 +1583,14 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::open_and_read", XS_PerlAPI_open_and_read);
     newXS_deffile("PerlAPI::lio_peek", XS_PerlAPI_lio_peek);
     newXS_deffile("PerlAPI::count_own_struct", XS_PerlAPI_count_own_struct);
+    newXS_deffile("PerlAPI::null_strings", XS_PerlAPI_null_strings);
+    newXS_deffile("PerlAPI::watch", XS_PerlAPI_watch);
+    newXS_deffile("PerlAPI::watched", XS_PerlAPI_watched);
+    newXS_deffile("PerlAPI::keyed_attach", XS_PerlAPI_keyed_attach);
+    newXS_deffile("PerlAPI::keyed_read", XS_PerlAPI_keyed_read);
+    newXS_deffile("PerlAPI::tied_to", XS_PerlAPI_tied_to);
+    newXS_deffile("PerlAPI::decode_first", XS_PerlAPI_decode_first);
+    newXS_deffile("PerlAPI::pio_layers", XS_PerlAPI_pio_layers);
+    newXS_deffile("PerlAPI::pio_failures", XS_PerlAPI_pio_failures);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

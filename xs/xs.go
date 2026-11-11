@@ -87,7 +87,12 @@ const (
 	opPlvarSet      = 74
 	opPPHookSet     = 98
 	opMagicSetHook  = 133
+	opSvCall        = 187
 )
+
+// svCallMagicIsValue is the SV_CALL selector that asks whether a magic type
+// is value magic (GOPERL_SVCALL_MAGIC_IS_VALUE in perl-wasm).
+const svCallMagicIsValue = 55
 
 // cFrame mirrors goperl_frame_t in sdk/include/perl.h (ABI). The trailing Go
 // fields are invisible to C, which only knows the leading portion.
@@ -359,6 +364,9 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	if err := clone.SetMagicFreeHandler(cs.magicFreed); err != nil {
 		return err
 	}
+	if err := clone.SetMagicLocalHandler(cs.magicLocalized); err != nil {
+		return err
+	}
 	if err := clone.SetPPHookHandler(cs.ppHook); err != nil {
 		return err
 	}
@@ -480,6 +488,9 @@ func (s *state) open(path string) (lib uintptr, err error) {
 		return 0, err
 	}
 	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
+		return 0, err
+	}
+	if err := p.SetMagicLocalHandler(s.magicLocalized); err != nil {
 		return 0, err
 	}
 	if err := p.SetPPHookHandler(s.ppHook); err != nil {
@@ -802,11 +813,15 @@ const (
 	mgOffMore    = 0
 	mgOffVirtual = 8
 	mgOffType    = 18
+	mgOffFlags   = 19
 	mgOffLen     = 20
 	mgOffObj     = 24
 	mgOffPtr     = 32
 	vtblOffSet   = 8
 	vtblOffFree  = 32
+	vtblOffLocal = 56
+	mgfLocal     = 0x20 // MGf_LOCAL
+	hefSVKey     = -2   // HEf_SVKEY: the name of a MAGIC is an SV
 )
 
 // magicShares counts, for every MAGIC that was copied to another instance
@@ -870,13 +885,23 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 	}
 	s.mu.Unlock()
 
+	// sv_magicext keeps the length it is given. A positive one makes the
+	// MAGIC own a copy of the name; HEf_SVKEY says the name is an SV, which
+	// the MAGIC then holds a reference to; with any other the pointer is
+	// kept as it is.
 	mgPtr := namePtr
-	mgLen := int32(0)
-	if namLen > 0 { // real sv_magicext semantics: positive namlen copies
+	mgLen := int32(namLen)
+	switch {
+	case namePtr == 0:
+	case namLen > 0:
 		mgPtr = cMalloc(int(namLen) + 1)
 		cMemcpy(mgPtr, namePtr, int(namLen))
 		pokeBytes(mgPtr+uintptr(namLen), []byte{0})
-		mgLen = int32(namLen)
+	case namLen == hefSVKey:
+		if _, err := s.p.XSHelperOp(opRefcntInc, uint64(namePtr), 0, ""); err != nil {
+			f.fail("sv_magicext: " + err.Error())
+			return 0
+		}
 	}
 	var buf [mgAllocSize]byte
 	binary.LittleEndian.PutUint64(buf[mgOffMore:], uint64(oldHead))
@@ -1054,6 +1079,49 @@ func (s *state) magicSetFired(id uint32) {
 	}
 }
 
+// magicLocalized runs when `local` puts the SV nsv in the place of the
+// variable whose anchor is id. It does for the mirror chain what perl's
+// mg_localize does for an SV's own: value magic stays behind; an entry
+// whose vtable has svt_local and asks for it (MGf_LOCAL) decides itself;
+// every other entry is attached to nsv again with sv_magicext, which gives
+// nsv a chain and an anchor of its own. The interpreter then calls set
+// magic on nsv, and frees its magic with it when the scope ends.
+func (s *state) magicLocalized(id uint32, nsv uint64) {
+	s.mu.Lock()
+	rec := s.magicByID[id]
+	var head uintptr
+	if rec != nil {
+		head = rec.head
+	}
+	s.mu.Unlock()
+	for mg := head; mg != 0; {
+		node := copyIn(mg, mgSize)
+		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
+		how := int32(int8(node[mgOffType]))
+		vtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
+		isValue, err := s.p.XSHelperOp(opSvCall, uint64(svCallMagicIsValue)<<32|uint64(node[mgOffType]), 0, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "goperl xs: local on a variable with magic: %v\n", err)
+			return
+		}
+		switch {
+		case isValue != 0:
+		case node[mgOffFlags]&mgfLocal != 0 && vtbl != 0 && binary.LittleEndian.Uint64(copyIn(vtbl+vtblOffLocal, 8)) != 0:
+			s.callSvtHook(nsv, mg, vtblOffLocal)
+		default:
+			f, fp := s.bootFrame()
+			s.magicExt(f, nsv, binary.LittleEndian.Uint64(node[mgOffObj:]), how, vtbl,
+				uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])),
+				int64(int32(binary.LittleEndian.Uint32(node[mgOffLen:]))))
+			if f.failed != 0 {
+				fmt.Fprintf(os.Stderr, "goperl xs: local on a variable with magic: %s\n", f.errString())
+			}
+			unpinFrame(fp)
+		}
+		mg = next
+	}
+}
+
 // perlioHook services reserved method -6: run one host layer hook (the
 // SDK-side __goperl_perlio_invoke does the marshalling and croak guard).
 func (s *state) perlioHook(req []byte) []byte {
@@ -1187,11 +1255,22 @@ func (s *state) magicFreed(id uint32) {
 		} else if obj != 0 && obj == rec.anchorObj {
 			rec.anchorObj = 0 // the anchor releases its own reference
 		}
-		if mgLen > 0 && mgPtr != 0 {
-			cFree(mgPtr)
-		}
+		s.releaseMagicName(mgLen, mgPtr)
 		cFree(mg)
 		mg = next
+	}
+}
+
+// releaseMagicName gives up what a MAGIC holds as its name: the copy
+// sv_magicext made (a positive length), or its reference to the SV that is
+// the name (HEf_SVKEY).
+func (s *state) releaseMagicName(mgLen int32, mgPtr uintptr) {
+	switch {
+	case mgPtr == 0:
+	case mgLen > 0:
+		cFree(mgPtr)
+	case mgLen == hefSVKey:
+		_, _ = s.p.XSHelperOp(opRefcntDec, uint64(mgPtr), 0, "")
 	}
 }
 
@@ -1220,9 +1299,7 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 			if obj != 0 && obj != rec.anchorObj {
 				_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
 			}
-			if mgLen > 0 && mgPtr != 0 {
-				cFree(mgPtr)
-			}
+			s.releaseMagicName(mgLen, mgPtr)
 			if prev == 0 {
 				rec.head = next
 			} else {

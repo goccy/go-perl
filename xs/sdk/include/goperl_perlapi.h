@@ -44,6 +44,8 @@ enum {
 
 /* SV_CALL selectors. */
 enum {
+    GOPERL_SVCALL_TAINT_ENV = 54,
+    GOPERL_SVCALL_TIED = 56,
     GOPERL_SVCALL_MG_GET = 0,
     GOPERL_SVCALL_MG_CLEAR = 1,
     GOPERL_SVCALL_MG_FREE = 2,
@@ -1001,6 +1003,7 @@ static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
     goperl_gen_bump();
     free(req);
     if (!failed_before && f->failed && f->jb) goperl_raise(f);
+    if (!opened) goperl_errno_from_interp(f);
     return opened != 0;
 }
 #define do_openn(gv, oname, len, as_raw, rawmode, rawperm, supplied_fp, svp, num) \
@@ -1008,6 +1011,30 @@ static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
                     (rawperm), (supplied_fp), (svp), (I32)(num))
 #define do_open(gv, name, len, as_raw, rawmode, rawperm, supplied_fp) \
     do_openn((gv), (name), (len), (as_raw), (rawmode), (rawperm), (supplied_fp), (SV **)0, 0)
+
+/* ---- tie magic --------------------------------------------------------------
+ * Tie magic is the interpreter's and is not mirrored. SvTIED_mg answers
+ * with a MAGIC that says what a module asks of it: that the SV is tied,
+ * by which kind of tie, and to what object (SvTIED_obj). It lasts as long
+ * as the outermost native call. */
+static MAGIC *goperl_sv_tied_mg(goperl_frame_t *f, SV *sv, int how)
+    __attribute__((unused));
+static MAGIC *goperl_sv_tied_mg(goperl_frame_t *f, SV *sv, int how) {
+    const uint64_t tied = goperl_do_op(
+        f, GOPERL_OP_SV_CALL,
+        ((uint64_t)GOPERL_SVCALL_TIED << 32) | (uint32_t)GOPERL_TOK(sv),
+        (uint64_t)(int64_t)how, 0, 0);
+    if (!tied) return 0;
+    MAGIC *mg = (MAGIC *)goperl_arena_alloc(sizeof(MAGIC));
+    memset(mg, 0, sizeof(MAGIC));
+    mg->mg_type = (char)how;
+    mg->mg_obj = GOPERL_SV((uint32_t)tied);
+    return mg;
+}
+#define SvTIED_mg(sv, how) goperl_sv_tied_mg(_gof, (SV *)(sv), (int)(how))
+#ifndef SvTIED_obj
+#define SvTIED_obj(sv, mg) ((mg)->mg_obj)
+#endif
 
 /* ---- formatted strings ---------------------------------------------------- */
 

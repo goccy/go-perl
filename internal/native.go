@@ -37,6 +37,12 @@ const destructorMethodID = -4
 // the loader can run its mirror chain's svt_set hooks.
 const setMagicMethodID = -5
 
+// magicLocalMethodID is the reserved callback method id fired when `local`
+// puts a new SV in the place of one that carries the anchor magic (perl.cc
+// GOPERL_MG_LOCAL_METHOD_ID): the payload is the anchor's u32 host id and
+// the u32 token of the new SV.
+const magicLocalMethodID = -8
+
 // perlioMethodID is the reserved callback method id the guest PerlIO proxy
 // layer dispatches on for the layer slots a native module customized
 // (perl.cc GOPERL_PERLIO_METHOD_ID).
@@ -85,6 +91,19 @@ func (p *Perl) SetSetMagicHandler(fn func(id uint32)) error {
 	}
 	p.hookMu.Lock()
 	p.magicSet = fn
+	p.hookMu.Unlock()
+	return nil
+}
+
+// SetMagicLocalHandler installs the hook for `local` on an SV with
+// host-side magic: id is the anchor of the variable, sv the token of the SV
+// that takes its place for the scope and is to get the magic `local` gives.
+func (p *Perl) SetMagicLocalHandler(fn func(id uint32, sv uint64)) error {
+	if err := p.EnsureDispatcher(); err != nil {
+		return err
+	}
+	p.hookMu.Lock()
+	p.magicLocal = fn
 	p.hookMu.Unlock()
 	return nil
 }
@@ -280,6 +299,15 @@ func (d dispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
 		d.p.hookMu.RUnlock()
 		if set != nil && len(req) >= 4 {
 			set(binary.LittleEndian.Uint32(req))
+		}
+		return []byte{1}, nil
+	}
+	if methodID == magicLocalMethodID {
+		d.p.hookMu.RLock()
+		local := d.p.magicLocal
+		d.p.hookMu.RUnlock()
+		if local != nil && len(req) >= 8 {
+			local(binary.LittleEndian.Uint32(req), uint64(binary.LittleEndian.Uint32(req[4:])))
 		}
 		return []byte{1}, nil
 	}
