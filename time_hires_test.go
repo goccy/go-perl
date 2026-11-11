@@ -12,8 +12,9 @@ import (
 // TestTimeHiResRealXS pins that Time::HiRes is the REAL statically linked
 // core XS module (not an emulation): gettimeofday returns epoch time
 // consistent with core time(), intervals measure real elapsed time, usleep
-// actually sleeps, and the deliberately disabled portions (clock_gettime,
-// interval timers — impossible under wasi) fail as clean feature probes.
+// actually sleeps, and the deliberately disabled portion (clock_gettime,
+// whose clock ids are not integers under wasi) fails as a clean feature
+// probe.
 func TestTimeHiResRealXS(t *testing.T) {
 	p, err := perl.New(perl.Config{})
 	if err != nil {
