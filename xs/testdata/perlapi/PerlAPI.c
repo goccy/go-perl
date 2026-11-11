@@ -1027,6 +1027,21 @@ XS(XS_PerlAPI_weak_count) {
     }
 }
 
+/* The file of the calling statement, read through its file glob the way
+ * DBI's profiler names a caller. */
+XS(XS_PerlAPI_caller_file) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        GV *gv = CopFILEGV(PL_curcop);
+        const char *via_gv = gv ? SvPV_nolen(GvSV(gv)) : "";
+        const char *direct = CopFILE(PL_curcop);
+        if (!*via_gv || !direct || strNE(via_gv, direct)) XSRETURN_UNDEF;
+        ST(0) = sv_2mortal(newSVpv(via_gv, 0));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1096,5 +1111,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::set_from_pointer", XS_PerlAPI_set_from_pointer);
     newXS_deffile("PerlAPI::callback_then_mark", XS_PerlAPI_callback_then_mark);
     newXS_deffile("PerlAPI::weak_count", XS_PerlAPI_weak_count);
+    newXS_deffile("PerlAPI::caller_file", XS_PerlAPI_caller_file);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

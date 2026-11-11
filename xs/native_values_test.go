@@ -225,6 +225,7 @@ sub outer { inner(1) } sub via_block { eval { inner() } } sub via_string { eval 
 		{"the innermost frame", `(split /\|/, outer())[0]`, "sub main::inner with args"},
 		{"an eval block", `(split /\|/, via_block())[1]`, "eval block"},
 		{"an eval string", `(split /\|/, via_string())[1]`, "eval string"},
+		{"CopFILEGV names the file of the statement", `my $f = eval qq{#line 7 "some/file.pl"\nPerlAPI::caller_file()}; defined $f ? $f : "undef"`, "some/file.pl"},
 		{"a sub called with &", `sub amp { &inner } (split /\|/, amp(1))[0]`, "sub main::inner"},
 	})
 }

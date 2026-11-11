@@ -4655,7 +4655,9 @@ static char *goperl_pv_uni_display(goperl_frame_t *f, SV *dsv, const U8 *spv,
 
 /* ---- the DBI surface ---------------------------------------------------- */
 
-#define CopFILEGV(cop) ((GV *)0) /* file GV not modeled; CopFILE has the name */
+/* CopFILEGV: the glob "_<file" of the file the COP was compiled from, whose
+ * scalar holds the file name. */
+#define CopFILEGV(cop) gv_fetchfile(CopFILE(cop))
 #define DEFSV_set(sv) ((void)(DEFSV = (SV *)(sv)))
 #define die Perl_croak_nocontext
 #define perl_require_pv(pv)                                              \
