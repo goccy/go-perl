@@ -1899,9 +1899,29 @@ static void goperl_sv_setnv(goperl_frame_t *f, SV *sv, double d) {
     goperl_do_op(f, GOPERL_OP_SV_SETNV, GOPERL_TOK(sv), cvt.u, 0, 0);
 }
 #define sv_setnv(sv, v) goperl_sv_setnv(_gof, (SV *)(sv), (double)(v))
+/* sv_setpvn and sv_setpv: a null pointer makes the SV undefined, as in
+ * perl (xsubpp sets a `char *` return value with sv_setpv, and a function
+ * that returns NULL is how XS code returns undef). */
+static void goperl_sv_setpvn(goperl_frame_t *f, SV *sv, const char *p,
+                             STRLEN len) __attribute__((unused));
+static void goperl_sv_setpvn(goperl_frame_t *f, SV *sv, const char *p,
+                             STRLEN len) {
+    if (!p) { /* GOPERL_SVCALL_SET_UNDEF */
+        goperl_do_op(f, GOPERL_OP_SV_CALL,
+                     ((uint64_t)19 << 32) | (uint32_t)GOPERL_TOK(sv), 0, 0, 0);
+        return;
+    }
+    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), (uint64_t)len, p,
+                 (uint64_t)len);
+}
+static void goperl_sv_setpv(goperl_frame_t *f, SV *sv, const char *p)
+    __attribute__((unused));
+static void goperl_sv_setpv(goperl_frame_t *f, SV *sv, const char *p) {
+    goperl_sv_setpvn(f, sv, p, p ? strlen(p) : 0);
+}
 #define sv_setpvn(sv, p, l) \
-    ((void)goperl_ops(GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), (uint64_t)(l), (p), (uint64_t)(l)))
-#define sv_setpv(sv, p) sv_setpvn((sv), (p), strlen(p))
+    goperl_sv_setpvn(_gof, (SV *)(sv), (p), (STRLEN)(l))
+#define sv_setpv(sv, p) goperl_sv_setpv(_gof, (SV *)(sv), (p))
 #define sv_setpvs(sv, s) sv_setpvn((sv), "" s "", sizeof(s) - 1)
 static void goperl_sv_setpvf(goperl_frame_t *f, SV *sv, const char *fmt, ...)
     __attribute__((unused));
@@ -1933,7 +1953,15 @@ static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
     ((void)goperl_op0(GOPERL_OP_SV_CATSV, GOPERL_TOK(d), GOPERL_TOK(s)))
 #define sv_catpvn(d, p, l) \
     ((void)goperl_ops(GOPERL_OP_SV_CATPVN, GOPERL_TOK(d), (uint64_t)(l), (p), (uint64_t)(l)))
-#define sv_catpv(d, p) sv_catpvn((d), (p), strlen(p))
+/* sv_catpv: nothing is appended for a null pointer, as in perl. */
+static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p)
+    __attribute__((unused));
+static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
+    if (!p) return;
+    goperl_do_op(f, GOPERL_OP_SV_CATPVN, GOPERL_TOK(sv), (uint64_t)strlen(p),
+                 p, (uint64_t)strlen(p));
+}
+#define sv_catpv(d, p) goperl_sv_catpv(_gof, (SV *)(d), (p))
 #define sv_catpvs(d, s) sv_catpvn((d), "" s "", sizeof(s) - 1)
 
 /* ---- flags / predicates -------------------------------------------------- */
@@ -2859,8 +2887,12 @@ static IV goperl_pio_seek(goperl_frame_t *f, const void *h, Off_t off,
     goperl_pio_read(_gof, (io), (buf), (size_t)(n))
 #define PerlIO_write(io, buf, n) \
     goperl_pio_write(_gof, (io), (buf), (size_t)(n))
-#define PerlIO_puts(io, s2) \
-    ((int)goperl_pio_write(_gof, (io), (s2), strlen(s2)))
+static int goperl_pio_puts(goperl_frame_t *f, const void *h, const char *s2)
+    __attribute__((unused));
+static int goperl_pio_puts(goperl_frame_t *f, const void *h, const char *s2) {
+    return (int)goperl_pio_write(f, h, s2, strlen(s2));
+}
+#define PerlIO_puts(io, s2) goperl_pio_puts(_gof, (io), (s2))
 #define PerlIO_putc(io, c) \
     (goperl_pio_write(_gof, (io), &(char){(char)(c)}, 1) == 1 ? (int)(unsigned char)(c) : EOF)
 #define PerlIO_printf goperl_perlio_printf

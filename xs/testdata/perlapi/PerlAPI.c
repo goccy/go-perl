@@ -950,6 +950,34 @@ XS(XS_PerlAPI_leave_errno) {
     }
 }
 
+static int perlapi_string_calls;
+static const char *perlapi_next_string(int null) {
+    perlapi_string_calls++;
+    return null ? NULL : "text";
+}
+
+/* A `char *` result set the way xsubpp does it; a null pointer is undef.
+ * Returns the value and how often the argument expression was evaluated. */
+XS(XS_PerlAPI_set_from_pointer) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "null");
+    {
+        SV *out = sv_2mortal(newSVpvs("before"));
+        SV *more = sv_2mortal(newSVpvs("kept"));
+        int null = SvTRUE(ST(0));
+        perlapi_string_calls = 0;
+        sv_setpv(out, perlapi_next_string(null));
+        sv_catpv(more, perlapi_next_string(null));
+        SP -= items;
+        EXTEND(SP, 3);
+        PUSHs(out);
+        PUSHs(more);
+        PUSHs(sv_2mortal(newSViv(perlapi_string_calls)));
+        PUTBACK;
+        return;
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1016,5 +1044,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::method_twice", XS_PerlAPI_method_twice);
     newXS_deffile("PerlAPI::with_topic", XS_PerlAPI_with_topic);
     newXS_deffile("PerlAPI::leave_errno", XS_PerlAPI_leave_errno);
+    newXS_deffile("PerlAPI::set_from_pointer", XS_PerlAPI_set_from_pointer);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

@@ -150,6 +150,8 @@ func TestNativeByteStrings(t *testing.T) {
 		{"a string held as UTF-8", `my $s = "caf\xe9"; utf8::upgrade($s); PerlAPI::bytes_hex($s)`, "636166e9"},
 		{"a wide character", `eval { PerlAPI::bytes_hex("\x{263a}") }; $@ =~ /^Wide character/ ? "refused" : "accepted: $@"`, "refused"},
 		{"sv_uni_display and memCHRs", `PerlAPI::display("a\x{263a}\n") . "|" . PerlAPI::display("z")`, `a\x{263a}\n (vowel)|z (other)`},
+		{"sv_setpv and sv_catpv", `join ",", PerlAPI::set_from_pointer(0)`, "text,kepttext,2"},
+		{"sv_setpv and sv_catpv with a null pointer", `join ",", map { defined $_ ? $_ : "undef" } PerlAPI::set_from_pointer(1)`, "undef,kept,2"},
 		{"my_setenv reaches the host's C environment", `PerlAPI::setenv_then_getenv("GOPERL_XS_ENV_PROBE", "set") . "," . (defined PerlAPI::setenv_then_getenv("GOPERL_XS_ENV_PROBE", undef) ? "still set" : "removed")`, "set,removed"},
 	})
 }
