@@ -166,8 +166,9 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	if err != nil {
 		return 1, err
 	}
-	// Close before reporting: it flushes PerlIO (the program's buffered
-	// output) and runs global destruction, the tail of a perl process.
+	// The program's run includes the tail of a perl process — the flush of
+	// its buffered output and global destruction — so its status is final;
+	// Close gives back what the host holds for the instance.
 	defer p.Close()
 
 	ctx := context.Background()

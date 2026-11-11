@@ -277,8 +277,8 @@ func main() {
 		Inc:  incDirs,
 		Args: os.Args[1:],
 	})
-	// Close flushes PerlIO and runs global destruction before the process
-	// reports the status.
+	// The status is final: the run flushed PerlIO and went through global
+	// destruction. Close gives back what the host holds for the instance.
 	p.Close()
 	var killed *perl.SignalError
 	if errors.As(err, &killed) {

@@ -263,6 +263,36 @@ report("child status ", $? >> 8);
 	wantLines(t, got, "child status 5")
 }
 
+// Global destruction belongs to the child's run too: a destructor there
+// decides the status its parent sees.
+func TestForkChildStatusFromGlobalDestruction(t *testing.T) {
+	got := runForkScript(t, `
+use POSIX ();
+my $parent = $$;
+our $how = '';
+sub Guard::DESTROY {
+    return if $$ == $parent;
+    $? = 5 if $how eq 'assign';
+    exit 7 if $how eq 'exit';
+    POSIX::_exit(219) if $how eq '_exit';
+    kill TERM => $$ if $how eq 'signal';
+}
+our $guard = bless [], 'Guard';
+for my $way (qw(assign exit _exit signal)) {
+    my $pid = fork // die "fork: $!";
+    if (!$pid) { $how = $way; exit 0 }
+    waitpid($pid, 0);
+    report("$way: signal=", $? & 127, " exit=", $? >> 8);
+}
+`)
+	wantLines(t, got,
+		"assign: signal=0 exit=5",
+		"exit: signal=0 exit=7",
+		"_exit: signal=0 exit=219",
+		"signal: signal=15 exit=0",
+	)
+}
+
 // system and exec look a bare command name up on the PATH the program has
 // at that moment, as execvp does — not on the PATH gperl was started with.
 func TestSystemSearchesTheProgramsPath(t *testing.T) {

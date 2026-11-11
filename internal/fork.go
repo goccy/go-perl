@@ -89,6 +89,12 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 
 // runForkChild runs the child's program to its end, tears the instance
 // down, and returns the POSIX wait status to report to the parent.
+//
+// The bridge call covers the child's whole life as a process: its END
+// blocks, the flush of PerlIO and global destruction run inside it, and its
+// result is the status all of that leaves. A destructor that exits, calls
+// _exit or is killed during global destruction therefore ends the call the
+// way the same thing does anywhere else in the program.
 func (c *Perl) runForkChild(pid int32) (status int32) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, c.h)
@@ -99,10 +105,6 @@ func (c *Perl) runForkChild(pid int32) (status int32) {
 	}
 
 	exitCode := 255
-	// destruct: whether the interpreter gets its orderly end (PerlIO flush,
-	// END blocks, destructors). A process that left through the raw
-	// _exit, a signal, or a host failure does not.
-	destruct := false
 	var raw *base.WasiExitError
 	var killed *base.WasiSignalError
 	switch {
@@ -117,23 +119,14 @@ func (c *Perl) runForkChild(pid int32) (status int32) {
 	default:
 		if code := readScalarAtField(resp, 1, (*pbReader).readUint32); code != math.MaxUint32 {
 			exitCode = int(code)
-			destruct = true
 		} else {
 			fmt.Fprintf(c.stderr(), "perl: fork child %d: the instance holds no pending fork\n", pid)
 		}
 	}
-	sig := c.killed.Load()
-	if sig != 0 {
-		destruct = false
-	}
-	if destruct {
-		if err := c.Close(); err != nil {
-			fmt.Fprintf(c.stderr(), "perl: fork child %d: close: %v\n", pid, err)
-		}
-	} else {
-		c.discard()
-	}
-	if sig != 0 {
+	// Whichever way the call ended, no interpreter is left to finalize:
+	// only the host's side of the instance remains.
+	c.discard()
+	if sig := c.killed.Load(); sig != 0 {
 		return sig & 0x7f
 	}
 	return int32(exitCode&0xff) << 8

@@ -11,8 +11,11 @@ import (
 )
 
 // RunProgram runs the program desc describes (perl-wasm's perl_run_program
-// layout) to its end, END blocks included, and returns its exit status.
-// Afterwards the instance only has to be closed.
+// layout) to its end and returns its exit status. The end is a process's:
+// the END blocks, the flush of PerlIO and global destruction all run inside
+// the call, and the status is the one they leave (a destructor may assign
+// $?, exit, or be killed during global destruction). Afterwards the
+// instance holds no interpreter and only has to be closed.
 func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -39,9 +42,9 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 	}
 	var raw *base.WasiExitError
 	if errors.As(err, &raw) {
-		// The program left through the raw _exit (POSIX::_exit, or the end
-		// of an exec): nothing of the interpreter may run again, so there
-		// is no orderly end left for Close to perform.
+		// The program left through the raw _exit (POSIX::_exit, the end of
+		// an exec, or an exit from a destructor during global destruction):
+		// nothing of the interpreter may run again.
 		p.discard()
 		return int(raw.Code), nil
 	}

@@ -986,9 +986,13 @@ func PerlEval(h uint64, src string) (string, error) {
 // child under. The call resumes the program right after the forking op,
 // with fork's result being 0, and returns when the child's program ends.
 //
-// Returns the child's exit status (0..255) once its END blocks have run, or
-// UINT32_MAX when the instance is not a freshly forked child. perl_close
-// must follow: it flushes PerlIO and runs destructors.
+// The child's program ends like a process: its END blocks run, PerlIO is
+// flushed, and the interpreter is destroyed (global destruction), all inside
+// this call. Returns the exit status (0..255) that leaves — a destructor
+// may still assign $? during global destruction — or UINT32_MAX when the
+// instance is not a freshly forked child. A destructor that calls exit or
+// _exit there ends the instance through proc_exit, as it ends a perl
+// process. Afterwards there is no interpreter: perl_close is a no-op.
 func PerlForkChild(h uint64, pid int32) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
@@ -1199,9 +1203,10 @@ func PerlRelease(h uint64, ids string, idsLen uint32) (string, error) {
 // Run a whole program, the way the perl command runs the one its command
 // line names: compiled as the MAIN program (no caller at its top level,
 // __END__/__DATA__ attached, the switches of its #! line honoured), then
-// BEGIN/CHECK/INIT, the run, and END blocks. Call it at most once, on an
-// instance that only has to be closed afterwards (perl_close flushes PerlIO
-// and runs destructors).
+// BEGIN/CHECK/INIT, the run, END blocks, the flush of PerlIO and the
+// destruction of the interpreter (global destruction). The program is the
+// interpreter's whole life, as it is a perl process's: afterwards there is
+// no interpreter, and perl_close is a no-op.
 //
 // The host parses the command line; `program` carries what it means. All
 // integers little-endian, str := u32 len + bytes, strlist := u32 count +

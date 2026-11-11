@@ -314,18 +314,20 @@ func isASCII(s string) bool {
 // command line names: the text is compiled as the main program (no caller
 // at its top level, __END__/__DATA__ attached, the switches of its #! line
 // honoured), BEGIN, CHECK and INIT blocks run in their phases, then the
-// program, then its END blocks. Output goes to the instance's configured
-// stdio.
+// program, then its END blocks, and finally the interpreter's own end: its
+// output is flushed and global destruction runs. Output goes to the
+// instance's configured stdio.
 //
 // status is the process exit status the run maps to: 0 when the program
 // ran to its end, the argument of exit(), and perl's die status (errno, or
 // 255) for an uncaught die — whose message perl has already written to
-// STDERR. err reports a host failure or the cancellation of ctx, not the
-// program's own outcome.
+// STDERR. Like a perl process's, it is the status global destruction
+// leaves: a destructor that runs there may still assign $? or exit. err
+// reports a host failure or the cancellation of ctx, not the program's own
+// outcome.
 //
-// The program is the instance's last act: after RunProgram returns, the
-// instance must only be Closed, which flushes its output and runs global
-// destruction.
+// The program is the interpreter's whole life: after RunProgram returns,
+// the instance must only be Closed.
 func (p *Perl) RunProgram(ctx context.Context, prog Program) (status int, err error) {
 	desc, err := prog.encode()
 	if err != nil {

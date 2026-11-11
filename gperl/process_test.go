@@ -378,3 +378,39 @@ report("USR2 from the child: handler ran=$got ", status());
 		"USR2 from the child: handler ran=1 signal=0 exit=0",
 	)
 }
+
+// A gperl process ends with the status its global destruction leaves: a
+// destructor that assigns $?, exits, or is killed there decides it.
+func TestStatusFromGlobalDestructionOfAGperlProcess(t *testing.T) {
+	shim := perlCommandShim(t)
+	script := writeScript(t, "destruct.pl", `
+use strict; use warnings;
+my ($report, $perl) = @ARGV;
+sub report { open(my $fh, '>>', $report) or die "report: $!"; syswrite($fh, join('', @_) . "\n"); close $fh }
+sub status { "signal=" . ($? & 127) . " exit=" . ($? >> 8) }
+my $guard = 'our $guard = bless [], "Guard";';
+
+system($perl, '-e', "sub Guard::DESTROY { \$? = 5 } $guard");
+report("assigns the status: ", status());
+system($perl, '-e', "sub Guard::DESTROY { \$? = 5 } $guard exit 3");
+report("assigns the status after exit: ", status());
+system($perl, '-e', "sub Guard::DESTROY { exit 7 } $guard");
+report("exits: ", status());
+system($perl, '-MPOSIX', '-e', "sub Guard::DESTROY { POSIX::_exit(219) } $guard");
+report("leaves through _exit: ", status());
+system($perl, '-e', "sub Guard::DESTROY { kill TERM => \$\$ } $guard");
+report("is killed: ", status());
+`)
+	report := filepath.Join(t.TempDir(), "report.txt")
+	status, err := gperl.Run(script, []string{report, shim})
+	if err != nil || status != 0 {
+		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
+	}
+	wantLines(t, readLines(t, report),
+		"assigns the status: signal=0 exit=5",
+		"assigns the status after exit: signal=0 exit=5",
+		"exits: signal=0 exit=7",
+		"leaves through _exit: signal=0 exit=219",
+		"is killed: signal=15 exit=0",
+	)
+}
