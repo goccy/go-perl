@@ -169,3 +169,14 @@ func TestNativeModuleLoadsFromInc(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q, want DynaLoader's own failure", status, stderr)
 	}
 }
+
+// DynaLoader has its whole set of entry points. A loaded library stays
+// loaded, so dl_unload_file reports that it unloaded nothing.
+func TestDynaLoaderUnloadFileReportsFailure(t *testing.T) {
+	status, stdout, stderr := runCLI(t, t.TempDir(), "", "-MDynaLoader", "-e",
+		`print defined(&DynaLoader::dl_unload_file) ? "defined" : "undefined", "\n";`,
+		"-e", `print DynaLoader::dl_unload_file(1) ? "unloaded" : "kept: " . DynaLoader::dl_error(), "\n";`)
+	if status != 0 || stdout != "defined\nkept: dl_unload_file: a loaded library is never unloaded\n" {
+		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
+	}
+}

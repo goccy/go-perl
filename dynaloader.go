@@ -5,7 +5,7 @@ package perl
 // The embedded perl is statically linked: its DynaLoader has no
 // dl_load_file, so XSLoader and DynaLoader refuse any module that is not
 // compiled in. The xs package can load a module built against the native
-// XS SDK into the host process; this file gives DynaLoader the three
+// XS SDK into the host process; this file gives DynaLoader the
 // functions it loads a module with, backed by that loader. From there the
 // stock XSLoader.pm and DynaLoader.pm do what they do on any perl: find
 // auto/Module/Module.so on @INC, load it, call its boot function.
@@ -40,6 +40,15 @@ sub dl_install_xsub {
     return \&{$_[0]};
 }
 sub dl_undef_symbols { () }
+# A loaded library is never unloaded: the loader resolves its own entry
+# points from the modules it has loaded, and clones and fork children of an
+# interpreter share its library handles. The call therefore fails, the way
+# dl_unload_file reports any failure: a false result and a message for
+# dl_error.
+sub dl_unload_file {
+    $error = 'dl_unload_file: a loaded library is never unloaded';
+    return 0;
+}
 1;
 `
 
