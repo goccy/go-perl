@@ -84,3 +84,34 @@ report("inet_aton of a number: ", inet_ntoa(inet_aton("10.1.2.3")));
 		"inet_aton of a number: 10.1.2.3",
 	)
 }
+
+// Read-only is access mode 0 on the systems perl programs are written for,
+// and they say so with a literal: sysopen($fh, $path, 0), a DBM tied with
+// flags 0.
+func TestOpenWithLiteralZeroFlagsIsReadOnly(t *testing.T) {
+	got := runForkScript(t, `
+use Fcntl;
+my $dir = $REPORT =~ s{/[^/]*$}{}r;
+my $file = "$dir/data";
+open(my $out, '>', $file) or die "create: $!"; print {$out} "content\n"; close $out;
+my $in;
+report("sysopen with 0: ", (sysopen($in, $file, 0) ? "read " . scalar(<$in>) =~ s/\n//r : "failed: $!"));
+report("writing through it: ", (syswrite($in, "x") ? "wrote" : "refused"));
+report("sysopen with O_RDONLY: ", (sysopen(my $ro, $file, O_RDONLY) ? "opened" : "failed: $!"));
+report("sysopen of a missing file with 0: ", (sysopen(my $none, "$dir/missing", 0) ? "opened" : ($!{ENOENT} ? "ENOENT" : "error $!")));
+
+use SDBM_File;
+tie(my %db, 'SDBM_File', "$dir/db", O_CREAT | O_RDWR, 0600) or die "tie: $!";
+$db{key} = "value";
+untie %db;
+my %ro;
+report("DBM tied with flags 0: ", (tie(%ro, 'SDBM_File', "$dir/db", 0, 0644) ? "key=$ro{key}" : "failed: $!"));
+`)
+	wantLines(t, got,
+		"sysopen with 0: read content",
+		"writing through it: refused",
+		"sysopen with O_RDONLY: opened",
+		"sysopen of a missing file with 0: ENOENT",
+		"DBM tied with flags 0: key=value",
+	)
+}
