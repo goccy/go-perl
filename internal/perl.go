@@ -829,7 +829,6 @@ func (h envStubs) Endservent(m *base.Module)                                    
 func (h envStubs) Execv(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
 func (h envStubs) Fchdir(m *base.Module, l0 int32) int32                            { return 0 }
 func (h envStubs) Fchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Flock(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
 func (h envStubs) Getegid(m *base.Module) int32                                     { return 0 }
 func (h envStubs) Geteuid(m *base.Module) int32                                     { return 0 }
 func (h envStubs) Getgid(m *base.Module) int32                                      { return 0 }
@@ -902,7 +901,6 @@ func (h envStubs) Sigsuspend(m *base.Module, l0 int32) int32                    
 func (h envStubs) Socketpair(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32) int32 { return 0 }
 func (h envStubs) Ttyname(m *base.Module, l0 int32) int32                                  { return 0 }
 func (h envStubs) Tzset(m *base.Module)                                                    {}
-func (h envStubs) Umask(m *base.Module, l0 int32) int32                                    { return 0 }
 func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
 	if l0 == 0 {
 		l0 = 64

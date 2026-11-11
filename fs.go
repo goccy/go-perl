@@ -16,7 +16,6 @@ import (
 	iofs "io/fs"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
@@ -43,16 +42,13 @@ func withDevNull(fsys FS) FS { return devNullFS{FS: fsys} }
 
 type devNullFS struct{ FS }
 
-// Chmod forwards to the wrapped backend when it supports changing modes
-// (the runtime discovers the capability by interface assertion, which an
-// embedded interface field would otherwise hide).
-func (d devNullFS) Chmod(name string, mode iofs.FileMode) error {
-	if ch, ok := d.FS.(interface {
-		Chmod(string, iofs.FileMode) error
-	}); ok {
-		return ch.Chmod(name, mode)
+// Flock grants every lock on the bit bucket — it has no content for a lock
+// to protect — and leaves the files of the wrapped backend to that backend.
+func (d devNullFS) Flock(f File, lock goperlfs.FileLock, wait bool) error {
+	if _, ok := f.(nullFile); ok {
+		return nil
 	}
-	return &iofs.PathError{Op: "chmod", Path: name, Err: syscall.ENOSYS}
+	return d.FS.Flock(f, lock, wait)
 }
 
 const devNullName = "dev/null"
@@ -101,9 +97,10 @@ func (nullFile) Stat() (os.FileInfo, error) { return nullFileInfo{name: "null", 
 func (nullFile) ReadDir(n int) ([]os.DirEntry, error) {
 	return nil, fmt.Errorf("dev/null is not a directory")
 }
-func (nullFile) Sync() error               { return nil }
-func (nullFile) Truncate(size int64) error { return nil }
-func (nullFile) Name() string              { return "null" }
+func (nullFile) Sync() error                    { return nil }
+func (nullFile) Truncate(size int64) error      { return nil }
+func (nullFile) Chmod(mode iofs.FileMode) error { return nil }
+func (nullFile) Name() string                   { return "null" }
 
 type nullFileInfo struct {
 	name string

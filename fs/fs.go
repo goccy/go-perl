@@ -13,9 +13,6 @@
 package fs
 
 import (
-	"os"
-	"path/filepath"
-
 	"github.com/goccy/perlwasm2go/base"
 )
 
@@ -29,6 +26,18 @@ type FS = base.FS
 // File is an open file returned by FS.OpenFile.
 type File = base.File
 
+// FileLock is the kind of advisory lock FS.Flock applies or releases.
+type FileLock = base.FileLock
+
+const (
+	// FileUnlock releases the lock held through the open file.
+	FileUnlock = base.FileUnlock
+	// FileLockShared is a lock any number of open files can hold together.
+	FileLockShared = base.FileLockShared
+	// FileLockExclusive is a lock a single open file holds alone.
+	FileLockExclusive = base.FileLockExclusive
+)
+
 // MemFS is an in-memory read/write FS. Separate MemFS values are fully
 // isolated from one another. Safe for concurrent use.
 type MemFS = base.MemFS
@@ -40,37 +49,12 @@ func NewMemFS() *MemFS { return base.NewMemFS() }
 // the guest sees the host's real root, so absolute paths mean the same
 // thing inside and outside the instance. This is how the perl command
 // behaves (and how gperl runs scripts).
-func NewHostFS() FS { return hostFS{} }
+//
+// It is the runtime's own backend for the operating system's filesystem, so
+// everything the host provides — file modes and owners, link counts, the
+// three file times, flock — reaches the guest.
+func NewHostFS() FS { return base.NewOSFS("") }
 
 // DirFS returns the host filesystem scoped to dir: dir becomes the guest's
 // root, and nothing outside it is reachable.
-func DirFS(dir string) FS { return hostFS{root: dir} }
-
-// hostFS is a thin pass-through to the host filesystem, optionally scoped
-// to root. It mirrors the runtime's own OS backend, so behavior matches an
-// instance running directly on the host filesystem.
-type hostFS struct{ root string }
-
-func (o hostFS) join(name string) string {
-	if o.root == "" || o.root == "/" {
-		return "/" + name
-	}
-	return filepath.Join(o.root, name)
-}
-
-func (o hostFS) OpenFile(name string, flag int, perm os.FileMode) (File, error) {
-	f, err := os.OpenFile(o.join(name), flag, perm)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-func (o hostFS) Mkdir(name string, perm os.FileMode) error { return os.Mkdir(o.join(name), perm) }
-func (o hostFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(o.join(name), mode) }
-func (o hostFS) Remove(name string) error                  { return os.Remove(o.join(name)) }
-func (o hostFS) Rename(a, b string) error                  { return os.Rename(o.join(a), o.join(b)) }
-func (o hostFS) Stat(name string) (os.FileInfo, error)     { return os.Stat(o.join(name)) }
-func (o hostFS) Lstat(name string) (os.FileInfo, error)    { return os.Lstat(o.join(name)) }
-func (o hostFS) Symlink(target, name string) error         { return os.Symlink(target, o.join(name)) }
-func (o hostFS) Readlink(name string) (string, error)      { return os.Readlink(o.join(name)) }
-func (o hostFS) Link(a, b string) error                    { return os.Link(o.join(a), o.join(b)) }
+func DirFS(dir string) FS { return base.NewOSFS(dir) }
