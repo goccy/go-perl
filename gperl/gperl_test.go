@@ -1,7 +1,6 @@
 package gperl_test
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/gperl"
 )
 
@@ -56,14 +54,12 @@ func TestRunExitStatus(t *testing.T) {
 }
 
 func TestRunUncaughtDie(t *testing.T) {
-	script := writeScript(t, "die.pl", `die "kaboom\n";`)
+	script := writeScript(t, "die.pl", `$! = 0; die "kaboom\n";`)
 	status, err := gperl.Run(script, nil)
-	if status != 255 {
-		t.Fatalf("status = %d, want 255", status)
-	}
-	var pe *perl.PerlError
-	if !errors.As(err, &pe) || !strings.Contains(pe.Message, "kaboom") {
-		t.Fatalf("err = %v, want *perl.PerlError containing kaboom", err)
+	// perl reports the die on stderr itself; the run only carries its
+	// status.
+	if status != 255 || err != nil {
+		t.Fatalf("Run = (%d, %v), want (255, nil)", status, err)
 	}
 }
 

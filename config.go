@@ -9,7 +9,7 @@ import "io"
 // pre-loaded with the embedded standard library, an empty environment (the
 // host process env is not leaked), sandboxed stdio, and every capability
 // hook denying — no outbound connections, no name resolution, no subprocess
-// spawns. Each capability is granted explicitly by setting its field.
+// spawns, no fork. Each capability is granted explicitly by setting its field.
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
 	// holding the Perl standard library (the assembled lib/ tree); it
@@ -64,6 +64,13 @@ type Config struct {
 	// subprocess should set this to a strict allow-list. FAIL-CLOSED: a nil
 	// Exec denies ALL spawns.
 	Exec func(path string, argv []string) bool
+	// Fork lets the guest fork. A forked child is a pseudo-process: a copy of
+	// the whole instance (its memory, and a descriptor table sharing the
+	// parent's open files) that runs concurrently inside this host process,
+	// the way perl emulates fork on Windows. The child is subject to the
+	// same Config as its parent, and exec in a child goes through Exec like
+	// any other spawn. FAIL-CLOSED: when false, fork fails in the guest.
+	Fork bool
 	// FS, when non-nil, is the filesystem backend this instance sees as its
 	// entire guest filesystem ("/"). Every file operation is routed to it, so
 	// giving two instances separate FS values isolates them completely.

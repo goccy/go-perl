@@ -114,7 +114,7 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
+	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, shim)
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +338,9 @@ func hostToolchain() map[string]string {
 		common["lddlflags"] = "-bundle -undefined dynamic_lookup -fstack-protector-strong"
 		common["cccdlflags"] = "" // PIC is the darwin default
 	default: // linux and friends
+		// glibc hides its extensions unless asked; perl's own builds
+		// there compile everything with _GNU_SOURCE.
+		common["ccflags"] += " -D_GNU_SOURCE"
 		common["osname"] = runtime.GOOS
 		common["so"] = "so"
 		common["dlext"] = "so"
@@ -369,7 +372,7 @@ func xsWritePerlShim(work string) (string, error) {
 // %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
 // generate a build for THIS machine while everything else about %Config
 // (version, ivsize, ...) stays guest-true.
-func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, error) {
+func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
 	tc := hostToolchain()
 	if sdkDir != "" {
 		tc["ccflags"] = tc["ccflags"] + " -I" + sdkDir
@@ -386,6 +389,11 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, err
 	tc["vendorarchexp"] = ""
 	tc["installprivlib"] = stdlibDir
 	tc["installarchlib"] = fakeArch
+	// The perl that programs written during the build must name on their
+	// #! line (ExtUtils::MakeMaker's and ExtUtils::Helpers' script fixing)
+	// is the one running the build.
+	tc["perlpath"] = perlPath
+	tc["startperl"] = "#!" + perlPath
 
 	var b strings.Builder
 	b.WriteString("use Config ();\n")

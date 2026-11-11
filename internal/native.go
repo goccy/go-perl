@@ -175,7 +175,7 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendString(buf, 5, s)
-	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_23)
+	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_24)
 	if err != nil {
 		return 0, err
 	}
@@ -219,7 +219,7 @@ func (p *Perl) EnsureDispatcher() error {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, cbID)
-	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_22)
+	resp, err := p.m.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_23)
 	if err != nil {
 		return fmt.Errorf("set Go dispatcher: %w", err)
 	}

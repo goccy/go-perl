@@ -248,3 +248,53 @@ if (!defined $caught) {
 		"eval parent sees exit=9",
 	)
 }
+
+// A child's exit status is the one it ends with after its END blocks ran:
+// an END block may assign $?, as test libraries do.
+func TestForkChildEndBlockSetsStatus(t *testing.T) {
+	got := runForkScript(t, `
+my $parent = $$;
+END { $? = 5 if $$ != $parent }
+my $pid = fork // die "fork: $!";
+exit 0 if !$pid;
+waitpid($pid, 0);
+report("child status ", $? >> 8);
+`)
+	wantLines(t, got, "child status 5")
+}
+
+// system and exec look a bare command name up on the PATH the program has
+// at that moment, as execvp does — not on the PATH gperl was started with.
+func TestSystemSearchesTheProgramsPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "gperl-test-tool")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := runForkScript(t, `
+my $missing = system "gperl-test-tool", "arg";
+report("before: ", $missing);
+{
+    local $ENV{PATH} = "`+dir+`:$ENV{PATH}";
+    report("found: ", system("gperl-test-tool", "arg") >> 8);
+}
+report("after: ", system("gperl-test-tool", "arg"));
+`)
+	wantLines(t, got, "before: -1", "found: 7", "after: -1")
+}
+
+// A new descriptor takes the lowest free number, so a program can re-point
+// a standard stream by closing it and opening something else.
+func TestDescriptorNumbersAreReused(t *testing.T) {
+	got := runForkScript(t, `
+use POSIX ();
+my $first = POSIX::dup(0); POSIX::close($first);
+for (1 .. 20) { open(my $fh, '<', $0) or die "open: $!"; pipe(my $r, my $w) or die "pipe: $!"; }
+my $again = POSIX::dup(0); POSIX::close($again);
+report($first == $again ? "same number" : "leaked: $first then $again");
+close(STDOUT) or die "close: $!";
+open(my $fh, '>', '/dev/null') or die "open: $!";
+report("stdout's number is ", fileno($fh));
+`)
+	wantLines(t, got, "same number", "stdout's number is 1")
+}

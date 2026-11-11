@@ -2,8 +2,9 @@
 // the embedded (wasm2go-transpiled) interpreter with go-style tooling.
 //
 //	gperl run script.pl [args...]   resolve dependencies, then run the script
-//	gperl run [-e code|switches]    with any perl(1) switch (-e/-I/-M/-l/...),
-//	                                run exactly like the perl command instead
+//	gperl run [switches] [script]   with any perl(1) switch (-e/-I/-M/-n/...),
+//	                                or a program on standard input, run
+//	                                exactly like the perl command instead
 //	gperl build [-o out] script.pl  produce a self-contained Go binary that
 //	                                embeds the script, its vendored modules,
 //	                                and the interpreter
@@ -40,9 +41,6 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "run":
-		if len(os.Args) < 3 {
-			usage()
-		}
 		status, err := gperl.RunCLI(os.Args[2:])
 		if err != nil {
 			gperl.PrintRunError(err)

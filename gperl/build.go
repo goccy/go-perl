@@ -184,7 +184,6 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -272,30 +271,19 @@ func main() {
 			fatal(err)
 		}
 	}
-	err = p.RunFile(context.Background(), scriptPath, incDirs, os.Args[1:])
-	if err == nil {
-		p.Close()
-		return
+	status, err := p.RunProgram(context.Background(), perl.Program{
+		File: scriptPath,
+		Inc:  incDirs,
+		Args: os.Args[1:],
+	})
+	// Close flushes PerlIO and runs global destruction before the process
+	// reports the status.
+	p.Close()
+	if err != nil {
+		fatal(err)
 	}
-	if code, ok := perl.ExitCode(err); ok {
-		// A guest exit() unwound cleanly; Close flushes PerlIO and runs
-		// END blocks before the process reports the status.
-		p.Close()
-		cleanup()
-		os.Exit(code)
-	}
-	var pe *perl.PerlError
-	if errors.As(err, &pe) {
-		msg := pe.Message
-		if len(msg) == 0 || msg[len(msg)-1] != '\n' {
-			msg += "\n"
-		}
-		fmt.Fprint(os.Stderr, msg)
-		p.Close()
-		cleanup()
-		os.Exit(255)
-	}
-	fatal(err)
+	cleanup()
+	os.Exit(status)
 }
 
 // cleanup removes the unpacked app dir; os.Exit skips defers, so every

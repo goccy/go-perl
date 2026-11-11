@@ -71,13 +71,11 @@ func New(cfg Config) (*Perl, error) {
 		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
 		// bit bucket as its script filehandle); synthesize one over any
 		// backend.
-		FS:      withDevNull(cfg.FS),
-		Dial:    cfg.Dial,
-		Resolve: cfg.Resolve,
-		Exec:    cfg.Exec,
-		// Forking is granted with process spawning: an instance that may
-		// start host processes may also run copies of itself.
-		Fork:               cfg.Exec != nil,
+		FS:                 withDevNull(cfg.FS),
+		Dial:               cfg.Dial,
+		Resolve:            cfg.Resolve,
+		Exec:               cfg.Exec,
+		Fork:               cfg.Fork,
 		Stdin:              cfg.Stdin,
 		Stdout:             cfg.Stdout,
 		Stderr:             cfg.Stderr,

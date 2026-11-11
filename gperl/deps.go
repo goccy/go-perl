@@ -66,22 +66,6 @@ func runCpanm(projectDir string, extra []string) error {
 	return nil
 }
 
-// cpanmDriver is the program that runs cpanm on the embedded interpreter.
-// cpanm is a modulino: run as a plain file it only defines
-// App::cpanminus::script and enters its main under `unless (caller)` —
-// and inside an embedded interpreter the script runner is always a
-// caller. So the driver loads the file for its definitions and then
-// enters cpanm the way cpanm's own main does.
-const cpanmDriver = `
-my $r = do $ENV{GPERL_CPANM};
-die $@ if $@;
-App::cpanminus::script->can("new")
-    or die "$ENV{GPERL_CPANM}: does not define App::cpanminus::script\n";
-my $app = App::cpanminus::script->new;
-$app->parse_options(@ARGV);
-exit $app->doit;
-`
-
 // cpanmScript is the fatpacked cpanm program, vendored verbatim from the
 // App-cpanminus 1.7049 CPAN release (bin/cpanm; Perl 5 license, see the
 // script's own POD). cpanminus is in maintenance mode with roughly one
@@ -128,17 +112,16 @@ func runCpanmArgs(work, dir string, cpanmArgs []string) error {
 	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
 		return err
 	}
-	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
+	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, shim)
 	if err != nil {
 		return err
 	}
 	env := append(os.Environ(),
-		"GPERL_CPANM="+script,
 		"GPERL_PERL_EXE="+shim,
 		"GPERL_PERL_PRELOAD="+overlay,
 		"PATH="+filepath.Dir(shim)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	argv := append([]string{"-e", cpanmDriver, "--"}, cpanmArgs...)
+	argv := append([]string{script}, cpanmArgs...)
 	return runPerlInProcess(dir, env, os.Stderr, argv...)
 }
 

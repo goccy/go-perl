@@ -86,8 +86,9 @@ func main() {
   (`fs.NewHostFS()` passes through to the OS, matching `perl`; `fs.DirFS`
   scopes to one directory; `fs.NewMemFS()` or any custom backend plugs in
   the same way). The capability hooks are FAIL-CLOSED: with a zero `Config`,
-  outbound connections (`Dial`), name resolution (`Resolve`), and subprocess
-  spawns (`Exec`) are all denied — each capability is granted explicitly.
+  outbound connections (`Dial`), name resolution (`Resolve`), subprocess
+  spawns (`Exec`), and `fork` (`Fork`) are all denied — each capability is
+  granted explicitly.
 - **Cancellable**: cancelling the `context.Context` passed to `Eval`/`Call`
   stops a runaway script at the next Perl opcode.
 - **Go-style tooling for Perl**: the [`gperl`](./cmd/gperl) command runs
@@ -183,7 +184,9 @@ embedded interpreter with go-style workflows.
 
 ```sh
 gperl run script.pl [args...]   # resolve cpanfile deps, then run
-gperl run -e '...' [switches]   # any perl(1) switch (-e/-I/-M/-l/...)
+gperl run [switches] [script]   # the perl(1) command line: every perlrun
+                                # switch (-e/-n/-p/-i/-M/-C/-T/...), a
+                                # program on stdin, #! line switches
 gperl build [-o out] script.pl  # self-contained Go binary: script +
                                 # vendored modules + interpreter
 gperl xs build dist...          # compile XS dists (dir or .tar.gz)
@@ -192,7 +195,9 @@ gperl xs build dist...          # compile XS dists (dir or .tar.gz)
 
 `gperl run` and the binaries `gperl build` produces behave like `perl`:
 host filesystem, host environment, no sandbox (the library's zero `Config`
-is the opposite — deny by default). XS builds ride each distribution's own
+is the opposite — deny by default). The program runs as perl's main
+program — `(*Perl).RunProgram` with a `perl.Program`, the parsed form of a
+perl command line, which an embedding application can use directly. XS builds ride each distribution's own
 `Makefile.PL`/`Build.PL` with every `perl` in the pipeline being the
 embedded interpreter, so the only tools required are `make` and a C
 compiler; the artifacts land in `local/xs/<goos>_<goarch>/` and load

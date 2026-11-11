@@ -48,8 +48,9 @@ const (
 	midNewHash          = 19
 	midRegisterNativeXS = 20
 	midRelease          = 21
-	midSetGoDispatcher  = 22
-	midXSHelper         = 23
+	midRunProgram       = 22
+	midSetGoDispatcher  = 23
+	midXSHelper         = 24
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package
