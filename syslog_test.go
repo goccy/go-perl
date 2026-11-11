@@ -20,6 +20,20 @@ func TestSysSyslogLoads(t *testing.T) {
 	r.want(t, 0, "LOG_ERR=3 LOG_INFO=6 LOG_USER=8 LOG_LOCAL7=184 LOG_PID=1\nlog socket: /dev/log\n")
 }
 
+// Every module of the Sys-Syslog distribution is in the library, the event
+// log backend included: its file is where perl installs it, beside the
+// directory of Sys/Syslog.pm, and declares the package.
+func TestSysSyslogShipsItsEventLogBackend(t *testing.T) {
+	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+		`require Sys::Syslog;`,
+		`(my $file = $INC{"Sys/Syslog.pm"}) =~ s{\.pm\z}{/Win32.pm};`,
+		`open(my $h, "<", $file) or die "open $file: $!";`,
+		`my $text = do { local $/; <$h> };`,
+		`print $text =~ /^package Sys::Syslog::Win32;/m ? "declared\n" : "other content\n";`,
+	)}, "")
+	r.want(t, 0, "declared\n")
+}
+
 // Without Config.Syslog the program has no system logger. Sys::Syslog finds
 // its native mechanism unavailable and goes on to its other ones; in the
 // sandbox none of them can connect, and the program is told so. Nothing is
