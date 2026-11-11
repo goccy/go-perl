@@ -3701,8 +3701,8 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
                      (STRLEN)(klen), (int)(kflags), (int)(action),        \
                      (SV *)(val), (U32)(hash))
 
-/* xsubpp emits this for ATTRS: sections — apply attribute strings to a
- * freshly bound CV by driving the guest's attributes::import. */
+/* xsubpp emits this for ATTRS: sections. It is `use attributes PACKAGE,
+ * \\&code, ATTRS` (op.c): attributes->import(PACKAGE, \\&code, ATTRS). */
 static void apply_attrs_string(const char *stashpv, CV *cv,
                                const char *attrstr, STRLEN len) {
     goperl_frame_t *f = goperl_cur_frame_v;
@@ -3711,6 +3711,11 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
     uint32_t toks[16];
     int n = 0;
     size_t pl = strlen(stashpv);
+    uint64_t classsv = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0,
+                                    sizeof("attributes") - 1, "attributes",
+                                    sizeof("attributes") - 1);
+    goperl_do_op(f, GOPERL_OP_SV_MORTAL, classsv, 0, 0, 0);
+    toks[n++] = (uint32_t)classsv;
     uint64_t pkgsv = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, pl, stashpv, pl);
     goperl_do_op(f, GOPERL_OP_SV_MORTAL, pkgsv, 0, 0, 0);
     toks[n++] = (uint32_t)pkgsv;
@@ -4118,6 +4123,9 @@ static UV goperl_utf8n_to_uvchr(const U8 *s, STRLEN curlen, STRLEN *retlen,
     STRLEN n = curlen ? UTF8SKIP(s) : 0;
     if (n == 0 || n > curlen) goto fail;
     if (n == 1) {
+        /* the skip table gives 1 for a continuation byte too; only an
+         * invariant is a character by itself */
+        if (s[0] & 0x80) goto fail;
         if (retlen) *retlen = 1;
         return s[0];
     }

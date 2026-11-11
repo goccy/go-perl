@@ -112,6 +112,7 @@ package main; sub joiner { join "+", @_ } our ($foo, $loc); 1;`
 		{"av_store reports that it took the value", `my $x = "v"; my @a; my $ok = PerlAPI::store_first(\@a, $x); join ",", ($ok ? 1 : 0), Internals::SvREFCNT($x), $a[0]`, "1,2,v"},
 		{"an exception passes through call_sv without G_EVAL", `my $e = bless [], "My::Err"; eval { PerlAPI::call_plain(sub { die $e }) }; ref($@) . ($@ == $e ? ":same" : ":copy")`, "My::Err:same"},
 		{"GIMME_V", `my $s = PerlAPI::context(); my ($l) = PerlAPI::context(); PerlAPI::context(); "$s,$l,$PerlAPI::last_context"`, "scalar,list,void"},
+		{"utf8n_to_uvchr", `join ",", map { PerlAPI::first_char($_) } "A", "\xc3\xa9", "\xe2\x98\xba", "\xa0", "\xc3", "\xc0\x80"`, "65/1,233/2,9786/3,malformed,malformed,malformed"},
 		{"save_item", `$loc = "outside"; my $seen; PerlAPI::localize(\*loc, sub { $seen = $loc }); "$seen/$loc"`, "inside/outside"},
 	} {
 		r, err := p.Eval(ctx, tc.code)

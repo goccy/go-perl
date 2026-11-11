@@ -372,6 +372,23 @@ XS(XS_PerlAPI_context) {
     }
 }
 
+/* The first character of a byte string: "codepoint/length", or
+ * "malformed" when the bytes do not start with a well-formed character. */
+XS(XS_PerlAPI_first_char) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "bytes");
+    {
+        STRLEN len, used = 0;
+        const U8 *p = (const U8 *)SvPV(ST(0), len);
+        UV cp = utf8n_to_uvchr(p, len, &used, UTF8_CHECK_ONLY);
+        if (used == (STRLEN)-1)
+            ST(0) = sv_2mortal(newSVpvs("malformed"));
+        else
+            ST(0) = sv_2mortal(newSVpvf("%lu/%lu", (unsigned long)cp, (unsigned long)used));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -400,6 +417,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::length_after_upgrade", XS_PerlAPI_length_after_upgrade);
     newXS_deffile("PerlAPI::lower_type", XS_PerlAPI_lower_type);
     newXS_deffile("PerlAPI::throw", XS_PerlAPI_throw);
+    newXS_deffile("PerlAPI::first_char", XS_PerlAPI_first_char);
     newXS_deffile("PerlAPI::store_first", XS_PerlAPI_store_first);
     newXS_deffile("PerlAPI::call_plain", XS_PerlAPI_call_plain);
     newXS_deffile("PerlAPI::context", XS_PerlAPI_context);
