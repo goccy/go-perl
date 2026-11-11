@@ -978,19 +978,26 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
 static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
                                STRLEN patlen, va_list *args, SV **svargs,
                                Size_t sv_count, int cat) {
-    char buf[4096];
-    char fmt[1024];
+    goperl_text_t t;
     if (!args || svargs || sv_count)
         goperl_croakf(f, "sv_v%spvfn: formatting from an SV argument list is "
                          "not available to native XS modules",
                       cat ? "cat" : "set");
-    if (patlen >= sizeof fmt)
-        goperl_croakf(f, "sv_v%spvfn: the format is too long", cat ? "cat" : "set");
+    /* the format is patlen bytes, not necessarily terminated there */
+    char *fmt = (char *)malloc(patlen + 1);
+    if (!fmt) goperl_croakf(f, "%s", "Out of memory!");
     memcpy(fmt, pat, patlen);
     fmt[patlen] = '\0';
-    goperl_vfmt(f, buf, sizeof buf, fmt, *args);
-    goperl_do_op(f, cat ? GOPERL_OP_SV_CATPVN : GOPERL_OP_SV_SETPVN,
-                 GOPERL_TOK(sv), strlen(buf), buf, strlen(buf));
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, *args);
+    free(fmt);
+    if (cat)
+        goperl_text_op(f, &t, GOPERL_OP_SV_STR, (uint32_t)GOPERL_TOK(sv),
+                       ((uint64_t)(uint32_t)(SV_GMAGIC | (t.utf8 ? SV_CATUTF8 : SV_CATBYTES)) << 32) | (uint32_t)t.len);
+    else
+        goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                       ((uint64_t)GOPERL_SVSTR_SETPVN << 32) | (uint32_t)GOPERL_TOK(sv),
+                       GOPERL_TEXT_ARG(&t, 0));
 }
 #define sv_vsetpvfn(sv, pat, patlen, args, svargs, n, tainted) \
     goperl_sv_vsetpvfn(_gof, (SV *)(sv), (pat), (patlen), (args), (svargs), (n), 0)
@@ -1009,21 +1016,15 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
     ({ GOPERL_ONCE(goperl_sv_vcatpvf_mg_sv_, sv); \
        (sv_vcatpvf(goperl_sv_vcatpvf_mg_sv_, pat, args), SvSETMAGIC(goperl_sv_vcatpvf_mg_sv_)); })
 
-static void goperl_vcroak(goperl_frame_t *f, const char *pat, va_list *args)
+/* vcroak without a format dies with $@, as croak(NULL) does. */
+static void goperl_vcroak_args(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((noreturn, unused));
-static void goperl_vcroak(goperl_frame_t *f, const char *pat, va_list *args) {
-    if (pat) goperl_vfmt(f, f->err, sizeof f->err, pat, *args);
-    goperl_raise(f);
+static void goperl_vcroak_args(goperl_frame_t *f, const char *pat, va_list *args) {
+    if (!pat) goperl_croak_errsv(f);
+    goperl_vcroak(f, pat, *args);
 }
-#define vcroak(pat, args) goperl_vcroak(_gof, (pat), (args))
-static void goperl_vwarn(goperl_frame_t *f, const char *pat, va_list *args)
-    __attribute__((unused));
-static void goperl_vwarn(goperl_frame_t *f, const char *pat, va_list *args) {
-    char buf[1024];
-    goperl_vfmt(f, buf, sizeof buf, pat, *args);
-    goperl_do_op(f, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
-}
-#define vwarn(pat, args) goperl_vwarn(_gof, (pat), (args))
+#define vcroak(pat, args) goperl_vcroak_args(_gof, (pat), (args))
+#define vwarn(pat, args) goperl_vwarn(_gof, (pat), *(args))
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((unused));
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {

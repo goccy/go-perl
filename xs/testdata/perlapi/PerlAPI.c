@@ -1099,6 +1099,80 @@ XS(XS_PerlAPI_sub_slot) {
     XSRETURN(1);
 }
 
+/* Formats its argument into text by each of the formatting functions:
+ * how = "new" (newSVpvf), "set" (sv_setpvf), "cat" (sv_catpvf onto the
+ * third argument), "mixed" (bytes above 0x7f beside the argument), "long"
+ * (a %s argument of the given length), "warn" and "croak". */
+XS(XS_PerlAPI_formatted) {
+    dXSARGS;
+    if (items < 2) croak_xs_usage(cv, "how, sv, ...");
+    {
+        const char *how = SvPV_nolen(ST(0));
+        SV *arg = ST(1);
+        SV *out;
+        if (strEQ(how, "new")) {
+            out = sv_2mortal(newSVpvf("<%" SVf ">", SVfARG(arg)));
+        } else if (strEQ(how, "set")) {
+            out = sv_newmortal();
+            sv_setpvf(out, "%d:%" SVf, 7, SVfARG(arg));
+        } else if (strEQ(how, "cat")) {
+            out = sv_mortalcopy(ST(2));
+            sv_catpvf(out, "+%" SVf, SVfARG(arg));
+        } else if (strEQ(how, "mixed")) {
+            out = sv_2mortal(newSVpvf("\xe9%s|%" SVf "|\xe8", "\xea", SVfARG(arg)));
+        } else if (strEQ(how, "long")) {
+            STRLEN n = (STRLEN)SvIV(arg);
+            char *text = (char *)malloc(n + 1);
+            memset(text, 'x', n);
+            text[n] = '\0';
+            out = sv_2mortal(newSVpvf("[%s]", text));
+            free(text);
+        } else if (strEQ(how, "warn")) {
+            warn("warned: %" SVf "\n", SVfARG(arg));
+            XSRETURN(0);
+        } else if (strEQ(how, "croak")) {
+            croak("%" SVf, SVfARG(arg));
+        } else {
+            croak("formatted: unknown way %s", how);
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* Magic whose mg_ptr points at the string buffer of another SV, kept
+ * alive as mg_obj: the way DBI reaches the structure of a handle. */
+static MGVTBL perlapi_view_vtbl = {0, 0, 0, 0, 0, 0, 0, 0};
+
+XS(XS_PerlAPI_view_attach) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "holder, buffer");
+    sv_magicext(ST(0), ST(1), PERL_MAGIC_ext, &perlapi_view_vtbl, SvPV_nolen(ST(1)), 0);
+    XSRETURN(0);
+}
+
+/* The first n bytes at the place the magic points to. */
+XS(XS_PerlAPI_view_read) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "holder, n");
+    {
+        MAGIC *mg = mg_findext(ST(0), PERL_MAGIC_ext, &perlapi_view_vtbl);
+        if (!mg) XSRETURN_UNDEF;
+        ST(0) = sv_2mortal(newSVpvn(mg->mg_ptr, (STRLEN)SvIV(ST(1))));
+        XSRETURN(1);
+    }
+}
+
+/* The process id as C code asks for it. */
+XS(XS_PerlAPI_process_id) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    EXTEND(SP, 2);
+    ST(0) = sv_2mortal(newSViv((IV)getpid()));
+    ST(1) = sv_2mortal(newSViv((IV)PerlProc_getpid()));
+    XSRETURN(2);
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1173,5 +1247,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::tally_add", XS_PerlAPI_tally_add);
     newXS_deffile("PerlAPI::tally_freed", XS_PerlAPI_tally_freed);
     newXS_deffile("PerlAPI::sub_slot", XS_PerlAPI_sub_slot);
+    newXS_deffile("PerlAPI::formatted", XS_PerlAPI_formatted);
+    newXS_deffile("PerlAPI::view_attach", XS_PerlAPI_view_attach);
+    newXS_deffile("PerlAPI::view_read", XS_PerlAPI_view_read);
+    newXS_deffile("PerlAPI::process_id", XS_PerlAPI_process_id);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

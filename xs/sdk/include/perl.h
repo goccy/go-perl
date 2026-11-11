@@ -1452,13 +1452,13 @@ static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((noreturn, unused));
 static void goperl_croak_errsv(goperl_frame_t *f)
     __attribute__((noreturn, unused));
+static void goperl_vcroak(goperl_frame_t *f, const char *fmt, va_list ap)
+    __attribute__((noreturn, unused));
 static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...) {
     va_list ap;
     if (!fmt) goperl_croak_errsv(f);
     va_start(ap, fmt);
-    goperl_vfmt(f, f->err, sizeof f->err, fmt, ap);
-    va_end(ap);
-    goperl_raise(f);
+    goperl_vcroak(f, fmt, ap);
 }
 
 /* ---- SVf-aware formatting ----------------------------------------------
@@ -1484,41 +1484,154 @@ static const char *goperl_sv_pv_(goperl_frame_t *f, SV *sv, uint64_t *lenp) {
     return goperl_direct_sv_pv(f, GOPERL_TOK(sv), lenp);
 }
 
-static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
-                        const char *fmt, va_list ap) {
-    size_t o = 0;
-    if (dstsize == 0) return;
-#define GOPERL_PUTC(c)                    \
-    do {                                  \
-        if (o + 1 < dstsize) dst[o] = (c); \
-        o++;                              \
+/* SV_STR selectors of the formatter's consumers (the others are listed
+ * in goperl_perlapi.h). Their flags: bit 0, the text is UTF-8. */
+#define GOPERL_SVSTR_NEWPVN 11 /* bit 1: the new SV is mortal */
+#define GOPERL_SVSTR_WARN 12
+#define GOPERL_SVSTR_THROW 13
+#define GOPERL_SVSTR_SETPVN 14
+#define GOPERL_TEXT_UTF8 1
+#define GOPERL_TEXT_MORTAL 2
+
+/* The text a format produced: its bytes, and whether they are UTF-8. Like
+ * the SV perl formats into, it starts as one character per byte and
+ * becomes UTF-8 when an argument is: what it holds is upgraded then, and
+ * every later piece that is not UTF-8 is upgraded as it is appended. */
+typedef struct goperl_text {
+    char *p;
+    size_t len;
+    size_t cap;
+    int utf8;
+    char first[512];
+} goperl_text_t;
+
+static void goperl_text_init(goperl_text_t *t) {
+    t->p = t->first;
+    t->len = 0;
+    t->cap = sizeof t->first;
+    t->utf8 = 0;
+    t->first[0] = '\0';
+}
+static void goperl_text_free(goperl_text_t *t) {
+    if (t->p != t->first) free(t->p);
+    t->p = t->first;
+}
+/* Room for n more bytes and the terminator. */
+static void goperl_text_room(goperl_text_t *t, size_t n) {
+    if (t->len + n + 1 <= t->cap) return;
+    size_t cap = t->cap * 2;
+    while (cap < t->len + n + 1) cap *= 2;
+    char *np = (char *)malloc(cap);
+    if (!np) abort();
+    memcpy(np, t->p, t->len + 1);
+    if (t->p != t->first) free(t->p);
+    t->p = np;
+    t->cap = cap;
+}
+static void goperl_text_put(goperl_text_t *t, const char *src, size_t n,
+                            int is_utf8) {
+    if (is_utf8 && !t->utf8) {
+        size_t high = 0;
+        for (size_t i = 0; i < t->len; i++)
+            if ((unsigned char)t->p[i] >= 0x80) high++;
+        if (high) {
+            goperl_text_room(t, high);
+            size_t from = t->len, to = t->len + high;
+            t->p[to] = '\0';
+            while (from > 0) {
+                unsigned char c = (unsigned char)t->p[--from];
+                if (c >= 0x80) {
+                    t->p[--to] = (char)(0x80 | (c & 0x3f));
+                    t->p[--to] = (char)(0xc0 | (c >> 6));
+                } else {
+                    t->p[--to] = (char)c;
+                }
+            }
+            t->len += high;
+        }
+        t->utf8 = 1;
+    }
+    if (t->utf8 && !is_utf8) {
+        goperl_text_room(t, 2 * n);
+        char *w = t->p + t->len;
+        for (size_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)src[i];
+            if (c >= 0x80) {
+                *w++ = (char)(0xc0 | (c >> 6));
+                *w++ = (char)(0x80 | (c & 0x3f));
+            } else {
+                *w++ = (char)c;
+            }
+        }
+        t->len = (size_t)(w - t->p);
+    } else {
+        goperl_text_room(t, n);
+        if (n) memcpy(t->p + t->len, src, n);
+        t->len += n;
+    }
+    t->p[t->len] = '\0';
+}
+
+/* One standard conversion of the next argument, of the given type,
+ * rendered by snprintf into a buffer of the size it needs. */
+#define GOPERL_TEXT_CONV(t, spec, ap, type)                              \
+    do {                                                                 \
+        type goperl_arg = va_arg(ap, type);                              \
+        GOPERL_TEXT_VALUE(t, spec, goperl_arg);                          \
     } while (0)
+#define GOPERL_TEXT_VALUE(t, spec, arg)                                  \
+    do {                                                                 \
+        char goperl_small[128];                                          \
+        int goperl_n = snprintf(goperl_small, sizeof goperl_small, (spec), (arg)); \
+        if (goperl_n < 0) break;                                         \
+        if ((size_t)goperl_n < sizeof goperl_small) {                    \
+            goperl_text_put((t), goperl_small, (size_t)goperl_n, 0);     \
+        } else {                                                         \
+            char *goperl_big = (char *)malloc((size_t)goperl_n + 1);     \
+            if (!goperl_big) abort();                                    \
+            snprintf(goperl_big, (size_t)goperl_n + 1, (spec), (arg));   \
+            goperl_text_put((t), goperl_big, (size_t)goperl_n, 0);       \
+            free(goperl_big);                                            \
+        }                                                                \
+    } while (0)
+
+static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
+                         va_list ap) {
     while (*fmt) {
         if (*fmt != '%') {
-            GOPERL_PUTC(*fmt++);
+            const char *run = fmt;
+            while (*fmt && *fmt != '%') fmt++;
+            goperl_text_put(t, run, (size_t)(fmt - run), 0);
             continue;
         }
         fmt++;
         if (*fmt == '%') {
-            GOPERL_PUTC('%');
+            goperl_text_put(t, "%", 1, 0);
             fmt++;
             continue;
         }
         if (strncmp(fmt, SVf, sizeof(SVf) - 1) == 0) {
             SV *sv = va_arg(ap, SV *);
-            uint64_t len = 0;
-            const char *p = sv ? goperl_sv_pv_(f, sv, &len) : "(null)";
-            if (!p) p = "";
-            if (!sv) len = strlen(p);
-            for (uint64_t i = 0; i < len; i++) GOPERL_PUTC(p[i]);
             fmt += sizeof(SVf) - 1;
+            if (!sv) {
+                goperl_text_put(t, "(null)", 6, 0);
+                continue;
+            }
+            uint64_t len = 0;
+            const char *sp = goperl_sv_pv_(f, sv, &len);
+            /* the flag is read after the string: making the string is what
+             * settles it (an overloaded object, a number) */
+            int is_utf8 = (goperl_do_op(f, GOPERL_OP_SV_INFO, GOPERL_TOK(sv),
+                                        0, 0, 0) &
+                           GOPERL_INFO_UTF8) != 0;
+            if (sp) goperl_text_put(t, sp, (size_t)len, is_utf8);
             continue;
         }
         if (strncmp(fmt, UTF8f, sizeof(UTF8f) - 1) == 0) {
-            (void)va_arg(ap, int); /* is-utf8 flag: bytes append either way */
+            int is_utf8 = va_arg(ap, int);
             UV ulen = va_arg(ap, UV);
             const char *up = va_arg(ap, const char *);
-            for (UV i = 0; up && i < ulen; i++) GOPERL_PUTC(up[i]);
+            if (up) goperl_text_put(t, up, (size_t)ulen, is_utf8 != 0);
             fmt += sizeof(UTF8f) - 1;
             continue;
         }
@@ -1566,35 +1679,34 @@ static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
         if (!conv) break;
         spec[sn++] = conv;
         spec[sn] = '\0';
-        char chunk[512];
-        chunk[0] = '\0';
         switch (conv) {
         case 'd':
         case 'i':
-            if (lmod == 2) snprintf(chunk, sizeof chunk, spec, va_arg(ap, long long));
-            else if (lmod == 1) snprintf(chunk, sizeof chunk, spec, va_arg(ap, long));
-            else if (lmod == 3) snprintf(chunk, sizeof chunk, spec, va_arg(ap, size_t));
-            else snprintf(chunk, sizeof chunk, spec, va_arg(ap, int));
+            if (lmod == 2) GOPERL_TEXT_CONV(t, spec, ap, long long);
+            else if (lmod == 1) GOPERL_TEXT_CONV(t, spec, ap, long);
+            else if (lmod == 3) GOPERL_TEXT_CONV(t, spec, ap, size_t);
+            else GOPERL_TEXT_CONV(t, spec, ap, int);
             break;
         case 'u':
         case 'o':
         case 'x':
         case 'X':
-            if (lmod == 2) snprintf(chunk, sizeof chunk, spec, va_arg(ap, unsigned long long));
-            else if (lmod == 1) snprintf(chunk, sizeof chunk, spec, va_arg(ap, unsigned long));
-            else if (lmod == 3) snprintf(chunk, sizeof chunk, spec, va_arg(ap, size_t));
-            else snprintf(chunk, sizeof chunk, spec, va_arg(ap, unsigned int));
+            if (lmod == 2) GOPERL_TEXT_CONV(t, spec, ap, unsigned long long);
+            else if (lmod == 1) GOPERL_TEXT_CONV(t, spec, ap, unsigned long);
+            else if (lmod == 3) GOPERL_TEXT_CONV(t, spec, ap, size_t);
+            else GOPERL_TEXT_CONV(t, spec, ap, unsigned int);
             break;
         case 'c':
-            snprintf(chunk, sizeof chunk, spec, va_arg(ap, int));
+            GOPERL_TEXT_CONV(t, spec, ap, int);
             break;
         case 's': {
             const char *sp = va_arg(ap, const char *);
-            snprintf(chunk, sizeof chunk, spec, sp ? sp : "(null)");
+            if (!sp) sp = "(null)";
+            GOPERL_TEXT_VALUE(t, spec, sp);
             break;
         }
         case 'p':
-            snprintf(chunk, sizeof chunk, spec, va_arg(ap, void *));
+            GOPERL_TEXT_CONV(t, spec, ap, void *);
             break;
         case 'e':
         case 'E':
@@ -1602,16 +1714,95 @@ static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
         case 'F':
         case 'g':
         case 'G':
-            snprintf(chunk, sizeof chunk, spec, va_arg(ap, double));
+            GOPERL_TEXT_CONV(t, spec, ap, double);
             break;
-        default:
-            snprintf(chunk, sizeof chunk, "<%%%c?>", conv);
+        default: {
+            char unknown[8];
+            int un = snprintf(unknown, sizeof unknown, "<%%%c?>", conv);
+            goperl_text_put(t, unknown, (size_t)un, 0);
             break;
         }
-        for (const char *cp = chunk; *cp; cp++) GOPERL_PUTC(*cp);
+        }
     }
-    dst[o < dstsize ? o : dstsize - 1] = '\0';
-#undef GOPERL_PUTC
+}
+
+/* The formatted text in a buffer of fixed size, cut where it does not
+ * fit (form's rotating buffers, messages on the standard error). */
+static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
+                        const char *fmt, va_list ap) {
+    goperl_text_t t;
+    if (dstsize == 0) return;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    size_t n = t.len < dstsize - 1 ? t.len : dstsize - 1;
+    memcpy(dst, t.p, n);
+    dst[n] = '\0';
+    goperl_text_free(&t);
+}
+
+/* The op argument that carries a text's length and flags. */
+#define GOPERL_TEXT_ARG(t, extra) \
+    (((uint64_t)(uint32_t)(((t)->utf8 ? GOPERL_TEXT_UTF8 : 0) | (extra)) << 32) | (uint32_t)(t)->len)
+
+/* Runs a string operation of the interpreter on a text and releases the
+ * text. The contract is goperl_do_op's: when the interpreter dies inside
+ * the operation the call does not return, and the text is released
+ * before the unwinding. */
+static uint64_t goperl_text_op(goperl_frame_t *f, goperl_text_t *t, int32_t op,
+                               uint64_t a, uint64_t b) {
+    goperl_flush(f);
+    const int32_t failed_before = f->failed;
+    uint64_t r = goperl_xs_op(f, op, a, b, t->p, t->len);
+    goperl_gen_bump();
+    goperl_text_free(t);
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
+    return r;
+}
+
+/* A new SV holding the formatted text, UTF-8 when the text is. */
+static uint64_t goperl_vtext_sv(goperl_frame_t *f, int mortal, const char *fmt,
+                                va_list ap) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    return goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                          (uint64_t)GOPERL_SVSTR_NEWPVN << 32,
+                          GOPERL_TEXT_ARG(&t, mortal ? GOPERL_TEXT_MORTAL : 0));
+}
+
+/* warn: the interpreter gets the text and its encoding, and does the
+ * rest (the place of the caller, $SIG{__WARN__}). */
+static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap)
+    __attribute__((unused));
+static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_WARN << 32,
+                   GOPERL_TEXT_ARG(&t, 0));
+}
+
+/* croak: the exception is the formatted text as a string of the
+ * interpreter, whole and with its encoding. It is handed over here and the
+ * frame ends as one that threw a value, like croak_sv. The frame keeps the
+ * start of the text for the catch points that only report a message. */
+static void goperl_vcroak(goperl_frame_t *f, const char *fmt, va_list ap) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    size_t n = t.len < sizeof f->err - 1 ? t.len : sizeof f->err - 1;
+    memcpy(f->err, t.p, n);
+    f->err[n] = '\0';
+    if (!f->jb) {
+        goperl_text_free(&t);
+        goperl_raise(f);
+    }
+    goperl_flush(f);
+    goperl_xs_op(f, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_THROW << 32,
+                 GOPERL_TEXT_ARG(&t, 0), t.p, t.len);
+    goperl_text_free(&t);
+    f->failed = 2; /* GOPERL_FAILED_THROWN */
+    longjmp(*(jmp_buf *)f->jb, 1);
 }
 
 static const char *goperl_form(goperl_frame_t *f, const char *fmt, ...)
@@ -1657,9 +1848,7 @@ static void Perl_croak(pTHX_ const char *fmt, ...) {
     va_list ap;
     if (!fmt) goperl_croak_errsv(_gof);
     va_start(ap, fmt);
-    goperl_vfmt(_gof, _gof->err, sizeof _gof->err, fmt, ap);
-    va_end(ap);
-    goperl_raise(_gof);
+    goperl_vcroak(_gof, fmt, ap);
 }
 static void Perl_croak_nocontext(const char *fmt, ...)
     __attribute__((noreturn, unused));
@@ -1668,41 +1857,33 @@ static void Perl_croak_nocontext(const char *fmt, ...) {
     va_list ap;
     if (!fmt) goperl_croak_errsv(f);
     va_start(ap, fmt);
-    goperl_vfmt(f, f->err, sizeof f->err, fmt, ap);
-    va_end(ap);
-    goperl_raise(f);
+    goperl_vcroak(f, fmt, ap);
 }
 
 static void goperl_warnf(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((unused));
 static void goperl_warnf(goperl_frame_t *f, const char *fmt, ...) {
-    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    goperl_vwarn(f, fmt, ap);
     va_end(ap);
-    goperl_do_op(f, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
 }
 #define warn(...) goperl_warnf(goperl_cur_frame_v, __VA_ARGS__)
 static void Perl_warn(pTHX_ const char *fmt, ...) __attribute__((unused));
 static void Perl_warn(pTHX_ const char *fmt, ...) {
-    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
-    goperl_vfmt(_gof, buf, sizeof buf, fmt, ap);
+    goperl_vwarn(_gof, fmt, ap);
     va_end(ap);
-    goperl_do_op(_gof, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
 }
 static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...)
     __attribute__((unused));
 static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...) {
-    char buf[1024];
     va_list ap;
     (void)cat;
     va_start(ap, fmt);
-    goperl_vfmt(_gof, buf, sizeof buf, fmt, ap);
+    goperl_vwarn(_gof, fmt, ap);
     va_end(ap);
-    goperl_do_op(_gof, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
 }
 #define packWARN(a) (a)
 #define packWARN2(a, b) ((a) | ((b) << 8))
@@ -1832,37 +2013,29 @@ static SV *goperl_newSVpv(goperl_frame_t *f, const char *s, STRLEN len) {
 static SV *goperl_newSVpvf(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((unused));
 static SV *goperl_newSVpvf(goperl_frame_t *f, const char *fmt, ...) {
-    char buf[2048];
     va_list ap;
     va_start(ap, fmt);
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    uint64_t sv = goperl_vtext_sv(f, 0, fmt, ap);
     va_end(ap);
-    goperl_flush(f);
-    return (SV *)(uintptr_t)goperl_direct_new_pvn(f, buf, strlen(buf));
+    return (SV *)(uintptr_t)sv;
 }
 #define newSVpvf(...) goperl_newSVpvf(_gof, __VA_ARGS__)
 
 static SV *goperl_vnewSVpvf(goperl_frame_t *f, const char *fmt, va_list *ap)
     __attribute__((unused));
 static SV *goperl_vnewSVpvf(goperl_frame_t *f, const char *fmt, va_list *ap) {
-    char buf[2048];
-    goperl_vfmt(f, buf, sizeof buf, fmt, *ap);
-    goperl_flush(f);
-    return (SV *)(uintptr_t)goperl_direct_new_pvn(f, buf, strlen(buf));
+    return (SV *)(uintptr_t)goperl_vtext_sv(f, 0, fmt, *ap);
 }
 #define vnewSVpvf(fmt, ap) goperl_vnewSVpvf(_gof, (fmt), (ap))
 
 static SV *goperl_mess(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((unused));
 static SV *goperl_mess(goperl_frame_t *f, const char *fmt, ...) {
-    char buf[2048];
     va_list ap;
     va_start(ap, fmt);
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    uint64_t sv = goperl_vtext_sv(f, 1, fmt, ap);
     va_end(ap);
-    goperl_flush(f);
-    return (SV *)(uintptr_t)goperl_direct_sv_mortal(
-        f, goperl_direct_new_pvn(f, buf, strlen(buf)));
+    return (SV *)(uintptr_t)sv;
 }
 #define mess(...) goperl_mess(_gof, __VA_ARGS__)
 
@@ -1936,26 +2109,31 @@ static void goperl_sv_setpvf(goperl_frame_t *f, SV *sv, const char *fmt, ...)
     __attribute__((unused));
 static void goperl_sv_setpvf(goperl_frame_t *f, SV *sv, const char *fmt,
                              ...) {
-    char buf[2048];
+    goperl_text_t t;
     va_list ap;
+    goperl_text_init(&t);
     va_start(ap, fmt);
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    goperl_vtext(f, &t, fmt, ap);
     va_end(ap);
-    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), strlen(buf), buf,
-                 strlen(buf));
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                   ((uint64_t)GOPERL_SVSTR_SETPVN << 32) | (uint32_t)GOPERL_TOK(sv),
+                   GOPERL_TEXT_ARG(&t, 0));
 }
 #define sv_setpvf(sv, ...) goperl_sv_setpvf(_gof, (SV *)(sv), __VA_ARGS__)
 static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt, ...)
     __attribute__((unused));
 static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
                              ...) {
-    char buf[2048];
+    goperl_text_t t;
     va_list ap;
+    goperl_text_init(&t);
     va_start(ap, fmt);
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
+    goperl_vtext(f, &t, fmt, ap);
     va_end(ap);
-    goperl_do_op(f, GOPERL_OP_SV_CATPVN, GOPERL_TOK(sv), strlen(buf), buf,
-                 strlen(buf));
+    /* appended as what it is: sv_catpvn_flags upgrades whichever of the
+     * two sides is not UTF-8 when the other is */
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR, (uint32_t)GOPERL_TOK(sv),
+                   ((uint64_t)(uint32_t)(SV_GMAGIC | (t.utf8 ? SV_CATUTF8 : SV_CATBYTES)) << 32) | (uint32_t)t.len);
 }
 #define sv_catpvf(sv, ...) goperl_sv_catpvf(_gof, (SV *)(sv), __VA_ARGS__)
 #define sv_catsv(d, s) \
@@ -2839,9 +3017,12 @@ static int goperl_pio_vprintf(goperl_frame_t *f, const void *h,
     __attribute__((unused));
 static int goperl_pio_vprintf(goperl_frame_t *f, const void *h,
                               const char *fmt, va_list ap) {
-    char buf[8192];
-    goperl_vfmt(f, buf, sizeof buf, fmt, ap);
-    return (int)goperl_pio_write(f, h, buf, strlen(buf));
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    int n = (int)goperl_pio_write(f, h, t.p, t.len);
+    goperl_text_free(&t);
+    return n;
 }
 static int goperl_perlio_printf(const void *h, const char *fmt, ...)
     __attribute__((unused));
@@ -4804,12 +4985,7 @@ static void goperl_croak_errsv(goperl_frame_t *f) {
                                                     0, 0)));
 }
 #define croak_sv(sv) goperl_croak_sv(_gof, (SV *)(sv))
-#define warn_sv(sv)                                       \
-    do {                                                  \
-        STRLEN goperl_wl;                                 \
-        const char *goperl_wp = SvPV((SV *)(sv), goperl_wl); \
-        Perl_warn(aTHX_ "%.*s", (int)goperl_wl, goperl_wp);  \
-    } while (0)
+#define warn_sv(sv) Perl_warn(aTHX_ "%" SVf, SVfARG((SV *)(sv)))
 static void goperl_gv_efullname(goperl_frame_t *f, SV *sv, GV *gv) {
     uint64_t stash = goperl_do_op(f, GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 0, 0, 0);
     const char *pkg = stash ? goperl_intern_packed(
