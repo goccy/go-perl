@@ -73,14 +73,26 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <pthread.h>
+/* perl's own perl.h pulls these in on every unix; XS sources rely on that
+ * (htonl without <arpa/inet.h>, open flags without <fcntl.h>, ...). */
+#include <sys/types.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <locale.h>
+#include <dirent.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
-#define GOPERL_XS_ABI 9u
+#define GOPERL_XS_ABI 10u
 
 /* The perl this SDK targets (the embedded interpreter's version). */
-#define PERL_REVISION 5
-#define PERL_VERSION 42
-#define PERL_SUBVERSION 2
-#define PERL_BCDVERSION 0x5042002
+#include "patchlevel.h"
 #define PERL_VERSION_DECIMAL(r, v, s) ((r)*1000000 + (v)*1000 + (s))
 #define PERL_DECIMAL_VERSION \
     PERL_VERSION_DECIMAL(PERL_REVISION, PERL_VERSION, PERL_SUBVERSION)
@@ -204,7 +216,6 @@ typedef enum {
 /* gv.h flags (real values). */
 #define GV_ADD 0x01
 #define GV_ADDMULTI 0x02
-#define GV_NOADD_NOINIT 0x00 /* unused placeholder */
 
 /* overload (amagic) — real perl 5.44 values used by deref overloading. */
 #define fallback_amg 0
@@ -274,20 +285,23 @@ typedef enum {
 #define MGf_LOCAL 0x20
 #define HEf_SVKEY -2
 
-/* SvFLAGS speaks the SDK's synthetic bitset (guest op SV_INFO): SvFLAGS(a)
- * & (SVf_POK|SVf_IOK|SVf_NOK) style tests work because both sides use the
- * same synthetic values. These are NOT perl's real flag bits. */
-#define SVf_OK 1
-#define SVf_ROK 2
-#define SVf_POK 4
+/* Flag and type constants are the interpreter's own (SvFLAGS returns the
+ * real flag word, and flag arguments cross to the interpreter unchanged). */
+#include "goperl_consts.h"
+
+/* The SV_INFO guest op answers the common predicates (SvOK, SvPOK, ...) in
+ * one round trip, as this private bitset. */
+#define GOPERL_INFO_OK 1
+#define GOPERL_INFO_ROK 2
+#define GOPERL_INFO_POK 4
 #define GOPERL_INFO_NIOK 8
 #define GOPERL_INFO_UTF8 16
 #define GOPERL_INFO_ISOBJ 32
 #define GOPERL_INFO_READONLY 64
 #define GOPERL_INFO_ISCV 128
 #define GOPERL_INFO_ISGV 256
-#define SVf_IOK 512
-#define SVf_NOK 1024
+#define GOPERL_INFO_IOK 512
+#define GOPERL_INFO_NOK 1024
 #define GOPERL_INFO_POKp 2048
 #define GOPERL_INFO_NIOKp 4096
 #define GOPERL_INFO_ISUV 8192
@@ -296,13 +310,6 @@ typedef enum {
 #define GOPERL_INFO_AMAGIC 65536
 #define GOPERL_INFO_IOKp 131072
 #define GOPERL_INFO_NOKp 262144
-/* The private has-a-value flags map to their own synthetic bits, so
- * SvFLAGS masks that mix public and private tests (Params::Classify's
- * number checks) keep their meaning. */
-#define SVp_IOK GOPERL_INFO_IOKp
-#define SVp_NOK GOPERL_INFO_NOKp
-#define SVp_POK GOPERL_INFO_POKp
-#define SVs_TEMP 0x00080000 /* only consumed by newSVpvs_flags below */
 
 /* ---- host-side MAGIC mirror (layout is ABI: the loader writes it) ------- */
 
@@ -670,7 +677,7 @@ typedef struct goperl_shared {
      * these is mutated at runtime and must be as private per instance as
      * the interpreter it mirrors. Raw byte areas; the owning code aliases
      * them through its own types (typedefs appear later in this header). */
-    unsigned char plshadow[32 * 16];      /* goperl_plshadow_t[32] */
+    unsigned char plshadow[64 * 16];      /* goperl_plshadow_t[64] */
     char form_bufs[8][1024];              /* SVf formatter rotation */
     int32_t form_ix;
     int32_t pad1;
@@ -687,6 +694,7 @@ typedef struct goperl_shared {
     void *si_cache;                       /* PERL_SI* */
     uint64_t gen;                         /* bumped per guest op */
     uint64_t si_gen;
+    STRLEN na; /* PL_na */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -1259,8 +1267,6 @@ static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...) {
     goperl_do_op(_gof, GOPERL_OP_WARN, 0, 0, buf, strlen(buf));
 }
 #define packWARN(a) (a)
-#define WARN_MISC 4
-#define WARN_UNINITIALIZED 30
 
 /* ---- basic SV constructors / accessors ---------------------------------- */
 
@@ -1272,8 +1278,6 @@ static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...) {
 #define SvUV(sv) ((UV)SvIV(sv))
 #define SvUVX(sv) SvUV(sv)
 #define SvUVx(sv) SvUV(sv)
-#define sv_2iv(sv) ((IV)SvIV(sv))
-#define SvIOK_only(sv) ((void)(sv)) /* representation hint; SETIV flush covers it */
 
 static double goperl_sv_nv(goperl_frame_t *f, SV *sv) {
     union {
@@ -1292,9 +1296,6 @@ static double goperl_sv_nv(goperl_frame_t *f, SV *sv) {
     ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar)))
 #define SvPV_const(sv, lenvar) \
     goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar))
-#define SvPV_nomg(sv, lenvar) SvPV((sv), lenvar)
-#define SvPV_nomg_const(sv, lenvar) SvPV_const((sv), lenvar)
-#define SvPV_nomg_nolen(sv) SvPV_nolen(sv)
 /* SvPVX is the RAW buffer pointer (no get-magic, no stringification):
  * code grows the SV and writes through it. NULL when the SV has no
  * buffer yet — grow first, as real perl requires. */
@@ -1453,8 +1454,6 @@ static SV *goperl_newSVpvs_flags_(goperl_frame_t *f, const char *s,
 
 #define sv_setsv(d, s) \
     ((void)goperl_op0(GOPERL_OP_SV_SETSV, GOPERL_TOK(d), GOPERL_TOK(s)))
-#define sv_setsv_nomg(d, s) \
-    ((void)goperl_op0(GOPERL_OP_SV_SETSV_NOMG, GOPERL_TOK(d), GOPERL_TOK(s)))
 #define sv_setsv_mg(d, s) \
     ((void)goperl_op0(GOPERL_OP_SV_SETSV_MG, GOPERL_TOK(d), GOPERL_TOK(s)))
 #define sv_setiv(sv, v) \
@@ -1502,8 +1501,6 @@ static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
 #define sv_catpvf(sv, ...) goperl_sv_catpvf(_gof, (SV *)(sv), __VA_ARGS__)
 #define sv_catsv(d, s) \
     ((void)goperl_op0(GOPERL_OP_SV_CATSV, GOPERL_TOK(d), GOPERL_TOK(s)))
-#define sv_catsv_nomg(d, s) \
-    ((void)goperl_op0(GOPERL_OP_SV_CATSV_NOMG, GOPERL_TOK(d), GOPERL_TOK(s)))
 #define sv_catpvn(d, p, l) \
     ((void)goperl_ops(GOPERL_OP_SV_CATPVN, GOPERL_TOK(d), (uint64_t)(l), (p), (uint64_t)(l)))
 #define sv_catpv(d, p) sv_catpvn((d), (p), strlen(p))
@@ -1511,32 +1508,30 @@ static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
 
 /* ---- flags / predicates -------------------------------------------------- */
 
-#define SvFLAGS(sv) ((U32)goperl_op0(GOPERL_OP_SV_INFO, GOPERL_TOK(sv), 0))
-#define SvOK(sv) ((SvFLAGS(sv) & SVf_OK) != 0)
-#define SvPOK(sv) ((SvFLAGS(sv) & SVf_POK) != 0)
-#define SvIOK(sv) ((SvFLAGS(sv) & SVf_IOK) != 0)
-#define SvNOK(sv) ((SvFLAGS(sv) & SVf_NOK) != 0)
-#define SvNIOK(sv) ((SvFLAGS(sv) & GOPERL_INFO_NIOK) != 0)
-#define SvPOKp(sv) ((SvFLAGS(sv) & GOPERL_INFO_POKp) != 0)
-#define SvNIOKp(sv) ((SvFLAGS(sv) & GOPERL_INFO_NIOKp) != 0)
-#define SvIsUV(sv) ((SvFLAGS(sv) & GOPERL_INFO_ISUV) != 0)
-#define SvUTF8(sv) ((SvFLAGS(sv) & GOPERL_INFO_UTF8) != 0)
-#define SvREADONLY(sv) ((SvFLAGS(sv) & GOPERL_INFO_READONLY) != 0)
-#define SvOBJECT(sv) ((SvFLAGS(sv) & GOPERL_INFO_OBJECT) != 0)
-#define SvRMAGICAL(sv) ((SvFLAGS(sv) & GOPERL_INFO_RMAGICAL) != 0)
-#define sv_isobject(sv) ((SvFLAGS(sv) & GOPERL_INFO_ISOBJ) != 0)
+#define GOPERL_SVINFO(sv) \
+    ((U32)goperl_op0(GOPERL_OP_SV_INFO, GOPERL_TOK(sv), 0))
+/* SvFLAGS is the interpreter's real flag word. */
+#define SvFLAGS(sv) ((U32)goperl_op0(GOPERL_OP_SV_FLAGS, GOPERL_TOK(sv), 0))
+#define SvOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_OK) != 0)
+#define SvPOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_POK) != 0)
+#define SvIOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_IOK) != 0)
+#define SvNOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NOK) != 0)
+#define SvNIOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NIOK) != 0)
+#define SvPOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_POKp) != 0)
+#define SvNIOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NIOKp) != 0)
+#define SvIsUV(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISUV) != 0)
+#define SvUTF8(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_UTF8) != 0)
+#define SvREADONLY(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_READONLY) != 0)
+#define SvOBJECT(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_OBJECT) != 0)
+#define SvRMAGICAL(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_RMAGICAL) != 0)
+#define sv_isobject(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISOBJ) != 0)
 #define SvTRUE(sv) (goperl_op0(GOPERL_OP_SV_TRUE, GOPERL_TOK(sv), 0) != 0)
-#define SvTRUE_nomg(sv) SvTRUE(sv)
 #define sv_true(sv) SvTRUE(sv)
 #define SvROK(sv) (goperl_op0(GOPERL_OP_SV_RV, GOPERL_TOK(sv), 0) != 0)
 #define SvRV(sv) GOPERL_SV(goperl_op0(GOPERL_OP_SV_RV, GOPERL_TOK(sv), 0))
 #define SvTYPE(sv) \
     ((svtype)goperl_op0(GOPERL_OP_SV_TYPE, GOPERL_TOK(sv), 0))
 #define isGV(sv) (SvTYPE((SV *)(sv)) == SVt_PVGV)
-#define SvGETMAGIC(sv) ((void)(sv))
-#define SvIV_please(sv) ((void)(sv))
-#define SvTAINTED_off(sv) ((void)(sv))
-#define TAINT_NOT ((void)0)
 #define SvUTF8_on(sv) \
     ((void)goperl_op0(GOPERL_OP_SV_UTF8_ON, GOPERL_TOK(sv), 0))
 #define SvPOK_on(sv) \
@@ -1923,7 +1918,7 @@ static void goperl_ivmirror_flush(goperl_frame_t *f) {
 /* Interpreter-variable shadows beyond the die/warn hooks: read-through on
  * every access, written back before the next guest operation. Slots are
  * indexed by the GOPERL_PL_* id. */
-#define GOPERL_PLSHADOW_MAX 32
+#define GOPERL_PLSHADOW_MAX 64
 typedef struct {
     uint64_t val;
     U8 dirty;
@@ -2413,9 +2408,6 @@ static CV *goperl_newXS(goperl_frame_t *f, const char *name,
 }
 #define newXS(name, fn, file) goperl_newXS(_gof, (name), (fn))
 #define newXS_deffile(name, fn) goperl_newXS(_gof, (name), (fn))
-#define newXS_flags(name, fn, file, proto, flags) goperl_newXS(_gof, (name), (fn))
-#define newXSproto(name, fn, file, proto) goperl_newXS(_gof, (name), (fn))
-#define newXSproto_portable(name, fn, file, proto) goperl_newXS(_gof, (name), (fn))
 #define Perl_newXS_deffile(name, fn) goperl_newXS(_gof, (name), (fn))
 
 /* boot support */
@@ -3442,7 +3434,6 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                     (const char *)(name), (I32)(namlen))
 /* Any-magic test: the anchor for mirrored magic marks the guest SV
  * RMAGICAL, so this covers every SV whose magic the host can see. */
-#define SvMAGICAL(sv) SvRMAGICAL(sv)
 
 /* ---- v5: the Class::MOP/Moose surface ----------------------------------- */
 
@@ -3628,34 +3619,21 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
 #define PTR2ul(p) ((unsigned long)(uintptr_t)(p))
 #define safecalloc(n, sz) calloc((size_t)(n), (size_t)(sz))
 #define SVfARG(sv) ((SV *)(sv))
-#define GOPERL_INFO_IOKp 131072
-#define GOPERL_INFO_NOKp 262144
-#define SvIOKp(sv) ((SvFLAGS(sv) & GOPERL_INFO_IOKp) != 0)
-#define SvNOKp(sv) ((SvFLAGS(sv) & GOPERL_INFO_NOKp) != 0)
+#define SvIOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_IOKp) != 0)
+#define SvNOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NOKp) != 0)
 #define SvIsBOOL(sv) \
     ((int)goperl_op0(GOPERL_OP_SV_IS_BOOL, GOPERL_TOK(sv), 0))
 /* nomg variants: the SDK's accessors go through the guest's public API,
  * which applies get-magic — acceptable for these dists' uses. */
-#define SvIV_nomg(sv) SvIV(sv)
-#define SvUV_nomg(sv) SvUV(sv)
-#define SvNV_nomg(sv) SvNV(sv)
 #define SvNVX(sv) SvNV(sv)
-#define SvPOK_only(sv) \
-    ((void)goperl_op0(GOPERL_OP_SV_POK_ONLY, GOPERL_TOK(sv), 0))
-#define SvPOK_only_UTF8(sv) (SvPOK_only(sv), SvUTF8_on(sv))
 #define SvPVutf8_force(sv, lenvar) \
     (sv_utf8_upgrade((SV *)(sv)), SvPV_force((sv), lenvar))
 #define SvPVutf8(sv, lenvar) (sv_utf8_upgrade((SV *)(sv)), SvPV((sv), lenvar))
 #define SvSetMagicSV(dst, src) (sv_setsv((dst), (src)), (void)mg_set(dst))
 #define SvSetSV(dst, src) sv_setsv((dst), (src))
 /* Taint support is off in the embedded build (like -DNO_TAINT_SUPPORT). */
-#define SvTAINTED(sv) 0
-#define SvTAINT(sv) ((void)0)
-#define SvTAINTED_on(sv) ((void)0)
 #define TAINT_IF(x) ((void)(x))
-#define TAINT_NOT ((void)0)
 #define SvTRUEx(sv) SvTRUE(sv)
-#define SvTRUE_nomg(sv) SvTRUE(sv)
 #define HvAMAGIC(hv) ((int)goperl_op0(GOPERL_OP_GV_AMG, GOPERL_TOK(hv), 0))
 
 /* hv_common: only the JUST_SV fetch/store shapes dists actually use. */
@@ -3753,9 +3731,6 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
 #define MUTABLE_HV(p) ((HV *)(p))
 #define MUTABLE_CV(p) ((CV *)(p))
 #define MUTABLE_GV(p) ((GV *)(p))
-#define CvNODEBUG_on(cv) ((void)(cv))
-#define PERL_LOADMOD_NOIMPORT 0x1
-#define GV_NO_SVGMAGIC 0
 #define get_cvs(name, flags) get_cv("" name "", (flags))
 #define UNI_DISPLAY_ISPRINT 0x1
 #define UNI_DISPLAY_BACKSLASH 0x2
@@ -3810,11 +3785,6 @@ static char *goperl_pv_uni_display(goperl_frame_t *f, SV *dsv, const U8 *spv,
 #define SAVEINT(i) goperl_hostsave_i32(_gof, (int32_t *)&(i))
 #define SAVEI8(i) SAVEI32(i)
 #define SAVEBOOL(i) SAVEI32(i)
-#define SvOBJECT_off(sv) ((void)(sv)) /* flag flips w/o value change */
-#define SvOOK_off(sv) ((void)(sv))
-#define SvPOK_off(sv) sv_setsv((SV *)(sv), &PL_sv_undef)
-#define SvRMAGICAL_on(sv) ((void)(sv))
-#define SvSMAGICAL(sv) SvRMAGICAL(sv)
 #define DEBUG_l(x) ((void)0)
 #define DEBUG_x(x) ((void)0)
 #define DEBUG_v_TEST 0
@@ -3833,8 +3803,8 @@ static void goperl_save_defsv(goperl_frame_t *f) {
 }
 #define SAVE_DEFSV goperl_save_defsv(_gof)
 #define SvIOK_UV(sv) \
-    ((SvFLAGS(sv) & (SVf_IOK | GOPERL_INFO_ISUV)) == \
-     (SVf_IOK | GOPERL_INFO_ISUV))
+    ((GOPERL_SVINFO(sv) & (GOPERL_INFO_IOK | GOPERL_INFO_ISUV)) == \
+     (GOPERL_INFO_IOK | GOPERL_INFO_ISUV))
 #define SvPVutf8_nolen(sv) (sv_utf8_upgrade((SV *)(sv)), SvPV_nolen(sv))
 #define XST_mIV(i, v) (ST(i) = sv_2mortal(newSViv((IV)(v))))
 #define XST_mNV(i, v) (ST(i) = sv_2mortal(newSVnv((NV)(v))))
@@ -3865,7 +3835,6 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
 #define Nullch ((char *)0)
 #define PERL_GET_THX goperl_cur_frame_v
 #define dTHR dNOOP
-#define TAINT ((void)0)
 #define TAINT_ENV() ((void)0)
 #define TAINT_PROPER(s) ((void)0)
 #define I_STDARG 1
@@ -3874,21 +3843,12 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
 #define POPn ((NV)SvNV(POPs))
 #define POPl POPi
 #define POPpx SvPV_nolen(POPs)
-#define SvGMAGICAL(sv) SvRMAGICAL(sv)
 /* Writable taint state (DBI assigns PL_tainted around trace calls); the
  * embedded build has no taint support, so the value is inert. */
-__attribute__((weak)) int goperl_pl_tainted_v = 0;
-__attribute__((weak)) int goperl_pl_tainting_v = 0;
-__attribute__((weak)) int goperl_pl_dirty_v = 0;
 #undef PL_tainted
 #undef PL_tainting
 #undef PL_dirty
-#define PL_tainted goperl_pl_tainted_v
-#define PL_tainting goperl_pl_tainting_v
-#define PL_dirty goperl_pl_dirty_v
 /* Assignable no-op: teardown depth is the embedder's business. */
-__attribute__((weak)) int goperl_pl_destruct_level_v = 0;
-#define PL_perl_destruct_level goperl_pl_destruct_level_v
 #define perl_get_sv(name, flags) get_sv((name), (flags))
 #define perl_get_av(name, flags) get_av((name), (flags))
 #define perl_get_hv(name, flags) get_hv((name), (flags))
@@ -3932,17 +3892,12 @@ static void goperl_gv_efullname(goperl_frame_t *f, SV *sv, GV *gv) {
                  strlen(buf));
 }
 #define gv_efullname(sv, gv) goperl_gv_efullname(_gof, (SV *)(sv), (GV *)(gv))
-#define gv_efullname3(sv, gv, prefix) gv_efullname((sv), (gv))
-#define gv_efullname4(sv, gv, prefix, keepmain) gv_efullname((sv), (gv))
 static char *goperl_hv_iterkey(goperl_frame_t *f, HE *he, I32 *retlen) {
     HEK *hek = goperl_he_hek(f, he);
     *retlen = hek->hek_len;
     return hek->hek_key;
 }
 #define hv_iterkey(he, retlen) goperl_hv_iterkey(_gof, (HE *)(he), (retlen))
-#define sv_2nv(sv) SvNV(sv)
-#define sv_2uv(sv) SvUV(sv)
-#define sv_2pv(sv, lenp) ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)(lenp)))
 #define sv_2io(sv) \
     ((IO *)GOPERL_SV(goperl_op0(GOPERL_OP_SV_2IO, GOPERL_TOK(sv), 0)))
 #define sv_force_normal(sv) \
@@ -4037,7 +3992,9 @@ static I32 goperl_eval_sv(goperl_frame_t *f, SV *sv, I32 flags) {
                                            (uint64_t)(int64_t)i, 0, 0);
         *++f->psp = (SV *)(uintptr_t)tok;
     }
-    if (died && !(flags & G_EVAL)) {
+    /* eval_sv traps the error in $@; only G_RETHROW asks for it to be
+     * thrown again (perl.c) */
+    if (died && (flags & G_RETHROW)) {
         uint64_t errtok = goperl_api_v->xs_op(f, GOPERL_OP_ERRSV, 0, 0, 0, 0);
         uint64_t len = 0;
         const char *msg = goperl_api_v->sv_pv(f, errtok, &len);
@@ -4246,8 +4203,6 @@ static U32 *goperl_hints_ref(goperl_frame_t *f) {
 #define HINT_BYTES 0x00000008
 #define SVt_RV SVt_IV /* pre-5.12 name */
 #define PERL_MAGIC_overload_table 'c'
-#define GOPERL_INFO_AMAGIC 65536
-#define SVf_AMAGIC GOPERL_INFO_AMAGIC
 #define av_pop(av) GOPERL_SV(goperl_op0(GOPERL_OP_AV_POP, GOPERL_TOK(av), 0))
 #define av_top_index(av) av_len(av)
 #define av_tindex(av) av_len(av)
@@ -4274,18 +4229,12 @@ static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
 #define MEMBER_TO_FPTR(x) (x)
 #define Perl_deb(...) ((void)0)
 #define Strerror(e) strerror(e)
-#define SvUOK(sv) ((SvFLAGS(sv) & GOPERL_INFO_ISUV) != 0)
+#define SvUOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISUV) != 0)
 /* Dists pair these with a value write (sv_setiv/SvIV_set), which already
  * sets the guest flags — the standalone flag flip is then a no-op. */
-#define SvIOK_on(sv) ((void)(sv))
-#define SvIOK_off(sv) ((void)(sv))
-#define SvIV_set(sv, v) sv_setiv((SV *)(sv), (IV)(v))
-#define SvNV_set(sv, v) sv_setnv((SV *)(sv), (NV)(v))
-#define SvUV_set(sv, v) sv_setuv((SV *)(sv), (UV)(v))
 #define PerlProc_getpid() ((int)getpid())
 #define PerlProc_getuid() ((int)getuid())
 #define PerlEnv_getenv(n) getenv(n)
-#define SvTEMP(sv) 0 /* no host-visible TEMP flag; "never steal" is safe */
 #define XSRETURN_NV(v)                            \
     STMT_START {                                  \
         ST(0) = sv_2mortal(newSVnv((NV)(v)));     \
@@ -4293,13 +4242,10 @@ static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
     }                                             \
     STMT_END
 #define DEBUG_v(x) ((void)0)
-#define SvOK_off(sv) sv_setsv((SV *)(sv), &PL_sv_undef)
 /* Tie magic stays guest-side (not mirrored); every hv/av op above goes
  * through the real perl API, which honors it — so "not visibly tied" makes
  * dists take their plain path, which is then still tie-correct. */
 #define SvTIED_mg(sv, how) ((MAGIC *)0)
-#define sv_2pv_flags(sv, lenp, flags) ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)(lenp)))
-#define sv_cmp_flags(a, b, flags) sv_cmp((a), (b))
 #define sv_copypv(dsv, ssv)                            \
     do {                                               \
         STRLEN goperl_cl;                              \
@@ -4395,15 +4341,12 @@ typedef pid_t Pid_t;
 #define PERLSI_SIGNAL 4
 #define PERLSI_OVERLOAD 5
 #define PERLSI_DESTROY 6
-#define SvGMAGICAL(sv) 0
-#define mg_get(sv) ((void)(sv), 0)
 #define sv_free(sv) SvREFCNT_dec(sv)
 #define CxTRYBLOCK(cx) 0
 #define strnEQ(a, b, n) (strncmp((a), (b), (n)) == 0)
 #define strnNE(a, b, n) (strncmp((a), (b), (n)) != 0)
 typedef U16 OPCODE;
 typedef int opcode;
-#define CvFLAGS(cv) 0 /* diagnostic-only flag word; not modeled */
 #define GvEGV(gv) \
     ((GV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 4)))
 #define GvNAMELEN(gv) \
@@ -4490,7 +4433,6 @@ static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
     ((void)goperl_op0(GOPERL_OP_SV_UTF8_OFF, GOPERL_TOK(sv), 0))
 #define SvREADONLY_on(sv) \
     ((void)goperl_op0(GOPERL_OP_SV_READONLY_ON, GOPERL_TOK(sv), 0))
-#define SvTEMP_off(sv) ((void)(sv)) /* buffer-steal hint; not modeled */
 #define sv_setuv_mg(sv, v) (sv_setuv((sv), (v)), (void)mg_set(sv))
 #define C_ARRAY_LENGTH(a) (sizeof(a) / sizeof((a)[0]))
 #define save_scalar(gv) \
@@ -4503,7 +4445,6 @@ static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
     ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_NEW_CONSTSUB,                  \
                                 GOPERL_TOK(stash), GOPERL_TOK(sv),       \
                                 (name), strlen(name))))
-#define SVf_UTF8 0x20000000 /* only consumed by newSVpvn_flags below */
 static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
                                  STRLEN len, U32 flags)
     __attribute__((unused));
@@ -4550,8 +4491,6 @@ static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len) {
     free(p);
 }
 #define sv_usepvn(sv, p, len) goperl_sv_usepvn(_gof, (SV *)(sv), (p), (len))
-#define SvPV_set(sv, p) ((void)(sv)) /* buffer detach; nothing to detach */
-#define SvLEN_set(sv, l) ((void)(sv))
 
 /* sv_inc: numeric increment (string auto-increment is not modeled). */
 static void goperl_sv_inc(goperl_frame_t *f, SV *sv) {
@@ -4753,7 +4692,6 @@ typedef UV PADOFFSET;
 #define OA_METHOP (14 << OA_CLASS_SHIFT)
 #define OA_UNOP_AUX (15 << OA_CLASS_SHIFT)
 
-#define SVs_PADTMP 0x00020000
 #define CVf_ANON 0x0080
 
 /* ---- PL_parser shadow --------------------------------------------------- */
@@ -5321,7 +5259,6 @@ static CV *goperl_newattrsub_unsup(goperl_frame_t *f) {
     return 0;
 }
 #define newATTRSUB(floor, o, proto, attrs, block) goperl_newattrsub_unsup(_gof)
-#define CvLVALUE_on(cv) ((void)(cv))
 
 /* ---- keyword and infix plugins ------------------------------------------ */
 
@@ -5734,5 +5671,7 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
 #define OPpCONST_BARE 0x20
 #define OPpLVAL_INTRO 0x80
 #define HINT_BLOCK_SCOPE 0x00000100
+
+#include "goperl_perlapi.h"
 
 #endif /* GOPERL_XS_SDK_PERL_H */

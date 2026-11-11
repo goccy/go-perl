@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 9
+const abiVersion = 10
 
 const (
 	maxStack = 512 // GOPERL_XS_STACK
@@ -1393,6 +1393,15 @@ var (
 
 func libcInit() {
 	libcOnce.Do(func() {
+		// A perl executable is linked with the C math library, and XS
+		// modules count on its functions being loaded already: many are
+		// linked without -lm. This binary has no libm of its own, so the
+		// library goes into the global namespace before the first module.
+		// Where it is missing, a module that needs it fails to load with
+		// the dynamic linker's own message.
+		if runtime.GOOS == "linux" {
+			_, _ = purego.Dlopen("libm.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		}
 		for _, sym := range []struct {
 			name string
 			dst  *uintptr
