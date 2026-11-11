@@ -13,8 +13,14 @@ import "io"
 // Each capability is granted explicitly by setting its field.
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
-	// holding the Perl standard library (the assembled lib/ tree); it
-	// becomes @INC via perl_new. Empty defaults to "/" — right for the
+	// holding the Perl standard library (the assembled lib/ tree). It is
+	// the interpreter's own library directory: in @INC it stands where
+	// perl has its built-in library directories — after the directories
+	// the instance is given (AddInc, Program.Inc) and after PERL5LIB from
+	// Env, so a module found there shadows the standard library's copy.
+	// PERL5OPT in Env is not applied when the instance is created: it
+	// belongs to a perl command line, which the host interprets (gperl
+	// does). Empty defaults to "/" — right for the
 	// library default and for NewStdlibMemFS. An instance on the host
 	// filesystem (fs.NewHostFS) points this at a host directory, e.g. the
 	// one ExtractStdlib returns.
