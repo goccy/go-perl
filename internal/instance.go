@@ -15,6 +15,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
 	wasm2go "github.com/goccy/perlwasm2go"
@@ -273,6 +274,12 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	}
 	wasi.SetExecHook(exec)
 	wasi.SetHostProcess(opts.HostProcess)
+	// A program that is the host process is where the host is: when it
+	// names no time zone (TZ), its local time is the host's. An isolated
+	// program is in UTC.
+	if opts.HostProcess {
+		wasi.SetLocalZone(time.Local)
+	}
 	if opts.Syslog {
 		wasi.SetSyslogger(NewSyslogger())
 	}

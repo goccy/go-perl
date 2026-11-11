@@ -91,12 +91,15 @@ type Config struct {
 	//   - a signal the program dies of ends the run with a *SignalError, for
 	//     the embedder to end the host process the same way;
 	//   - kill reaches the host's processes;
-	//   - the program may listen for network connections (bind, listen).
+	//   - the program may listen for network connections (bind, listen);
+	//   - local time is the host's when the program names no time zone (the
+	//     TZ variable is not set).
 	//
 	// When false (the default) the program is an isolated process: pid 42,
 	// parent 1, user and group 0, empty user and group databases, kill
-	// reaches only the processes the program started, and binding a socket
-	// to a local address fails with EACCES. A pseudo-process forked from the program has the same user
+	// reaches only the processes the program started, binding a socket
+	// to a local address fails with EACCES, and local time is UTC unless
+	// the program sets TZ. A pseudo-process forked from the program has the same user
 	// and group but is never the host process: its pid is its own, and a
 	// signal ends only that pseudo-process.
 	HostProcess bool

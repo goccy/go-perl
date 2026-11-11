@@ -16,6 +16,13 @@ import (
 // pseudo-processes; each appends whole lines with syswrite.
 func runForkScript(t *testing.T, src string) []string {
 	t.Helper()
+	return runForkScriptArgs(t, src)
+}
+
+// runForkScriptArgs is runForkScript for a program that takes arguments:
+// they follow the report file in @ARGV.
+func runForkScriptArgs(t *testing.T, src string, args ...string) []string {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the fork tests drive /bin/sh and /bin/echo")
 	}
@@ -26,7 +33,7 @@ sub report { open(my $fh, '>>', $REPORT) or die "report: $!"; syswrite($fh, join
 `
 	script := writeScript(t, "fork.pl", prelude+src)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report})
+	status, err := gperl.Run(script, append([]string{report}, args...))
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
