@@ -95,7 +95,8 @@ enum {
     GOPERL_SVCALL_SETPV_BUFSIZE = 49,
     GOPERL_SVCALL_THROW = 50,
     GOPERL_SVCALL_2PVBYTE = 51,
-    GOPERL_SVCALL_HV_KSPLIT = 52
+    GOPERL_SVCALL_HV_KSPLIT = 52,
+    GOPERL_SVCALL_UNI_DISPLAY = 53
 };
 
 /* GV_CALL selectors: the ones below FIRST_CV take a glob, the rest a CV. */
@@ -1206,7 +1207,7 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_cop_seqmax ((U32)GOPERL_PLVAR(GOPERL_PL_COP_SEQMAX))
 #define PL_origfilename \
     ((char *)goperl_intern_packed(_gof, GOPERL_PLVAR(GOPERL_PL_ORIGFILENAME)))
-#define PL_stack_max (PL_stack_base + GOPERL_XS_STACK - 1)
+#define PL_stack_max (PL_stack_base + _gof->stcap - 1)
 /* The scratch length variable of old XS code (`SvPV(sv, PL_na)`). */
 #define PL_na (GOPERL_SHARED->na)
 
@@ -1254,7 +1255,7 @@ static I32 goperl_call_argv(goperl_frame_t *f, const char *name, I32 flags,
                             char **argv) __attribute__((unused));
 static I32 goperl_call_argv(goperl_frame_t *f, const char *name, I32 flags,
                             char **argv) {
-    goperl_pushmark(f, (I32)(f->psp - (SV **)f->st));
+    goperl_pushmark(f, (I32)(f->psp - f->stbase));
     while (*argv) {
         goperl_stack_extend(f, f->psp, 1);
         uint64_t tok = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, strlen(*argv),
@@ -1591,6 +1592,49 @@ static void goperl_my_setenv(goperl_frame_t *f, const char *nam,
         unsetenv(nam);
 }
 #define my_setenv(nam, val) goperl_my_setenv(_gof, (nam), (val))
+/* sv_uni_display: ssv's characters, escaped for display, into dsv. */
+#ifndef UNI_DISPLAY_ISPRINT
+#define UNI_DISPLAY_ISPRINT 0x0001
+#define UNI_DISPLAY_BACKSLASH 0x0002
+#define UNI_DISPLAY_BACKSPACE 0x0004
+#define UNI_DISPLAY_QQ (UNI_DISPLAY_ISPRINT | UNI_DISPLAY_BACKSLASH | UNI_DISPLAY_BACKSPACE)
+#define UNI_DISPLAY_REGEX (UNI_DISPLAY_ISPRINT | UNI_DISPLAY_BACKSLASH)
+#endif
+static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
+                                   STRLEN pvlim, UV flags)
+    __attribute__((unused));
+static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
+                                   STRLEN pvlim, UV flags) {
+    if (pvlim > 0xFFFFFF) pvlim = 0xFFFFFF;
+    uint64_t r = goperl_do_op(
+        f, GOPERL_OP_SV_CALL,
+        ((uint64_t)GOPERL_SVCALL_UNI_DISPLAY << 32) | (uint32_t)GOPERL_TOK(dsv),
+        ((((uint64_t)pvlim << 8) | (flags & 0xFF)) << 32) |
+            (uint32_t)GOPERL_TOK(ssv),
+        0, 0);
+    if (!(r >> 32)) return 0;
+    return (char *)goperl_api_v->guest_mem(f, r >> 32);
+}
+#define sv_uni_display(dsv, ssv, pvlim, flags) \
+    goperl_sv_uni_display(_gof, (SV *)(dsv), (SV *)(ssv), (STRLEN)(pvlim), (UV)(flags))
+/* memCHRs: whether the character is one of those of a string literal. */
+#define memCHRs(lit, c) ((const char *)memchr("" lit "", (c), sizeof(lit) - 1))
+#define Select_fd_set_t fd_set *
+#define PERLDB_ALL                                                   \
+    (PERLDBf_SUB | PERLDBf_LINE | PERLDBf_NOOPT | PERLDBf_INTER |    \
+     PERLDBf_SUBLINE | PERLDBf_SINGLE | PERLDBf_NAMEEVAL |           \
+     PERLDBf_NAMEANON | PERLDBf_SAVESRC)
+#define PERLDB_SUB (PL_perldb & PERLDBf_SUB)
+#define PERLDB_LINE (PL_perldb & PERLDBf_LINE)
+#define PERLDB_NOOPT (PL_perldb & PERLDBf_NOOPT)
+#define PERLDB_INTER (PL_perldb & PERLDBf_INTER)
+#define PERLDB_SUBLINE (PL_perldb & PERLDBf_SUBLINE)
+#define PERLDB_SINGLE (PL_perldb & PERLDBf_SINGLE)
+#define PERLDB_SUB_NN (PL_perldb & PERLDBf_NONAME)
+#define PERLDB_GOTO (PL_perldb & PERLDBf_GOTO)
+#define PERLDB_NAMEEVAL (PL_perldb & PERLDBf_NAMEEVAL)
+#define PERLDB_NAMEANON (PL_perldb & PERLDBf_NAMEANON)
+#define PERLDB_SAVESRC (PL_perldb & PERLDBf_SAVESRC)
 #define hv_ksplit(hv, newmax)                                             \
     ((void)goperl_do_op(_gof, GOPERL_OP_SV_CALL,                          \
                         ((uint64_t)GOPERL_SVCALL_HV_KSPLIT << 32) |       \

@@ -559,7 +559,11 @@ struct goperl_frame {
     uint64_t hook_op_tok;    /* +104 pp-hook frames: the op being executed */
     void *prev_frame;        /* +112 frame nesting (goperl_cur_frame_v) */
     void *inst;              /* +120 this INSTANCE's shared-state block */
-    uint64_t st[GOPERL_XS_STACK];   /* +128 the perl stack (tokens) */
+    SV **stbase;             /* +128 the perl stack: st below, or a heap
+                              * block once it outgrew st (the loader frees
+                              * it when the frame ends) */
+    int64_t stcap;           /* +136 its capacity in slots */
+    uint64_t st[GOPERL_XS_STACK];   /* +144 the initial stack (tokens) */
     int32_t marks[GOPERL_XS_MARKS]; /* mark offsets into st */
     uint64_t tmp[GOPERL_XS_TMPS];   /* slots backing SV**-returning macros */
     char err[512];
@@ -2268,7 +2272,7 @@ static I32 goperl_sv_cmp_fn(pTHX_ SV *a, SV *b) {
 
 /* ---- the perl stack ------------------------------------------------------ */
 
-#define PL_stack_base ((SV **)_gof->st)
+#define PL_stack_base (_gof->stbase)
 #define PL_stack_sp (_gof->psp)
 
 /* PL_markstack_ptr is an assignable pointer some dists arithmetic on
@@ -2303,10 +2307,26 @@ static void goperl_pushmark(goperl_frame_t *f, I32 off) {
     f->marks[++f->markidx] = off;
     goperl_marks_publish(f);
 }
-static void goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
-    if ((sp - (SV **)f->st) + n >= GOPERL_XS_STACK)
-        goperl_croakf(f, "perl stack overflow in native XS (max %d)",
-                      GOPERL_XS_STACK);
+/* Makes room for n more values above sp, moving the stack to a larger
+ * block when it is full, and returns sp in the stack as it now is (the
+ * frame's own stack pointer is moved along). As with perl's EXTEND, a
+ * pointer into the stack taken before (MARK) is stale after it; ST(n) and
+ * ORIGMARK are not, they go through the base. */
+static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
+    int64_t used = (int64_t)(sp - f->stbase);
+    if (n < 0) n = 0;
+    if (used + n + 1 < f->stcap) return sp;
+    int64_t ncap = f->stcap * 2;
+    if (ncap < used + n + 64) ncap = used + n + 64;
+    SV **nb = (SV **)malloc((size_t)ncap * sizeof(SV *));
+    if (!nb) goperl_croakf(f, "Out of memory during stack extend");
+    memcpy(nb, f->stbase, (size_t)f->stcap * sizeof(SV *));
+    int64_t psp = (int64_t)(f->psp - f->stbase);
+    if (f->stbase != (SV **)f->st) free(f->stbase);
+    f->stbase = nb;
+    f->stcap = ncap;
+    f->psp = nb + psp;
+    return nb + used;
 }
 
 #define dSP SV **sp = PL_stack_sp
@@ -2323,7 +2343,7 @@ static void goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
     I32 ax = POPMARK + 1;   \
     SV **mark = PL_stack_base + ax - 1
 #define dITEMS I32 items = (I32)(sp - mark)
-#define EXTEND(p, n) goperl_stack_extend(_gof, (p), (SSize_t)(n))
+#define EXTEND(p, n) ((void)((p) = goperl_stack_extend(_gof, (p), (SSize_t)(n))))
 #define PUSHs(s) (*++sp = (SV *)(s))
 #define XPUSHs(s)                 \
     STMT_START {                  \
@@ -2935,11 +2955,12 @@ static void goperl_save_delete(goperl_frame_t *f, HV *hv, char *key,
 static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
                           I32 flags) {
     I32 markoff = goperl_popmark(f);
-    SV **base = (SV **)f->st;
+    SV **base = f->stbase;
     SV **mark = base + markoff;
     I32 nargs = (I32)(f->psp - mark);
-    char buf[GOPERL_XS_STACK * 4 + 256];
+    char *buf = (char *)malloc((size_t)(nargs > 0 ? nargs : 0) * 4 + 256);
     size_t o = 0;
+    if (!buf) goperl_croakf(f, "Out of memory!");
     if (method) {
         size_t ml = strlen(method) + 1;
         if (ml > 255) ml = 255;
@@ -2961,10 +2982,11 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
                               ((uint64_t)(uint32_t)flags << 32) |
                                   (uint32_t)GOPERL_TOK(sv),
                               o, buf, o);
+    free(buf);
     int died = (int)(packed >> 63);
     I32 count = (I32)((packed >> 32) & 0x7FFFFFFF);
     uint64_t avtok = (uint32_t)packed;
-    f->psp = mark; /* args consumed */
+    f->psp = f->stbase + markoff; /* args consumed */
     goperl_stack_extend(f, f->psp, count);
     for (I32 i = 0; i < count; i++) {
         uint64_t tok = goperl_api_v->xs_op(f, GOPERL_OP_AV_FETCH, avtok,
@@ -3318,7 +3340,7 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
         goperl_croakf(_gof, "pp dispatch: scratch op %d is not supported",
                       type);
     }
-    SV **base = (SV **)_gof->st;
+    SV **base = _gof->stbase;
     if ((I32)(_gof->psp - base) < nargs)
         goperl_croakf(_gof, "pp dispatch: stack underflow");
     char buf[64 * 4];

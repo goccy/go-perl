@@ -62,7 +62,11 @@ const (
 )
 
 const (
-	maxStack = 512 // GOPERL_XS_STACK
+	maxStack = 512 // GOPERL_XS_STACK: the slots a frame starts with
+	// stackHeadroom is the room above the arguments a frame is given when
+	// they do not fit the initial stack: return values an XSUB stores
+	// without extending the stack first.
+	stackHeadroom = 64
 	// sharedBlockSize matches GOPERL_SHARED_RESERVED in the SDK.
 	sharedBlockSize = 262144
 	maxMarks        = 64 // GOPERL_XS_MARKS
@@ -100,10 +104,16 @@ type cFrame struct {
 	hookOpTok    uint64  // pp-hook frames: the guest op being executed
 	prevFrame    uintptr // frame nesting (SDK-maintained)
 	instShared   uintptr // this instance's shared-state block (goperl_shared_t)
-	st           [maxStack]uint64
-	marks        [maxMarks]int32
-	tmp          [tmpSlots]uint64
-	err          [512]byte
+	// stBase and stCap describe the perl stack of the frame: st below to
+	// begin with, a C heap block when the call has more arguments than st
+	// holds or the SDK's EXTEND outgrew it. The block is freed when the
+	// frame ends (releaseStack).
+	stBase uintptr
+	stCap  int64
+	st     [maxStack]uint64
+	marks  [maxMarks]int32
+	tmp    [tmpSlots]uint64
+	err    [512]byte
 
 	// Go-only:
 	p *internal.Perl
@@ -339,7 +349,13 @@ func pinFrame(f *cFrame) uintptr {
 	return addr
 }
 
-func unpinFrame(addr uintptr) { liveFrames.Delete(addr) }
+// unpinFrame ends a frame: its stack is released if it grew onto the heap.
+func unpinFrame(addr uintptr) {
+	if f := lookupFrame(addr); f != nil {
+		f.releaseStack()
+	}
+	liveFrames.Delete(addr)
+}
 
 // lookupFrame resolves a callback's frame argument WITHOUT converting the
 // uintptr back into a Go pointer: the pin registry keyed by address hands the
@@ -571,9 +587,6 @@ func (s *state) dispatch(req []byte) []byte {
 	id := int32(binary.LittleEndian.Uint32(req[0:]))
 	cvTok := uint64(binary.LittleEndian.Uint32(req[4:]))
 	items := int(binary.LittleEndian.Uint32(req[8:]))
-	if items >= maxStack-1 {
-		return fail(fmt.Sprintf("native XS dispatch: %d arguments exceed the SDK stack (%d)", items, maxStack))
-	}
 	if len(req) < 12+4*items {
 		return fail("native XS dispatch: truncated payload")
 	}
@@ -594,12 +607,13 @@ func (s *state) dispatch(req []byte) []byte {
 	// at st[1..items] (so ax == 1), sp at the last argument.
 	f.marks[0] = 0
 	f.markidx = 0
+	f.initStack(items)
 	for i := 0; i < items; i++ {
-		f.st[1+i] = uint64(binary.LittleEndian.Uint32(req[12+4*i:]))
+		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[12+4*i:])))
 	}
-	base := uintptr(unsafe.Pointer(&f.st[0]))
-	f.psp = base + uintptr(items)*8
+	f.psp = f.stBase + uintptr(items)*8
 	fp := pinFrame(f)
+	defer unpinFrame(fp)
 	// The XSUB call and the epilogue that closes its activation must run
 	// on ONE OS thread: the SDK's current-frame state is per-thread, and
 	// the Go scheduler is otherwise free to migrate the goroutine between
@@ -615,7 +629,6 @@ func (s *state) dispatch(req []byte) []byte {
 	if epi != 0 {
 		purego.SyscallN(epi, fp)
 	}
-	unpinFrame(fp)
 	if f.failed == failedThrown {
 		// croak_sv: the interpreter holds the thrown value and dies with
 		// it when it sees this response.
@@ -624,8 +637,8 @@ func (s *state) dispatch(req []byte) []byte {
 	if f.failed != 0 {
 		return fail(f.errString())
 	}
-	top := int(int64(f.psp-base) / 8)
-	if top < 0 || top >= maxStack {
+	top := int(int64(f.psp-f.stBase) / 8)
+	if top < 0 || int64(top) >= f.stCap {
 		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d)", top))
 	}
 	n := top // ax == 1: return values are st[1..top]
@@ -633,7 +646,7 @@ func (s *state) dispatch(req []byte) []byte {
 	resp[0] = 1
 	binary.LittleEndian.PutUint32(resp[1:], uint32(n))
 	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint32(resp[5+4*i:], uint32(f.st[1+i]))
+		binary.LittleEndian.PutUint32(resp[5+4*i:], uint32(f.stackAt(1+i)))
 	}
 	return resp
 }
@@ -644,7 +657,8 @@ func (s *state) bootFrame() (*cFrame, uintptr) {
 	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw}
 	f.marks[0] = 0
 	f.markidx = 0
-	f.psp = uintptr(unsafe.Pointer(&f.st[0]))
+	f.initStack(0)
+	f.psp = f.stBase
 	return f, pinFrame(f)
 }
 
@@ -681,10 +695,11 @@ func (s *state) ppHook(req []byte) []byte {
 	f.items = int32(n)
 	f.marks[0] = 0
 	f.markidx = 0
+	f.initStack(n)
 	for i := 0; i < n; i++ {
-		f.st[1+i] = uint64(binary.LittleEndian.Uint32(req[12+4*i:]))
+		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[12+4*i:])))
 	}
-	f.psp = uintptr(unsafe.Pointer(&f.st[0])) + uintptr(n)*8
+	f.psp = f.stBase + uintptr(n)*8
 	fp := pinFrame(f)
 	next, _, _ := purego.SyscallN(invoke, fp, fn)
 	unpinFrame(fp)
@@ -1333,6 +1348,50 @@ func buildVtable() {
 		}
 		return 0
 	})
+}
+
+// initStack gives the frame a stack with room for items arguments: its own
+// array, or a C heap block when they do not fit.
+func (f *cFrame) initStack(items int) {
+	if items+stackHeadroom <= maxStack {
+		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
+		f.stCap = maxStack
+		return
+	}
+	f.stCap = int64(items + stackHeadroom)
+	f.stBase = cMalloc(int(f.stCap) * 8)
+	pokeBytes(f.stBase, make([]byte, int(f.stCap)*8))
+}
+
+// inlineStack reports whether the stack is still the frame's own array.
+func (f *cFrame) inlineStack() bool {
+	return f.stBase == uintptr(unsafe.Pointer(&f.st[0]))
+}
+
+// setStack and stackAt write and read slot i of the stack, wherever it is.
+func (f *cFrame) setStack(i int, tok uint64) {
+	if f.inlineStack() {
+		f.st[i] = tok
+		return
+	}
+	pokeU64(f.stBase+uintptr(i)*8, tok)
+}
+
+func (f *cFrame) stackAt(i int) uint64 {
+	if f.inlineStack() {
+		return f.st[i]
+	}
+	return binary.LittleEndian.Uint64(copyIn(f.stBase+uintptr(i)*8, 8))
+}
+
+// releaseStack frees the stack when it is a heap block (the loader's for a
+// long argument list, or the one the SDK moved it to).
+func (f *cFrame) releaseStack() {
+	if f.stBase != 0 && !f.inlineStack() {
+		cFree(f.stBase)
+		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
+		f.stCap = maxStack
+	}
 }
 
 // fail records an error on the frame; the dispatcher reports it after the

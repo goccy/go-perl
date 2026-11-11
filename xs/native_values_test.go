@@ -70,6 +70,20 @@ func TestNativeIntegersCrossAtFullWidth(t *testing.T) {
 	})
 }
 
+// An XSUB takes and returns lists of any length, and so does a Perl sub it
+// calls: the stack of the call grows.
+func TestNativeLongLists(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a short argument list", `PerlAPI::sum_args(1 .. 10)`, "55"},
+		{"5000 arguments", `PerlAPI::sum_args(1 .. 5000)`, "12502500"},
+		{"5000 values after one EXTEND", `my @v = PerlAPI::count_up(5000, 0); scalar(@v) . ":$v[0]:$v[-1]"`, "5000:1:5000"},
+		{"5000 values pushed one by one", `my @v = PerlAPI::count_up(5000, 1); scalar(@v) . ":$v[0]:$v[-1]"`, "5000:1:5000"},
+		{"3000 arguments to a callback that doubles them", `join ":", PerlAPI::relay_list(sub { map { ($_, $_ * 2) } @_ }, 3000)`, "6000:6000"},
+	})
+}
+
 // SvPVbyte gives the byte form of a string: one held as UTF-8 is converted,
 // and one with a character above 255 has none.
 func TestNativeByteStrings(t *testing.T) {
@@ -79,6 +93,7 @@ func TestNativeByteStrings(t *testing.T) {
 		{"plain bytes", `PerlAPI::bytes_hex("a\xff")`, "61ff"},
 		{"a string held as UTF-8", `my $s = "caf\xe9"; utf8::upgrade($s); PerlAPI::bytes_hex($s)`, "636166e9"},
 		{"a wide character", `eval { PerlAPI::bytes_hex("\x{263a}") }; $@ =~ /^Wide character/ ? "refused" : "accepted: $@"`, "refused"},
+		{"sv_uni_display and memCHRs", `PerlAPI::display("a\x{263a}\n") . "|" . PerlAPI::display("z")`, `a\x{263a}\n (vowel)|z (other)`},
 		{"my_setenv reaches the host's C environment", `PerlAPI::setenv_then_getenv("GOPERL_XS_ENV_PROBE", "set") . "," . (defined PerlAPI::setenv_then_getenv("GOPERL_XS_ENV_PROBE", undef) ? "still set" : "removed")`, "set,removed"},
 	})
 }

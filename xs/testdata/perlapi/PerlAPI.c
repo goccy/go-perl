@@ -797,6 +797,85 @@ XS(XS_PerlAPI_presize) {
     }
 }
 
+/* ---- long lists on the stack --------------------------------------------- */
+
+/* The sum of all arguments, however many. */
+XS(XS_PerlAPI_sum_args) {
+    dXSARGS;
+    {
+        IV sum = 0;
+        I32 i;
+        for (i = 0; i < items; i++) sum += SvIV(ST(i));
+        XSRETURN_IV(sum);
+    }
+}
+
+/* Returns 1..n: with one EXTEND for all of them, or with XPUSHs each. */
+XS(XS_PerlAPI_count_up) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "n, one_by_one");
+    {
+        IV n = SvIV(ST(0)), i;
+        int one_by_one = SvTRUE(ST(1));
+        SP -= items;
+        if (!one_by_one) EXTEND(SP, n);
+        for (i = 1; i <= n; i++) {
+            if (one_by_one)
+                XPUSHs(sv_2mortal(newSViv(i)));
+            else
+                PUSHs(sv_2mortal(newSViv(i)));
+        }
+        PUTBACK;
+        return;
+    }
+}
+
+/* Calls code with n arguments in list context and returns how many values
+ * came back and the last of them. */
+XS(XS_PerlAPI_relay_list) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "code, n");
+    {
+        SV *code = ST(0);
+        IV n = SvIV(ST(1)), i, last = 0;
+        I32 count;
+        ENTER;
+        SAVETMPS;
+        PUSHMARK(SP);
+        EXTEND(SP, n);
+        for (i = 1; i <= n; i++) PUSHs(sv_2mortal(newSViv(i)));
+        PUTBACK;
+        count = call_sv(code, G_LIST);
+        SPAGAIN;
+        if (count > 0) last = SvIV(TOPs);
+        SP -= count;
+        PUTBACK;
+        FREETMPS;
+        LEAVE;
+        EXTEND(SP, 2);
+        ST(0) = sv_2mortal(newSViv(count));
+        ST(1) = sv_2mortal(newSViv(last));
+        XSRETURN(2);
+    }
+}
+
+/* The argument's characters escaped for display, and whether its first
+ * character is a vowel. */
+XS(XS_PerlAPI_display) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *out = sv_newmortal();
+        STRLEN len;
+        const char *p = SvPV(ST(0), len);
+        int vowel = len > 0 && memCHRs("aeiou", p[0]) != NULL;
+        sv_uni_display(out, ST(0), 100, UNI_DISPLAY_QQ);
+        sv_catpv(out, vowel ? " (vowel)" : " (other)");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -855,5 +934,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::with_local_errsv", XS_PerlAPI_with_local_errsv);
     newXS_deffile("PerlAPI::pio_buffer", XS_PerlAPI_pio_buffer);
     newXS_deffile("PerlAPI::presize", XS_PerlAPI_presize);
+    newXS_deffile("PerlAPI::sum_args", XS_PerlAPI_sum_args);
+    newXS_deffile("PerlAPI::count_up", XS_PerlAPI_count_up);
+    newXS_deffile("PerlAPI::relay_list", XS_PerlAPI_relay_list);
+    newXS_deffile("PerlAPI::display", XS_PerlAPI_display);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
