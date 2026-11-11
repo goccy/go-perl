@@ -176,7 +176,9 @@ enum {
     GOPERL_SVSTR_COP_HINT = 9,
     GOPERL_SVSTR_SETENV = 10,
     /* 11 to 14: the formatter's (perl.h) */
-    GOPERL_SVSTR_TAINT_PROPER = 15
+    GOPERL_SVSTR_TAINT_PROPER = 15,
+    /* 16: the formatter's (perl.h) */
+    GOPERL_SVSTR_GV_NAME_SET = 17
 };
 
 /* PLVAR_GET/SET ids beyond the shadowed ones of perl.h. */
@@ -1201,6 +1203,10 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvIMPORTED_AV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_AV, 0)
 #define GvIMPORTED_HV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_HV, 0)
 #define GvCVGEN(gv) (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVCVGEN))
+/* The name of a glob is changed with gv_name_set; GvNAME is not an lvalue
+ * (nor is it on perl). */
+#define gv_name_set(gv, name, len, flags) \
+    ((void)GOPERL_SVSTR(GOPERL_SVSTR_GV_NAME_SET, gv, flags, (name), (len)))
 /* GvGP is an identity: modules test it and compare it, never look inside. */
 #define GvGP(gv) ((void *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
 #define GvFILE(gv) \
@@ -1623,7 +1629,7 @@ static NV goperl_scan_radix(goperl_frame_t *f, const char *start, STRLEN len,
 
 #define UVCHR_SKIP(uv) \
     ({ GOPERL_ONCE(goperl_UVCHR_SKIP_uv_, uv); \
-       (UV)goperl_UVCHR_SKIP_uv_ < 0x80 ? 1 : (UV)goperl_UVCHR_SKIP_uv_ < 0x800 ? 2 : (UV)goperl_UVCHR_SKIP_uv_ < 0x10000 ? 3 : (UV)goperl_UVCHR_SKIP_uv_ < 0x200000 ? 4 : (UV)goperl_UVCHR_SKIP_uv_ < 0x4000000 ? 5 : (UV)goperl_UVCHR_SKIP_uv_ < 0x80000000 ? 6 : 7; })
+       (UV)goperl_UVCHR_SKIP_uv_ < 0x80 ? 1 : (UV)goperl_UVCHR_SKIP_uv_ < 0x800 ? 2 : (UV)goperl_UVCHR_SKIP_uv_ < 0x10000 ? 3 : (UV)goperl_UVCHR_SKIP_uv_ < 0x200000 ? 4 : (UV)goperl_UVCHR_SKIP_uv_ < 0x4000000 ? 5 : (UV)goperl_UVCHR_SKIP_uv_ < 0x80000000 ? 6 : (UV)goperl_UVCHR_SKIP_uv_ < ((UV)1 << 36) ? 7 : 13; })
 #define UNISKIP(uv) UVCHR_SKIP(uv)
 #define OFFUNISKIP(uv) UVCHR_SKIP(uv)
 #define utf8_to_uvchr(s, retlen) \

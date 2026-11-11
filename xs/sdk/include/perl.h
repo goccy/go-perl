@@ -5764,7 +5764,14 @@ static const char PL_hexdigit[] = "0123456789abcdef0123456789ABCDEF";
     (UTF8_DISALLOW_SURROGATE | UTF8_DISALLOW_SUPER)
 static const U8 goperl_utf8skip_v[16] = {1, 1, 1, 1, 1, 1, 1, 1,
                                          1, 1, 1, 1, 2, 2, 3, 4};
-#define UTF8SKIP(s) ((STRLEN)goperl_utf8skip_v[((U8) * (const U8 *)(s)) >> 4])
+/* The length a start byte announces. Above U+1FFFFF perl's extended
+ * UTF-8 goes on: five bytes (F8-FB), six (FC, FD), seven (FE), thirteen
+ * (FF). */
+static inline __attribute__((unused)) STRLEN goperl_utf8skip(U8 c) {
+    if (c < 0xF8) return goperl_utf8skip_v[c >> 4];
+    return c < 0xFC ? 5 : c < 0xFE ? 6 : c == 0xFE ? 7 : 13;
+}
+#define UTF8SKIP(s) goperl_utf8skip(*(const U8 *)(s))
 static STRLEN goperl_utf8_length(const U8 *s, const U8 *e) {
     STRLEN n = 0;
     while (s < e) {
@@ -5833,11 +5840,21 @@ static U8 *goperl_uvchr_to_utf8(U8 *d, UV uv) {
         *d++ = (U8)(0xe0 | (uv >> 12));
         *d++ = (U8)(0x80 | ((uv >> 6) & 0x3f));
         *d++ = (U8)(0x80 | (uv & 0x3f));
-    } else {
+    } else if (uv < 0x200000) {
         *d++ = (U8)(0xf0 | (uv >> 18));
         *d++ = (U8)(0x80 | ((uv >> 12) & 0x3f));
         *d++ = (U8)(0x80 | ((uv >> 6) & 0x3f));
         *d++ = (U8)(0x80 | (uv & 0x3f));
+    } else {
+        /* perl's extended UTF-8: the start byte says how many bytes, and
+         * each of the others carries six bits */
+        const int n = uv < 0x4000000 ? 5 : uv < 0x80000000 ? 6
+                      : uv < ((UV)1 << 36) ? 7 : 13;
+        *d++ = n == 5 ? (U8)(0xf8 | (uv >> 24))
+               : n == 6 ? (U8)(0xfc | (uv >> 30))
+               : n == 7 ? (U8)0xfe : (U8)0xff;
+        for (int i = n - 2; i >= 0; i--)
+            *d++ = (U8)(0x80 | (i * 6 < 64 ? ((uv >> (i * 6)) & 0x3f) : 0));
     }
     return d;
 }

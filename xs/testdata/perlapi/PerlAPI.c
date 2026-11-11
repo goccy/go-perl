@@ -1642,6 +1642,38 @@ XS(XS_PerlAPI_evaluated_twice) {
     }
 }
 
+/* The UTF-8 bytes of a code point, in hex, and the length UVCHR_SKIP and
+ * UTF8SKIP give for it. */
+XS(XS_PerlAPI_encode_uv) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "uv");
+    {
+        U8 bytes[UTF8_MAXBYTES + 1];
+        char hex[2 * UTF8_MAXBYTES + 1];
+        const UV uv = SvUV(ST(0));
+        U8 *end = uvchr_to_utf8(bytes, uv);
+        STRLEN i, n = (STRLEN)(end - bytes);
+        for (i = 0; i < n; i++) snprintf(hex + 2 * i, 3, "%02x", bytes[i]);
+        ST(0) = sv_2mortal(newSVpvf("%s:%lu:%lu", hex, (unsigned long)UVCHR_SKIP(uv),
+                                    (unsigned long)UTF8SKIP(bytes)));
+        XSRETURN(1);
+    }
+}
+
+/* Gives the glob of a name another name with gv_name_set. */
+XS(XS_PerlAPI_rename_glob) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "glob, name");
+    {
+        STRLEN len;
+        const char *name = SvPV(ST(1), len);
+        GV *gv = gv_fetchpv(SvPV_nolen(ST(0)), GV_ADD, SVt_PV);
+        gv_name_set(gv, name, len, GV_NOTQUAL);
+        ST(0) = sv_2mortal(newSVpv(GvNAME(gv), 0));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1742,5 +1774,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::glob_fields", XS_PerlAPI_glob_fields);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
+    newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);
+    newXS_deffile("PerlAPI::rename_glob", XS_PerlAPI_rename_glob);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

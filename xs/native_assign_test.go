@@ -49,3 +49,30 @@ func TestNativeMacrosEvaluateEachArgumentOnce(t *testing.T) {
 		{"none evaluates an argument twice", `my $s = "text" . "1"; "[" . PerlAPI::evaluated_twice($s) . "]"`, "[]"},
 	})
 }
+
+// Characters above U+1FFFFF have perl's extended UTF-8: five bytes and
+// more. The encoder writes them, the length macros count them and the
+// decoder reads them, as the interpreter does for the same code point.
+func TestNativeExtendedUTF8(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	if r, err := p.Eval(context.Background(), `sub own { my $c = chr(shift); utf8::encode($c); unpack("H*", $c) . ":" . length($c) . ":" . length($c) } 1`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"four bytes", `PerlAPI::encode_uv(0x10FFFF)`, "f48fbfbf:4:4"},
+		{"five bytes, as the interpreter encodes it", `no warnings; PerlAPI::encode_uv(0x310000) eq own(0x310000) ? PerlAPI::encode_uv(0x310000) : "differs: " . own(0x310000)`, "f88c908080:5:5"},
+		{"six bytes", `no warnings; PerlAPI::encode_uv(0x7FFFFFFF) eq own(0x7FFFFFFF) ? "same" : own(0x7FFFFFFF)`, "same"},
+		{"decoded", `PerlAPI::decode_first("\xf8\x8c\x90\x80\x80", 0)`, "310000:5"},
+	})
+}
+
+// gv_name_set renames a glob; a module that names the subs it generates
+// does it with that (GvNAME itself is not assignable, on perl neither).
+func TestNativeGlobRename(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"gv_name_set", `$Renamed::old = 1; join ",", PerlAPI::rename_glob("Renamed::old", "fresh"), *Renamed::old{NAME}`, "fresh,fresh"},
+	})
+}
