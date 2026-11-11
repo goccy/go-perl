@@ -1497,6 +1497,79 @@ XS(XS_PerlAPI_pio_failures) {
     }
 }
 
+/* Two functions for one sub, PerlAPI::impl, and an XSUB that exchanges
+ * them by assigning to CvXSUB: it returns whether the second is installed
+ * afterwards. */
+XS(XS_PerlAPI_impl_one) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvs("one"));
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_impl_two) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvs("two"));
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_exchange) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        CV *target = get_cv("PerlAPI::impl", 0);
+        if (CvXSUB(target) == XS_PerlAPI_impl_one)
+            CvXSUB(target) = XS_PerlAPI_impl_two;
+        else
+            CvXSUB(target) = XS_PerlAPI_impl_one;
+        ST(0) = boolSV(CvXSUB(target) == XS_PerlAPI_impl_two);
+        XSRETURN(1);
+    }
+}
+
+/* Assigns to the method-cache generation of a glob and to its stash:
+ * returns the generation after `= 7` and after `= 0`, and the name of the
+ * stash read back after `GvSTASH(gv) = ...`. */
+XS(XS_PerlAPI_glob_fields) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "name, package");
+    {
+        GV *gv = gv_fetchpv(SvPV_nolen(ST(0)), GV_ADD, SVt_PVCV);
+        U32 set, cleared;
+        const char *stash_name;
+        GvCVGEN(gv) = 7;
+        set = GvCVGEN(gv);
+        GvCVGEN(gv) = 0;
+        cleared = GvCVGEN(gv);
+        GvSTASH(gv) = gv_stashpv(SvPV_nolen(ST(1)), GV_ADD);
+        stash_name = HvNAME(GvSTASH(gv));
+        SP -= items;
+        EXTEND(SP, 3);
+        mPUSHu(set);
+        mPUSHu(cleared);
+        mPUSHs(newSVpv(stash_name, 0));
+        PUTBACK;
+        return;
+    }
+}
+
+/* A warning of the utf8 category, given with Perl_warner (how 0),
+ * Perl_ck_warner (1) or Perl_ck_warner_d (2). */
+XS(XS_PerlAPI_category_warning) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "how, text");
+    {
+        const IV how = SvIV(ST(0));
+        const char *text = SvPV_nolen(ST(1));
+        if (how == 0)
+            Perl_warner(aTHX_ packWARN(WARN_UTF8), "%s\n", text);
+        else if (how == 1)
+            Perl_ck_warner(aTHX_ packWARN(WARN_UTF8), "%s\n", text);
+        else
+            Perl_ck_warner_d(aTHX_ packWARN(WARN_UTF8), "%s\n", text);
+        XSRETURN_YES;
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1592,5 +1665,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::decode_first", XS_PerlAPI_decode_first);
     newXS_deffile("PerlAPI::pio_layers", XS_PerlAPI_pio_layers);
     newXS_deffile("PerlAPI::pio_failures", XS_PerlAPI_pio_failures);
+    newXS_deffile("PerlAPI::impl", XS_PerlAPI_impl_one);
+    newXS_deffile("PerlAPI::exchange", XS_PerlAPI_exchange);
+    newXS_deffile("PerlAPI::glob_fields", XS_PerlAPI_glob_fields);
+    newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

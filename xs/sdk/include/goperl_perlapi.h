@@ -125,8 +125,42 @@ enum {
     GOPERL_GVCALL_CV_STASH_SET = 33,
     GOPERL_GVCALL_CV_FLAGS = 34,
     GOPERL_GVCALL_CV_OUTSIDE = 35,
-    GOPERL_GVCALL_CV_PROTO = 36
+    GOPERL_GVCALL_CV_PROTO = 36,
+    GOPERL_GVCALL_CVGEN_SET = 16,
+    GOPERL_GVCALL_STASH_SET = 17
 };
+
+/* The glob and CV fields that are lvalues (see GOPERL_LV_CVXSUB). */
+static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
+    switch (field) {
+    case GOPERL_LV_CVXSUB:
+        return (uint64_t)(uintptr_t)goperl_api_cv_xsub(f, tok);
+    case GOPERL_LV_GVSTASH:
+        return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 0, 0, 0);
+    default:
+        return goperl_do_op(f, GOPERL_OP_GV_CALL,
+                            ((uint64_t)GOPERL_GVCALL_CVGEN << 32) | (uint32_t)tok,
+                            0, 0, 0);
+    }
+}
+static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
+                                  uint64_t val) {
+    switch (field) {
+    case GOPERL_LV_CVXSUB:
+        goperl_api_cv_set_xsub(f, tok, (void *)(uintptr_t)val);
+        break;
+    case GOPERL_LV_GVSTASH:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_STASH_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    default:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_CVGEN_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    }
+}
 
 /* SV_STR selectors. */
 enum {
@@ -1131,7 +1165,7 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvIMPORTED_SV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_SV, 0)
 #define GvIMPORTED_AV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_AV, 0)
 #define GvIMPORTED_HV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_HV, 0)
-#define GvCVGEN(gv) ((U32)GOPERL_GVCALL(GOPERL_GVCALL_CVGEN, gv, 0))
+#define GvCVGEN(gv) (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVCVGEN))
 /* GvGP is an identity: modules test it and compare it, never look inside. */
 #define GvGP(gv) ((void *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
 #define GvFILE(gv) \

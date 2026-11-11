@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 13u
+#define GOPERL_XS_ABI 14u
 
 /* The perl this SDK targets (the embedded interpreter's version). */
 #include "patchlevel.h"
@@ -533,6 +533,8 @@ typedef struct goperl_api {
     /* the descriptor of the host process behind a descriptor of the
      * interpreter, or -1 when it has none */
     int64_t (*host_fd)(goperl_frame_t *, int64_t guest_fd);
+    /* `CvXSUB(cv) = fn`: the CV calls the native function fn from now on */
+    void (*cv_set_xsub)(goperl_frame_t *, uint64_t cv, void *fn);
 } goperl_api_t;
 #define GOPERL_SHARED_RESERVED 262144
 
@@ -672,6 +674,10 @@ static inline __attribute__((unused)) uint32_t goperl_api_perlio_def(
 static inline __attribute__((unused)) int64_t goperl_api_host_fd(
     goperl_frame_t *f, int64_t guest_fd) {
     GOPERL_KEEP_ERRNO(int64_t, goperl_api_v->host_fd(f, guest_fd));
+}
+static inline __attribute__((unused)) void goperl_api_cv_set_xsub(
+    goperl_frame_t *f, uint64_t cv, void *fn) {
+    GOPERL_KEEP_ERRNO_VOID(goperl_api_v->cv_set_xsub(f, cv, fn));
 }
 /* The interpreter's number for a host errno value. Its C library has a
  * number for every POSIX name; a host value it has no name for (a few are
@@ -1293,6 +1299,15 @@ typedef struct goperl_shared {
 #define GOPERL_LV_IV 0
 #define GOPERL_LV_UV 1
 #define GOPERL_LV_NV 2
+/* The same mechanism gives the function of an XSUB and two fields of a
+ * glob as lvalues: `CvXSUB(cv) = fn`, `GvSTASH(gv) = stash`,
+ * `GvCVGEN(gv) = 0`. */
+#define GOPERL_LV_CVXSUB 3
+#define GOPERL_LV_GVSTASH 4
+#define GOPERL_LV_GVCVGEN 5
+static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field);
+static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
+                                  uint64_t val);
 #define goperl_lvchunks_v (GOPERL_SHARED->lvchunks)
 
 /* PL_ppaddr proxy: every slot is the same generic trampoline. */
@@ -1732,6 +1747,8 @@ static const char *goperl_sv_pv_(goperl_frame_t *f, SV *sv, uint64_t *lenp) {
 #define GOPERL_SVSTR_WARN 12
 #define GOPERL_SVSTR_THROW 13
 #define GOPERL_SVSTR_SETPVN 14
+#define GOPERL_SVSTR_WARNER 16 /* the SV slot is the category; flags bits
+                                * 1-2: warner, ck_warner, ck_warner_d */
 #define GOPERL_TEXT_UTF8 1
 #define GOPERL_TEXT_MORTAL 2
 
@@ -2120,11 +2137,38 @@ static void Perl_warn(pTHX_ const char *fmt, ...) {
 }
 static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...)
     __attribute__((unused));
+static void goperl_vwarner(goperl_frame_t *f, int kind, U32 cat,
+                           const char *fmt, va_list ap) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext(f, &t, fmt, ap);
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                   ((uint64_t)GOPERL_SVSTR_WARNER << 32) | cat,
+                   GOPERL_TEXT_ARG(&t, (uint32_t)kind << 1));
+}
+/* A warning of a category is the interpreter's to give: it is fatal where
+ * the caller's `use warnings FATAL` says so, and ck_warner and ck_warner_d
+ * give it only where the category is enabled (or not disabled). */
 static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...) {
     va_list ap;
-    (void)cat;
     va_start(ap, fmt);
-    goperl_vwarn(_gof, fmt, ap);
+    goperl_vwarner(_gof, 0, cat, fmt, ap);
+    va_end(ap);
+}
+static void Perl_ck_warner(pTHX_ U32 cat, const char *fmt, ...)
+    __attribute__((unused));
+static void Perl_ck_warner(pTHX_ U32 cat, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vwarner(_gof, 1, cat, fmt, ap);
+    va_end(ap);
+}
+static void Perl_ck_warner_d(pTHX_ U32 cat, const char *fmt, ...)
+    __attribute__((unused));
+static void Perl_ck_warner_d(pTHX_ U32 cat, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    goperl_vwarner(_gof, 2, cat, fmt, ap);
     va_end(ap);
 }
 #define packWARN(a) (a)
@@ -2897,6 +2941,9 @@ static void goperl_lvslot_flush(goperl_frame_t *f) {
                     f, GOPERL_OP_SV_SLOT_SET,
                     ((uint64_t)4 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
                 break;
+            default:
+                goperl_lv_store_field(f, m->svtok, m->field, m->val);
+                break;
             }
         }
     }
@@ -3035,9 +3082,12 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field) {
     case GOPERL_LV_UV:
         v = goperl_do_op(f, GOPERL_OP_SV_IV, tok, 1, 0, 0);
         break;
-    default:
+    case GOPERL_LV_NV:
         v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
                          ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0);
+        break;
+    default:
+        v = goperl_lv_load_field(f, tok, field);
         break;
     }
     m->val = m->shadow = v;
@@ -3720,7 +3770,7 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
     ((char *)goperl_intern_packed(                     \
         _gof, goperl_op0(GOPERL_OP_CV_FILE, GOPERL_TOK(cv), 0)))
 #define GvSTASH(gv) \
-    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 0)))
+    (*(HV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVSTASH))
 #define GvCVu(gv) \
     ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 1)))
 /* GvCV is the sub of the glob whatever the glob is; GvCVu leaves out the
@@ -3753,7 +3803,7 @@ typedef union goperl_any {
 #define XSANY CvXSUBANY(cv)
 #define dXSI32 I32 ix = XSANY.any_i32
 #define CvXSUB(cv) \
-    ((void (*)(pTHX_ CV *))goperl_api_cv_xsub(_gof, GOPERL_TOK(cv)))
+    (*(void (**)(pTHX_ CV *))goperl_lv_ref(_gof, (SV *)(cv), GOPERL_LV_CVXSUB))
 
 /* newXS family: every native XSUB is registered through the loader, which
  * assigns the dispatch id and returns the guest CV token. Prototypes and
@@ -5816,8 +5866,6 @@ static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
 #define ckWARN2_d(a, b) ckWARN_d(packWARN2(a, b))
 #define ckWARN3_d(a, b, c) ckWARN_d(packWARN3(a, b, c))
 #define ckWARN4_d(a, b, c, d) ckWARN_d(packWARN4(a, b, c, d))
-#define Perl_ck_warner Perl_warner
-#define Perl_ck_warner_d Perl_warner
 #define PL_dowarn \
     ((U8)goperl_op0(GOPERL_OP_PLVAR_GET, GOPERL_PL_DOWARN, 0))
 /* PL_hints is an LVALUE (keyword plugins |= HINT_BLOCK_SCOPE): reads pull

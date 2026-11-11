@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 13
+const abiVersion = 14
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -88,7 +88,12 @@ const (
 	opPPHookSet     = 98
 	opMagicSetHook  = 133
 	opSvCall        = 187
+	opGvCall        = 188
 )
+
+// gvCallCvNative is the GV_CALL selector that makes a CV call the native
+// function of an id (GOPERL_GVCALL_CV_NATIVE in perl-wasm).
+const gvCallCvNative = 37
 
 // svCallMagicIsValue is the SV_CALL selector that asks whether a magic type
 // is value magic (GOPERL_SVCALL_MAGIC_IS_VALUE in perl-wasm).
@@ -178,6 +183,8 @@ type cAPI struct {
 	perOpSet  uintptr
 	// v11: the host descriptor behind a guest descriptor.
 	hostFd uintptr
+	// v14: `CvXSUB(cv) = fn`.
+	cvSetXsub uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -627,6 +634,29 @@ func (s *state) registerNative(name string, fn uintptr) (uint64, error) {
 	s.cvFn[cvTok] = fn
 	s.mu.Unlock()
 	return cvTok, nil
+}
+
+// setNative makes the existing CV cv call fn: what `CvXSUB(cv) = fn` means.
+// The function gets an id of its own, under the name the CV's function had
+// when the loader registered one for it.
+func (s *state) setNative(cv uint64, fn uintptr) error {
+	s.mu.Lock()
+	name := []byte{0}
+	if old, ok := s.cvFn[cv]; ok {
+		for i, registered := range s.fns {
+			if registered == old {
+				name = s.fnNames[i]
+				break
+			}
+		}
+	}
+	s.fns = append(s.fns, fn)
+	s.fnNames = append(s.fnNames, name)
+	id := int32(len(s.fns) - 1)
+	s.cvFn[cv] = fn
+	s.mu.Unlock()
+	_, err := s.p.XSHelperOp(opGvCall, uint64(gvCallCvNative)<<32|cv, uint64(uint32(id)), "")
+	return err
 }
 
 // dispatch handles one native XSUB call: payload [u32 fn_id][u32 cv]
@@ -1445,6 +1475,16 @@ func buildVtable() {
 			return ^uintptr(0) // -1: the handle has no descriptor of the host
 		}
 		return host
+	})
+	vtable.cvSetXsub = purego.NewCallback(func(fr, cv, fn uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		if err := stateFor(f.p).setNative(uint64(cv), fn); err != nil {
+			f.fail("CvXSUB: " + err.Error())
+		}
+		return 0
 	})
 	vtable.regXS = purego.NewCallback(func(fr, name, fn uintptr) uintptr {
 		f := lookupFrame(fr)
