@@ -29,7 +29,7 @@ import (
 // every capability hook allowing — perl(1) does not sandbox, so neither
 // does gperl (the library's zero Config denies these instead). The
 // program is the host process: its pid, user and signals are the
-// process's own.
+// process's own, and it logs to the host's system logger.
 func HostConfig() (perl.Config, error) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -43,6 +43,7 @@ func HostConfig() (perl.Config, error) {
 		Exec:          func(string, []string) bool { return true },
 		Fork:          true,
 		HostProcess:   true,
+		Syslog:        true,
 		NativeModules: true,
 	}, nil
 }

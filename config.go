@@ -9,7 +9,8 @@ import "io"
 // pre-loaded with the embedded standard library, an empty environment (the
 // host process env is not leaked), sandboxed stdio, and every capability
 // hook denying — no outbound connections, no name resolution, no subprocess
-// spawns, no fork, and an identity of its own instead of the host process's.
+// spawns, no fork, no system logger, and an identity of its own instead of
+// the host process's.
 // Each capability is granted explicitly by setting its field.
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
@@ -99,6 +100,19 @@ type Config struct {
 	// and group but is never the host process: its pid is its own, and a
 	// signal ends only that pseudo-process.
 	HostProcess bool
+	// Syslog lets the program log to the host's system logger. The
+	// interpreter has no log daemon of its own: when Syslog is set, what the
+	// program sends through syslog(3) — the "native" mechanism of
+	// Sys::Syslog, the one that module tries first — is delivered to the
+	// system logger of the host (the local log daemon, on a Unix host), under
+	// the facility, level and ident the program chose. A host without a
+	// reachable system logger reports the mechanism unavailable.
+	// FAIL-CLOSED: when false, the program has no system logger; Sys::Syslog
+	// sees its native mechanism as unavailable and goes on to its other
+	// mechanisms (a log server over TCP or UDP, a log socket), each subject
+	// to the capability it needs, or fails in openlog. A message is never
+	// reported as logged without having been handed to a logger.
+	Syslog bool
 	// NativeModules lets Perl code load native XS modules the way perl
 	// loads any dynamic module: XSLoader and DynaLoader find
 	// auto/Module/Module.so on @INC and load it into the HOST process (the

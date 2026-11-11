@@ -69,9 +69,11 @@ type InstanceOptions struct {
 	// HostProcess makes the program the host process: its ids, user
 	// database and signals are the process's own.
 	HostProcess bool
-	Stdin       io.Reader
-	Stdout      io.Writer
-	Stderr      io.Writer
+	// Syslog gives the program the host's system logger (see syslog.go).
+	Syslog bool
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 
 	MaxMemoryBytes     int
 	MemoryReserveBytes int
@@ -271,6 +273,9 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	}
 	wasi.SetExecHook(exec)
 	wasi.SetHostProcess(opts.HostProcess)
+	if opts.Syslog {
+		wasi.SetSyslogger(NewSyslogger())
+	}
 	// Taking a local address to accept connections on makes the program a
 	// server on the host's network: only a program that is the host process
 	// may. Traffic on sockets it already has is not gated here (outbound
