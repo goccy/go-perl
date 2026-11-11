@@ -63,7 +63,7 @@ func (d devNullFS) OpenFile(name string, flag int, perm iofs.FileMode) (File, er
 func (d devNullFS) Stat(name string) (os.FileInfo, error) {
 	switch name {
 	case devNullName:
-		return nullFileInfo{name: "null", mode: 0o666}, nil
+		return nullFileInfo{name: "null", mode: devNullMode}, nil
 	case "dev":
 		// The synthetic parent directory, so path resolution can traverse it
 		// even when the wrapped FS has no dev/ entry.
@@ -82,6 +82,10 @@ func (d devNullFS) Lstat(name string) (os.FileInfo, error) {
 	return d.FS.Lstat(name)
 }
 
+// devNullMode is the mode of the guest's /dev/null: a character device
+// anyone may read and write, as on a real system.
+const devNullMode = iofs.ModeDevice | iofs.ModeCharDevice | 0o666
+
 // nullFile is the guest's /dev/null: an always-empty sink.
 type nullFile struct{}
 
@@ -92,8 +96,10 @@ func (nullFile) WriteAt(p []byte, off int64) (int, error) { return len(p), nil }
 func (nullFile) Seek(offset int64, whence int) (int64, error) {
 	return 0, nil
 }
-func (nullFile) Close() error               { return nil }
-func (nullFile) Stat() (os.FileInfo, error) { return nullFileInfo{name: "null", mode: 0o666}, nil }
+func (nullFile) Close() error { return nil }
+func (nullFile) Stat() (os.FileInfo, error) {
+	return nullFileInfo{name: "null", mode: devNullMode}, nil
+}
 func (nullFile) ReadDir(n int) ([]os.DirEntry, error) {
 	return nil, fmt.Errorf("dev/null is not a directory")
 }
