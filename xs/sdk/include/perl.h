@@ -44,6 +44,14 @@
 #ifndef GOPERL_XS_SDK_PERL_H
 #define GOPERL_XS_SDK_PERL_H
 
+/* The stream wrapper around guest handles (goperl_perlio_wrap) is built on
+ * fopencookie where there is no funopen; glibc and musl declare it only
+ * under _GNU_SOURCE, which has to be in effect before the first system
+ * header. perl's own Linux builds compile XS with it defined too. */
+#if !defined(__APPLE__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE 1
+#endif
+
 #include <assert.h>
 #include <setjmp.h>
 #include <stdarg.h>
