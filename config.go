@@ -9,7 +9,8 @@ import "io"
 // pre-loaded with the embedded standard library, an empty environment (the
 // host process env is not leaked), sandboxed stdio, and every capability
 // hook denying — no outbound connections, no name resolution, no subprocess
-// spawns, no fork. Each capability is granted explicitly by setting its field.
+// spawns, no fork, and an identity of its own instead of the host process's.
+// Each capability is granted explicitly by setting its field.
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
 	// holding the Perl standard library (the assembled lib/ tree); it
@@ -71,6 +72,25 @@ type Config struct {
 	// same Config as its parent, and exec in a child goes through Exec like
 	// any other spawn. FAIL-CLOSED: when false, fork fails in the guest.
 	Fork bool
+	// HostProcess declares that the program IS the host process, the way a
+	// command-line tool built around one instance is:
+	//
+	//   - $$ and getppid are the host process's;
+	//   - the user and group ids ($<, $>, $(, $)) and the user and group
+	//     databases (getpwuid, getgrnam, ...) are the host's;
+	//   - a signal the host process receives reaches the program when the
+	//     program handles it (%SIG), is ignored when the program ignores it,
+	//     and otherwise does to the host process what that signal does;
+	//   - a signal the program dies of ends the run with a *SignalError, for
+	//     the embedder to end the host process the same way;
+	//   - kill reaches the host's processes.
+	//
+	// When false (the default) the program is an isolated process: pid 42,
+	// parent 1, user and group 0, empty user and group databases, and kill
+	// reaches only the processes the program started. A pseudo-process forked from the program has the same user
+	// and group but is never the host process: its pid is its own, and a
+	// signal ends only that pseudo-process.
+	HostProcess bool
 	// NativeModules lets Perl code load native XS modules the way perl
 	// loads any dynamic module: XSLoader and DynaLoader find
 	// auto/Module/Module.so on @INC and load it into the HOST process (the

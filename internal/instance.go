@@ -65,14 +65,24 @@ type InstanceOptions struct {
 	Exec      func(path string, argv []string) bool
 	// Fork lets the guest fork: each fork runs a copy of the instance as a
 	// pseudo-process inside this host process (see fork.go).
-	Fork   bool
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Fork bool
+	// HostProcess makes the program the host process: its ids, user
+	// database and signals are the process's own.
+	HostProcess bool
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Stderr      io.Writer
 
 	MaxMemoryBytes     int
 	MemoryReserveBytes int
 }
+
+// SignalError is a guest that ended by a signal: one it neither handles nor
+// ignores, whose default action ends the process. Signal is the guest's
+// number for it (Linux numbering).
+type SignalError struct{ Signal int }
+
+func (e *SignalError) Error() string { return fmt.Sprintf("perl: terminated by signal %d", e.Signal) }
 
 // ExitError is a guest exit() the bridge caught cleanly: the guest unwound
 // back to the call frame, so the interpreter is still flushable and
@@ -157,9 +167,7 @@ type Perl struct {
 	// for the whole family when it closes: the host process is what keeps
 	// the pseudo-processes alive, so it cannot end before they do.
 	family *forkFamily
-	// killed is the terminating signal delivered to this fork child (0 =
-	// none). It is the only record of the signal: the guest reports a
-	// signal death as an ordinary exit.
+	// killed is the signal this fork child died of (0 = none).
 	killed atomic.Int32
 }
 
@@ -262,6 +270,7 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 		exec = func(string, []string) bool { return false }
 	}
 	wasi.SetExecHook(exec)
+	wasi.SetHostProcess(opts.HostProcess)
 	// Sandbox stdio by default: an unset stream does NOT fall through to the
 	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
 	// stderr to discard. (Perl-level print output is still captured into the

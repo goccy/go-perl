@@ -184,6 +184,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -279,6 +280,13 @@ func main() {
 	// Close flushes PerlIO and runs global destruction before the process
 	// reports the status.
 	p.Close()
+	var killed *perl.SignalError
+	if errors.As(err, &killed) {
+		// A signal ended the program: report it the way a shell reports a
+		// signal death.
+		cleanup()
+		os.Exit(128 + killed.Signal)
+	}
 	if err != nil {
 		fatal(err)
 	}

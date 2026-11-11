@@ -815,31 +815,20 @@ func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32
 	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
 }
 
-func (h envStubs) Alarm(m *base.Module, l0 int32) int32                             { return 0 }
 func (h envStubs) Bind(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
 func (h envStubs) Chown(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
 func (h envStubs) Chroot(m *base.Module, l0 int32) int32                            { return 0 }
 func (h envStubs) Cuserid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Endgrent(m *base.Module)                                          {}
 func (h envStubs) Endhostent(m *base.Module)                                        {}
 func (h envStubs) Endnetent(m *base.Module)                                         {}
 func (h envStubs) Endprotoent(m *base.Module)                                       {}
-func (h envStubs) Endpwent(m *base.Module)                                          {}
 func (h envStubs) Endservent(m *base.Module)                                        {}
 func (h envStubs) Execv(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
 func (h envStubs) Fchdir(m *base.Module, l0 int32) int32                            { return 0 }
 func (h envStubs) Fchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Getegid(m *base.Module) int32                                     { return 0 }
-func (h envStubs) Geteuid(m *base.Module) int32                                     { return 0 }
-func (h envStubs) Getgid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Getgrent(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Getgrgid(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getgrnam(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getgroups(m *base.Module, l0 int32, l1 int32) int32               { return 0 }
 func (h envStubs) Gethostbyaddr(m *base.Module, l0 int32, l1 int32, l2 int32) int32 { return 0 }
 func (h envStubs) Gethostbyname(m *base.Module, l0 int32) int32                     { return 0 }
 func (h envStubs) Gethostent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getlogin(m *base.Module) int32                                    { return 0 }
 func (h envStubs) Getnetbyaddr(m *base.Module, l0 int32, l1 int32) int32            { return 0 }
 func (h envStubs) Getnetbyname(m *base.Module, l0 int32) int32                      { return 0 }
 func (h envStubs) Getnetent(m *base.Module) int32                                   { return 0 }
@@ -848,56 +837,31 @@ func (h envStubs) Getpriority(m *base.Module, l0 int32, l1 int32) int32         
 func (h envStubs) Getprotobyname(m *base.Module, l0 int32) int32                    { return 0 }
 func (h envStubs) Getprotobynumber(m *base.Module, l0 int32) int32                  { return 0 }
 func (h envStubs) Getprotoent(m *base.Module) int32                                 { return 0 }
-func (h envStubs) Getpwent(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Getpwnam(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getpwuid(m *base.Module, l0 int32) int32                          { return 0 }
 func (h envStubs) Getservbyname(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
 func (h envStubs) Getservbyport(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
 func (h envStubs) Getservent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getuid(m *base.Module) int32                                      { return 0 }
 func (h envStubs) Killpg(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
 func (h envStubs) Lchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
 func (h envStubs) Listen(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
 func (h envStubs) Mkfifo(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
 func (h envStubs) Mkstemp(m *base.Module, l0 int32) int32                           { return 0 }
 func (h envStubs) Nice(m *base.Module, l0 int32) int32                              { return 0 }
-func (h envStubs) Pause(m *base.Module) int32                                       { return 0 }
 func (h envStubs) Recvfrom(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32, l5 int32) int32 {
 	return 0
 }
 func (h envStubs) Sendto(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32, l5 int32) int32 {
 	return 0
 }
-func (h envStubs) Setegid(m *base.Module, l0 int32) int32                         { return 0 }
-func (h envStubs) Seteuid(m *base.Module, l0 int32) int32                         { return 0 }
-func (h envStubs) Setgid(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Setgrent(m *base.Module)                                        {}
-func (h envStubs) Setgroups(m *base.Module, l0 int32, l1 int32) int32             { return 0 }
 func (h envStubs) Sethostent(m *base.Module, l0 int32)                            {}
 func (h envStubs) Setnetent(m *base.Module, l0 int32)                             {}
 func (h envStubs) Setpgid(m *base.Module, l0 int32, l1 int32) int32               { return 0 }
 func (h envStubs) Setpriority(m *base.Module, l0 int32, l1 int32, l2 int32) int32 { return 0 }
 func (h envStubs) Setprotoent(m *base.Module, l0 int32)                           {}
-func (h envStubs) Setpwent(m *base.Module)                                        {}
-func (h envStubs) Setregid(m *base.Module, l0 int32, l1 int32) int32              { return 0 }
-func (h envStubs) Setresgid(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
-func (h envStubs) Setresuid(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
-func (h envStubs) Setreuid(m *base.Module, l0 int32, l1 int32) int32              { return 0 }
 func (h envStubs) Setservent(m *base.Module, l0 int32)                            {}
 func (h envStubs) Setsid(m *base.Module) int32                                    { return 0 }
 func (h envStubs) Setsockopt(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32) int32 {
 	return 0
 }
-func (h envStubs) Setuid(m *base.Module, l0 int32) int32                                   { return 0 }
-func (h envStubs) Sigaction(m *base.Module, l0 int32, l1 int32, l2 int32) int32            { return 0 }
-func (h envStubs) Sigaddset(m *base.Module, l0 int32, l1 int32) int32                      { return 0 }
-func (h envStubs) Sigdelset(m *base.Module, l0 int32, l1 int32) int32                      { return 0 }
-func (h envStubs) Sigemptyset(m *base.Module, l0 int32) int32                              { return 0 }
-func (h envStubs) Sigfillset(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Sigismember(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
-func (h envStubs) Sigpending(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Sigprocmask(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
-func (h envStubs) Sigsuspend(m *base.Module, l0 int32) int32                               { return 0 }
 func (h envStubs) Socketpair(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32) int32 { return 0 }
 func (h envStubs) Ttyname(m *base.Module, l0 int32) int32                                  { return 0 }
 func (h envStubs) Tzset(m *base.Module)                                                    {}

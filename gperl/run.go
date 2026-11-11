@@ -20,13 +20,16 @@ import (
 
 	perl "github.com/goccy/go-perl"
 	goperlfs "github.com/goccy/go-perl/fs"
+	"github.com/goccy/go-perl/internal"
 )
 
 // HostConfig is the perl-like base configuration every gperl entry point
 // (and every binary `gperl build` produces) starts from: the operating
 // system's filesystem with the embedded stdlib extracted onto it, and
 // every capability hook allowing — perl(1) does not sandbox, so neither
-// does gperl (the library's zero Config denies these instead).
+// does gperl (the library's zero Config denies these instead). The
+// program is the host process: its pid, user and signals are the
+// process's own.
 func HostConfig() (perl.Config, error) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -39,6 +42,7 @@ func HostConfig() (perl.Config, error) {
 		Resolve:       func(string) bool { return true },
 		Exec:          func(string, []string) bool { return true },
 		Fork:          true,
+		HostProcess:   true,
 		NativeModules: true,
 	}, nil
 }
@@ -52,9 +56,25 @@ func HostConfig() (perl.Config, error) {
 // uncaught die (255 unless errno says otherwise) — whose message perl has
 // already written to stderr. err reports a failure to get the program
 // running at all; it is nil whenever the program ran.
+//
+// The program is this process: when a signal ends it, Run does not return —
+// the process dies of that signal.
 func Run(script string, args []string) (status int, err error) {
 	cmd := &perlCommand{prog: perl.Program{File: script, Args: args}}
-	return runPerlCommand(cmd, perlRunOpts{project: true})
+	return endOfProcess(runPerlCommand(cmd, perlRunOpts{project: true}))
+}
+
+// endOfProcess turns the outcome of the program that is this process into
+// the process's own end. A program that a signal ended takes the process
+// with it, by the same signal, as it does under the perl command; where the
+// host cannot do that, the status is the shell's for a signal death.
+func endOfProcess(status int, err error) (int, error) {
+	var killed *perl.SignalError
+	if !errors.As(err, &killed) {
+		return status, err
+	}
+	internal.DieOfSignal(killed.Signal)
+	return 128 + killed.Signal, nil
 }
 
 // RunCLI executes a `gperl run` command line: the command line of the perl
@@ -80,7 +100,7 @@ func RunCLI(argv []string) (status int, err error) {
 	}
 	project := !cmd.switches && cmd.action == actionRun && cmd.prog.File != "" &&
 		envValue(env, "GPERL_PERL_PRELOAD") == ""
-	return runPerlCommand(cmd, perlRunOpts{project: project})
+	return endOfProcess(runPerlCommand(cmd, perlRunOpts{project: project}))
 }
 
 // PrintRunError writes the error of a run that could not be carried out. A

@@ -32,17 +32,8 @@ import (
 // (its low bits are the signal number); see perl-wasm's pl.h.
 const interruptSignal = 0x100
 
-// The signals whose delivery to a child is modelled: the ones that
-// terminate a process that has not asked for anything else. Signal
-// handlers do not run in a pseudo-process, so any other signal is refused
-// rather than silently dropped or turned into a kill.
-const (
-	sigHUP  = 1
-	sigINT  = 2
-	sigQUIT = 3
-	sigKILL = 9
-	sigTERM = 15
-)
+// sigKILL is the one signal a process cannot catch, block or ignore.
+const sigKILL = 9
 
 // installForkHook lets the guest fork when the configuration allows it.
 // Without the hook the import reports ENOSYS and fork returns undef.
@@ -113,7 +104,12 @@ func (c *Perl) runForkChild(pid int32) (status int32) {
 	// _exit, a signal, or a host failure does not.
 	destruct := false
 	var raw *base.WasiExitError
+	var killed *base.WasiSignalError
 	switch {
+	case errors.As(err, &killed):
+		// The default action of a signal the child neither handles nor
+		// ignores.
+		c.killed.CompareAndSwap(0, killed.Signal)
 	case errors.As(err, &raw):
 		exitCode = int(raw.Code)
 	case err != nil:
@@ -144,19 +140,25 @@ func (c *Perl) runForkChild(pid int32) (status int32) {
 }
 
 // signalForkChild delivers sig to a running fork child: the proc_kill path
-// for a pseudo-process.
+// for a pseudo-process. A signal is posted to the child's guest, which
+// handles it like any process does: its %SIG handler runs, or the signal is
+// ignored, or its default action ends the child. SIGKILL is not the guest's
+// to act on: it stops the child at its next op, even one in a busy loop
+// that never reaches a point where signals are noticed.
 func (c *Perl) signalForkChild(sig int32) error {
-	switch sig {
-	case sigHUP, sigINT, sigQUIT, sigKILL, sigTERM:
-	default:
-		return fmt.Errorf("perl: signal %d cannot be delivered to a fork child", sig)
-	}
 	if c.closed.Load() {
 		return nil // already finished; like signalling a zombie
+	}
+	if sig != sigKILL {
+		c.wasi.PostSignal(sig)
+		return nil
 	}
 	if !c.killed.CompareAndSwap(0, sig) {
 		return nil // already dying of an earlier signal
 	}
+	// Posted as well, so that a child waiting in a blocking call wakes up
+	// and meets its end.
+	c.wasi.PostSignal(sig)
 	base.AccessMemory(c.m.g, func(mem []byte) {
 		binary.LittleEndian.PutUint32(mem[c.intrAddr:], interruptSignal|uint32(sig))
 	})

@@ -30,6 +30,13 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 	resp, err := p.m.invoke(0, midRunProgram, buf, wasm2go.Inv_0_22)
 	interrupted := disarm()
 
+	var killed *base.WasiSignalError
+	if errors.As(err, &killed) {
+		// A signal ended the program where it stood: like a process killed
+		// by a signal, it gets no orderly end.
+		p.discard()
+		return 0, &SignalError{Signal: int(killed.Signal)}
+	}
 	var raw *base.WasiExitError
 	if errors.As(err, &raw) {
 		// The program left through the raw _exit (POSIX::_exit, or the end

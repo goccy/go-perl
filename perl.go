@@ -81,6 +81,7 @@ func New(cfg Config) (*Perl, error) {
 		Resolve:            cfg.Resolve,
 		Exec:               cfg.Exec,
 		Fork:               cfg.Fork,
+		HostProcess:        cfg.HostProcess,
 		Stdin:              cfg.Stdin,
 		Stdout:             cfg.Stdout,
 		Stderr:             cfg.Stderr,
