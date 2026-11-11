@@ -643,6 +643,9 @@ func (s *state) dispatch(req []byte) []byte {
 		return fail(fmt.Sprintf("native XS dispatch: unknown function id %d", id))
 	}
 
+	if xsTrace {
+		fmt.Fprintf(os.Stderr, "[xsub] %s cv=%#x items=%d\n", cString(subname), cvTok, items)
+	}
 	f := s.newFrame()
 	f.subname = subname
 	f.items = int32(items)
@@ -696,6 +699,9 @@ func (s *state) dispatch(req []byte) []byte {
 	binary.LittleEndian.PutUint32(resp[1:], uint32(n))
 	for i := 0; i < n; i++ {
 		binary.LittleEndian.PutUint32(resp[5+4*i:], uint32(f.stackAt(1+i)))
+	}
+	if xsTrace {
+		fmt.Fprintf(os.Stderr, "[xsub] %s returns %d: % x\n", cString(subname), n, resp[5:])
 	}
 	return resp
 }

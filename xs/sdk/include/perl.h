@@ -2213,8 +2213,48 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 #define SvSTASH(sv) \
     ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_SV_STASH, GOPERL_TOK(sv), 0)))
 
+/* SvREFCNT_inc and SvREFCNT_dec take any pointer: on perl the macro casts
+ * its argument to an SV. A module can pass a pointer to a structure of its
+ * own (Marpa::R2 counts the users of its recognizer structure that way),
+ * and perl then counts in that structure's memory, in the word where the
+ * head of an SV has its count. Such a pointer is not a value of the
+ * interpreter and must never reach it as one: its type says what it is,
+ * and the count is kept where perl would keep it. */
+typedef struct goperl_foreign_head {
+    void *any;
+    U32 refcnt;
+    U32 flags;
+} goperl_foreign_head_t;
+static inline __attribute__((unused)) SV *goperl_foreign_refcnt_inc(void *p) {
+    if (p) ((goperl_foreign_head_t *)p)->refcnt++;
+    return (SV *)p;
+}
+/* perl goes on to free an SV whose count ends; there is no SV here to
+ * free, so the count just ends. */
+static inline __attribute__((unused)) void goperl_foreign_refcnt_dec(void *p) {
+    if (p && ((goperl_foreign_head_t *)p)->refcnt > 0)
+        ((goperl_foreign_head_t *)p)->refcnt--;
+}
+#ifdef __cplusplus
+extern "C++" { /* the header is usually included inside extern "C" */
+template <class T> static inline int goperl_is_value_ptr(T) { return 1; }
+template <class T> static inline int goperl_is_value_ptr(T *) { return 0; }
+static inline int goperl_is_value_ptr(struct goperl_sv *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_sv *) { return 1; }
+static inline int goperl_is_value_ptr(void *) { return 1; }
+static inline int goperl_is_value_ptr(const void *) { return 1; }
+}
+#define GOPERL_IS_VALUE_PTR(p) goperl_is_value_ptr(p)
+#else
+#define GOPERL_IS_VALUE_PTR(p)           \
+    _Generic((p), struct goperl_sv *: 1, \
+             const struct goperl_sv *: 1, void *: 1, const void *: 1, default: 0)
+#endif
 #define SvREFCNT_inc(sv) \
-    GOPERL_SV(goperl_op0(GOPERL_OP_REFCNT_INC, GOPERL_TOK(sv), 0))
+    ({ GOPERL_ONCE(goperl_SvREFCNT_inc_sv_, sv); \
+       GOPERL_IS_VALUE_PTR(goperl_SvREFCNT_inc_sv_) \
+           ? GOPERL_SV(goperl_op0(GOPERL_OP_REFCNT_INC, GOPERL_TOK(goperl_SvREFCNT_inc_sv_), 0)) \
+           : goperl_foreign_refcnt_inc((void *)(uintptr_t)(goperl_SvREFCNT_inc_sv_)); })
 #define SvREFCNT_inc_NN(sv) SvREFCNT_inc(sv)
 #define SvREFCNT_inc_simple(sv) SvREFCNT_inc(sv)
 #define SvREFCNT_inc_simple_NN(sv) SvREFCNT_inc(sv)
@@ -2222,7 +2262,12 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 #define SvREFCNT_inc_simple_void(sv) ((void)SvREFCNT_inc(sv))
 #define SvREFCNT_inc_simple_void_NN(sv) ((void)SvREFCNT_inc(sv))
 #define SvREFCNT_dec(sv) \
-    ((void)goperl_op0(GOPERL_OP_SV_REFCNT_DEC, GOPERL_TOK(sv), 0))
+    ({ GOPERL_ONCE(goperl_SvREFCNT_dec_sv_, sv); \
+       if (GOPERL_IS_VALUE_PTR(goperl_SvREFCNT_dec_sv_)) \
+           (void)goperl_op0(GOPERL_OP_SV_REFCNT_DEC, GOPERL_TOK(goperl_SvREFCNT_dec_sv_), 0); \
+       else \
+           goperl_foreign_refcnt_dec((void *)(uintptr_t)(goperl_SvREFCNT_dec_sv_)); \
+       (void)0; })
 #define SvREFCNT_dec_NN(sv) SvREFCNT_dec(sv)
 
 #define newRV_inc(sv) \

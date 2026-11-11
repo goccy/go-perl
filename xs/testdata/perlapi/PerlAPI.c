@@ -1299,6 +1299,41 @@ XS(XS_PerlAPI_lio_peek) {
     }
 }
 
+/* Counts references to a structure of the module's own with SvREFCNT_inc
+ * and SvREFCNT_dec, as Marpa::R2 does: on perl the count lands in the
+ * structure, in the second word. Returns that word's change after the
+ * increment and after the decrement, and the reference counts the two
+ * values the structure points at had before. */
+XS(XS_PerlAPI_count_own_struct) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "a, b");
+    {
+        struct perlapi_owner {
+            SV *first;
+            UV second;
+            SV *third;
+        } *owner = (struct perlapi_owner *)malloc(sizeof(struct perlapi_owner));
+        IV after_inc, after_dec;
+        const IV count_a = (IV)SvREFCNT(ST(0)), count_b = (IV)SvREFCNT(ST(1));
+        owner->first = ST(0);
+        owner->second = 1000;
+        owner->third = ST(1);
+        SvREFCNT_inc(owner);
+        after_inc = (IV)owner->second - 1000;
+        SvREFCNT_dec(owner);
+        after_dec = (IV)owner->second - 1000;
+        free(owner);
+        SP -= items;
+        EXTEND(SP, 4);
+        mPUSHi(after_inc);
+        mPUSHi(after_dec);
+        mPUSHi(count_a);
+        mPUSHi(count_b);
+        PUTBACK;
+        return;
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1384,5 +1419,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::save_one_int", XS_PerlAPI_save_one_int);
     newXS_deffile("PerlAPI::open_and_read", XS_PerlAPI_open_and_read);
     newXS_deffile("PerlAPI::lio_peek", XS_PerlAPI_lio_peek);
+    newXS_deffile("PerlAPI::count_own_struct", XS_PerlAPI_count_own_struct);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
