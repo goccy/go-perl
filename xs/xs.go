@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 12
+const abiVersion = 13
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -121,9 +121,26 @@ type cFrame struct {
 	// xerrno is 0, or 1 + the errno the XSUB left when it returned, in the
 	// interpreter's numbering: the SDK notes it, dispatch hands it over.
 	xerrno int32
+	// memBase and memCap are the interpreter's linear memory as native
+	// code sees it: where it starts and the size of the range reserved
+	// for it. The memory grows inside that range and never moves (the
+	// copy-on-write snapshot path), so a pointer is the interpreter's
+	// exactly when it lies in the range.
+	memBase uintptr
+	memCap  uint64
 
 	// Go-only:
 	p *internal.Perl
+}
+
+// newFrame returns a frame of this instance with no stack yet.
+func (s *state) newFrame() *cFrame {
+	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw}
+	if mem := s.p.RawMemory(); cap(mem) > 0 {
+		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
+		f.memCap = uint64(cap(mem))
+	}
+	return f
 }
 
 // cAPI mirrors goperl_api_t (ABI).
@@ -626,7 +643,8 @@ func (s *state) dispatch(req []byte) []byte {
 		return fail(fmt.Sprintf("native XS dispatch: unknown function id %d", id))
 	}
 
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, subname: subname, instShared: s.sharedRaw}
+	f := s.newFrame()
+	f.subname = subname
 	f.items = int32(items)
 	// Stack layout mirrors a real XS entry: a mark at offset 0, arguments
 	// at st[1..items] (so ax == 1), sp at the last argument.
@@ -685,7 +703,7 @@ func (s *state) dispatch(req []byte) []byte {
 // bootFrame builds a minimal frame for loader-driven native calls that
 // happen outside an XSUB dispatch (svt_free teardown).
 func (s *state) bootFrame() (*cFrame, uintptr) {
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw}
+	f := s.newFrame()
 	f.marks[0] = 0
 	f.markidx = 0
 	f.initStack(0)
@@ -721,7 +739,7 @@ func (s *state) ppHook(req []byte) []byte {
 		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d n=%d\n", opTok, opType, n)
 	}
 
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw}
+	f := s.newFrame()
 	f.hookOpTok = opTok
 	f.items = int32(n)
 	f.marks[0] = 0

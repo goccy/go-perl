@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 12u
+#define GOPERL_XS_ABI 13u
 
 /* The perl this SDK targets (the embedded interpreter's version). */
 #include "patchlevel.h"
@@ -569,6 +569,9 @@ struct goperl_frame {
     char err[512];
     int32_t xerrno; /* 0, or 1 + the errno the XSUB left, in the
                      * interpreter's numbering (see goperl_errno_leave) */
+    char *membase;   /* the interpreter's linear memory: where it starts in */
+    uint64_t memcap; /* this process, and the size of the range reserved
+                      * for it (it grows inside that range, never moves) */
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) --------- */
@@ -1277,7 +1280,10 @@ enum {
     GOPERL_OP_SV_STR = 189,
     GOPERL_OP_SV_SLOT_GET = 190,
     GOPERL_OP_CALLER_CX = 191,
-    GOPERL_OP_PERLIO = 192
+    GOPERL_OP_PERLIO = 192,
+    GOPERL_OP_MEM_FREE = 193,
+    GOPERL_OP_MEM_REALLOC = 194,
+    GOPERL_OP_DO_OPENN = 195
 };
 
 /* PLVAR_GET/SET ids. */
@@ -3218,6 +3224,9 @@ static void goperl_xs_leave(goperl_frame_t *f) {
      * XSUB return is the closest safe point — the saved locations typically
      * point into this activation's now-dying C stack. */
     goperl_hostsave_unwind_to(f, f->hostsave_base);
+    /* a restored location can be the slot of an interpreter variable
+     * (SAVEI32(PL_statusvalue)): the restored value is the interpreter's */
+    goperl_plshadow_flush(f);
     if (--goperl_xs_depth_v <= 0) {
         goperl_xs_depth_v = 0;
         for (int32_t i = 0; i < goperl_avmirror_n; i++) {
@@ -3441,7 +3450,10 @@ static void goperl_leave(goperl_frame_t *f) {
     while (goperl_hostsave_n > 0 &&
            goperl_hostsave_v[goperl_hostsave_n - 1].scope >= goperl_scope_v) {
         goperl_hostsave_t *e = &goperl_hostsave_v[--goperl_hostsave_n];
-        *e->loc = e->val;
+        if (e->width == 4)
+            *(int32_t *)e->loc = (int32_t)(intptr_t)e->val;
+        else
+            *e->loc = e->val;
     }
     goperl_scope_v--;
 }
@@ -4695,7 +4707,7 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
        (sv_setsv((goperl_SvSetMagicSV_dst_), (src)), (void)mg_set(goperl_SvSetMagicSV_dst_)); })
 #define SvSetSV(dst, src) sv_setsv((dst), (src))
 /* Taint support is off in the embedded build (like -DNO_TAINT_SUPPORT). */
-#define TAINT_IF(x) ((void)(x))
+#define TAINT_IF(c) ((void)((c) && PL_tainting && (PL_tainted = 1)))
 #define SvTRUEx(sv) SvTRUE(sv)
 #define HvAMAGIC(hv) ((int)goperl_op0(GOPERL_OP_GV_AMG, GOPERL_TOK(hv), 0))
 
@@ -4919,8 +4931,13 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
 #define Nullch ((char *)0)
 #define PERL_GET_THX goperl_cur_frame_v
 #define dTHR dNOOP
-#define TAINT_ENV() ((void)0)
-#define TAINT_PROPER(s) ((void)0)
+/* The taint checks are the interpreter's: it dies (or, under -t, warns)
+ * when tainted data is in use, naming the operation. */
+#define TAINT_ENV() \
+    ((void)(PL_tainting && (GOPERL_SVCALL(GOPERL_SVCALL_TAINT_ENV, 0, 0), 0)))
+#define TAINT_PROPER(s) \
+    ({ GOPERL_ONCE(goperl_taint_proper_s_, s); \
+       (void)(PL_tainting && (GOPERL_SVSTR(GOPERL_SVSTR_TAINT_PROPER, 0, 0, (goperl_taint_proper_s_), strlen(goperl_taint_proper_s_)), 0)); })
 #define I_STDARG 1
 #define POPi ((IV)SvIV(POPs))
 #define POPu ((UV)SvUV(POPs))
@@ -5557,14 +5574,43 @@ static void load_module(U32 flags, SV *name, SV *ver, ...) {
 
 /* ---- memory helpers ------------------------------------------------------ */
 
+/* A module's own allocations are the C library's. A block of the
+ * interpreter's memory is a different thing: the string buffer of an SV,
+ * which a module may hold (SvPVX), free (Safefree(SvPVX(sv)) before
+ * SvPV_set(sv, NULL)) or resize (Renew). Such a block belongs to the
+ * interpreter's allocator, and freeing or resizing it is the interpreter's
+ * to do. Which of the two a pointer is, its address says: the interpreter's
+ * memory is one reserved range of this process. */
+static inline __attribute__((unused)) uint64_t goperl_guest_addr(
+    const goperl_frame_t *f, const void *p) {
+    const uintptr_t d = (uintptr_t)p - (uintptr_t)f->membase;
+    return (p && d < f->memcap) ? (uint64_t)d : 0;
+}
+static void goperl_safefree(void *p) __attribute__((unused));
+static void goperl_safefree(void *p) {
+    goperl_frame_t *f = goperl_cur_frame_v;
+    const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
+    if (g)
+        goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
+    else
+        free(p);
+}
+static void *goperl_saferealloc(void *p, size_t n) __attribute__((unused));
+static void *goperl_saferealloc(void *p, size_t n) {
+    goperl_frame_t *f = goperl_cur_frame_v;
+    const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
+    if (!g) return realloc(p, n);
+    const uint64_t moved = goperl_do_op(f, GOPERL_OP_MEM_REALLOC, g, n, 0, 0);
+    return moved ? f->membase + moved : 0;
+}
 #define Newx(ptr, n, t) ((ptr) = (t *)malloc((size_t)(n) * sizeof(t)))
 #define Newxz(ptr, n, t) ((ptr) = (t *)calloc((size_t)(n), sizeof(t)))
 #define Newxc(ptr, n, t, c) ((ptr) = (c *)malloc((size_t)(n) * sizeof(t)))
 #define safemalloc(n) malloc((size_t)(n))
-#define safefree(p) free((void *)(p))
+#define safefree(p) goperl_safefree((void *)(p))
 #define SETERRNO(e, x) (errno = (e))
-#define Renew(ptr, n, t) ((ptr) = (t *)realloc((void *)(ptr), (size_t)(n) * sizeof(t)))
-#define Safefree(p) free((void *)(p))
+#define Renew(ptr, n, t) ((ptr) = (t *)goperl_saferealloc((void *)(ptr), (size_t)(n) * sizeof(t)))
+#define Safefree(p) goperl_safefree((void *)(p))
 #define Copy(s, d, n, t) ((void)memcpy((d), (s), (size_t)(n) * sizeof(t)))
 #define Move(s, d, n, t) ((void)memmove((d), (s), (size_t)(n) * sizeof(t)))
 #define Zero(d, n, t) ((void)memset((d), 0, (size_t)(n) * sizeof(t)))
@@ -5845,7 +5891,7 @@ static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
     }                                              \
     STMT_END
 
-#define saferealloc(p, n) realloc((p), (size_t)(n))
+#define saferealloc(p, n) goperl_saferealloc((void *)(p), (size_t)(n))
 #ifndef NV_DIG
 #define NV_DIG DBL_DIG
 #endif
@@ -5933,6 +5979,24 @@ typedef struct stat Stat_t;
 #define PerlLIO_lstat(path, buf) lstat((path), (buf))
 #define PerlLIO_unlink(path) unlink(path)
 #define PerlLIO_open(path, flags) open((path), (flags))
+#define PerlLIO_open3(path, flags, perm) open((path), (flags), (perm))
+#define PerlLIO_close(fd) close(fd)
+#define PerlLIO_read(fd, buf, count) read((fd), (buf), (count))
+#define PerlLIO_write(fd, buf, count) write((fd), (buf), (count))
+#define PerlLIO_fstat(fd, buf) fstat((fd), (buf))
+#define PerlLIO_lseek(fd, offset, mode) lseek((fd), (offset), (mode))
+#define PerlLIO_dup(fd) dup(fd)
+#define PerlLIO_dup2(fd1, fd2) dup2((fd1), (fd2))
+#define PerlLIO_access(path, mode) access((path), (mode))
+#define PerlLIO_chmod(path, mode) chmod((path), (mode))
+#define PerlLIO_rename(a, b) rename((a), (b))
+#define PerlLIO_isatty(fd) isatty(fd)
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+#ifndef O_TEXT
+#define O_TEXT 0
+#endif
 
 static char *goperl_savepvn(const char *p, size_t n) {
     char *out = (char *)malloc(n + 1);

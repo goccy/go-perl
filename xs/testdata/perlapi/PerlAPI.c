@@ -1173,6 +1173,132 @@ XS(XS_PerlAPI_process_id) {
     XSRETURN(2);
 }
 
+/* Makes the argument a number without a string, the way DBI's
+ * sql_type_cast discards the string of a value it converted: the buffer,
+ * which is the interpreter's, is freed by the module. */
+XS(XS_PerlAPI_discard_string) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *sv = ST(0);
+        sv_2iv(sv);
+        if (SvNIOK(sv) && SvPVX(sv)) {
+            SvOOK_off(sv);
+            sv_force_normal(sv);
+            if (SvLEN(sv)) Safefree(SvPVX(sv));
+            SvPOK_off(sv);
+            SvPV_set(sv, NULL);
+            SvLEN_set(sv, 0);
+            SvCUR_set(sv, 0);
+        }
+        XSRETURN(0);
+    }
+}
+
+/* Gives the string of the argument a buffer of n bytes by resizing the one
+ * it has, and fills what was added with dots. */
+XS(XS_PerlAPI_resize_buffer) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, n");
+    {
+        SV *sv = ST(0);
+        STRLEN n = (STRLEN)SvIV(ST(1));
+        STRLEN cur;
+        char *buf = SvPV_force(sv, cur);
+        Renew(buf, n + 1, char);
+        memset(buf + cur, '.', n - cur);
+        buf[n] = '\0';
+        SvPV_set(sv, buf);
+        SvLEN_set(sv, n + 1);
+        SvCUR_set(sv, n);
+        XSRETURN(0);
+    }
+}
+
+/* What a module does with an argument it must not take from tainted data. */
+XS(XS_PerlAPI_insecure) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, what");
+    TAINT_IF(SvTAINTED(ST(0)));
+    TAINT_PROPER(SvPV_nolen(ST(1)));
+    XSRETURN_YES;
+}
+
+/* Calls the code with $? saved and zero, as an object system does around
+ * its destructors (local $?). */
+XS(XS_PerlAPI_with_local_status) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    SAVEI32(PL_statusvalue);
+    PL_statusvalue = 0;
+    PUSHMARK(SP);
+    PUTBACK;
+    call_sv(ST(0), G_DISCARD);
+    XSRETURN_EMPTY;
+}
+
+/* Saves one int of a pair in a scope, changes both, leaves the scope:
+ * returns the pair, of which only the saved one is restored. */
+XS(XS_PerlAPI_save_one_int) {
+    dXSARGS;
+    static struct {
+        int saved;
+        int beside;
+    } pair;
+    PERL_UNUSED_VAR(items);
+    pair.saved = 1;
+    pair.beside = 2;
+    ENTER;
+    SAVEI32(pair.saved);
+    pair.saved = 5;
+    pair.beside = 7;
+    LEAVE;
+    EXTEND(SP, 2);
+    ST(0) = sv_2mortal(newSViv(pair.saved));
+    ST(1) = sv_2mortal(newSViv(pair.beside));
+    XSRETURN(2);
+}
+
+/* Opens a file the way open() does, through do_openn, and returns its
+ * first bytes read from the new handle. */
+XS(XS_PerlAPI_open_and_read) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "mode, name, n");
+    {
+        STRLEN mode_len;
+        const char *mode = SvPV(ST(0), mode_len);
+        SV *name = ST(1);
+        char buf[64];
+        SSize_t got;
+        GV *gv = MUTABLE_GV(sv_2mortal(newSV_type(SVt_NULL)));
+        gv_init_pvn(gv, CopSTASH(PL_curcop), "__ANONIO__", 10, GV_ADDMULTI);
+        if (!do_openn(gv, mode, mode_len, 0, 0, 0, NULL, &name, 1)) XSRETURN_UNDEF;
+        got = PerlIO_read(IoIFP(GvIO(gv)), buf, (Size_t)SvIV(ST(2)) < sizeof buf ? (Size_t)SvIV(ST(2)) : sizeof buf);
+        if (got < 0) XSRETURN_UNDEF;
+        ST(0) = sv_2mortal(newSVpvn(buf, (STRLEN)got));
+        XSRETURN(1);
+    }
+}
+
+/* The size of a file and its first byte, by the low-level I/O functions. */
+XS(XS_PerlAPI_lio_peek) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "path");
+    {
+        Stat_t st;
+        char first = 0;
+        int fd = PerlLIO_open3(SvPV_nolen(ST(0)), O_RDONLY | O_BINARY, 0);
+        if (fd < 0) XSRETURN_UNDEF;
+        if (PerlLIO_fstat(fd, &st) != 0 || PerlLIO_read(fd, &first, 1) != 1) {
+            PerlLIO_close(fd);
+            XSRETURN_UNDEF;
+        }
+        PerlLIO_close(fd);
+        ST(0) = sv_2mortal(newSVpvf("%ld:%c", (long)st.st_size, first));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1251,5 +1377,12 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::view_attach", XS_PerlAPI_view_attach);
     newXS_deffile("PerlAPI::view_read", XS_PerlAPI_view_read);
     newXS_deffile("PerlAPI::process_id", XS_PerlAPI_process_id);
+    newXS_deffile("PerlAPI::discard_string", XS_PerlAPI_discard_string);
+    newXS_deffile("PerlAPI::resize_buffer", XS_PerlAPI_resize_buffer);
+    newXS_deffile("PerlAPI::insecure", XS_PerlAPI_insecure);
+    newXS_deffile("PerlAPI::with_local_status", XS_PerlAPI_with_local_status);
+    newXS_deffile("PerlAPI::save_one_int", XS_PerlAPI_save_one_int);
+    newXS_deffile("PerlAPI::open_and_read", XS_PerlAPI_open_and_read);
+    newXS_deffile("PerlAPI::lio_peek", XS_PerlAPI_lio_peek);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

@@ -138,7 +138,9 @@ enum {
     GOPERL_SVSTR_GET_CVN = 7,
     GOPERL_SVSTR_WHICHSIG = 8,
     GOPERL_SVSTR_COP_HINT = 9,
-    GOPERL_SVSTR_SETENV = 10
+    GOPERL_SVSTR_SETENV = 10,
+    /* 11 to 14: the formatter's (perl.h) */
+    GOPERL_SVSTR_TAINT_PROPER = 15
 };
 
 /* PLVAR_GET/SET ids beyond the shadowed ones of perl.h. */
@@ -457,7 +459,7 @@ static inline UV goperl_cast_uv(NV f) {
                 : 0))
 #define MEM_WRAP_CHECK_(n, t) MEM_WRAP_CHECK(n, t),
 #define Renewc(v, n, t, c) \
-    ((v) = (MEM_WRAP_CHECK_(n, t)(c *)realloc((void *)(v), (size_t)(n) * sizeof(t))))
+    ((v) = (MEM_WRAP_CHECK_(n, t)(c *)goperl_saferealloc((void *)(v), (size_t)(n) * sizeof(t))))
 #define PoisonWith(d, n, t, b) \
     (MEM_WRAP_CHECK_(n, t)(void) memset((char *)(d), (U8)(b), (size_t)(n) * sizeof(t)))
 #define PoisonNew(d, n, t) PoisonWith(d, n, t, 0xAB)
@@ -754,13 +756,9 @@ static void goperl_sv_nv_set(goperl_frame_t *f, SV *sv, NV v) {
  * module can store there is one the interpreter handed out (SvPVX, SvGROW)
  * or NULL. */
 static void goperl_sv_pv_set(goperl_frame_t *f, SV *sv, const char *p) {
-    uint64_t g = 0;
-    if (p) {
-        const char *base = (const char *)goperl_guest_mem(f, 0);
-        if (p < base || (uint64_t)(p - base) > UINT32_MAX)
-            goperl_croakf(f, "SvPV_set: the buffer is not interpreter memory");
-        g = (uint64_t)(p - base);
-    }
+    const uint64_t g = goperl_guest_addr(f, p);
+    if (p && !g)
+        goperl_croakf(f, "SvPV_set: the buffer is not interpreter memory");
     goperl_do_op(f, GOPERL_OP_SV_SLOT_SET,
                  ((uint64_t)GOPERL_SVSLOT_PV << 32) | (uint32_t)GOPERL_TOK(sv), g,
                  0, 0);
@@ -968,6 +966,48 @@ static SV *goperl_newSVrv(goperl_frame_t *f, SV *rv, const char *classname) {
 #define IoTYPE(io) ((char)GOPERL_SVCALL(GOPERL_SVCALL_IO_TYPE, io, 0))
 #define IoFLAGS(io) ((U8)GOPERL_SVCALL(GOPERL_SVCALL_IO_FLAGS, io, 0))
 #define IoLINES(io) ((IV)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_IO_LINES, io, 0))
+
+/* ---- do_openn: the open behind perl's open function ----------------------- */
+
+static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
+                            I32 len, int as_raw, int rawmode, int rawperm,
+                            const void *supplied_fp, SV **svp, I32 num)
+    __attribute__((unused));
+static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
+                            I32 len, int as_raw, int rawmode, int rawperm,
+                            const void *supplied_fp, SV **svp, I32 num) {
+    const size_t count = (svp && num > 0) ? (size_t)num : 0;
+    const size_t mode_len = len > 0 ? (size_t)len : 0;
+    const uint32_t head[5] = {(uint32_t)as_raw, (uint32_t)rawmode,
+                              (uint32_t)rawperm,
+                              (uint32_t)(uintptr_t)supplied_fp,
+                              (uint32_t)count};
+    const size_t size = sizeof head + count * 4 + mode_len;
+    char *req = (char *)malloc(size + 1);
+    if (!req) goperl_croakf(f, "%s", "Out of memory!");
+    memcpy(req, head, sizeof head);
+    for (size_t i = 0; i < count; i++) {
+        const uint32_t tok = (uint32_t)GOPERL_TOK(svp[i]);
+        memcpy(req + sizeof head + i * 4, &tok, 4);
+    }
+    if (mode_len) memcpy(req + sizeof head + count * 4, oname, mode_len);
+    req[size] = '\0';
+    /* goperl_do_op's contract, with the request released before a death
+     * inside the open unwinds this call */
+    goperl_flush(f);
+    const int32_t failed_before = f->failed;
+    const uint64_t opened =
+        goperl_xs_op(f, GOPERL_OP_DO_OPENN, GOPERL_TOK(gv), size, req, size);
+    goperl_gen_bump();
+    free(req);
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
+    return opened != 0;
+}
+#define do_openn(gv, oname, len, as_raw, rawmode, rawperm, supplied_fp, svp, num) \
+    goperl_do_openn(_gof, (GV *)(gv), (oname), (I32)(len), (as_raw), (rawmode),   \
+                    (rawperm), (supplied_fp), (svp), (I32)(num))
+#define do_open(gv, name, len, as_raw, rawmode, rawperm, supplied_fp) \
+    do_openn((gv), (name), (len), (as_raw), (rawmode), (rawperm), (supplied_fp), (SV **)0, 0)
 
 /* ---- formatted strings ---------------------------------------------------- */
 
@@ -1236,6 +1276,8 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_tmps_ix ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_IX))
 #define PL_tmps_floor ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_FLOOR))
 #define PL_localizing (*goperl_plint_ref(_gof, GOPERL_PL_LOCALIZING))
+#define GOPERL_PL_STATUSVALUE 62
+#define PL_statusvalue (*goperl_plint_ref(_gof, GOPERL_PL_STATUSVALUE))
 #define PL_perl_destruct_level (*goperl_plint_ref(_gof, GOPERL_PL_DESTRUCT_LEVEL))
 #define PL_unsafe (GOPERL_PLVAR(GOPERL_PL_UNSAFE) != 0)
 #define PL_cop_seqmax ((U32)GOPERL_PLVAR(GOPERL_PL_COP_SEQMAX))
