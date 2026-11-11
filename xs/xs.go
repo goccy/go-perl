@@ -143,6 +143,12 @@ type magicRec struct {
 func init() {
 	// Back (*internal.Perl).AddXSDir with this package's directory loader.
 	internal.RegisterXSDirLoader(loadDir)
+	// Back DynaLoader's dl_* functions (Config.NativeModules).
+	internal.RegisterXSDynamicLoader(internal.XSDynamicLoader{
+		Open:    openLibrary,
+		Symbol:  librarySymbol,
+		Install: installXSub,
+	})
 }
 
 // ArchTag names the per-architecture native-module directory
@@ -177,8 +183,12 @@ func loadDir(p *internal.Perl, dir string) error {
 
 // state is the per-instance loader state.
 type state struct {
-	p       *internal.Perl
-	mu      sync.Mutex
+	p  *internal.Perl
+	mu sync.Mutex
+	// libs and syms back the tokens DynaLoader's dl_load_file and
+	// dl_find_symbol hand to Perl code (token = index+1).
+	libs    []uintptr
+	syms    []uintptr
 	fns     []uintptr // fnID -> native XSUB pointer
 	fnNames [][]byte  // fnID -> NUL-terminated sub name (frame.subname points here)
 	// ptrs is the host-pointer registry backing T_PTROBJ: guest IVs are
@@ -241,6 +251,8 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	statesMu.Lock()
 	cs := &state{
 		p:             clone,
+		libs:          append([]uintptr(nil), s.libs...),
+		syms:          append([]uintptr(nil), s.syms...),
 		fns:           append([]uintptr(nil), s.fns...),
 		fnNames:       append([][]byte(nil), s.fnNames...),
 		ptrs:          append([]uintptr(nil), s.ptrs...),
@@ -402,31 +414,60 @@ func stateFor(p *internal.Perl) *state {
 // module lazily at use time with no loader-side patching. module is the Perl
 // package the .xs declared (e.g. "Compiler::Lexer").
 func load(p *internal.Perl, module, path string) error {
+	s, err := loaderState(p)
+	if err != nil {
+		return err
+	}
+	lib, err := s.open(path)
+	if err != nil {
+		return err
+	}
+	bootName := "boot_" + strings.ReplaceAll(module, "::", "__")
+	bootFn, err := purego.Dlsym(lib, bootName)
+	if err != nil {
+		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
+	}
+	// The static-perl bootstrap contract: DynaLoader::bootstrap (which
+	// XSLoader falls back to on a perl without dynamic loading) resolves
+	// and calls &{"${module}::bootstrap"}.
+	_, err = s.registerNative(module+"::bootstrap", bootFn)
+	return err
+}
+
+// loaderState returns p's loader state once the C library the loader
+// allocates from is bound.
+func loaderState(p *internal.Perl) (*state, error) {
 	libcInit()
 	if libcErr != nil {
-		return libcErr
+		return nil, libcErr
 	}
-	s := stateFor(p)
+	return stateFor(p), nil
+}
+
+// open dlopens a native XS module built against the SDK, injects the
+// vtable, and picks up the SDK entry points the module carries.
+func (s *state) open(path string) (lib uintptr, err error) {
+	p := s.p
 	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetSetMagicHandler(s.magicSetFired); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetPPHookHandler(s.ppHook); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetKeywordHandler(s.keywordHook); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetPerlIOHandler(s.perlioHook); err != nil {
-		return err
+		return 0, err
 	}
 	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
-		return err
+		return 0, err
 	}
 	if !s.cloneHookSet {
 		s.cloneHookSet = true
@@ -434,17 +475,17 @@ func load(p *internal.Perl, module, path string) error {
 	}
 	vtableOnce.Do(buildVtable)
 
-	lib, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	lib, err = purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
 	if err != nil {
-		return fmt.Errorf("dlopen %s: %w", path, err)
+		return 0, fmt.Errorf("dlopen %s: %w", path, err)
 	}
 	initFn, err := purego.Dlsym(lib, "__goperl_xs_init")
 	if err != nil {
-		return fmt.Errorf("%s is not a go-perl native XS module (no __goperl_xs_init): %w", path, err)
+		return 0, fmt.Errorf("%s is not a go-perl native XS module (no __goperl_xs_init): %w", path, err)
 	}
 	got, _, _ := purego.SyscallN(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
-		return fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
+		return 0, fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
 	}
 	// The SDK's croak-guarded entry points for pp hooks and save-stack
 	// destructors (weak, so any SDK .so provides them).
@@ -476,16 +517,58 @@ func load(p *internal.Perl, module, path string) error {
 		s.dtorInvoke = fn
 		s.mu.Unlock()
 	}
+	return lib, nil
+}
 
-	bootName := "boot_" + strings.ReplaceAll(module, "::", "__")
-	bootFn, err := purego.Dlsym(lib, bootName)
+// openLibrary is DynaLoader's dl_load_file: it loads the module at path
+// and returns the token Perl code names it by.
+func openLibrary(p *internal.Perl, path string) (uint64, error) {
+	s, err := loaderState(p)
 	if err != nil {
-		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
+		return 0, err
 	}
-	// The static-perl bootstrap contract: DynaLoader::bootstrap (which
-	// XSLoader falls back to on a perl without dynamic loading) resolves
-	// and calls &{"${module}::bootstrap"}.
-	_, err = s.registerNative(module+"::bootstrap", bootFn)
+	lib, err := s.open(path)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.libs = append(s.libs, lib)
+	return uint64(len(s.libs)), nil
+}
+
+// librarySymbol is DynaLoader's dl_find_symbol.
+func librarySymbol(p *internal.Perl, lib uint64, name string) (uint64, error) {
+	s := stateFor(p)
+	s.mu.Lock()
+	if lib == 0 || lib > uint64(len(s.libs)) {
+		s.mu.Unlock()
+		return 0, fmt.Errorf("unknown library handle %d", lib)
+	}
+	handle := s.libs[lib-1]
+	s.mu.Unlock()
+	fn, err := purego.Dlsym(handle, name)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syms = append(s.syms, fn)
+	return uint64(len(s.syms)), nil
+}
+
+// installXSub is DynaLoader's dl_install_xsub: the function behind sym
+// becomes the Perl sub name.
+func installXSub(p *internal.Perl, name string, sym uint64) error {
+	s := stateFor(p)
+	s.mu.Lock()
+	if sym == 0 || sym > uint64(len(s.syms)) {
+		s.mu.Unlock()
+		return fmt.Errorf("unknown symbol handle %d", sym)
+	}
+	fn := s.syms[sym-1]
+	s.mu.Unlock()
+	_, err := s.registerNative(name, fn)
 	return err
 }
 

@@ -71,6 +71,17 @@ type Config struct {
 	// same Config as its parent, and exec in a child goes through Exec like
 	// any other spawn. FAIL-CLOSED: when false, fork fails in the guest.
 	Fork bool
+	// NativeModules lets Perl code load native XS modules the way perl
+	// loads any dynamic module: XSLoader and DynaLoader find
+	// auto/Module/Module.so on @INC and load it into the HOST process (the
+	// module must be built against the go-perl XS SDK, see the xs package,
+	// which has to be linked into the binary). Native code runs outside
+	// the sandbox entirely, so this is for instances that are not
+	// sandboxed in the first place. The path is opened on the host, which
+	// is the same file only under a host filesystem backend (fs.NewHostFS).
+	// FAIL-CLOSED: when false, only modules the embedder registered with
+	// AddXSDir load.
+	NativeModules bool
 	// FS, when non-nil, is the filesystem backend this instance sees as its
 	// entire guest filesystem ("/"). Every file operation is routed to it, so
 	// giving two instances separate FS values isolates them completely.

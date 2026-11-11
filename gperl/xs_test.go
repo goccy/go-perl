@@ -119,3 +119,53 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = old
 	return <-done
 }
+
+// A native module laid out the way perl installs one — Module.pm next to
+// auto/Module/Module.so on @INC, as in a dist's blib or an install tree —
+// loads through the stock XSLoader, with nothing registered up front.
+func TestNativeModuleLoadsFromInc(t *testing.T) {
+	hostXSToolchain(t)
+	project := t.TempDir()
+	dist, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := XSBuild(project, []string{dist}); err != nil {
+		t.Fatalf("XSBuild: %v", err)
+	}
+
+	lib := t.TempDir()
+	place := func(src string, dst ...string) {
+		t.Helper()
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(append([]string{lib}, dst...)...)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place(filepath.Join(project, "local", "lib", "perl5", "Demo", "XS.pm"), "Demo", "XS.pm")
+	place(filepath.Join(xsDir(project), "Demo-XS.so"), "auto", "Demo", "XS", "XS.so")
+
+	status, stdout, stderr := runCLI(t, t.TempDir(), "", "-I"+lib, "-MDemo::XS", "-e",
+		`print "sum=", Demo::XS::add(40, 2), "\n";`,
+		`-e`, `my $pid = fork // die "fork: $!"; if (!$pid) { print "child=", Demo::XS::add(1, 2), "\n"; exit 0 } waitpid($pid, 0);`)
+	if status != 0 || stdout != "sum=42\nchild=3\n" {
+		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
+	}
+
+	// A module whose shared object is not there fails the way it does on
+	// any perl.
+	if err := os.Remove(filepath.Join(lib, "auto", "Demo", "XS", "XS.so")); err != nil {
+		t.Fatal(err)
+	}
+	status, _, stderr = runCLI(t, t.TempDir(), "", "-I"+lib, "-MDemo::XS", "-e", "1")
+	if status == 0 || !strings.Contains(stderr, "Can't locate loadable object for module Demo::XS in @INC") {
+		t.Fatalf("status=%d stderr=%q, want DynaLoader's own failure", status, stderr)
+	}
+}

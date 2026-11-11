@@ -377,6 +377,16 @@ func TestForkIsDeniedByDefault(t *testing.T) {
 	r.want(t, 0, "denied\n")
 }
 
+// Loading native code is a capability too: without Config.NativeModules
+// DynaLoader has nothing to load a shared object with.
+func TestNativeModulesAreDeniedByDefault(t *testing.T) {
+	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+		`require DynaLoader;`,
+		`print defined(&DynaLoader::dl_load_file) ? "can load\n" : "cannot load\n";`,
+	)}, "")
+	r.want(t, 0, "cannot load\n")
+}
+
 func TestForkWithoutExec(t *testing.T) {
 	r := runProgram(t, perl.Config{Fork: true}, perl.Program{Code: code(
 		`pipe(my $r, my $w) or die "pipe: $!";`,

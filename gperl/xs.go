@@ -334,7 +334,9 @@ func hostToolchain() map[string]string {
 	case "darwin":
 		common["osname"] = "darwin"
 		common["so"] = "dylib"
-		common["dlext"] = "bundle"
+		// The embedded XSLoader looks for auto/Module/Module.so on every
+		// platform; a bundle under that name loads the same.
+		common["dlext"] = "so"
 		common["lddlflags"] = "-bundle -undefined dynamic_lookup -fstack-protector-strong"
 		common["cccdlflags"] = "" // PIC is the darwin default
 	default: // linux and friends

@@ -21,6 +21,11 @@ type Perl struct {
 	funcsMu    sync.RWMutex
 	funcs      map[int32]GoFunc
 	nextFuncID int32
+	// dynaLoaderIDs are the function ids of DynaLoader's host functions
+	// (dynaloader.go), zero without Config.NativeModules. They are kept
+	// because those functions act on the instance that calls them: a clone
+	// or fork child shares the ids but must get functions of its own.
+	dynaLoaderIDs [3]int32
 }
 
 // Result is the outcome of one Eval: the expression's value and the
@@ -88,6 +93,12 @@ func New(cfg Config) (*Perl, error) {
 	raw.UserHandler = p.handleUserCallback
 	raw.OnFork = p.adoptForkChild
 	p.raw = raw
+	if cfg.NativeModules {
+		if err := p.installDynaLoader(); err != nil {
+			p.Close()
+			return nil, err
+		}
+	}
 	return p, nil
 }
 
@@ -102,7 +113,9 @@ func (p *Perl) adoptForkChild(raw *internal.Perl) {
 		c.funcs[id] = fn
 	}
 	c.nextFuncID = p.nextFuncID
+	c.dynaLoaderIDs = p.dynaLoaderIDs
 	p.funcsMu.RUnlock()
+	c.bindDynaLoader()
 	raw.UserHandler = c.handleUserCallback
 	raw.OnFork = c.adoptForkChild
 }
@@ -149,6 +162,7 @@ func (p *Perl) Clone() (*Perl, error) {
 		c.funcs[id] = fn
 	}
 	c.nextFuncID = p.nextFuncID
+	c.dynaLoaderIDs = p.dynaLoaderIDs
 	p.funcsMu.RUnlock()
 
 	raw, err := p.raw.Clone(c.handleUserCallback)
@@ -157,6 +171,7 @@ func (p *Perl) Clone() (*Perl, error) {
 	}
 	raw.OnFork = c.adoptForkChild
 	c.raw = raw
+	c.bindDynaLoader()
 	return c, nil
 }
 
