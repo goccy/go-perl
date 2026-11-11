@@ -46,7 +46,7 @@ report("end of input after the client closed: ", (defined(my $more = <$conn>) ? 
 my $second = IO::Socket::INET->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => $port);
 report("the port is taken: ", ($second ? "bound again" : ($!{EADDRINUSE} ? "EADDRINUSE" : "error $!")));
 report("unknown option: ", (defined setsockopt($server, SOL_SOCKET, 9999, 1) ? "set" : ($!{ENOPROTOOPT} ? "ENOPROTOOPT" : "error $!")));
-report("datagram socket: ", (socket(my $udp, PF_INET, SOCK_DGRAM, 0) ? "created" : ($!{EPROTONOSUPPORT} ? "EPROTONOSUPPORT" : "error $!")));
+report("raw socket: ", (socket(my $raw, PF_INET, SOCK_RAW, 0) ? "created" : ($!{EPROTONOSUPPORT} ? "EPROTONOSUPPORT" : "error $!")));
 `)
 	wantLines(t, got,
 		"listening: host=127.0.0.1 port assigned=1",
@@ -59,7 +59,7 @@ report("datagram socket: ", (socket(my $udp, PF_INET, SOCK_DGRAM, 0) ? "created"
 		"end of input after the client closed: eof",
 		"the port is taken: EADDRINUSE",
 		"unknown option: ENOPROTOOPT",
-		"datagram socket: EPROTONOSUPPORT",
+		"raw socket: EPROTONOSUPPORT",
 	)
 }
 
