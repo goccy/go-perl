@@ -8,6 +8,8 @@
 //	                   metadata of every latest release
 //	cpancompat graph   join them into one record per distribution and
 //	                   derive the dependency graph
+//	cpancompat native  find the distributions with native (XS) code among
+//	                   the most depended-upon ones (-top N)
 //
 // The data directory is given with -data or the CPANCOMPAT_DATA
 // environment variable.
@@ -23,6 +25,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   cpancompat fetch [-data dir]
   cpancompat graph [-data dir]
+  cpancompat native [-data dir] [-top n]
 `)
 	os.Exit(2)
 }
@@ -33,6 +36,7 @@ func main() {
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	data := fs.String("data", os.Getenv("CPANCOMPAT_DATA"), "data directory")
+	top := fs.Int("top", 1000, "native: how many of the most depended-upon distributions to scan")
 	_ = fs.Parse(os.Args[2:])
 	if *data == "" {
 		fmt.Fprintln(os.Stderr, "cpancompat: no data directory (-data or CPANCOMPAT_DATA)")
@@ -44,6 +48,8 @@ func main() {
 		err = fetch(*data)
 	case "graph":
 		err = buildGraph(*data)
+	case "native":
+		err = scanNative(*data, *top)
 	default:
 		usage()
 	}
