@@ -234,6 +234,25 @@ report("busy loop killed: ", outcome($busy));
 	)
 }
 
+// A signal sent to a child the instant it was forked — before the child has
+// run a single statement — is not lost.
+func TestSignalRightAfterFork(t *testing.T) {
+	got := runForkScript(t, `
+for my $sig (qw(USR1 TERM KILL)) {
+    my $pid = fork // die "fork: $!";
+    if ($pid == 0) { sleep 600; exit 0 }
+    kill $sig => $pid;
+    waitpid($pid, 0);
+    report("$sig at once: signal=", $? & 127, " exit=", $? >> 8);
+}
+`)
+	wantLines(t, got,
+		"USR1 at once: signal=10 exit=0",
+		"TERM at once: signal=15 exit=0",
+		"KILL at once: signal=9 exit=0",
+	)
+}
+
 // The parent is told when a child ends: its SIGCHLD handler runs and
 // reaps the child.
 func TestSIGCHLDReaper(t *testing.T) {
