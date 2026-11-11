@@ -107,3 +107,15 @@ func TestAlarmInTheSandbox(t *testing.T) {
 		t.Fatalf("error text %q does not name the signal", err.Error())
 	}
 }
+
+// A sandboxed program cannot become a server on the host's network: binding
+// a socket to a local address is the host process's privilege.
+func TestSandboxCannotListen(t *testing.T) {
+	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+		`use Socket;`,
+		`socket(my $s, PF_INET, SOCK_STREAM, 0) or die "socket: $!";`,
+		`print "bind: ", (bind($s, pack_sockaddr_in(0, pack("C4", 127, 0, 0, 1))) ? "bound" : ($!{EACCES} ? "EACCES" : "error $!")), "\n";`,
+		`print "listen: ", (listen($s, 5) ? "listening" : ($!{EACCES} ? "EACCES" : "error $!")), "\n";`,
+	)}, "")
+	r.want(t, 0, "bind: EACCES\nlisten: EACCES\n")
+}

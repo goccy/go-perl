@@ -89,11 +89,13 @@ type Config struct {
 	//     and otherwise does to the host process what that signal does;
 	//   - a signal the program dies of ends the run with a *SignalError, for
 	//     the embedder to end the host process the same way;
-	//   - kill reaches the host's processes.
+	//   - kill reaches the host's processes;
+	//   - the program may listen for network connections (bind, listen).
 	//
 	// When false (the default) the program is an isolated process: pid 42,
-	// parent 1, user and group 0, empty user and group databases, and kill
-	// reaches only the processes the program started. A pseudo-process forked from the program has the same user
+	// parent 1, user and group 0, empty user and group databases, kill
+	// reaches only the processes the program started, and binding a socket
+	// to a local address fails with EACCES. A pseudo-process forked from the program has the same user
 	// and group but is never the host process: its pid is its own, and a
 	// signal ends only that pseudo-process.
 	HostProcess bool

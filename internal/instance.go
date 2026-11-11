@@ -271,6 +271,12 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	}
 	wasi.SetExecHook(exec)
 	wasi.SetHostProcess(opts.HostProcess)
+	// Taking a local address to accept connections on makes the program a
+	// server on the host's network: only a program that is the host process
+	// may. Traffic on sockets it already has is not gated here (outbound
+	// connections have the Dial hook).
+	mayListen := opts.HostProcess
+	wasi.SetNetAccessHook(func(op string) bool { return op != "listen" || mayListen })
 	// Sandbox stdio by default: an unset stream does NOT fall through to the
 	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
 	// stderr to discard. (Perl-level print output is still captured into the
