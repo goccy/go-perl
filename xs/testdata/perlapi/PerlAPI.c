@@ -876,6 +876,35 @@ XS(XS_PerlAPI_display) {
     }
 }
 
+/* What a module that keeps a looked-up method compares to know whether it
+ * is still current (DBI's dispatch does this). */
+XS(XS_PerlAPI_method_cache_gen) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "class");
+    {
+        HV *stash = gv_stashsv(ST(0), GV_ADD);
+        XSRETURN_IV((IV)(PL_sub_generation + HvMROMETA(stash)->cache_gen));
+    }
+}
+
+/* The sub a method lookup finds, taken with GvCV as method-dispatching XS
+ * code does; looked up twice, so that the second answer comes from the
+ * class's method cache. */
+XS(XS_PerlAPI_method_twice) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "class, method");
+    {
+        HV *stash = gv_stashsv(ST(0), GV_ADD);
+        const char *name = SvPV_nolen(ST(1));
+        GV *first = gv_fetchmethod_autoload(stash, name, FALSE);
+        GV *second = gv_fetchmethod_autoload(stash, name, FALSE);
+        CV *a = first ? GvCV(first) : NULL;
+        CV *b = second ? GvCV(second) : NULL;
+        if (!a || !b) XSRETURN_PV(!a ? "first lookup: no sub" : "second lookup: no sub");
+        XSRETURN_PV(a == b ? "same sub" : "different subs");
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -938,5 +967,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::count_up", XS_PerlAPI_count_up);
     newXS_deffile("PerlAPI::relay_list", XS_PerlAPI_relay_list);
     newXS_deffile("PerlAPI::display", XS_PerlAPI_display);
+    newXS_deffile("PerlAPI::method_cache_gen", XS_PerlAPI_method_cache_gen);
+    newXS_deffile("PerlAPI::method_twice", XS_PerlAPI_method_twice);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

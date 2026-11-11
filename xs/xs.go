@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 11
+const abiVersion = 12
 
 // failedThrown is the frame's failed value after croak_sv
 // (GOPERL_FAILED_THROWN in the SDK), and respThrow the dispatch response

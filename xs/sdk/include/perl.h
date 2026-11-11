@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 11u
+#define GOPERL_XS_ABI 12u
 
 /* The perl this SDK targets (the embedded interpreter's version). */
 #include "patchlevel.h"
@@ -2805,7 +2805,11 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
     ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 0)))
 #define GvCVu(gv) \
     ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 1)))
-#define GvCV(gv) GvCVu(gv)
+/* GvCV is the sub of the glob whatever the glob is; GvCVu leaves out the
+ * one a method lookup cached there. gv_fetchmethod returns such cache
+ * entries, and their callers take the sub with GvCV. */
+#define GvCV(gv) \
+    ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 7)))
 #define GvHV(gv) \
     ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 2)))
 #define GvAV(gv) \
@@ -3957,12 +3961,14 @@ static HV *goperl_gv_stashsv(goperl_frame_t *f, SV *name, I32 flags) {
 #define SvAMAGIC_off(sv) \
     ((void)goperl_op0(GOPERL_OP_SV_AMAGIC_SET, GOPERL_TOK(sv), 0))
 
-/* mro package generation, read the way Moose's mop.c reads it:
- * HvAUX(stash)->xhv_mro_meta->pkg_gen. Only that chain is modeled — HvAUX
- * returns a scratch one-deep view refreshed from the guest on every call. */
+/* The mro generations of a stash, read the way Moose's mop.c reads one
+ * (HvAUX(stash)->xhv_mro_meta->pkg_gen) and the way DBI reads the other
+ * (HvMROMETA(stash)->cache_gen, which says whether a method it looked up
+ * and kept is still the one the stash resolves to). Only these chains are
+ * modeled: a scratch one-deep view refreshed from the guest on every call. */
 struct mro_meta {
     U32 pkg_gen;
-    U32 cache_gen; /* always 0: method-cache users revalidate every time */
+    U32 cache_gen;
 };
 struct xpvhv_aux { struct mro_meta *xhv_mro_meta; };
 static struct {
@@ -3973,6 +3979,8 @@ static struct xpvhv_aux *goperl_hvaux(goperl_frame_t *f, HV *hv) {
     uint64_t r = goperl_do_op(f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 0, 0, 0);
     if (r >> 32) {
         goperl_hvaux_v.meta.pkg_gen = (U32)r;
+        goperl_hvaux_v.meta.cache_gen = (U32)goperl_do_op(
+            f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 1, 0, 0);
         goperl_hvaux_v.aux.xhv_mro_meta = &goperl_hvaux_v.meta;
     } else {
         goperl_hvaux_v.aux.xhv_mro_meta = 0;
@@ -3980,13 +3988,12 @@ static struct xpvhv_aux *goperl_hvaux(goperl_frame_t *f, HV *hv) {
     return &goperl_hvaux_v.aux;
 }
 #define HvAUX(hv) goperl_hvaux(_gof, (HV *)(hv))
-/* HvMROMETA never returns NULL in core; hand out the shim meta. */
+/* HvMROMETA never returns NULL in core: a stash without the meta gets one. */
 static struct mro_meta *goperl_hvmrometa(goperl_frame_t *f, HV *hv) {
-    struct xpvhv_aux *aux = goperl_hvaux(f, hv);
-    return aux->xhv_mro_meta ? aux->xhv_mro_meta
-                             : (goperl_hvaux_v.meta.pkg_gen = 0,
-                                goperl_hvaux_v.meta.cache_gen = 0,
-                                &goperl_hvaux_v.meta);
+    uint64_t r = goperl_do_op(f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 1, 0, 0);
+    goperl_hvaux_v.meta.pkg_gen = (U32)(r >> 32);
+    goperl_hvaux_v.meta.cache_gen = (U32)r;
+    return &goperl_hvaux_v.meta;
 }
 #define HvMROMETA(hv) goperl_hvmrometa(_gof, (HV *)(hv))
 
@@ -4375,17 +4382,26 @@ static void goperl_croak_sv(goperl_frame_t *f, SV *sv)
  * the frame as well, for the catch points that only report a message. */
 #define GOPERL_FAILED_THROWN 2
 static void goperl_croak_sv(goperl_frame_t *f, SV *sv) {
-    uint64_t len = 0;
-    const char *p;
     goperl_flush(f);
-    p = goperl_direct_sv_pv(f, GOPERL_TOK(sv), &len);
-    snprintf(f->err, sizeof f->err, "%.*s", (int)(len > 400 ? 400 : len),
-             p ? p : "");
+    /* The value is taken before anything else happens to it. A reference
+     * is not stringified at all, as perl does not when it dies with one:
+     * its string overloading is the program's code, which may run anything
+     * (and clear $@, the very value being thrown, on the way). */
+    if (f->jb)
+        goperl_api_v->xs_op(f, GOPERL_OP_SV_CALL,
+                            ((uint64_t)50 /* GOPERL_SVCALL_THROW */ << 32) |
+                                (uint32_t)GOPERL_TOK(sv),
+                            0, 0, 0);
+    if (goperl_api_v->xs_op(f, GOPERL_OP_SV_INFO, GOPERL_TOK(sv), 0, 0, 0) &
+        GOPERL_INFO_ROK) {
+        snprintf(f->err, sizeof f->err, "died with a reference");
+    } else {
+        uint64_t len = 0;
+        const char *p = goperl_api_v->sv_pv(f, GOPERL_TOK(sv), &len);
+        snprintf(f->err, sizeof f->err, "%.*s", (int)(len > 400 ? 400 : len),
+                 p ? p : "");
+    }
     if (!f->jb) goperl_raise(f);
-    goperl_api_v->xs_op(f, GOPERL_OP_SV_CALL,
-                        ((uint64_t)50 /* GOPERL_SVCALL_THROW */ << 32) |
-                            (uint32_t)GOPERL_TOK(sv),
-                        0, 0, 0);
     f->failed = GOPERL_FAILED_THROWN;
     longjmp(*(jmp_buf *)f->jb, 1);
 }

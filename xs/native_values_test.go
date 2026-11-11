@@ -84,6 +84,43 @@ func TestNativeLongLists(t *testing.T) {
 	})
 }
 
+// The method-cache generation of a class changes when a method it inherits
+// is replaced or its @ISA changes: a module that keeps a method it looked
+// up relies on that to look again.
+func TestNativeMethodCacheGeneration(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	setup := `package GenParent; sub m { 1 } package GenOther; sub m { 3 }
+package GenChild; our @ISA = ("GenParent"); package main; 1;`
+	if r, err := p.Eval(context.Background(), setup); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"unchanged while nothing is redefined", `GenChild->m; my $a = PerlAPI::method_cache_gen("GenChild"); GenChild->m; $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "same"},
+		{"a method of the parent is replaced", `my $a = PerlAPI::method_cache_gen("GenChild"); { no warnings; *GenParent::m = sub { 2 }; } $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "moved"},
+		{"GvCV of an inherited method, from the method cache too", `package GenKid; our @ISA = ("GenOther"); package main; PerlAPI::method_twice("GenKid", "m")`, "same sub"},
+		{"@ISA changes", `my $a = PerlAPI::method_cache_gen("GenChild"); @GenChild::ISA = ("GenOther"); $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "moved"},
+	})
+}
+
+// croak(NULL) and croak_sv die with a reference as it is. The reference is
+// not stringified on the way: its overloading is code of the program, and
+// this one clears $@, which is the value being thrown.
+func TestNativeThrowsReferenceUntouched(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	setup := `package Clears; our $calls = 0;
+use overload '""' => sub { $calls++; eval { 1 }; "text" }, bool => sub { 1 }, fallback => 1;
+package main; 1;`
+	if r, err := p.Eval(context.Background(), setup); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"croak(NULL) with an object in $@", `my $e = bless {}, "Clears"; eval { PerlAPI::rethrow_errsv($e) }; (ref($@) || "not a reference") . ":" . $Clears::calls`, "Clears:0"},
+		{"croak_sv with the object", `my $e = bless {}, "Clears"; eval { PerlAPI::throw($e) }; (ref($@) || "not a reference") . ":" . $Clears::calls`, "Clears:0"},
+	})
+}
+
 // SvPVbyte gives the byte form of a string: one held as UTF-8 is converted,
 // and one with a character above 255 has none.
 func TestNativeByteStrings(t *testing.T) {
