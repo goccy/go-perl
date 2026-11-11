@@ -60,6 +60,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 #include <float.h>
 #include <ctype.h>
@@ -926,7 +927,12 @@ enum {
     GOPERL_OP_KEYWORD_ENABLE = 181,
     GOPERL_OP_CHARCLASS = 182,
     GOPERL_OP_SAVE_MISC = 183,
-    GOPERL_OP_SV_CLASSIFY = 184
+    GOPERL_OP_SV_CLASSIFY = 184,
+    GOPERL_OP_SV_FLAGS = 185,
+    GOPERL_OP_SV_SLOT_SET = 186,
+    GOPERL_OP_SV_CALL = 187,
+    GOPERL_OP_GV_CALL = 188,
+    GOPERL_OP_SV_STR = 189
 };
 
 /* PLVAR_GET/SET ids. */
@@ -970,13 +976,23 @@ static void goperl_hostsave_i32(goperl_frame_t *f, int32_t *loc);
 static void goperl_svcur_writeback(goperl_frame_t *f);
 static void goperl_gen_bump(void);
 
+static void goperl_raise(goperl_frame_t *f) __attribute__((noreturn, unused));
+
 static uint64_t goperl_do_op(goperl_frame_t *f, int32_t op, uint64_t a,
                              uint64_t b, const char *s, uint64_t slen) {
     goperl_flush(f);
+    const int32_t failed_before = f->failed;
     uint64_t r = goperl_api_v->xs_op(f, op, a, b, s, slen);
     /* any guest operation may have changed interpreter state the context
      * mirrors reflect */
     goperl_gen_bump();
+    /* The interpreter died inside the operation (the loader left the
+     * message in the frame). A perl API function does not return to its
+     * caller in that case: it unwinds to the nearest catch point, which
+     * here is the XSUB entry or an enclosing XCPT_TRY. Without one armed
+     * (a callback the loader runs outside an XSUB) the caller goes on with
+     * the zero result and the loader reports the failure afterwards. */
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
     return r;
 }
 
@@ -1001,7 +1017,6 @@ static void goperl_hostsave_unwind_to(goperl_frame_t *f, int32_t base) {
     }
 }
 
-static void goperl_raise(goperl_frame_t *f) __attribute__((noreturn, unused));
 static void goperl_raise(goperl_frame_t *f) {
     f->failed = 1;
     if (!f->jb) {
@@ -1017,8 +1032,11 @@ static void goperl_raise(goperl_frame_t *f) {
 
 static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((noreturn, unused));
+static void goperl_croak_errsv(goperl_frame_t *f)
+    __attribute__((noreturn, unused));
 static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...) {
     va_list ap;
+    if (!fmt) goperl_croak_errsv(f);
     va_start(ap, fmt);
     goperl_vfmt(f, f->err, sizeof f->err, fmt, ap);
     va_end(ap);
@@ -1219,6 +1237,7 @@ static void Perl_croak(pTHX_ const char *fmt, ...)
     __attribute__((noreturn, unused));
 static void Perl_croak(pTHX_ const char *fmt, ...) {
     va_list ap;
+    if (!fmt) goperl_croak_errsv(_gof);
     va_start(ap, fmt);
     goperl_vfmt(_gof, _gof->err, sizeof _gof->err, fmt, ap);
     va_end(ap);
@@ -1229,6 +1248,7 @@ static void Perl_croak_nocontext(const char *fmt, ...)
 static void Perl_croak_nocontext(const char *fmt, ...) {
     goperl_frame_t *f = goperl_cur_frame_v;
     va_list ap;
+    if (!fmt) goperl_croak_errsv(f);
     va_start(ap, fmt);
     goperl_vfmt(f, f->err, sizeof f->err, fmt, ap);
     va_end(ap);
@@ -1536,8 +1556,11 @@ static void goperl_sv_catpvf(goperl_frame_t *f, SV *sv, const char *fmt,
     ((void)goperl_op0(GOPERL_OP_SV_UTF8_ON, GOPERL_TOK(sv), 0))
 #define SvPOK_on(sv) \
     ((void)goperl_op0(GOPERL_OP_SV_POK_ON, GOPERL_TOK(sv), 0))
-#define SvUPGRADE(sv, t) \
-    ((void)goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(sv), (uint64_t)(t)), 0)
+/* SvUPGRADE only ever raises the type; sv_upgrade itself refuses to lower
+ * it. */
+#define SvUPGRADE(sv, t)                                                  \
+    ((void)(SvTYPE(sv) >= (t) ||                                          \
+            (goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(sv), (uint64_t)(t)), 1)))
 #define sv_upgrade(sv, t) \
     ((void)goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(sv), (uint64_t)(t)))
 #define sv_utf8_upgrade(sv) \
@@ -3865,10 +3888,31 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
  * (croak carries a message, not an SV). */
 static void goperl_croak_sv(goperl_frame_t *f, SV *sv)
     __attribute__((noreturn, unused));
+/* croak_sv dies with the SV itself: an exception object reaches the Perl
+ * code that catches it as the same object. The value is handed to the
+ * interpreter here and the frame is marked as ending with a thrown value;
+ * the loader then makes the interpreter die with it. The text goes into
+ * the frame as well, for the catch points that only report a message. */
+#define GOPERL_FAILED_THROWN 2
 static void goperl_croak_sv(goperl_frame_t *f, SV *sv) {
     uint64_t len = 0;
-    const char *p = goperl_api_v->sv_pv(f, GOPERL_TOK(sv), &len);
-    goperl_croakf(f, "%.*s", (int)(len > 400 ? 400 : len), p ? p : "");
+    const char *p;
+    goperl_flush(f);
+    p = goperl_api_v->sv_pv(f, GOPERL_TOK(sv), &len);
+    snprintf(f->err, sizeof f->err, "%.*s", (int)(len > 400 ? 400 : len),
+             p ? p : "");
+    if (!f->jb) goperl_raise(f);
+    goperl_api_v->xs_op(f, GOPERL_OP_SV_CALL,
+                        ((uint64_t)50 /* GOPERL_SVCALL_THROW */ << 32) |
+                            (uint32_t)GOPERL_TOK(sv),
+                        0, 0, 0);
+    f->failed = GOPERL_FAILED_THROWN;
+    longjmp(*(jmp_buf *)f->jb, 1);
+}
+/* croak(NULL): the exception is whatever $@ holds. */
+static void goperl_croak_errsv(goperl_frame_t *f) {
+    goperl_croak_sv(f, GOPERL_SV(goperl_api_v->xs_op(f, GOPERL_OP_ERRSV, 0, 0,
+                                                    0, 0)));
 }
 #define croak_sv(sv) goperl_croak_sv(_gof, (SV *)(sv))
 #define warn_sv(sv)                                       \
@@ -4364,32 +4408,150 @@ typedef int opcode;
  * type may not even exist without MULTIPLICITY). */
 #define dTHXa(a) dTHX
 
-/* grok_number, minimally: decimal unsigned parse (perl numeric.c). */
+/* grok_number (numeric.c): classifies a decimal number, with the integer
+ * limits of the interpreter (UV_MAX above). The radix is '.': the
+ * interpreter runs in the C locale. */
 #define IS_NUMBER_IN_UV 0x01
 #define IS_NUMBER_GREATER_THAN_UV_MAX 0x02
 #define IS_NUMBER_NOT_INT 0x04
 #define IS_NUMBER_NEG 0x08
 #define IS_NUMBER_INFINITY 0x10
 #define IS_NUMBER_NAN 0x20
-static int goperl_grok_number(const char *pv, STRLEN len, UV *valuep)
+/* grok_infnan: "Inf", "Infinity", "NaN" (with the q/s suffixes) and the
+ * "1.#INF" / "1.#IND" / "1.#QNAN" spellings, any letter case, optionally
+ * followed by spaces. Payload forms ("nan(123)") are not recognized. */
+static int goperl_grok_infnan(const char **sp, const char *send)
     __attribute__((unused));
-static int goperl_grok_number(const char *pv, STRLEN len, UV *valuep) {
-    uint64_t v = 0;
-    STRLEN i = 0;
-    if (len == 0) return 0;
-    for (; i < len && pv[i] >= '0' && pv[i] <= '9'; i++) {
-        v = v * 10 + (uint64_t)(pv[i] - '0');
-        /* overflow past the GUEST's 32-bit UV: report like real perl
-         * (GREATER_THAN_UV_MAX, IN_UV cleared) so callers take their
-         * NV path instead of storing a truncated integer. */
-        if (v > 0xFFFFFFFFull)
-            return IS_NUMBER_GREATER_THAN_UV_MAX;
+static int goperl_grok_infnan(const char **sp, const char *send) {
+    const char *s = *sp;
+    int kind = 0;
+    size_t n = (size_t)(send - s);
+    if (n >= 3 && s[0] == '1' && s[1] == '.' && s[2] == '#') {
+        s += 3;
+        n -= 3;
+        if (n >= 3 && strncasecmp(s, "INF", 3) == 0) {
+            kind = 0x10;
+            s += 3;
+        } else if (n >= 3 && strncasecmp(s, "IND", 3) == 0) {
+            kind = 0x20;
+            s += 3;
+        } else if (n >= 4 && (strncasecmp(s, "QNAN", 4) == 0 ||
+                              strncasecmp(s, "SNAN", 4) == 0)) {
+            kind = 0x20;
+            s += 4;
+        } else if (n >= 3 && strncasecmp(s, "NAN", 3) == 0) {
+            kind = 0x20;
+            s += 3;
+        }
+    } else if (n >= 8 && strncasecmp(s, "infinity", 8) == 0) {
+        kind = 0x10;
+        s += 8;
+    } else if (n >= 3 && strncasecmp(s, "inf", 3) == 0) {
+        kind = 0x10;
+        s += 3;
+    } else if (n >= 3 && strncasecmp(s, "nan", 3) == 0) {
+        kind = 0x20;
+        s += 3;
+        if (s < send && (*s == 'q' || *s == 'Q' || *s == 's' || *s == 'S')) s++;
     }
-    if (i == 0 || i != len) return 0;
-    if (valuep) *valuep = (UV)v;
-    return IS_NUMBER_IN_UV;
+    if (!kind) return 0;
+    while (s < send && isspace((unsigned char)*s)) s++;
+    if (s < send) return 0;
+    *sp = s;
+    return kind | 0x04; /* IS_NUMBER_NOT_INT */
 }
-#define grok_number(pv, len, vp) goperl_grok_number((pv), (len), (vp))
+static int goperl_grok_number_flags(const char *pv, STRLEN len, UV *valuep,
+                                    U32 flags) __attribute__((unused));
+static int goperl_grok_number_flags(const char *pv, STRLEN len, UV *valuep,
+                                    U32 flags) {
+    const char *s = pv;
+    const char *const send = pv + len;
+    const char *d;
+    int numtype = 0;
+    const UV max_div_10 = UV_MAX / 10;
+    const U8 max_mod_10 = (U8)(UV_MAX % 10);
+    while (s < send && isspace((unsigned char)*s)) s++;
+    if (s == send) return 0;
+    if (*s == '-') {
+        s++;
+        numtype = IS_NUMBER_NEG;
+    } else if (*s == '+') {
+        s++;
+    }
+    if (s == send) return 0;
+    d = s;
+    if (*s >= '0' && *s <= '9') {
+        UV value = 0;
+        int overflow = 0;
+        for (; s < send && *s >= '0' && *s <= '9'; s++) {
+            const U8 digit = (U8)(*s - '0');
+            if (overflow) continue;
+            if (value > max_div_10 ||
+                (value == max_div_10 && digit > max_mod_10))
+                overflow = 1;
+            else
+                value = value * 10 + digit;
+        }
+        if (overflow) {
+            numtype |= IS_NUMBER_GREATER_THAN_UV_MAX;
+        } else {
+            numtype |= IS_NUMBER_IN_UV;
+            if (valuep) *valuep = value;
+        }
+        if (s < send && *s == '.') {
+            s++;
+            numtype |= IS_NUMBER_NOT_INT;
+            while (s < send && *s >= '0' && *s <= '9') s++;
+        }
+    } else if (*s == '.') {
+        s++;
+        numtype |= IS_NUMBER_NOT_INT | IS_NUMBER_IN_UV;
+        /* no digits before the radix: there must be some after it */
+        if (s < send && *s >= '0' && *s <= '9') {
+            do {
+                s++;
+            } while (s < send && *s >= '0' && *s <= '9');
+            if (valuep) *valuep = 0;
+        } else {
+            return 0;
+        }
+    }
+    if (s > d && s < send && (*s == 'e' || *s == 'E')) {
+        s++;
+        if (s < send && (*s == '-' || *s == '+')) s++;
+        if (s < send && *s >= '0' && *s <= '9') {
+            do {
+                s++;
+            } while (s < send && *s >= '0' && *s <= '9');
+        } else if (flags & 0x10 /* PERL_SCAN_TRAILING */) {
+            return numtype | 0x40 /* IS_NUMBER_TRAILING */;
+        } else {
+            return 0;
+        }
+        /* an exponent leaves only the sign of what was learnt */
+        numtype &= IS_NUMBER_NEG;
+        numtype |= IS_NUMBER_NOT_INT;
+    }
+    while (s < send && isspace((unsigned char)*s)) s++;
+    if (s >= send) return numtype;
+    if (len == 10 && memcmp(pv, "0 but true", 10) == 0) {
+        if (valuep) *valuep = 0;
+        return IS_NUMBER_IN_UV;
+    }
+    if (s + 2 < send && strchr("inqsINQS#", *s)) {
+        /* from the first digit: "1.#INF" has been read as a number so far */
+        const int infnan = goperl_grok_infnan(&d, send);
+        if (infnan & IS_NUMBER_INFINITY) return numtype | infnan;
+        if (infnan & IS_NUMBER_NAN) return (numtype | infnan) & ~IS_NUMBER_NEG;
+    } else if (flags & 0x10 /* PERL_SCAN_TRAILING */) {
+        return numtype | 0x40 /* IS_NUMBER_TRAILING */;
+    }
+    return 0;
+}
+#define grok_number_flags(pv, len, vp, flags) \
+    goperl_grok_number_flags((pv), (len), (vp), (U32)(flags))
+#define grok_number(pv, len, vp) goperl_grok_number_flags((pv), (len), (vp), 0)
+#define grok_infnan(sp, send) goperl_grok_infnan((sp), (send))
 
 /* ninstr: find the FIRST occurrence of little in big (perl util.c). */
 static char *ninstr(const char *big, const char *bigend, const char *little,

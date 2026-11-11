@@ -52,6 +52,15 @@ var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
 const abiVersion = 10
 
+// failedThrown is the frame's failed value after croak_sv
+// (GOPERL_FAILED_THROWN in the SDK), and respThrow the dispatch response
+// that tells the interpreter to die with the value it was handed
+// (GOPERL_RESP_THROW in perl-wasm).
+const (
+	failedThrown = 2
+	respThrow    = 2
+)
+
 const (
 	maxStack = 512 // GOPERL_XS_STACK
 	// sharedBlockSize matches GOPERL_SHARED_RESERVED in the SDK.
@@ -649,6 +658,11 @@ func (s *state) dispatch(req []byte) []byte {
 		purego.SyscallN(epi, fp)
 	}
 	unpinFrame(fp)
+	if f.failed == failedThrown {
+		// croak_sv: the interpreter holds the thrown value and dies with
+		// it when it sees this response.
+		return []byte{respThrow}
+	}
 	if f.failed != 0 {
 		return fail(f.errString())
 	}

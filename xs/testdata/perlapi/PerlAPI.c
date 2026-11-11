@@ -284,6 +284,56 @@ XS(XS_PerlAPI_localize) {
     }
 }
 
+XS(XS_PerlAPI_length_after_upgrade) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    SvUPGRADE(ST(0), SVt_PV);
+    XSRETURN_IV((IV)SvCUR(ST(0)));
+}
+
+/* sv_upgrade refuses to lower a type by dying; nothing after it may run. */
+XS(XS_PerlAPI_lower_type) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    sv_upgrade(ST(0), SVt_PV);
+    croak("the XSUB went on after an API function died");
+}
+
+/* grok_number: the classification bits and, for an integer, the value. */
+XS(XS_PerlAPI_number_kind) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "string");
+    {
+        STRLEN len;
+        const char *p = SvPV(ST(0), len);
+        UV value = 0;
+        int kind = grok_number(p, len, &value);
+        SV *out = sv_2mortal(newSVpvs(""));
+        if (kind & IS_NUMBER_IN_UV) sv_catpvf(out, "uv=%lu,", (unsigned long)value);
+        if (kind & IS_NUMBER_GREATER_THAN_UV_MAX) sv_catpvs(out, "big,");
+        if (kind & IS_NUMBER_NOT_INT) sv_catpvs(out, "notint,");
+        if (kind & IS_NUMBER_NEG) sv_catpvs(out, "neg,");
+        if (kind & IS_NUMBER_INFINITY) sv_catpvs(out, "inf,");
+        if (kind & IS_NUMBER_NAN) sv_catpvs(out, "nan,");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+XS(XS_PerlAPI_throw) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "exception");
+    croak_sv(ST(0));
+}
+
+/* die(NULL) / croak(NULL): the exception is the current value of $@. */
+XS(XS_PerlAPI_rethrow_errsv) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "exception");
+    sv_setsv(ERRSV, ST(0));
+    croak(NULL);
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -309,5 +359,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::version", XS_PerlAPI_version);
     newXS_deffile("PerlAPI::phase", XS_PerlAPI_phase);
     newXS_deffile("PerlAPI::localize", XS_PerlAPI_localize);
+    newXS_deffile("PerlAPI::length_after_upgrade", XS_PerlAPI_length_after_upgrade);
+    newXS_deffile("PerlAPI::lower_type", XS_PerlAPI_lower_type);
+    newXS_deffile("PerlAPI::throw", XS_PerlAPI_throw);
+    newXS_deffile("PerlAPI::number_kind", XS_PerlAPI_number_kind);
+    newXS_deffile("PerlAPI::rethrow_errsv", XS_PerlAPI_rethrow_errsv);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

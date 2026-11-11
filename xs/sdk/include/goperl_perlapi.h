@@ -16,14 +16,6 @@
 
 /* ---- guest operation selectors (mirror perl-wasm's perl_xs_helper) ------ */
 
-enum {
-    GOPERL_OP_SV_FLAGS = 185,
-    GOPERL_OP_SV_SLOT_SET = 186,
-    GOPERL_OP_SV_CALL = 187,
-    GOPERL_OP_GV_CALL = 188,
-    GOPERL_OP_SV_STR = 189
-};
-
 /* SAVE_MISC selectors. */
 enum {
     GOPERL_SAVE_FREESV = 0,
@@ -98,7 +90,8 @@ enum {
     GOPERL_SVCALL_IO_TYPE = 46,
     GOPERL_SVCALL_IO_FLAGS = 47,
     GOPERL_SVCALL_IO_LINES = 48,
-    GOPERL_SVCALL_SETPV_BUFSIZE = 49
+    GOPERL_SVCALL_SETPV_BUFSIZE = 49,
+    GOPERL_SVCALL_THROW = 50
 };
 
 /* GV_CALL selectors: the ones below FIRST_CV take a glob, the rest a CV. */
@@ -1573,6 +1566,14 @@ static Size_t goperl_strlcpy(char *dst, const char *src, Size_t size) {
 #define Perl_sv_setpvf goperl_sv_setpvf
 #define Perl_sv_catpvf goperl_sv_catpvf
 #define warner(cat, ...) Perl_warner(aTHX_(cat), __VA_ARGS__)
+
+/* The fields of a hash key (hv.h); the flags byte follows the key's NUL. */
+#define HEK_KEY(hek) ((hek)->hek_key)
+#define HEK_LEN(hek) ((hek)->hek_len)
+#define HEK_HASH(hek) ((hek)->hek_hash)
+#define HEK_FLAGS(hek) (*((unsigned char *)(HEK_KEY(hek)) + HEK_LEN(hek) + 1))
+#define HEK_UTF8(hek) (HEK_FLAGS(hek) & HVhek_UTF8)
+#define HEK_WASUTF8(hek) (HEK_FLAGS(hek) & HVhek_WASUTF8)
 
 /* The stash a COP was compiled in; the interpreter keeps it by name too. */
 #define CopSTASH(c) gv_stashpv(CopSTASHPV(c), 0)

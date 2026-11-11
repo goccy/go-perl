@@ -99,6 +99,15 @@ package main; sub joiner { join "+", @_ } our ($foo, $loc); 1;`
 		{"PL_na", `PerlAPI::length_via_na("hello")`, "5"},
 		{"version macros", `PerlAPI::version() eq sprintf("%vd", $^V) ? "same" : PerlAPI::version()`, "same"},
 		{"PL_phase", `PerlAPI::phase()`, "RUN"},
+		{"SvUPGRADE of an SV of a higher type", `my $s = "12"; bless \$s, "Marked"; PerlAPI::length_after_upgrade($s)`, "2"},
+		{"an API function that dies ends the XSUB", `my $s = "12"; bless \$s, "Marked"; eval { PerlAPI::lower_type($s) }; $@ =~ /^sv_upgrade from type 7 down to type 3/ ? "died in the API" : "other: $@"`, "died in the API"},
+		{"croak_sv with an object", `my $e = bless { code => 7 }, "My::Err"; eval { PerlAPI::throw($e) }; ref($@) . ":" . $@->{code} . ":" . ($@ == $e ? "same" : "copy")`, "My::Err:7:same"},
+		{"croak_sv with a string", `eval { PerlAPI::throw("plain\n") }; $@`, "plain\n"},
+		{"croak_sv with a long string", `my $m = ("x" x 600) . "\n"; eval { PerlAPI::throw($m) }; length($@)`, "601"},
+		{"croak_sv adds the location to an unterminated message", `eval { PerlAPI::throw("no newline") }; $@ =~ /^no newline at .* line \d+\.$/ ? "located" : "bare: $@"`, "located"},
+		{"croak(NULL) dies with $@", `eval { PerlAPI::rethrow_errsv(bless [], "My::Other") }; ref $@`, "My::Other"},
+		{"grok_number", `join "|", map { PerlAPI::number_kind($_) } "42", "-1", "0.00", " 12 ", "1e3", "-.5", ".", "12abc", "", "4294967296", "0 but true", "Inf", "-Infinity", "NaN", "1.#INF"`,
+			"uv=42,|uv=1,neg,|uv=0,notint,|uv=12,|notint,|uv=0,notint,neg,||||big,|uv=0,|notint,inf,|notint,neg,inf,|notint,nan,|uv=1,notint,inf,"},
 		{"save_item", `$loc = "outside"; my $seen; PerlAPI::localize(\*loc, sub { $seen = $loc }); "$seen/$loc"`, "inside/outside"},
 	} {
 		r, err := p.Eval(ctx, tc.code)
