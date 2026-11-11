@@ -2308,8 +2308,20 @@ static void goperl_xs_leave(goperl_frame_t *f) {
  * make current again — the caller for a fresh entry, the frame ITSELF for
  * a same-frame nested call — and depth++ balances the leave's decrement
  * either way. */
+/* Runs when the function that declared dXSARGS returns. An XSUB that ends
+ * with a bare `return` (xsubpp's PPCODE trailer is `PUTBACK; return;`)
+ * skips XSRETURN's frame-exit bookkeeping; the frame's catch point would
+ * then keep naming the jmp_buf of a function that is gone, and a croak in
+ * the caller of a directly called XSUB (DBI's dispatch calls driver XSUBs
+ * by C pointer) would jump into it. The activation is still open exactly
+ * when the frame's catch point is this function's own buffer. */
+static void goperl_xs_autoleave(jmp_buf *jb) {
+    goperl_frame_t *f = goperl_cur_frame_v;
+    if (f && f->jb == (void *)jb) goperl_xs_leave(f);
+}
+
 #define dXSARGS                                            \
-    jmp_buf _gof_jb;                                       \
+    jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave))); \
     {                                                      \
         /* current-frame FIRST: the shared-state macros below resolve  \
          * through it, and on a fresh thread the slot starts NULL */   \

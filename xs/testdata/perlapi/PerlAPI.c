@@ -389,6 +389,26 @@ XS(XS_PerlAPI_first_char) {
     }
 }
 
+/* Ends the way xsubpp's PPCODE sections do: no XSRETURN. */
+XS(XS_PerlAPI_bare_return) {
+    dXSARGS;
+    SP -= items;
+    PUTBACK;
+    return;
+}
+
+/* Calls an XSUB by its C function, then croaks: the croak has to unwind to
+ * this function, not to the one that already returned. */
+XS(XS_PerlAPI_direct_then_croak) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    PUSHMARK(SP);
+    PUTBACK;
+    XS_PerlAPI_bare_return(aTHX_ cv);
+    SPAGAIN;
+    croak("after the direct call");
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -417,6 +437,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::length_after_upgrade", XS_PerlAPI_length_after_upgrade);
     newXS_deffile("PerlAPI::lower_type", XS_PerlAPI_lower_type);
     newXS_deffile("PerlAPI::throw", XS_PerlAPI_throw);
+    newXS_deffile("PerlAPI::bare_return", XS_PerlAPI_bare_return);
+    newXS_deffile("PerlAPI::direct_then_croak", XS_PerlAPI_direct_then_croak);
     newXS_deffile("PerlAPI::first_char", XS_PerlAPI_first_char);
     newXS_deffile("PerlAPI::store_first", XS_PerlAPI_store_first);
     newXS_deffile("PerlAPI::call_plain", XS_PerlAPI_call_plain);

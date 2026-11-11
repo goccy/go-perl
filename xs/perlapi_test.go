@@ -113,6 +113,7 @@ package main; sub joiner { join "+", @_ } our ($foo, $loc); 1;`
 		{"an exception passes through call_sv without G_EVAL", `my $e = bless [], "My::Err"; eval { PerlAPI::call_plain(sub { die $e }) }; ref($@) . ($@ == $e ? ":same" : ":copy")`, "My::Err:same"},
 		{"GIMME_V", `my $s = PerlAPI::context(); my ($l) = PerlAPI::context(); PerlAPI::context(); "$s,$l,$PerlAPI::last_context"`, "scalar,list,void"},
 		{"utf8n_to_uvchr", `join ",", map { PerlAPI::first_char($_) } "A", "\xc3\xa9", "\xe2\x98\xba", "\xa0", "\xc3", "\xc0\x80"`, "65/1,233/2,9786/3,malformed,malformed,malformed"},
+		{"croak after a directly called XSUB that returned bare", `PerlAPI::bare_return(1, 2); eval { PerlAPI::direct_then_croak() }; $@ =~ /^after the direct call at / ? "caught" : "other: $@"`, "caught"},
 		{"save_item", `$loc = "outside"; my $seen; PerlAPI::localize(\*loc, sub { $seen = $loc }); "$seen/$loc"`, "inside/outside"},
 	} {
 		r, err := p.Eval(ctx, tc.code)
