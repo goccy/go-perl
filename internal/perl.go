@@ -815,44 +815,6 @@ func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32
 	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
 }
 
-func (h envStubs) Chown(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
-func (h envStubs) Chroot(m *base.Module, l0 int32) int32                            { return 0 }
-func (h envStubs) Cuserid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Endhostent(m *base.Module)                                        {}
-func (h envStubs) Endnetent(m *base.Module)                                         {}
-func (h envStubs) Endprotoent(m *base.Module)                                       {}
-func (h envStubs) Endservent(m *base.Module)                                        {}
-func (h envStubs) Execv(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
-func (h envStubs) Fchdir(m *base.Module, l0 int32) int32                            { return 0 }
-func (h envStubs) Fchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Gethostbyaddr(m *base.Module, l0 int32, l1 int32, l2 int32) int32 { return 0 }
-func (h envStubs) Gethostbyname(m *base.Module, l0 int32) int32                     { return 0 }
-func (h envStubs) Gethostent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getnetbyaddr(m *base.Module, l0 int32, l1 int32) int32            { return 0 }
-func (h envStubs) Getnetbyname(m *base.Module, l0 int32) int32                      { return 0 }
-func (h envStubs) Getnetent(m *base.Module) int32                                   { return 0 }
-func (h envStubs) Getpgid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Getpriority(m *base.Module, l0 int32, l1 int32) int32             { return 0 }
-func (h envStubs) Getprotobyname(m *base.Module, l0 int32) int32                    { return 0 }
-func (h envStubs) Getprotobynumber(m *base.Module, l0 int32) int32                  { return 0 }
-func (h envStubs) Getprotoent(m *base.Module) int32                                 { return 0 }
-func (h envStubs) Getservbyname(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
-func (h envStubs) Getservbyport(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
-func (h envStubs) Getservent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Killpg(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Lchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Mkfifo(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Mkstemp(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Nice(m *base.Module, l0 int32) int32                              { return 0 }
-func (h envStubs) Sethostent(m *base.Module, l0 int32)                              {}
-func (h envStubs) Setnetent(m *base.Module, l0 int32)                               {}
-func (h envStubs) Setpgid(m *base.Module, l0 int32, l1 int32) int32                 { return 0 }
-func (h envStubs) Setpriority(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
-func (h envStubs) Setprotoent(m *base.Module, l0 int32)                             {}
-func (h envStubs) Setservent(m *base.Module, l0 int32)                              {}
-func (h envStubs) Setsid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Ttyname(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Tzset(m *base.Module)                                             {}
 func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
 	if l0 == 0 {
 		l0 = 64
