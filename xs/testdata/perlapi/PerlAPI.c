@@ -978,6 +978,55 @@ XS(XS_PerlAPI_set_from_pointer) {
     }
 }
 
+/* Passes all its arguments on to code (the first argument), then reads its
+ * own second argument through MARK: the way a dispatching XSUB goes on
+ * with its arguments after a callback, when the stack has moved meanwhile. */
+XS(XS_PerlAPI_callback_then_mark) {
+    dXSARGS;
+    dORIGMARK;
+    if (items < 2) croak_xs_usage(cv, "code, first, ...");
+    {
+        I32 i;
+        EXTEND(SP, items + 1);
+        PUSHMARK(SP);
+        for (i = 1; i < items; i++) PUSHs(ST(i));
+        PUTBACK;
+        call_sv(ST(0), G_DISCARD);
+        MSPAGAIN;
+        XSRETURN_IV(SvIV(mark[2]) + (IV)(sp - mark));
+    }
+}
+
+static int perlapi_name_calls;
+static const char *perlapi_class_name(void) {
+    perlapi_name_calls++;
+    return "PerlAPI::Weak";
+}
+
+/* Keeps a weak reference to what the argument refers to, made the way DBI
+ * records a child handle (the new reference is the argument of
+ * sv_rvweaken), and reports the strong reference count of the referent
+ * and how often an argument expression of sv_isa was evaluated. */
+XS(XS_PerlAPI_weak_count) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "keep, ref");
+    {
+        AV *keep = (AV *)SvRV(ST(0));
+        SV *target = SvRV(ST(1));
+        U32 count;
+        av_push(keep, (SV *)sv_rvweaken(newRV_inc(target)));
+        count = SvREFCNT(target);
+        perlapi_name_calls = 0;
+        (void)sv_isa(ST(1), perlapi_class_name());
+        SP -= items;
+        EXTEND(SP, 2);
+        mPUSHi((IV)count);
+        mPUSHi((IV)perlapi_name_calls);
+        PUTBACK;
+        return;
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1045,5 +1094,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::with_topic", XS_PerlAPI_with_topic);
     newXS_deffile("PerlAPI::leave_errno", XS_PerlAPI_leave_errno);
     newXS_deffile("PerlAPI::set_from_pointer", XS_PerlAPI_set_from_pointer);
+    newXS_deffile("PerlAPI::callback_then_mark", XS_PerlAPI_callback_then_mark);
+    newXS_deffile("PerlAPI::weak_count", XS_PerlAPI_weak_count);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

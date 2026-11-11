@@ -80,6 +80,7 @@ func TestNativeLongLists(t *testing.T) {
 		{"5000 arguments", `PerlAPI::sum_args(1 .. 5000)`, "12502500"},
 		{"5000 values after one EXTEND", `my @v = PerlAPI::count_up(5000, 0); scalar(@v) . ":$v[0]:$v[-1]"`, "5000:1:5000"},
 		{"5000 values pushed one by one", `my @v = PerlAPI::count_up(5000, 1); scalar(@v) . ":$v[0]:$v[-1]"`, "5000:1:5000"},
+		{"MARK after a callback with 3000 arguments", `my $n = 0; PerlAPI::callback_then_mark(sub { $n = @_ }, 7, (0) x 2999) . ",$n"`, "3008,3000"},
 		{"3000 arguments to a callback that doubles them", `join ":", PerlAPI::relay_list(sub { map { ($_, $_ * 2) } @_ }, 3000)`, "6000:6000"},
 	})
 }
@@ -137,6 +138,21 @@ func TestNativeErrnoIsDollarBang(t *testing.T) {
 		{"ERANGE", `$! = 0; PerlAPI::leave_errno("ERANGE"); $!{ERANGE} ? "ERANGE" : "other: " . ($! + 0)`, "ERANGE"},
 		{"errno cleared", `$! = Errno::EPERM(); PerlAPI::leave_errno("zero"); $! + 0`, "0"},
 		{"errno not touched", `$! = Errno::EPERM(); PerlAPI::leave_errno("nothing"); $!{EPERM} ? "EPERM" : "other: " . ($! + 0)`, "EPERM"},
+	})
+}
+
+// A macro that stands in for a function of the perl API evaluates each
+// argument once: a reference made in the argument of sv_rvweaken is one
+// reference, the weak one, and the object it points at can go away.
+func TestNativeMacrosEvaluateArgumentsOnce(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	setup := `package Gone; our $destroyed = 0; sub DESTROY { $destroyed++ } package main; 1;`
+	if r, err := p.Eval(context.Background(), setup); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"sv_rvweaken(newRV_inc(sv)) and sv_isa(sv, name())", `my @keep; my $obj = bless {}, "Gone"; my @r = PerlAPI::weak_count(\@keep, $obj); undef $obj; join ",", @r, $Gone::destroyed, defined $keep[0] ? "still referenced" : "weak reference cleared"`, "1,1,1,weak reference cleared"},
 	})
 }
 

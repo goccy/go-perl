@@ -816,18 +816,32 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
 #define sv_catpvn_nomg(d, p, len) sv_catpvn_flags(d, p, len, 0)
 #define sv_catpvn_nomg_maybeutf8(d, p, len, is_utf8) \
     sv_catpvn_flags(d, p, len, (is_utf8) ? SV_CATUTF8 : SV_CATBYTES)
-#define sv_catpv_flags(d, p, flags) sv_catpvn_flags(d, p, strlen(p), flags)
-#define sv_catpv_nomg(d, p) sv_catpvn_flags(d, p, strlen(p), 0)
-#define sv_catpv_mg(d, p) sv_catpvn_flags(d, p, strlen(p), SV_GMAGIC | SV_SMAGIC)
+#define sv_catpv_flags(d, p, flags) \
+    ({ GOPERL_ONCE(goperl_sv_catpv_flags_p_, p); \
+       sv_catpvn_flags(d, goperl_sv_catpv_flags_p_, strlen(goperl_sv_catpv_flags_p_), flags); })
+#define sv_catpv_nomg(d, p) \
+    ({ GOPERL_ONCE(goperl_sv_catpv_nomg_p_, p); \
+       sv_catpvn_flags(d, goperl_sv_catpv_nomg_p_, strlen(goperl_sv_catpv_nomg_p_), 0); })
+#define sv_catpv_mg(d, p) \
+    ({ GOPERL_ONCE(goperl_sv_catpv_mg_p_, p); \
+       sv_catpvn_flags(d, goperl_sv_catpv_mg_p_, strlen(goperl_sv_catpv_mg_p_), SV_GMAGIC | SV_SMAGIC); })
 #define sv_catpvs_nomg(d, s) sv_catpvn_flags(d, "" s "", sizeof(s) - 1, 0)
 #define sv_catpvs_mg(d, s) \
     sv_catpvn_flags(d, "" s "", sizeof(s) - 1, SV_GMAGIC | SV_SMAGIC)
 #define sv_catpvs_flags(d, s, flags) \
     sv_catpvn_flags(d, "" s "", sizeof(s) - 1, flags)
-#define sv_setpv_mg(sv, p) (sv_setpv((sv), (p)), SvSETMAGIC(sv))
-#define sv_setpvs_mg(sv, s) (sv_setpvs((sv), s), SvSETMAGIC(sv))
-#define sv_setpvf_mg(sv, ...) (sv_setpvf((sv), __VA_ARGS__), SvSETMAGIC(sv))
-#define sv_catpvf_mg(sv, ...) (sv_catpvf((sv), __VA_ARGS__), SvSETMAGIC(sv))
+#define sv_setpv_mg(sv, p) \
+    ({ GOPERL_ONCE(goperl_sv_setpv_mg_sv_, sv); \
+       (sv_setpv((goperl_sv_setpv_mg_sv_), (p)), SvSETMAGIC(goperl_sv_setpv_mg_sv_)); })
+#define sv_setpvs_mg(sv, s) \
+    ({ GOPERL_ONCE(goperl_sv_setpvs_mg_sv_, sv); \
+       (sv_setpvs((goperl_sv_setpvs_mg_sv_), s), SvSETMAGIC(goperl_sv_setpvs_mg_sv_)); })
+#define sv_setpvf_mg(sv, ...) \
+    ({ GOPERL_ONCE(goperl_sv_setpvf_mg_sv_, sv); \
+       (sv_setpvf((goperl_sv_setpvf_mg_sv_), __VA_ARGS__), SvSETMAGIC(goperl_sv_setpvf_mg_sv_)); })
+#define sv_catpvf_mg(sv, ...) \
+    ({ GOPERL_ONCE(goperl_sv_catpvf_mg_sv_, sv); \
+       (sv_catpvf((goperl_sv_catpvf_mg_sv_), __VA_ARGS__), SvSETMAGIC(goperl_sv_catpvf_mg_sv_)); })
 #define sv_cmp_flags(a, b, flags) \
     ((I32)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_CMP, a, GOPERL_SV_PAIR(flags, b)))
 #define sv_eq_flags(a, b, flags) \
@@ -842,7 +856,8 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_UNREF, sv, (U32)(flags)))
 #define sv_unref(sv) sv_unref_flags(sv, 0)
 #define sv_rvunweaken(sv) \
-    ((void)GOPERL_SVCALL(GOPERL_SVCALL_RVUNWEAKEN, sv, 0), (SV *)(sv))
+    ({ GOPERL_ONCE(goperl_sv_rvunweaken_sv_, sv); \
+       ((void)GOPERL_SVCALL(GOPERL_SVCALL_RVUNWEAKEN, goperl_sv_rvunweaken_sv_, 0), (SV *)(goperl_sv_rvunweaken_sv_)); })
 #define sv_ref(dst, sv, ob)                                               \
     goperl_sv_ref(_gof, (SV *)(dst), (const SV *)(sv), (int)(ob))
 static SV *goperl_sv_ref(goperl_frame_t *f, SV *dst, const SV *sv, int ob)
@@ -861,8 +876,12 @@ static SV *goperl_sv_ref(goperl_frame_t *f, SV *dst, const SV *sv, int ob) {
 }
 #define sv_does_pvn(sv, name, len, flags) \
     (GOPERL_SVSTR(GOPERL_SVSTR_DOES, sv, flags, (name), (len)) != 0)
-#define sv_does_pv(sv, name, flags) sv_does_pvn(sv, name, strlen(name), flags)
-#define sv_does(sv, name) sv_does_pvn(sv, name, strlen(name), 0)
+#define sv_does_pv(sv, name, flags) \
+    ({ GOPERL_ONCE(goperl_sv_does_pv_name_, name); \
+       sv_does_pvn(sv, goperl_sv_does_pv_name_, strlen(goperl_sv_does_pv_name_), flags); })
+#define sv_does(sv, name) \
+    ({ GOPERL_ONCE(goperl_sv_does_name_, name); \
+       sv_does_pvn(sv, goperl_sv_does_name_, strlen(goperl_sv_does_name_), 0); })
 #define sv_pos_u2b_flags(sv, uoffset, lenp, flags) \
     goperl_sv_pos_u2b(_gof, (SV *)(sv), (STRLEN)(uoffset), (STRLEN *)(lenp))
 static STRLEN goperl_sv_pos_u2b(goperl_frame_t *f, SV *sv, STRLEN uoffset,
@@ -891,7 +910,8 @@ static void goperl_sv_pos_u2b_i32(goperl_frame_t *f, SV *sv, I32 *offsetp,
 #define sv_pos_u2b(sv, offsetp, lenp) \
     goperl_sv_pos_u2b_i32(_gof, (SV *)(sv), (offsetp), (lenp))
 #define sv_pos_b2u(sv, offsetp) \
-    ((void)(*(offsetp) = (I32)sv_pos_b2u_flags(sv, *(offsetp), SV_GMAGIC)))
+    ({ GOPERL_ONCE(goperl_sv_pos_b2u_offsetp_, offsetp); \
+       ((void)(*(goperl_sv_pos_b2u_offsetp_) = (I32)sv_pos_b2u_flags(sv, *(goperl_sv_pos_b2u_offsetp_), SV_GMAGIC))); })
 #define newSVrv(rv, classname)                                            \
     goperl_newSVrv(_gof, (SV *)(rv), (const char *)(classname))
 static SV *goperl_newSVrv(goperl_frame_t *f, SV *rv, const char *classname) {
@@ -903,19 +923,26 @@ static SV *goperl_newSVrv(goperl_frame_t *f, SV *rv, const char *classname) {
         classname ? classname : "", classname ? strlen(classname) : 0));
 }
 #define sv_setref_pvn(rv, classname, pv, n) \
-    (sv_setpvn(newSVrv((rv), (classname)), (pv), (n)), (SV *)(rv))
+    ({ GOPERL_ONCE(goperl_sv_setref_pvn_rv_, rv); \
+       (sv_setpvn(newSVrv((goperl_sv_setref_pvn_rv_), (classname)), (pv), (n)), (SV *)(goperl_sv_setref_pvn_rv_)); })
 #define sv_setref_pvs(rv, classname, s) \
     sv_setref_pvn(rv, classname, "" s "", sizeof(s) - 1)
 #define sv_setref_uv(rv, classname, uv) \
-    (sv_setuv(newSVrv((rv), (classname)), (uv)), (SV *)(rv))
+    ({ GOPERL_ONCE(goperl_sv_setref_uv_rv_, rv); \
+       (sv_setuv(newSVrv((goperl_sv_setref_uv_rv_), (classname)), (uv)), (SV *)(goperl_sv_setref_uv_rv_)); })
 #define sv_setref_nv(rv, classname, nv) \
-    (sv_setnv(newSVrv((rv), (classname)), (nv)), (SV *)(rv))
+    ({ GOPERL_ONCE(goperl_sv_setref_nv_rv_, rv); \
+       (sv_setnv(newSVrv((goperl_sv_setref_nv_rv_), (classname)), (nv)), (SV *)(goperl_sv_setref_nv_rv_)); })
 #define sv_setrv_inc(sv, ref) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_SETRV_INC, sv, (uint32_t)GOPERL_TOK(ref)))
 #define sv_setrv_noinc(sv, ref) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_SETRV_NOINC, sv, (uint32_t)GOPERL_TOK(ref)))
-#define sv_setrv_inc_mg(sv, ref) (sv_setrv_inc(sv, ref), SvSETMAGIC(sv))
-#define sv_setrv_noinc_mg(sv, ref) (sv_setrv_noinc(sv, ref), SvSETMAGIC(sv))
+#define sv_setrv_inc_mg(sv, ref) \
+    ({ GOPERL_ONCE(goperl_sv_setrv_inc_mg_sv_, sv); \
+       (sv_setrv_inc(goperl_sv_setrv_inc_mg_sv_, ref), SvSETMAGIC(goperl_sv_setrv_inc_mg_sv_)); })
+#define sv_setrv_noinc_mg(sv, ref) \
+    ({ GOPERL_ONCE(goperl_sv_setrv_noinc_mg_sv_, sv); \
+       (sv_setrv_noinc(goperl_sv_setrv_noinc_mg_sv_, ref), SvSETMAGIC(goperl_sv_setrv_noinc_mg_sv_)); })
 #define newSVsv_flags(sv, flags) \
     GOPERL_SV(GOPERL_SVCALL(GOPERL_SVCALL_NEWSVSV, sv, (U32)(flags)))
 #define newSVsv_nomg(sv) newSVsv_flags(sv, SV_NOSTEAL)
@@ -970,11 +997,17 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
 #define sv_vcatpvfn(sv, pat, patlen, args, svargs, n, tainted) \
     goperl_sv_vsetpvfn(_gof, (SV *)(sv), (pat), (patlen), (args), (svargs), (n), 1)
 #define sv_vsetpvf(sv, pat, args) \
-    goperl_sv_vsetpvfn(_gof, (SV *)(sv), (pat), strlen(pat), (args), 0, 0, 0)
+    ({ GOPERL_ONCE(goperl_sv_vsetpvf_pat_, pat); \
+       goperl_sv_vsetpvfn(_gof, (SV *)(sv), (goperl_sv_vsetpvf_pat_), strlen(goperl_sv_vsetpvf_pat_), (args), 0, 0, 0); })
 #define sv_vcatpvf(sv, pat, args) \
-    goperl_sv_vsetpvfn(_gof, (SV *)(sv), (pat), strlen(pat), (args), 0, 0, 1)
-#define sv_vsetpvf_mg(sv, pat, args) (sv_vsetpvf(sv, pat, args), SvSETMAGIC(sv))
-#define sv_vcatpvf_mg(sv, pat, args) (sv_vcatpvf(sv, pat, args), SvSETMAGIC(sv))
+    ({ GOPERL_ONCE(goperl_sv_vcatpvf_pat_, pat); \
+       goperl_sv_vsetpvfn(_gof, (SV *)(sv), (goperl_sv_vcatpvf_pat_), strlen(goperl_sv_vcatpvf_pat_), (args), 0, 0, 1); })
+#define sv_vsetpvf_mg(sv, pat, args) \
+    ({ GOPERL_ONCE(goperl_sv_vsetpvf_mg_sv_, sv); \
+       (sv_vsetpvf(goperl_sv_vsetpvf_mg_sv_, pat, args), SvSETMAGIC(goperl_sv_vsetpvf_mg_sv_)); })
+#define sv_vcatpvf_mg(sv, pat, args) \
+    ({ GOPERL_ONCE(goperl_sv_vcatpvf_mg_sv_, sv); \
+       (sv_vcatpvf(goperl_sv_vcatpvf_mg_sv_, pat, args), SvSETMAGIC(goperl_sv_vcatpvf_mg_sv_)); })
 
 static void goperl_vcroak(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((noreturn, unused));
@@ -1075,7 +1108,8 @@ static void goperl_gv_fullname4(goperl_frame_t *f, SV *sv, const GV *gv,
 #define gv_fetchmeth(stash, name, len, level) \
     gv_fetchmeth_pvn(stash, name, len, level, 0)
 #define gv_fetchmeth_pv(stash, name, level, flags) \
-    gv_fetchmeth_pvn(stash, name, strlen(name), level, flags)
+    ({ GOPERL_ONCE(goperl_gv_fetchmeth_pv_name_, name); \
+       gv_fetchmeth_pvn(stash, goperl_gv_fetchmeth_pv_name_, strlen(goperl_gv_fetchmeth_pv_name_), level, flags); })
 #define gv_fetchmeth_pvn_autoload(stash, name, len, level, flags)         \
     ((GV *)GOPERL_SV(GOPERL_SVSTR(GOPERL_SVSTR_FETCHMETH_AUTOLOAD, stash, \
                                   GOPERL_METH_FLAGS(level, flags), (name), (len))))
@@ -1085,26 +1119,24 @@ static void goperl_gv_fullname4(goperl_frame_t *f, SV *sv, const GV *gv,
     ((GV *)GOPERL_SV(GOPERL_SVSTR(GOPERL_SVSTR_FETCHMETHOD, stash, flags, \
                                   (name), (len))))
 #define gv_fetchmethod_pv_flags(stash, name, flags) \
-    gv_fetchmethod_pvn_flags(stash, name, strlen(name), flags)
+    ({ GOPERL_ONCE(goperl_gv_fetchmethod_pv_flags_name_, name); \
+       gv_fetchmethod_pvn_flags(stash, goperl_gv_fetchmethod_pv_flags_name_, strlen(goperl_gv_fetchmethod_pv_flags_name_), flags); })
 #define gv_fetchmethod_flags(stash, name, flags) \
-    gv_fetchmethod_pvn_flags(stash, name, strlen(name), flags)
-#define gv_fetchpvn_flags(name, len, flags, svt)                          \
-    ((GV *)GOPERL_SV(goperl_do_op(                                        \
-        _gof, GOPERL_OP_SV_STR,                                           \
-        ((uint64_t)GOPERL_SVSTR_GV_FETCHPVN << 32) | (uint32_t)(svt),     \
-        ((uint64_t)(U32)(flags) << 32) | (uint32_t)(len), (name),         \
-        (uint64_t)(len))))
+    ({ GOPERL_ONCE(goperl_gv_fetchmethod_flags_name_, name); \
+       gv_fetchmethod_pvn_flags(stash, goperl_gv_fetchmethod_flags_name_, strlen(goperl_gv_fetchmethod_flags_name_), flags); })
+#define gv_fetchpvn_flags(name, len, flags, svt) \
+    ({ GOPERL_ONCE(goperl_gv_fetchpvn_flags_len_, len); \
+       ((GV *)GOPERL_SV(goperl_do_op( _gof, GOPERL_OP_SV_STR, ((uint64_t)GOPERL_SVSTR_GV_FETCHPVN << 32) | (uint32_t)(svt), ((uint64_t)(U32)(flags) << 32) | (uint32_t)(goperl_gv_fetchpvn_flags_len_), (name), (uint64_t)(goperl_gv_fetchpvn_flags_len_)))); })
 #define gv_fetchpvn(name, len, flags, svt) gv_fetchpvn_flags(name, len, flags, svt)
-#define get_cvn_flags(name, len, flags)                                   \
-    ((CV *)GOPERL_SV(goperl_do_op(                                        \
-        _gof, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_GET_CVN << 32,     \
-        ((uint64_t)(U32)(flags) << 32) | (uint32_t)(len), (name),         \
-        (uint64_t)(len))))
-#define whichsig_pvn(sig, len)                                            \
-    ((I32)(int64_t)goperl_do_op(_gof, GOPERL_OP_SV_STR,                   \
-                                (uint64_t)GOPERL_SVSTR_WHICHSIG << 32,    \
-                                (uint32_t)(len), (sig), (uint64_t)(len)))
-#define whichsig_pv(sig) whichsig_pvn((sig), strlen(sig))
+#define get_cvn_flags(name, len, flags) \
+    ({ GOPERL_ONCE(goperl_get_cvn_flags_len_, len); \
+       ((CV *)GOPERL_SV(goperl_do_op( _gof, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_GET_CVN << 32, ((uint64_t)(U32)(flags) << 32) | (uint32_t)(goperl_get_cvn_flags_len_), (name), (uint64_t)(goperl_get_cvn_flags_len_)))); })
+#define whichsig_pvn(sig, len) \
+    ({ GOPERL_ONCE(goperl_whichsig_pvn_len_, len); \
+       ((I32)(int64_t)goperl_do_op(_gof, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_WHICHSIG << 32, (uint32_t)(goperl_whichsig_pvn_len_), (sig), (uint64_t)(goperl_whichsig_pvn_len_))); })
+#define whichsig_pv(sig) \
+    ({ GOPERL_ONCE(goperl_whichsig_pv_sig_, sig); \
+       whichsig_pvn((goperl_whichsig_pv_sig_), strlen(goperl_whichsig_pv_sig_)); })
 #define whichsig(sig) whichsig_pv(sig)
 
 #define CvFLAGS(cv) ((U32)GOPERL_GVCALL(GOPERL_GVCALL_CV_FLAGS, cv, 0))
@@ -1170,14 +1202,12 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define CopHINTS_get(c) ((c)->cop_hints)
 #define IN_BYTES (CopHINTS_get(PL_curcop) & HINT_BYTES)
 #define IN_LOCALE_RUNTIME (CopHINTS_get(PL_curcop) & HINT_LOCALE)
-#define cop_hints_fetch_pvn(cop, key, keylen, hash, flags)                \
-    GOPERL_SV(goperl_do_op(                                               \
-        _gof, GOPERL_OP_SV_STR,                                           \
-        ((uint64_t)GOPERL_SVSTR_COP_HINT << 32) | (uint32_t)(cop)->gop,   \
-        ((uint64_t)(U32)(flags) << 32) | (uint32_t)(keylen), (key),       \
-        (uint64_t)(keylen)))
+#define cop_hints_fetch_pvn(cop, key, keylen, hash, flags) \
+    ({ GOPERL_ONCE(goperl_cop_hints_fetch_pvn_keylen_, keylen); \
+       GOPERL_SV(goperl_do_op( _gof, GOPERL_OP_SV_STR, ((uint64_t)GOPERL_SVSTR_COP_HINT << 32) | (uint32_t)(cop)->gop, ((uint64_t)(U32)(flags) << 32) | (uint32_t)(goperl_cop_hints_fetch_pvn_keylen_), (key), (uint64_t)(goperl_cop_hints_fetch_pvn_keylen_))); })
 #define cop_hints_fetch_pv(cop, key, hash, flags) \
-    cop_hints_fetch_pvn(cop, key, strlen(key), hash, flags)
+    ({ GOPERL_ONCE(goperl_cop_hints_fetch_pv_key_, key); \
+       cop_hints_fetch_pvn(cop, goperl_cop_hints_fetch_pv_key_, strlen(goperl_cop_hints_fetch_pv_key_), hash, flags); })
 #define cop_hints_fetch_pvs(cop, key, flags) \
     cop_hints_fetch_pvn(cop, "" key "", sizeof(key) - 1, 0, flags)
 
@@ -1459,7 +1489,8 @@ static NV goperl_scan_radix(goperl_frame_t *f, const char *start, STRLEN len,
 #define UNISKIP(uv) UVCHR_SKIP(uv)
 #define OFFUNISKIP(uv) UVCHR_SKIP(uv)
 #define utf8_to_uvchr(s, retlen) \
-    utf8_to_uvchr_buf((s), (const U8 *)(s) + UTF8SKIP(s), (retlen))
+    ({ GOPERL_ONCE(goperl_utf8_to_uvchr_s_, s); \
+       utf8_to_uvchr_buf((goperl_utf8_to_uvchr_s_), (const U8 *)(goperl_utf8_to_uvchr_s_) + UTF8SKIP(goperl_utf8_to_uvchr_s_), (retlen)); })
 #define utf8_to_uvuni(s, retlen) utf8_to_uvchr((s), (retlen))
 #define utf8_to_uvuni_buf(s, e, retlen) utf8_to_uvchr_buf((s), (e), (retlen))
 #define utf8n_to_uvuni(s, len, retlen, flags) \
@@ -1648,7 +1679,8 @@ static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
 #define SV_CHECK_THINKFIRST_COW_DROP(sv) \
     if (SvTHINKFIRST(sv)) sv_force_normal_flags(sv, SV_COW_DROP_PV)
 #define SvPVbyte_force(sv, lenvar) \
-    (sv_utf8_downgrade((SV *)(sv), 0), SvPV_force(sv, lenvar))
+    ({ GOPERL_ONCE(goperl_SvPVbyte_force_sv_, sv); \
+       (sv_utf8_downgrade((SV *)(goperl_SvPVbyte_force_sv_), 0), SvPV_force(goperl_SvPVbyte_force_sv_, lenvar)); })
 #define newSVpvn_utf8(s, len, u) newSVpvn_flags((s), (len), (u) ? SVf_UTF8 : 0)
 /* my_strlcpy (util.c): copies at most size-1 bytes, always terminates, and
  * returns the length of the source. */
