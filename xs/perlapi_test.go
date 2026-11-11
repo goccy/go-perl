@@ -108,6 +108,10 @@ package main; sub joiner { join "+", @_ } our ($foo, $loc); 1;`
 		{"croak(NULL) dies with $@", `eval { PerlAPI::rethrow_errsv(bless [], "My::Other") }; ref $@`, "My::Other"},
 		{"grok_number", `join "|", map { PerlAPI::number_kind($_) } "42", "-1", "0.00", " 12 ", "1e3", "-.5", ".", "12abc", "", "4294967296", "0 but true", "Inf", "-Infinity", "NaN", "1.#INF"`,
 			"uv=42,|uv=1,neg,|uv=0,notint,|uv=12,|notint,|uv=0,notint,neg,||||big,|uv=0,|notint,inf,|notint,neg,inf,|notint,nan,|uv=1,notint,inf,"},
+		{"a nested XSUB that croaks leaves its caller running", `PerlAPI::call_on_new_stack(sub { eval { PerlAPI::throw("inner\n") }; "survived:$@" }, 1)`, "survived:inner\n"},
+		{"av_store reports that it took the value", `my $x = "v"; my @a; my $ok = PerlAPI::store_first(\@a, $x); join ",", ($ok ? 1 : 0), Internals::SvREFCNT($x), $a[0]`, "1,2,v"},
+		{"an exception passes through call_sv without G_EVAL", `my $e = bless [], "My::Err"; eval { PerlAPI::call_plain(sub { die $e }) }; ref($@) . ($@ == $e ? ":same" : ":copy")`, "My::Err:same"},
+		{"GIMME_V", `my $s = PerlAPI::context(); my ($l) = PerlAPI::context(); PerlAPI::context(); "$s,$l,$PerlAPI::last_context"`, "scalar,list,void"},
 		{"save_item", `$loc = "outside"; my $seen; PerlAPI::localize(\*loc, sub { $seen = $loc }); "$seen/$loc"`, "inside/outside"},
 	} {
 		r, err := p.Eval(ctx, tc.code)

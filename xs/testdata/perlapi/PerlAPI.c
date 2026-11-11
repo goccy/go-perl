@@ -334,6 +334,44 @@ XS(XS_PerlAPI_rethrow_errsv) {
     croak(NULL);
 }
 
+/* The store idiom of perlapi: the caller keeps its reference only when
+ * av_store did not take the value. */
+XS(XS_PerlAPI_store_first) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "arrayref, sv");
+    {
+        AV *av = (AV *)SvRV(ST(0));
+        SV *sv = ST(1);
+        SV **slot = av_store(av, 0, SvREFCNT_inc(sv));
+        if (!slot) SvREFCNT_dec(sv);
+        ST(0) = boolSV(slot && *slot == sv);
+        XSRETURN(1);
+    }
+}
+
+/* A callback called without G_EVAL: its exception passes through. */
+XS(XS_PerlAPI_call_plain) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    PUSHMARK(SP);
+    PUTBACK;
+    call_sv(ST(0), G_DISCARD);
+    XSRETURN_EMPTY;
+}
+
+/* The context of the call, returned and left in $PerlAPI::last_context. */
+XS(XS_PerlAPI_context) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        const U8 gimme = GIMME_V;
+        const char *name = gimme == G_VOID ? "void" : gimme == G_SCALAR ? "scalar" : "list";
+        sv_setpv(get_sv("PerlAPI::last_context", GV_ADD), name);
+        ST(0) = sv_2mortal(newSVpv(name, 0));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -362,6 +400,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::length_after_upgrade", XS_PerlAPI_length_after_upgrade);
     newXS_deffile("PerlAPI::lower_type", XS_PerlAPI_lower_type);
     newXS_deffile("PerlAPI::throw", XS_PerlAPI_throw);
+    newXS_deffile("PerlAPI::store_first", XS_PerlAPI_store_first);
+    newXS_deffile("PerlAPI::call_plain", XS_PerlAPI_call_plain);
+    newXS_deffile("PerlAPI::context", XS_PerlAPI_context);
     newXS_deffile("PerlAPI::number_kind", XS_PerlAPI_number_kind);
     newXS_deffile("PerlAPI::rethrow_errsv", XS_PerlAPI_rethrow_errsv);
     Perl_xs_boot_epilog(aTHX_ ax);

@@ -1656,11 +1656,24 @@ static SV *goperl_amagic_deref_call(goperl_frame_t *f, SV *ref, int method) {
     ((void)goperl_op0(GOPERL_OP_AV_EXTEND, GOPERL_TOK(av), (uint64_t)(int64_t)(n)))
 #define av_fill(av, n) \
     ((void)goperl_op0(GOPERL_OP_AV_FILL, GOPERL_TOK(av), (uint64_t)(int64_t)(n)))
-#define av_store(av, i, sv)                                                    \
-    ((void)goperl_op0(GOPERL_OP_AV_STORE, GOPERL_TOK(av),                      \
-                      ((uint64_t)(uint32_t)(int32_t)(i) << 32) |               \
-                          (uint32_t)GOPERL_TOK(sv)),                           \
-     (SV **)0)
+/* av_store returns the slot when the array took the value and NULL when
+ * it did not (a tied array hands it to STORE): callers release the value
+ * themselves on NULL, so the result has to tell the two apart. */
+static SV **goperl_av_store(goperl_frame_t *f, AV *av, SSize_t i, SV *sv) {
+    uint64_t tok;
+    goperl_do_op(f, GOPERL_OP_AV_STORE, GOPERL_TOK(av),
+                 ((uint64_t)(uint32_t)(int32_t)i << 32) |
+                     (uint32_t)GOPERL_TOK(sv),
+                 0, 0);
+    tok = goperl_do_op(f, GOPERL_OP_AV_FETCH, GOPERL_TOK(av),
+                       (uint64_t)(int64_t)i, 0, 0);
+    if (tok != GOPERL_TOK(sv)) return 0;
+    uint64_t *slot = &f->tmp[(f->tmpidx++) % GOPERL_XS_TMPS];
+    *slot = tok;
+    return (SV **)slot;
+}
+#define av_store(av, i, sv) \
+    goperl_av_store(_gof, (AV *)(av), (SSize_t)(i), (SV *)(sv))
 #define AvREAL_on(av) ((void)(av))
 #define AvREAL_only(av) ((void)(av))
 #define AvREIFY_off(av) ((void)(av))
@@ -2317,8 +2330,8 @@ static void goperl_xs_leave(goperl_frame_t *f) {
         goperl_frame_arg->hostsave_base = goperl_entry_base; \
         goperl_frame_arg->jb = (void *)&_gof_jb;           \
         if (setjmp(_gof_jb)) {                             \
-            goperl_hostsave_unwind_to(                     \
-                goperl_frame_arg, goperl_frame_arg->hostsave_base); \
+            /* xs_leave unwinds the host saves itself, after reading \
+             * the frame to return to: that link is one of them */  \
             goperl_xs_leave(goperl_frame_arg);             \
             /* Real XSUBs are void; the sole non-void dXSARGS user \
              * (DBI's bounce) is reached nested, where a croak      \
@@ -2579,12 +2592,7 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
                                            (uint64_t)(int64_t)i, 0, 0);
         *++f->psp = (SV *)(uintptr_t)tok;
     }
-    if (died && !(flags & G_EVAL)) {
-        uint64_t errtok = goperl_api_v->xs_op(f, GOPERL_OP_ERRSV, 0, 0, 0, 0);
-        uint64_t len = 0;
-        const char *msg = goperl_api_v->sv_pv(f, errtok, &len);
-        goperl_croakf(f, "%.*s", (int)(len > 400 ? 400 : len), msg ? msg : "");
-    }
+    if (died && !(flags & G_EVAL)) goperl_croak_errsv(f);
     return count;
 }
 #define call_sv(sv, flags) goperl_do_call(_gof, (SV *)(sv), 0, (flags))
@@ -4038,12 +4046,7 @@ static I32 goperl_eval_sv(goperl_frame_t *f, SV *sv, I32 flags) {
     }
     /* eval_sv traps the error in $@; only G_RETHROW asks for it to be
      * thrown again (perl.c) */
-    if (died && (flags & G_RETHROW)) {
-        uint64_t errtok = goperl_api_v->xs_op(f, GOPERL_OP_ERRSV, 0, 0, 0, 0);
-        uint64_t len = 0;
-        const char *msg = goperl_api_v->sv_pv(f, errtok, &len);
-        goperl_croakf(f, "%.*s", (int)(len > 400 ? 400 : len), msg ? msg : "");
-    }
+    if (died && (flags & G_RETHROW)) goperl_croak_errsv(f);
     return count;
 }
 #define eval_sv(sv, flags) goperl_eval_sv(_gof, (SV *)(sv), (I32)(flags))
