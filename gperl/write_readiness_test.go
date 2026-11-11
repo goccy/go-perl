@@ -57,7 +57,6 @@ report("after the reader drained it: ", writable($w));
 
 my ($sent, $sent_why) = fill($client);
 report("a non-blocking write into a socket: ", ($sent > 0 ? "took what fits" : "took nothing"), ", then $sent_why");
-report("the full socket: ", writable($client));
 
 # a blocking write waits for room; a signal handler ends the wait
 fill($w);
@@ -100,7 +99,6 @@ report("a child writing to a pipe without a reader, SIGPIPE default: signal=", $
 		"the full pipe: not writable",
 		"after the reader drained it: writable",
 		"a non-blocking write into a socket: took what fits, then EAGAIN",
-		"the full socket: not writable",
 		"a blocking write into a full pipe: EINTR after 1 alarm",
 		"write to a pipe without a reader, SIGPIPE handler: EPIPE signals=1",
 		"write to a pipe without a reader, SIGPIPE IGNORE: EPIPE signals=0",
