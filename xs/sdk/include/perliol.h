@@ -124,7 +124,9 @@ typedef struct {
 #define PERLIO_FUNCS_DECL(f) const PerlIO_funcs f
 #define PERLIO_FUNCS_CAST(f) ((PerlIO_funcs *)(void *)(f))
 
-#define PerlIOValid(f) ((f) && *(f))
+#define PerlIOValid(f) \
+    ({ GOPERL_ONCE(goperl_PerlIOValid_f_, f); \
+       goperl_PerlIOValid_f_ && *goperl_PerlIOValid_f_; })
 #define PerlIOBase(f) (*(f))
 #define PerlIOSelf(f, type) ((type *)PerlIOBase(f))
 #define PerlIONext(f) (&PerlIOBase(f)->next)

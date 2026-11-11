@@ -222,10 +222,11 @@ enum {
                  ((uint64_t)(fn) << 32) | (uint32_t)GOPERL_TOK(gv),        \
                  (uint64_t)(b), 0, 0)
 #define GOPERL_SVSTR(fn, sv, flags, s, len)                                \
-    goperl_do_op(_gof, GOPERL_OP_SV_STR,                                   \
-                 ((uint64_t)(fn) << 32) | (uint32_t)GOPERL_TOK(sv),        \
-                 ((uint64_t)(U32)(flags) << 32) | (uint32_t)(len), (s),    \
-                 (uint64_t)(len))
+    ({ const uint64_t goperl_SVSTR_len_ = (uint64_t)(len);                 \
+       goperl_do_op(_gof, GOPERL_OP_SV_STR,                                \
+                    ((uint64_t)(fn) << 32) | (uint32_t)GOPERL_TOK(sv),     \
+                    ((uint64_t)(U32)(flags) << 32) | (uint32_t)goperl_SVSTR_len_, (s), \
+                    goperl_SVSTR_len_); })
 /* b of the two-SV calls: flags<<32 | the other SV. */
 #define GOPERL_SV_PAIR(flags, sv) \
     (((uint64_t)(U32)(flags) << 32) | (uint32_t)GOPERL_TOK(sv))
@@ -495,18 +496,24 @@ static inline UV goperl_cast_uv(NV f) {
                 : 0))
 #define MEM_WRAP_CHECK_(n, t) MEM_WRAP_CHECK(n, t),
 #define Renewc(v, n, t, c) \
-    ((v) = (MEM_WRAP_CHECK_(n, t)(c *)goperl_saferealloc((void *)(v), (size_t)(n) * sizeof(t))))
+    ({ __typeof__(v) *const goperl_Renewc_v_ = &(v); \
+       GOPERL_ONCE(goperl_Renewc_n_, n); \
+       *goperl_Renewc_v_ = (MEM_WRAP_CHECK_(goperl_Renewc_n_, t)(c *)goperl_saferealloc((void *)*goperl_Renewc_v_, (size_t)goperl_Renewc_n_ * sizeof(t))); })
 #define PoisonWith(d, n, t, b) \
-    (MEM_WRAP_CHECK_(n, t)(void) memset((char *)(d), (U8)(b), (size_t)(n) * sizeof(t)))
+    ({ GOPERL_ONCE(goperl_PoisonWith_n_, n); \
+       (MEM_WRAP_CHECK_(goperl_PoisonWith_n_, t)(void) memset((char *)(d), (U8)(b), (size_t)goperl_PoisonWith_n_ * sizeof(t))); })
 #define PoisonNew(d, n, t) PoisonWith(d, n, t, 0xAB)
 #define PoisonFree(d, n, t) PoisonWith(d, n, t, 0xEF)
 #define Poison(d, n, t) PoisonFree(d, n, t)
 #define CopyD(s, d, n, t) \
-    (MEM_WRAP_CHECK_(n, t) memcpy((char *)(d), (const char *)(s), (size_t)(n) * sizeof(t)))
+    ({ GOPERL_ONCE(goperl_CopyD_n_, n); \
+       (MEM_WRAP_CHECK_(goperl_CopyD_n_, t) memcpy((char *)(d), (const char *)(s), (size_t)goperl_CopyD_n_ * sizeof(t))); })
 #define MoveD(s, d, n, t) \
-    (MEM_WRAP_CHECK_(n, t) memmove((char *)(d), (const char *)(s), (size_t)(n) * sizeof(t)))
+    ({ GOPERL_ONCE(goperl_MoveD_n_, n); \
+       (MEM_WRAP_CHECK_(goperl_MoveD_n_, t) memmove((char *)(d), (const char *)(s), (size_t)goperl_MoveD_n_ * sizeof(t))); })
 #define ZeroD(d, n, t) \
-    (MEM_WRAP_CHECK_(n, t) memset((char *)(d), 0, (size_t)(n) * sizeof(t)))
+    ({ GOPERL_ONCE(goperl_ZeroD_n_, n); \
+       (MEM_WRAP_CHECK_(goperl_ZeroD_n_, t) memset((char *)(d), 0, (size_t)goperl_ZeroD_n_ * sizeof(t))); })
 #define safesysmalloc(n) malloc((size_t)(n))
 #define safesyscalloc(n, sz) calloc((size_t)(n), (size_t)(sz))
 #define safesysrealloc(p, n) realloc((void *)(p), (size_t)(n))
@@ -527,7 +534,8 @@ static char *goperl_savesvpv(goperl_frame_t *f, SV *sv) {
 #define savesvpv(sv) goperl_savesvpv(_gof, (SV *)(sv))
 #define memNE(a, b, n) (memcmp((a), (b), (n)) != 0)
 #define memEQs(s1, l, s2) \
-    ((sizeof(s2) - 1 == (size_t)(l)) && memcmp((s1), ("" s2 ""), (l)) == 0)
+    ({ GOPERL_ONCE(goperl_memEQs_l_, l); \
+       (sizeof(s2) - 1 == (size_t)goperl_memEQs_l_) && memcmp((s1), ("" s2 ""), goperl_memEQs_l_) == 0; })
 #define memNEs(s1, l, s2) (!memEQs(s1, l, s2))
 #define strLT(a, b) (strcmp((a), (b)) < 0)
 #define strLE(a, b) (strcmp((a), (b)) <= 0)
@@ -540,16 +548,22 @@ static char *goperl_savesvpv(goperl_frame_t *f, SV *sv) {
 #define isASCII(c) ((UV)(c) < 128)
 #endif
 #ifndef isOCTAL
-#define isOCTAL(c) ((c) >= '0' && (c) <= '7')
+#define isOCTAL(c) \
+    ({ GOPERL_ONCE(goperl_isOCTAL_c_, c); \
+       goperl_isOCTAL_c_ >= '0' && goperl_isOCTAL_c_ <= '7'; })
 #endif
 #ifndef isIDFIRST
-#define isIDFIRST(c) (isALPHA(c) || (c) == '_')
+#define isIDFIRST(c) \
+    ({ GOPERL_ONCE(goperl_isIDFIRST_c_, c); \
+       isALPHA(goperl_isIDFIRST_c_) || goperl_isIDFIRST_c_ == '_'; })
 #endif
 #ifndef isIDCONT
 #define isIDCONT(c) isWORDCHAR(c)
 #endif
 #ifndef isALNUMC
-#define isALNUMC(c) (isALPHA(c) || isDIGIT(c))
+#define isALNUMC(c) \
+    ({ GOPERL_ONCE(goperl_isALNUMC_c_, c); \
+       isALPHA(goperl_isALNUMC_c_) || isDIGIT(goperl_isALNUMC_c_); })
 #endif
 #ifndef toFOLD
 #define toFOLD(c) toLOWER(c)
@@ -573,7 +587,9 @@ static char *goperl_savesvpv(goperl_frame_t *f, SV *sv) {
 
 #define SvOOK(sv) (SvFLAGS(sv) & SVf_OOK)
 #define sv_backoff(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_BACKOFF, sv, 0))
-#define SvOOK_off(sv) ((void)(SvOOK(sv) && GOPERL_SVCALL(GOPERL_SVCALL_BACKOFF, sv, 0)))
+#define SvOOK_off(sv) \
+    ({ GOPERL_ONCE(goperl_SvOOK_off_sv_, sv); \
+       (void)(SvOOK(goperl_SvOOK_off_sv_) && GOPERL_SVCALL(GOPERL_SVCALL_BACKOFF, goperl_SvOOK_off_sv_, 0)); })
 /* SvOK_off: clear the value flags, then give back an offset string start. */
 static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
     U32 flags = (U32)goperl_do_op(f, GOPERL_OP_SV_FLAGS, GOPERL_TOK(sv),
@@ -588,14 +604,20 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
 #define SvOK_off_exc_UV(sv) goperl_sv_ok_off(_gof, (SV *)(sv), SVf_OK | SVf_UTF8)
 #define SvIOK_on(sv) GOPERL_FLAGS_CHANGE(sv, SVf_IOK | SVp_IOK, 0)
 #define SvIOK_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVf_IOK | SVp_IOK | SVf_IVisUV)
-#define SvIOK_only(sv) (SvOK_off(sv), SvIOK_on(sv))
-#define SvIOK_only_UV(sv) (SvOK_off_exc_UV(sv), SvIOK_on(sv))
+#define SvIOK_only(sv) \
+    ({ GOPERL_ONCE(goperl_SvIOK_only_sv_, sv); \
+       (SvOK_off(goperl_SvIOK_only_sv_), SvIOK_on(goperl_SvIOK_only_sv_)); })
+#define SvIOK_only_UV(sv) \
+    ({ GOPERL_ONCE(goperl_SvIOK_only_UV_sv_, sv); \
+       (SvOK_off_exc_UV(goperl_SvIOK_only_UV_sv_), SvIOK_on(goperl_SvIOK_only_UV_sv_)); })
 #define SvIOK_notUV(sv) ((SvFLAGS(sv) & (SVf_IOK | SVf_IVisUV)) == SVf_IOK)
 #define SvIsUV_on(sv) GOPERL_FLAGS_CHANGE(sv, SVf_IVisUV, 0)
 #define SvIsUV_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVf_IVisUV)
 #define SvNOK_on(sv) GOPERL_FLAGS_CHANGE(sv, SVf_NOK | SVp_NOK, 0)
 #define SvNOK_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVf_NOK | SVp_NOK)
-#define SvNOK_only(sv) (SvOK_off(sv), SvNOK_on(sv))
+#define SvNOK_only(sv) \
+    ({ GOPERL_ONCE(goperl_SvNOK_only_sv_, sv); \
+       (SvOK_off(goperl_SvNOK_only_sv_), SvNOK_on(goperl_SvNOK_only_sv_)); })
 #define SvNIOK_off(sv) \
     GOPERL_FLAGS_CHANGE(sv, 0, SVf_IOK | SVf_NOK | SVp_IOK | SVp_NOK | SVf_IVisUV)
 #define SvPOK_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVf_POK | SVp_POK)
@@ -636,15 +658,16 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
     ((SvFLAGS(sv) & (SVf_ROK | SVprv_WEAKREF)) == (SVf_ROK | SVprv_WEAKREF))
 #define SvIsCOW(sv) (SvFLAGS(sv) & SVf_IsCOW)
 #define SvIsCOW_shared_hash(sv) \
-    ((SvFLAGS(sv) & (SVf_POK | SVf_IsCOW)) == (SVf_POK | SVf_IsCOW) && SvLEN(sv) == 0)
+    ({ GOPERL_ONCE(goperl_SvIsCOW_shared_hash_sv_, sv); \
+       (SvFLAGS(goperl_SvIsCOW_shared_hash_sv_) & (SVf_POK | SVf_IsCOW)) == (SVf_POK | SVf_IsCOW) && SvLEN(goperl_SvIsCOW_shared_hash_sv_) == 0; })
 #define SvPROTECT(sv) (SvFLAGS(sv) & SVf_PROTECT)
-#define SvIMMORTAL(sv)                                                    \
-    (SvREADONLY(sv) &&                                                    \
-     ((SV *)(sv) == &PL_sv_undef || (SV *)(sv) == &PL_sv_yes ||           \
-      (SV *)(sv) == &PL_sv_no || (SV *)(sv) == &PL_sv_zero ||             \
-      (SV *)(sv) == &PL_sv_placeholder))
+#define SvIMMORTAL(sv) \
+    ({ GOPERL_ONCE(goperl_SvIMMORTAL_sv_, sv); \
+       SvREADONLY(goperl_SvIMMORTAL_sv_) && ((SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_undef || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_yes || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_no || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_zero || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_placeholder); })
 #define SvVOK(sv) (GOPERL_SVCALL(GOPERL_SVCALL_VOK, sv, 0) != 0)
-#define SvGAMAGIC(sv) (SvGMAGICAL(sv) || SvAMAGIC(sv))
+#define SvGAMAGIC(sv) \
+    ({ GOPERL_ONCE(goperl_SvGAMAGIC_sv_, sv); \
+       SvGMAGICAL(goperl_SvGAMAGIC_sv_) || SvAMAGIC(goperl_SvGAMAGIC_sv_); })
 #define assert_not_ROK(sv)
 #define assert_not_glob(sv)
 
@@ -654,7 +677,9 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
 #define mg_clear(sv) ((int)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_MG_CLEAR, sv, 0))
 #define mg_magical(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_MG_MAGICAL, sv, 0))
 #define mg_size(sv) ((U32)GOPERL_SVCALL(GOPERL_SVCALL_MG_SIZE, sv, 0))
-#define SvGETMAGIC(sv) ((void)(SvGMAGICAL(sv) && mg_get(sv)))
+#define SvGETMAGIC(sv) \
+    ({ GOPERL_ONCE(goperl_SvGETMAGIC_sv_, sv); \
+       (void)(SvGMAGICAL(goperl_SvGETMAGIC_sv_) && mg_get(goperl_SvGETMAGIC_sv_)); })
 /* The extension magic of an SV lives in the host mirror chain. */
 static MAGIC *goperl_mg_findext(goperl_frame_t *f, const SV *sv, int type,
                                 const MGVTBL *vtbl) __attribute__((unused));
@@ -681,7 +706,9 @@ static MAGIC *goperl_mg_findext(goperl_frame_t *f, const SV *sv, int type,
 #define sv_tainted(sv) (GOPERL_SVCALL(GOPERL_SVCALL_TAINTED, sv, 0) != 0)
 #define sv_taint(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_TAINT, sv, 0))
 #define sv_untaint(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_UNTAINT, sv, 0))
-#define SvTAINTED(sv) (SvMAGICAL(sv) && sv_tainted(sv))
+#define SvTAINTED(sv) \
+    ({ GOPERL_ONCE(goperl_SvTAINTED_sv_, sv); \
+       SvMAGICAL(goperl_SvTAINTED_sv_) && sv_tainted(goperl_SvTAINTED_sv_); })
 #define SvTAINTED_on(sv) ((void)(TAINTING_get && (sv_taint(sv), 0)))
 #define SvTAINTED_off(sv) ((void)(TAINTING_get && (sv_untaint(sv), 0)))
 #define SvTAINT(sv) ((void)(TAINTING_get && TAINT_get && (sv_taint(sv), 0)))
@@ -750,13 +777,12 @@ static char *goperl_sv_pv_flags(goperl_frame_t *f, SV *sv, STRLEN *lenp,
 #define sv_2bool(sv) (GOPERL_SVCALL(GOPERL_SVCALL_2BOOL, sv, SV_GMAGIC) != 0)
 #define sv_2bool_flags(sv, flags) (GOPERL_SVCALL(GOPERL_SVCALL_2BOOL, sv, flags) != 0)
 #define sv_pvn(sv, lenp) sv_2pv_flags(sv, lenp, SV_GMAGIC)
-#define SvIV_please(sv)                                                   \
-    ((void)(!(SvFLAGS(sv) & (SVf_IOK | SVp_IOK)) &&                       \
-            (SvFLAGS(sv) & (SVf_NOK | SVf_POK)) && (SvIV(sv), 0)))
-#define SvIV_please_nomg(sv)                                              \
-    (!(SvFLAGS(sv) & (SVf_IOK | SVp_IOK)) && (SvFLAGS(sv) & (SVf_NOK | SVf_POK)) \
-         ? (sv_2iv_flags(sv, 0), SvIOK(sv))                               \
-         : SvIOK(sv))
+#define SvIV_please(sv) \
+    ({ GOPERL_ONCE(goperl_SvIV_please_sv_, sv); \
+       (void)(!(SvFLAGS(goperl_SvIV_please_sv_) & (SVf_IOK | SVp_IOK)) && (SvFLAGS(goperl_SvIV_please_sv_) & (SVf_NOK | SVf_POK)) && (SvIV(goperl_SvIV_please_sv_), 0)); })
+#define SvIV_please_nomg(sv) \
+    ({ GOPERL_ONCE(goperl_SvIV_please_nomg_sv_, sv); \
+       !(SvFLAGS(goperl_SvIV_please_nomg_sv_) & (SVf_IOK | SVp_IOK)) && (SvFLAGS(goperl_SvIV_please_nomg_sv_) & (SVf_NOK | SVf_POK)) ? (sv_2iv_flags(goperl_SvIV_please_nomg_sv_, 0), SvIOK(goperl_SvIV_please_nomg_sv_)) : SvIOK(goperl_SvIV_please_nomg_sv_); })
 #define POPp SvPV_nolen(POPs)
 #define POPpbytex SvPVbyte_nolen(POPs)
 #define TOPi ((IV)SvIV(TOPs))
@@ -829,18 +855,27 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
 #define sv_setsv_flags(d, s, flags) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_SETSV, d, GOPERL_SV_PAIR(flags, s)))
 #define sv_setsv_nomg(d, s) sv_setsv_flags(d, s, SV_DO_COW_SVSETSV)
-#define SvSetSV_nosteal(d, s)                                             \
-    ((void)((SV *)(d) != (SV *)(s) &&                                     \
-            (sv_setsv_flags(d, s, SV_GMAGIC | SV_NOSTEAL | SV_DO_COW_SVSETSV), 0)))
+#define SvSetSV_nosteal(d, s) \
+    ({ GOPERL_ONCE(goperl_SvSetSV_nosteal_d_, d); \
+       GOPERL_ONCE(goperl_SvSetSV_nosteal_s_, s); \
+       (void)((SV *)goperl_SvSetSV_nosteal_d_ != (SV *)goperl_SvSetSV_nosteal_s_ && (sv_setsv_flags(goperl_SvSetSV_nosteal_d_, goperl_SvSetSV_nosteal_s_, SV_GMAGIC | SV_NOSTEAL | SV_DO_COW_SVSETSV), 0)); })
 #define SvSetSV_nosteal_and(d, s, finally)                                \
     STMT_START {                                                          \
-        if ((SV *)(d) != (SV *)(s)) {                                     \
-            sv_setsv_flags(d, s, SV_GMAGIC | SV_NOSTEAL | SV_DO_COW_SVSETSV); \
+        GOPERL_ONCE(goperl_SvSetSV_nosteal_and_d_, d);                    \
+        GOPERL_ONCE(goperl_SvSetSV_nosteal_and_s_, s);                    \
+        if ((SV *)goperl_SvSetSV_nosteal_and_d_ != (SV *)goperl_SvSetSV_nosteal_and_s_) { \
+            sv_setsv_flags(goperl_SvSetSV_nosteal_and_d_, goperl_SvSetSV_nosteal_and_s_, SV_GMAGIC | SV_NOSTEAL | SV_DO_COW_SVSETSV); \
             finally;                                                      \
         }                                                                 \
     }                                                                     \
     STMT_END
-#define SvSetMagicSV_nosteal(d, s) SvSetSV_nosteal_and(d, s, SvSETMAGIC(d))
+#define SvSetMagicSV_nosteal(d, s)                                        \
+    STMT_START {                                                          \
+        GOPERL_ONCE(goperl_SvSetMagicSV_nosteal_d_, d);                   \
+        SvSetSV_nosteal_and(goperl_SvSetMagicSV_nosteal_d_, s,            \
+                            SvSETMAGIC(goperl_SvSetMagicSV_nosteal_d_));  \
+    }                                                                     \
+    STMT_END
 #define sv_catsv_flags(d, s, flags) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_CATSV, d, GOPERL_SV_PAIR(flags, s)))
 #define sv_catsv_nomg(d, s) sv_catsv_flags(d, s, 0)
@@ -1586,10 +1621,9 @@ static NV goperl_scan_radix(goperl_frame_t *f, const char *start, STRLEN len,
 
 /* ---- UTF-8 inspection (utf8.h, inline.h) ---------------------------------- */
 
-#define UVCHR_SKIP(uv)                                                    \
-    ((UV)(uv) < 0x80 ? 1 : (UV)(uv) < 0x800 ? 2 : (UV)(uv) < 0x10000 ? 3 \
-     : (UV)(uv) < 0x200000 ? 4 : (UV)(uv) < 0x4000000 ? 5                 \
-     : (UV)(uv) < 0x80000000 ? 6 : 7)
+#define UVCHR_SKIP(uv) \
+    ({ GOPERL_ONCE(goperl_UVCHR_SKIP_uv_, uv); \
+       (UV)goperl_UVCHR_SKIP_uv_ < 0x80 ? 1 : (UV)goperl_UVCHR_SKIP_uv_ < 0x800 ? 2 : (UV)goperl_UVCHR_SKIP_uv_ < 0x10000 ? 3 : (UV)goperl_UVCHR_SKIP_uv_ < 0x200000 ? 4 : (UV)goperl_UVCHR_SKIP_uv_ < 0x4000000 ? 5 : (UV)goperl_UVCHR_SKIP_uv_ < 0x80000000 ? 6 : 7; })
 #define UNISKIP(uv) UVCHR_SKIP(uv)
 #define OFFUNISKIP(uv) UVCHR_SKIP(uv)
 #define utf8_to_uvchr(s, retlen) \
@@ -1778,10 +1812,20 @@ static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
                         ((uint64_t)GOPERL_SVCALL_HV_KSPLIT << 32) |       \
                             (uint32_t)GOPERL_TOK(hv),                     \
                         (uint64_t)(int64_t)(newmax), 0, 0))
-#define SV_CHECK_THINKFIRST(sv) \
-    if (SvTHINKFIRST(sv)) sv_force_normal_flags(sv, 0)
-#define SV_CHECK_THINKFIRST_COW_DROP(sv) \
-    if (SvTHINKFIRST(sv)) sv_force_normal_flags(sv, SV_COW_DROP_PV)
+#define SV_CHECK_THINKFIRST(sv)                                       \
+    STMT_START {                                                      \
+        GOPERL_ONCE(goperl_SV_CHECK_THINKFIRST_sv_, sv);              \
+        if (SvTHINKFIRST(goperl_SV_CHECK_THINKFIRST_sv_))             \
+            sv_force_normal_flags(goperl_SV_CHECK_THINKFIRST_sv_, 0); \
+    }                                                                 \
+    STMT_END
+#define SV_CHECK_THINKFIRST_COW_DROP(sv)                              \
+    STMT_START {                                                      \
+        GOPERL_ONCE(goperl_SV_CHECK_THINKFIRST_COW_DROP_sv_, sv);     \
+        if (SvTHINKFIRST(goperl_SV_CHECK_THINKFIRST_COW_DROP_sv_))    \
+            sv_force_normal_flags(goperl_SV_CHECK_THINKFIRST_COW_DROP_sv_, SV_COW_DROP_PV); \
+    }                                                                 \
+    STMT_END
 #define SvPVbyte_force(sv, lenvar) \
     ({ GOPERL_ONCE(goperl_SvPVbyte_force_sv_, sv); \
        (sv_utf8_downgrade((SV *)(goperl_SvPVbyte_force_sv_), 0), SvPV_force(goperl_SvPVbyte_force_sv_, lenvar)); })
@@ -1816,7 +1860,10 @@ static Size_t goperl_strlcpy(char *dst, const char *src, Size_t size) {
 #define HEK_KEY(hek) ((hek)->hek_key)
 #define HEK_LEN(hek) ((hek)->hek_len)
 #define HEK_HASH(hek) ((hek)->hek_hash)
-#define HEK_FLAGS(hek) (*((unsigned char *)(HEK_KEY(hek)) + HEK_LEN(hek) + 1))
+static inline __attribute__((unused)) unsigned char *goperl_hek_flags(HEK *hek) {
+    return (unsigned char *)hek->hek_key + hek->hek_len + 1;
+}
+#define HEK_FLAGS(hek) (*goperl_hek_flags((HEK *)(hek)))
 #define HEK_UTF8(hek) (HEK_FLAGS(hek) & HVhek_UTF8)
 #define HEK_WASUTF8(hek) (HEK_FLAGS(hek) & HVhek_WASUTF8)
 

@@ -480,12 +480,19 @@ struct op {
 #define OpSIBLING(o) goperl_op_sibling(_gof, (OP *)(o))
 #define OpHAS_SIBLING(o) (OpSIBLING(o) != 0)
 #define OpMORESIB_set(o, sib) \
-    (((OP *)(o))->op_moresib = 1, ((OP *)(o))->op_sibparent = (OP *)(sib))
+    ({ OP *const goperl_OpMORESIB_set_o_ = (OP *)(o); \
+       goperl_OpMORESIB_set_o_->op_moresib = 1; \
+       goperl_OpMORESIB_set_o_->op_sibparent = (OP *)(sib); })
 #define OpLASTSIB_set(o, parent) \
-    (((OP *)(o))->op_moresib = 0, ((OP *)(o))->op_sibparent = (OP *)(parent))
+    ({ OP *const goperl_OpLASTSIB_set_o_ = (OP *)(o); \
+       goperl_OpLASTSIB_set_o_->op_moresib = 0; \
+       goperl_OpLASTSIB_set_o_->op_sibparent = (OP *)(parent); })
 #define OpMAYBESIB_set(o, sib, parent) \
-    (((OP *)(o))->op_sibparent = (sib) ? (OP *)(sib) : (OP *)(parent), \
-     ((OP *)(o))->op_moresib = (sib) ? 1 : 0)
+    ({ OP *const goperl_OpMAYBESIB_set_o_ = (OP *)(o); \
+       OP *const goperl_OpMAYBESIB_set_sib_ = (OP *)(sib); \
+       goperl_OpMAYBESIB_set_o_->op_sibparent = \
+           goperl_OpMAYBESIB_set_sib_ ? goperl_OpMAYBESIB_set_sib_ : (OP *)(parent); \
+       goperl_OpMAYBESIB_set_o_->op_moresib = goperl_OpMAYBESIB_set_sib_ ? 1 : 0; })
 #define CopLINE(c) ((c)->cop_line)
 #define CopFILE(c) ((c)->cop_file)
 #define OutCopFILE(c) ((c)->cop_file)
@@ -1647,11 +1654,12 @@ static void goperl_raise(goperl_frame_t *f) {
 /* The loader's direct accessors. They follow the contract of goperl_do_op
  * (minus the flush, which their callers do): when the interpreter dies
  * inside one, the call does not return. */
-#define GOPERL_DIRECT_END(f, failed_before)                         \
-    do {                                                            \
-        goperl_gen_bump();                                          \
-        if (!(failed_before) && (f)->failed && (f)->jb) goperl_raise(f); \
-    } while (0)
+static inline __attribute__((unused)) void goperl_direct_end(
+    goperl_frame_t *f, int32_t failed_before) {
+    goperl_gen_bump();
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
+}
+#define GOPERL_DIRECT_END(f, failed_before) goperl_direct_end((f), (failed_before))
 static int64_t goperl_direct_sv_iv(goperl_frame_t *f, uint64_t sv)
     __attribute__((unused));
 static int64_t goperl_direct_sv_iv(goperl_frame_t *f, uint64_t sv) {
@@ -2000,8 +2008,12 @@ static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
 }
 
 /* The op argument that carries a text's length and flags. */
-#define GOPERL_TEXT_ARG(t, extra) \
-    (((uint64_t)(uint32_t)(((t)->utf8 ? GOPERL_TEXT_UTF8 : 0) | (extra)) << 32) | (uint32_t)(t)->len)
+static inline __attribute__((unused)) uint64_t goperl_text_arg(
+    const goperl_text_t *t, uint32_t extra) {
+    return ((uint64_t)((t->utf8 ? GOPERL_TEXT_UTF8 : 0) | extra) << 32) |
+           (uint32_t)t->len;
+}
+#define GOPERL_TEXT_ARG(t, extra) goperl_text_arg((t), (uint32_t)(extra))
 
 /* Runs a string operation of the interpreter on a text and releases the
  * text. The contract is goperl_do_op's: when the interpreter dies inside
@@ -2252,7 +2264,9 @@ static STRLEN *goperl_svcur_lv(goperl_frame_t *f, SV *sv) {
 #define SvCUR(sv) (*goperl_svcur_lv(_gof, (SV *)(sv)))
 #define SvCUR_set(sv, n) \
     ((void)goperl_op0(GOPERL_OP_SV_CUR_SET, GOPERL_TOK(sv), (uint64_t)(n)))
-#define SvEND(sv) (SvPVX(sv) + SvCUR(sv))
+#define SvEND(sv) \
+    ({ GOPERL_ONCE(goperl_SvEND_sv_, sv); \
+       SvPVX(goperl_SvEND_sv_) + SvCUR(goperl_SvEND_sv_); })
 
 static char *goperl_sv_grow(goperl_frame_t *f, SV *sv, STRLEN n) {
     uint64_t gp = goperl_do_op(f, GOPERL_OP_SV_GROW, GOPERL_TOK(sv),
@@ -2478,9 +2492,10 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
     ((void)goperl_op0(GOPERL_OP_SV_POK_ON, GOPERL_TOK(sv), 0))
 /* SvUPGRADE only ever raises the type; sv_upgrade itself refuses to lower
  * it. */
-#define SvUPGRADE(sv, t)                                                  \
-    ((void)(SvTYPE(sv) >= (t) ||                                          \
-            (goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(sv), (uint64_t)(t)), 1)))
+#define SvUPGRADE(sv, t) \
+    ({ GOPERL_ONCE(goperl_SvUPGRADE_sv_, sv); \
+       GOPERL_ONCE(goperl_SvUPGRADE_t_, t); \
+       (void)(SvTYPE(goperl_SvUPGRADE_sv_) >= goperl_SvUPGRADE_t_ || (goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(goperl_SvUPGRADE_sv_), (uint64_t)goperl_SvUPGRADE_t_), 1)); })
 #define sv_upgrade(sv, t) \
     ((void)goperl_op0(GOPERL_OP_SV_UPGRADE, GOPERL_TOK(sv), (uint64_t)(t)))
 #define sv_utf8_upgrade(sv) \
@@ -3231,7 +3246,10 @@ static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
     I32 ax = POPMARK + 1;   \
     SV **mark = PL_stack_base + ax - 1
 #define dITEMS I32 items = (I32)(sp - mark)
-#define EXTEND(p, n) ((void)((p) = goperl_stack_extend(_gof, (p), (SSize_t)(n))))
+#define EXTEND(p, n) \
+    ({ __typeof__(p) *const goperl_EXTEND_p_ = &(p); \
+       *goperl_EXTEND_p_ = goperl_stack_extend(_gof, *goperl_EXTEND_p_, (SSize_t)(n)); \
+       (void)0; })
 #define PUSHs(s) (*++sp = (SV *)(s))
 #define XPUSHs(s)                 \
     STMT_START {                  \
@@ -4266,7 +4284,8 @@ static OP *goperl_op_sibling(goperl_frame_t *f, OP *o) {
 }
 
 #define OP_NAME(o) \
-    (PL_op_name[(o)->op_type ? (o)->op_type : (int)(o)->op_targ])
+    ({ GOPERL_ONCE(goperl_OP_NAME_o_, o); \
+       PL_op_name[goperl_OP_NAME_o_->op_type ? goperl_OP_NAME_o_->op_type : (int)goperl_OP_NAME_o_->op_targ]; })
 
 /* Op-tree dumping needs interpreter internals the SDK does not model. */
 static void goperl_do_op_dump(I32 level, void *fp, const OP *o)
@@ -4606,7 +4625,8 @@ struct goperl_si {
 #define CXp_FINALLY 0x20
 #define CxTYPE(cx) ((cx)->cx_type & CXTYPEMASK)
 #define CxTYPE_is_LOOP(cx) \
-    (CxTYPE(cx) >= CXt_LOOP_ARY && CxTYPE(cx) <= CXt_LOOP_PLAIN)
+    ({ GOPERL_ONCE(goperl_CxTYPE_is_LOOP_cx_, cx); \
+       CxTYPE(goperl_CxTYPE_is_LOOP_cx_) >= CXt_LOOP_ARY && CxTYPE(goperl_CxTYPE_is_LOOP_cx_) <= CXt_LOOP_PLAIN; })
 #define CxMULTICALL(cx) (((cx)->cx_type & CXp_MULTICALL) != 0)
 #define CxHASARGS(cx) (((cx)->cx_type & CXp_HASARGS) != 0)
 #define CxREALEVAL(cx) \
@@ -4617,7 +4637,8 @@ struct goperl_si {
 #define CxTRY(cx) \
     (((cx)->cx_type & (CXTYPEMASK | CXp_TRY)) == (CXt_EVAL | CXp_TRY))
 #define CxFOREACH(cx) \
-    (CxTYPE(cx) >= CXt_LOOP_ARY && CxTYPE(cx) <= CXt_LOOP_LIST)
+    ({ GOPERL_ONCE(goperl_CxFOREACH_cx_, cx); \
+       CxTYPE(goperl_CxFOREACH_cx_) >= CXt_LOOP_ARY && CxTYPE(goperl_CxFOREACH_cx_) <= CXt_LOOP_LIST; })
 
 typedef struct goperl_arena_blk {
     struct goperl_arena_blk *next;
@@ -4712,17 +4733,27 @@ static HEK *goperl_he_hek(goperl_frame_t *f, HE *he) {
 #define HeKEY_sv(he) (*(SV **)HeKEY(he))
 #define HeKLEN(he) (HeKEY_hek(he)->hek_len)
 #define HeHASH(he) (HeKEY_hek(he)->hek_hash)
-#define HeKUTF8(he)                                                       \
-    (HeKEY_hek(he)->hek_key[HeKEY_hek(he)->hek_len + 1] & HVhek_UTF8)
+#define HeKUTF8(he) \
+    ({ HEK *const goperl_HeKUTF8_hek_ = HeKEY_hek(he); \
+       goperl_HeKUTF8_hek_->hek_key[goperl_HeKUTF8_hek_->hek_len + 1] & HVhek_UTF8; })
 #define HeKWASUTF8(he) 0
 #define HeUTF8(he) \
-    ((HeKLEN(he) == HEf_SVKEY) ? SvUTF8(HeKEY_sv(he)) : (U32)HeKUTF8(he))
-#define HePV(he, lenvar) ((lenvar) = (STRLEN)HeKLEN(he), (char *)HeKEY(he))
+    ({ HEK *const goperl_HeUTF8_hek_ = HeKEY_hek(he); \
+       (goperl_HeUTF8_hek_->hek_len == HEf_SVKEY) \
+           ? SvUTF8(*(SV **)goperl_HeUTF8_hek_->hek_key) \
+           : (U32)(goperl_HeUTF8_hek_->hek_key[goperl_HeUTF8_hek_->hek_len + 1] & HVhek_UTF8); })
+#define HePV(he, lenvar) \
+    ({ HEK *const goperl_HePV_hek_ = HeKEY_hek(he); \
+       (lenvar) = (STRLEN)goperl_HePV_hek_->hek_len; \
+       (char *)goperl_HePV_hek_->hek_key; })
 #define HeSVKEY(he) \
-    ((HeKLEN(he) == HEf_SVKEY) ? *(SV **)HeKEY(he) : (SV *)0)
-#define HeSVKEY_set(he, sv)                                     \
-    ((he)->hent_hek->hek_len = HEf_SVKEY,                       \
-     *(SV **)(he)->hent_hek->hek_key = (sv))
+    ({ HEK *const goperl_HeSVKEY_hek_ = HeKEY_hek(he); \
+       (goperl_HeSVKEY_hek_->hek_len == HEf_SVKEY) \
+           ? *(SV **)goperl_HeSVKEY_hek_->hek_key : (SV *)0; })
+#define HeSVKEY_set(he, sv) \
+    ({ HEK *const goperl_HeSVKEY_set_hek_ = (he)->hent_hek; \
+       goperl_HeSVKEY_set_hek_->hek_len = HEf_SVKEY; \
+       *(SV **)goperl_HeSVKEY_set_hek_->hek_key = (sv); })
 
 /* The key as an SV: guest-backed shadows go through the guest (a mortal
  * copy, utf8-faithful); SVKEY entries return the stored SV. */
@@ -4971,7 +5002,8 @@ static struct mro_meta *goperl_hvmrometa(goperl_frame_t *f, HV *hv) {
 
 /* Compiled-regex test (ppport's NEED_SvRX fallback defers to this). */
 #define SvRXOK(sv) \
-    (SvROK(sv) && SvTYPE(SvRV((SV *)(sv))) == SVt_REGEXP)
+    ({ GOPERL_ONCE(goperl_SvRXOK_sv_, sv); \
+       SvROK(goperl_SvRXOK_sv_) && SvTYPE(SvRV((SV *)goperl_SvRXOK_sv_)) == SVt_REGEXP; })
 
 /* $_ is a slot of the interpreter that holds an SV: DEFSV reads it,
  * DEFSV_set (and an assignment to DEFSV) puts another SV there, and
@@ -5661,27 +5693,51 @@ static I32 goperl_eval_sv(goperl_frame_t *f, SV *sv, I32 flags) {
 
 /* ASCII ctype (real perl's are ASCII-range too for these dists' uses). */
 #ifndef toLOWER
-#define toLOWER(c) ((c) >= 'A' && (c) <= 'Z' ? (c) + 32 : (c))
-#define toUPPER(c) ((c) >= 'a' && (c) <= 'z' ? (c)-32 : (c))
+#define toLOWER(c) \
+    ({ GOPERL_ONCE(goperl_toLOWER_c_, c); \
+       goperl_toLOWER_c_ >= 'A' && goperl_toLOWER_c_ <= 'Z' ? goperl_toLOWER_c_ + 32 : goperl_toLOWER_c_; })
+#define toUPPER(c) \
+    ({ GOPERL_ONCE(goperl_toUPPER_c_, c); \
+       goperl_toUPPER_c_ >= 'a' && goperl_toUPPER_c_ <= 'z' ? goperl_toUPPER_c_ - 32 : goperl_toUPPER_c_; })
 #endif
 #ifndef isALPHA
 #define isALPHA(c) \
-    (((c) >= 'a' && (c) <= 'z') || ((c) >= 'A' && (c) <= 'Z'))
-#define isDIGIT(c) ((c) >= '0' && (c) <= '9')
-#define isALNUM(c) (isALPHA(c) || isDIGIT(c) || (c) == '_')
+    ({ GOPERL_ONCE(goperl_isALPHA_c_, c); \
+       (goperl_isALPHA_c_ >= 'a' && goperl_isALPHA_c_ <= 'z') || (goperl_isALPHA_c_ >= 'A' && goperl_isALPHA_c_ <= 'Z'); })
+#define isDIGIT(c) \
+    ({ GOPERL_ONCE(goperl_isDIGIT_c_, c); \
+       goperl_isDIGIT_c_ >= '0' && goperl_isDIGIT_c_ <= '9'; })
+#define isALNUM(c) \
+    ({ GOPERL_ONCE(goperl_isALNUM_c_, c); \
+       isALPHA(goperl_isALNUM_c_) || isDIGIT(goperl_isALNUM_c_) || goperl_isALNUM_c_ == '_'; })
 #define isSPACE(c) \
-    ((c) == ' ' || (c) == '\t' || (c) == '\n' || (c) == '\r' || \
-     (c) == '\f' || (c) == '\v')
+    ({ GOPERL_ONCE(goperl_isSPACE_c_, c); \
+       goperl_isSPACE_c_ == ' ' || goperl_isSPACE_c_ == '\t' || goperl_isSPACE_c_ == '\n' || goperl_isSPACE_c_ == '\r' || goperl_isSPACE_c_ == '\f' || goperl_isSPACE_c_ == '\v'; })
 #define isWORDCHAR(c) isALNUM(c)
-#define isPRINT(c) ((c) >= 0x20 && (c) < 0x7f)
-#define isGRAPH(c) ((c) > 0x20 && (c) < 0x7f)
-#define isUPPER(c) ((c) >= 'A' && (c) <= 'Z')
-#define isLOWER(c) ((c) >= 'a' && (c) <= 'z')
-#define isPUNCT(c) (isGRAPH(c) && !isALNUM(c))
+#define isPRINT(c) \
+    ({ GOPERL_ONCE(goperl_isPRINT_c_, c); \
+       goperl_isPRINT_c_ >= 0x20 && goperl_isPRINT_c_ < 0x7f; })
+#define isGRAPH(c) \
+    ({ GOPERL_ONCE(goperl_isGRAPH_c_, c); \
+       goperl_isGRAPH_c_ > 0x20 && goperl_isGRAPH_c_ < 0x7f; })
+#define isUPPER(c) \
+    ({ GOPERL_ONCE(goperl_isUPPER_c_, c); \
+       goperl_isUPPER_c_ >= 'A' && goperl_isUPPER_c_ <= 'Z'; })
+#define isLOWER(c) \
+    ({ GOPERL_ONCE(goperl_isLOWER_c_, c); \
+       goperl_isLOWER_c_ >= 'a' && goperl_isLOWER_c_ <= 'z'; })
+#define isPUNCT(c) \
+    ({ GOPERL_ONCE(goperl_isPUNCT_c_, c); \
+       isGRAPH(goperl_isPUNCT_c_) && !isALNUM(goperl_isPUNCT_c_); })
 #define isXDIGIT(c) \
-    (isDIGIT(c) || ((c) >= 'a' && (c) <= 'f') || ((c) >= 'A' && (c) <= 'F'))
-#define isCNTRL(c) (((U8)(c)) < 0x20 || (c) == 0x7f)
-#define isBLANK(c) ((c) == ' ' || (c) == '\t')
+    ({ GOPERL_ONCE(goperl_isXDIGIT_c_, c); \
+       isDIGIT(goperl_isXDIGIT_c_) || (goperl_isXDIGIT_c_ >= 'a' && goperl_isXDIGIT_c_ <= 'f') || (goperl_isXDIGIT_c_ >= 'A' && goperl_isXDIGIT_c_ <= 'F'); })
+#define isCNTRL(c) \
+    ({ GOPERL_ONCE(goperl_isCNTRL_c_, c); \
+       ((U8)goperl_isCNTRL_c_) < 0x20 || goperl_isCNTRL_c_ == 0x7f; })
+#define isBLANK(c) \
+    ({ GOPERL_ONCE(goperl_isBLANK_c_, c); \
+       goperl_isBLANK_c_ == ' ' || goperl_isBLANK_c_ == '\t'; })
 #define isPSXSPC(c) isSPACE(c)
 #endif
 
@@ -6022,7 +6078,9 @@ static void *goperl_saferealloc(void *p, size_t n) {
 #define safemalloc(n) malloc((size_t)(n))
 #define safefree(p) goperl_safefree((void *)(p))
 #define SETERRNO(e, x) (errno = (e))
-#define Renew(ptr, n, t) ((ptr) = (t *)goperl_saferealloc((void *)(ptr), (size_t)(n) * sizeof(t)))
+#define Renew(ptr, n, t) \
+    ({ __typeof__(ptr) *const goperl_Renew_ptr_ = &(ptr); \
+       *goperl_Renew_ptr_ = (t *)goperl_saferealloc((void *)*goperl_Renew_ptr_, (size_t)(n) * sizeof(t)); })
 #define Safefree(p) goperl_safefree((void *)(p))
 #define Copy(s, d, n, t) ((void)memcpy((d), (s), (size_t)(n) * sizeof(t)))
 #define Move(s, d, n, t) ((void)memmove((d), (s), (size_t)(n) * sizeof(t)))
@@ -6518,7 +6576,8 @@ typedef UV PADOFFSET;
 #define OPf_STACKED 64
 #define OPf_SPECIAL 128
 #define OP_GIMME(op, dfl) \
-    (((op)->op_flags & OPf_WANT) ? ((op)->op_flags & OPf_WANT) : (dfl))
+    ({ GOPERL_ONCE(goperl_OP_GIMME_op_, op); \
+       (goperl_OP_GIMME_op_->op_flags & OPf_WANT) ? (goperl_OP_GIMME_op_->op_flags & OPf_WANT) : (dfl); })
 
 /* op class + trait bits for PL_opargs (values from the real op.h) */
 #define OA_MARK 1

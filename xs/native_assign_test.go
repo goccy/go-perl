@@ -38,3 +38,14 @@ func TestNativeCategoryWarnings(t *testing.T) {
 		{"a fatal category", `my $went_on = 0; { use warnings FATAL => "utf8"; eval { PerlAPI::category_warning(1, "fatal"); $went_on = 1 } } "$@$went_on:" . seen()`, "fatal\n0:nothing"},
 	})
 }
+
+// A macro that stands in for a function of the perl API evaluates each
+// argument once, as a call of the function would: an argument with a side
+// effect (`isALPHA(*p++)`, `Renew(*slot(), n, char)`) has it once.
+func TestNativeMacrosEvaluateEachArgumentOnce(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"none evaluates an argument twice", `my $s = "text" . "1"; "[" . PerlAPI::evaluated_twice($s) . "]"`, "[]"},
+	})
+}

@@ -1570,6 +1570,78 @@ XS(XS_PerlAPI_category_warning) {
     }
 }
 
+/* Arguments that count how often they are evaluated. */
+static int perlapi_evaluations;
+static int perlapi_counted_char(int c) {
+    perlapi_evaluations++;
+    return c;
+}
+static SV *perlapi_counted_sv(SV *sv) {
+    perlapi_evaluations++;
+    return sv;
+}
+static char **perlapi_counted_slot(char **slot) {
+    perlapi_evaluations++;
+    return slot;
+}
+static STRLEN perlapi_counted_len(STRLEN n) {
+    perlapi_evaluations++;
+    return n;
+}
+
+/* Uses each of a number of API macros once with an argument that counts
+ * its evaluations, and returns the names of those that evaluated it more
+ * or less than once (nothing when all is well). */
+XS(XS_PerlAPI_evaluated_twice) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *sv = ST(0);
+        SV *report = sv_2mortal(newSVpvs(""));
+        char *block = (char *)malloc(8);
+        STRLEN len;
+        (void)SvPV_force(sv, len);
+#define PERLAPI_ONCE(name, use)                                   \
+    do {                                                          \
+        perlapi_evaluations = 0;                                  \
+        use;                                                      \
+        if (perlapi_evaluations != 1)                             \
+            sv_catpvf(report, "%s:%d ", name, perlapi_evaluations); \
+    } while (0)
+        PERLAPI_ONCE("toLOWER", (void)toLOWER(perlapi_counted_char('A')));
+        PERLAPI_ONCE("toUPPER", (void)toUPPER(perlapi_counted_char('a')));
+        PERLAPI_ONCE("isALPHA", (void)isALPHA(perlapi_counted_char('1')));
+        PERLAPI_ONCE("isDIGIT", (void)isDIGIT(perlapi_counted_char('1')));
+        PERLAPI_ONCE("isALNUM", (void)isALNUM(perlapi_counted_char('-')));
+        PERLAPI_ONCE("isSPACE", (void)isSPACE(perlapi_counted_char('x')));
+        PERLAPI_ONCE("isPUNCT", (void)isPUNCT(perlapi_counted_char('a')));
+        PERLAPI_ONCE("isXDIGIT", (void)isXDIGIT(perlapi_counted_char('g')));
+        PERLAPI_ONCE("isIDFIRST", (void)isIDFIRST(perlapi_counted_char('1')));
+        PERLAPI_ONCE("UVCHR_SKIP", (void)UVCHR_SKIP(perlapi_counted_len(0x10000)));
+        PERLAPI_ONCE("SvEND", (void)SvEND(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvUPGRADE", SvUPGRADE(perlapi_counted_sv(sv), SVt_PV));
+        PERLAPI_ONCE("SvRXOK", (void)SvRXOK(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvTAINTED", (void)SvTAINTED(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvGETMAGIC", SvGETMAGIC(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvGAMAGIC", (void)SvGAMAGIC(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvIMMORTAL", (void)SvIMMORTAL(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvOOK_off", SvOOK_off(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvIV_please", SvIV_please(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SV_CHECK_THINKFIRST", SV_CHECK_THINKFIRST(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvSetSV_nosteal", SvSetSV_nosteal(perlapi_counted_sv(sv), sv));
+        PERLAPI_ONCE("SvREFCNT_inc", (void)SvREFCNT_inc(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("SvREFCNT_dec", SvREFCNT_dec(perlapi_counted_sv(sv)));
+        PERLAPI_ONCE("memEQs", (void)memEQs("abc", perlapi_counted_len(3), "abc"));
+        PERLAPI_ONCE("Renew", Renew(*perlapi_counted_slot(&block), 16, char));
+        PERLAPI_ONCE("Renewc", Renewc(*perlapi_counted_slot(&block), 32, char, char));
+        PERLAPI_ONCE("ZeroD", (void)ZeroD(block, perlapi_counted_len(8), char));
+#undef PERLAPI_ONCE
+        free(block);
+        ST(0) = report;
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1669,5 +1741,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::exchange", XS_PerlAPI_exchange);
     newXS_deffile("PerlAPI::glob_fields", XS_PerlAPI_glob_fields);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
+    newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
