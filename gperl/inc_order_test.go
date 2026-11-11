@@ -54,7 +54,7 @@ waitpid($pid, 0);
 	// Run is the project runner: the script's directory leads, as a -I
 	// directory would.
 	scriptDir := strings.Fields(strings.TrimPrefix(got[0], "inc: "))[0]
-	inc := strings.Join([]string{scriptDir, first, second, "STDLIB", "."}, " ")
+	inc := strings.Join([]string{scriptDir, first, second, "STDLIB"}, " ")
 	wantLines(t, got,
 		"inc: "+inc,
 		"Text::Tabs from first",
@@ -68,7 +68,7 @@ waitpid($pid, 0);
 func TestIncOrderStandardLibraryAlone(t *testing.T) {
 	t.Setenv("PERL5LIB", "")
 	got := runForkScript(t, incReport)
-	if len(got) != 3 || !strings.HasSuffix(got[0], " STDLIB .") {
+	if len(got) != 3 || !strings.HasSuffix(got[0], " STDLIB") {
 		t.Fatalf("report = %q", got)
 	}
 	wantLines(t, got[1:], "Text::Tabs from the standard library", "List::Util from the standard library")
@@ -97,21 +97,26 @@ exit(system($perl, @args) >> 8);
 
 // The perl command line: -I comes before PERL5LIB, use lib before both, a
 // -M module named in PERL5OPT is loaded once and from where @INC says, and
-// under -T neither PERL5LIB nor "." is searched.
+// the current directory is searched only when PERL_USE_UNSAFE_INC asks for
+// it, and under -T neither PERL5LIB nor the current directory is.
 func TestIncOrderOnThePerlCommandLine(t *testing.T) {
 	first, second := shadowLib(t, "first"), shadowLib(t, "second")
 	t.Setenv("PERL5LIB", first)
 	const show = `my ($s) = grep { -e "$_/strict.pm" } @INC; print join(" ", map { $_ eq $s ? "STDLIB" : $_ } @INC), "\n";`
 	const from = `require Text::Tabs; print "from ", ($Text::Tabs::FROM // "stdlib"), "\n";`
 
-	if got, want := runPerl(t, "-e", show+from), first+" STDLIB .\nfrom first\n"; got != want {
+	if got, want := runPerl(t, "-e", show+from), first+" STDLIB\nfrom first\n"; got != want {
 		t.Errorf("PERL5LIB only:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-I"+second, "-e", show+from), second+" "+first+" STDLIB .\nfrom second\n"; got != want {
+	if got, want := runPerl(t, "-I"+second, "-e", show+from), second+" "+first+" STDLIB\nfrom second\n"; got != want {
 		t.Errorf("-I and PERL5LIB:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-e", "use lib '"+second+"';"+show+from), second+" "+first+" STDLIB .\nfrom second\n"; got != want {
+	if got, want := runPerl(t, "-e", "use lib '"+second+"';"+show+from), second+" "+first+" STDLIB\nfrom second\n"; got != want {
 		t.Errorf("use lib:\n%swant:\n%s", got, want)
+	}
+	t.Setenv("PERL_USE_UNSAFE_INC", "1")
+	if got, want := runPerl(t, "-e", show+from), first+" STDLIB .\nfrom first\n"; got != want {
+		t.Errorf("PERL_USE_UNSAFE_INC:\n%swant:\n%s", got, want)
 	}
 	if got, want := runPerl(t, "-T", "-e", show+from), "STDLIB\nfrom stdlib\n"; got != want {
 		t.Errorf("-T:\n%swant:\n%s", got, want)
@@ -160,13 +165,13 @@ func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 		}
 		return s.String()
 	}
-	if got, want := eval(p), first+" STDLIB ."; got != want {
+	if got, want := eval(p), first+" STDLIB"; got != want {
 		t.Fatalf("@INC = %q, want %q", got, want)
 	}
 	if err := p.AddInc(t.Context(), added); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := eval(p), added+" "+first+" STDLIB ."; got != want {
+	if got, want := eval(p), added+" "+first+" STDLIB"; got != want {
 		t.Fatalf("@INC after AddInc = %q, want %q", got, want)
 	}
 	clone, err := p.Clone()
@@ -174,7 +179,7 @@ func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer clone.Close()
-	if got, want := eval(clone), added+" "+first+" STDLIB ."; got != want {
+	if got, want := eval(clone), added+" "+first+" STDLIB"; got != want {
 		t.Fatalf("@INC of the clone = %q, want %q", got, want)
 	}
 }
