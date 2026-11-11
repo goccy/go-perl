@@ -332,6 +332,20 @@ func TestRunProgramTaint(t *testing.T) {
 	}
 }
 
+// A taint failure that an eval caught leaves no taint behind: the code
+// compiled next loads its modules as usual.
+func TestRunProgramTaintFailureInsideEvalDoesNotSpread(t *testing.T) {
+	r := runProgram(t, perl.Config{}, perl.Program{
+		Code: code(
+			// the refused eval is the last thing its BEGIN block does
+			`BEGIN { eval { eval("1" . substr($^X, 0, 0)); print "not refused\n" } }`,
+			`use Text::Wrap; print "loaded\n";`,
+		),
+		Taint: perl.TaintOn,
+	}, "")
+	r.want(t, 0, "loaded\n")
+}
+
 func TestRunProgramExtract(t *testing.T) {
 	r := runProgram(t, perl.Config{}, perl.Program{Stdin: true, Extract: true},
 		"To: someone\nSubject: a program in a message\n\n#!perl -l\nprint 'extracted';\nprint __LINE__;\n__END__\nsignature\n")
