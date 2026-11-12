@@ -270,7 +270,14 @@ enum {
 #define ASSUME(x) assert(x)
 #define NOT_REACHED assert(0)
 #define NORETURN_FUNCTION_END NOT_REACHED
-#define PERL_UNUSED_RESULT(v) ((void)sizeof(v))
+/* The expression is evaluated, and its value dropped: it is how code calls
+ * a function for its effect when the compiler insists on the result being
+ * used (PERL_UNUSED_RESULT(Gconvert(nv, NV_DIG, 0, buf))). */
+#define PERL_UNUSED_RESULT(v)                         \
+    do {                                              \
+        __typeof__(v) goperl_unused_result_ = (v);    \
+        (void)sizeof(goperl_unused_result_);          \
+    } while (0)
 #define PERL_BITFIELD8 U8
 #define PERL_BITFIELD16 U16
 #define PERL_BITFIELD32 U32

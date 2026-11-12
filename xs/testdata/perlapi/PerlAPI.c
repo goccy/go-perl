@@ -1334,6 +1334,20 @@ XS(XS_PerlAPI_count_own_struct) {
     }
 }
 
+/* A number formatted by a call whose result is dropped with
+ * PERL_UNUSED_RESULT: the call is made. */
+XS(XS_PerlAPI_format_dropping_result) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "nv");
+    {
+        char buf[64];
+        buf[0] = '\0';
+        PERL_UNUSED_RESULT(Gconvert(SvNV(ST(0)), NV_DIG, 0, buf));
+        ST(0) = sv_2mortal(newSVpv(buf, 0));
+        XSRETURN(1);
+    }
+}
+
 /* Which of the first eight slots of an array's body (AvARRAY) are filled,
  * for an array that held eight elements and was then emptied, extended to
  * room for eight and given one element at index 2: the slots the array has
@@ -1936,6 +1950,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::null_strings", XS_PerlAPI_null_strings);
     newXS_deffile("PerlAPI::anonymous_subs", XS_PerlAPI_anonymous_subs);
     newXS_deffile("PerlAPI::array_slots", XS_PerlAPI_array_slots);
+    newXS_deffile("PerlAPI::format_dropping_result", XS_PerlAPI_format_dropping_result);
     newXS_deffile("PerlAPI::watch", XS_PerlAPI_watch);
     newXS_deffile("PerlAPI::watched", XS_PerlAPI_watched);
     newXS_deffile("PerlAPI::keyed_attach", XS_PerlAPI_keyed_attach);

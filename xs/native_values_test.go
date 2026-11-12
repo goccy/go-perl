@@ -285,3 +285,13 @@ func TestNativeArrayBodyHasEverySlot(t *testing.T) {
 		{"filled, emptied, extended, one stored", `my @a; PerlAPI::array_slots(\@a)`, "8 filled; null null set null null null null null"},
 	})
 }
+
+// PERL_UNUSED_RESULT evaluates the expression it is given and drops the
+// value: code formats a number into a buffer that way and reads the buffer.
+func TestNativeUnusedResultIsEvaluated(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"Gconvert under PERL_UNUSED_RESULT", `join ",", map { PerlAPI::format_dropping_result($_) } 0.5, 100.01, 3`, "0.5,100.01,3"},
+	})
+}
