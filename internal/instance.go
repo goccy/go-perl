@@ -109,6 +109,12 @@ type Perl struct {
 	// built from the process snapshot; unmapped on Close. nil for instances
 	// that booted privately.
 	mapped []byte
+	// image is the image mapped is a private mapping of, when a fork can
+	// start from it: the copy made for a fork child is then limited to the
+	// pages this instance changed since the image was made (see fork.go).
+	// It cannot be found from the mapping, hence the field. nil when the
+	// memory is no such mapping.
+	image *memoryImage
 
 	// UserHandler receives every callback whose method id is not one of the
 	// reserved hook ids: the Perl->Go function bridge. The public package
@@ -331,6 +337,7 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
 			p.h = snap.handle
 			p.mapped = mem
+			p.image = snap.image.retain()
 			return nil
 		}
 		// Mapping failed (exotic platform / fd exhaustion): boot privately.
@@ -652,6 +659,31 @@ func (p *Perl) releaseMapping() {
 	if p.mapped != nil {
 		base.UnmapMemory(p.mapped)
 		p.mapped = nil
+	}
+	p.image.release()
+	p.image = nil
+}
+
+// memoryImage is a memory image that instances map privately, counted by
+// the instances that may still fork from it: the image is closed, and its
+// pages go once the mappings have gone, when the last of them is done.
+type memoryImage struct {
+	img  *base.SharedImage
+	refs atomic.Int32
+}
+
+// retain counts one more instance that maps the image, and returns it.
+func (i *memoryImage) retain() *memoryImage {
+	if i != nil {
+		i.refs.Add(1)
+	}
+	return i
+}
+
+// release counts an instance out.
+func (i *memoryImage) release() {
+	if i != nil && i.refs.Add(-1) == 0 {
+		i.img.Close()
 	}
 }
 

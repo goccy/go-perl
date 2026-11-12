@@ -38,7 +38,10 @@ import (
 const snapshotCeiling = 512 << 20
 
 type perlSnapshot struct {
-	img    *base.SharedImage
+	img *base.SharedImage
+	// image is img as the instances built on the snapshot hold it. The
+	// snapshot holds it too, for the life of the process.
+	image  *memoryImage
 	handle uint64
 	err    error
 }
@@ -115,5 +118,5 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 	if e := img.Err(); e != nil {
 		return &perlSnapshot{err: e}
 	}
-	return &perlSnapshot{img: img, handle: handle}
+	return &perlSnapshot{img: img, image: (&memoryImage{img: img}).retain(), handle: handle}
 }

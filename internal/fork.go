@@ -5,12 +5,17 @@ package internal
 // WASI has no fork and the guest cannot duplicate itself, so the host does
 // it — the way perl emulates fork on Windows, with the whole instance
 // standing in for perl_clone. When the guest forks (the proc_fork host
-// import), forkGuest snapshots the instance's linear memory and globals
+// import), forkGuest duplicates the instance's linear memory and globals
 // into a NEW instance that also gets a copy of the fd table (its slots
 // share the parent's open descriptors, as a fork child's do), and runs that
 // instance on its own goroutine as the child. The guest is single-threaded
-// and suspended inside the import while the snapshot is taken, so the image
-// is consistent.
+// and suspended inside the import while the duplicate is made, so it is
+// consistent.
+//
+// The duplicate is copy-on-write where the host can tell which pages an
+// instance changed (see base.ForkMemory): parent and child are private
+// mappings of one image, and a fork copies what the parent changed since
+// that image was made, not everything it holds.
 //
 // The child has the parent's memory but none of its native call stack, so
 // it is entered through one bridge call (perl_fork_child) that resumes the
@@ -50,24 +55,29 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 	if p.closed.Load() {
 		return nil, ErrClosed
 	}
-	img := base.NewSharedSnapshot(func() (*base.Module, error) { return p.m.g, nil })
-	if err := img.Err(); err != nil {
-		return nil, fmt.Errorf("perl: snapshot the forking instance: %w", err)
+	var from *base.SharedImage
+	if p.image != nil {
+		from = p.image.img
 	}
-	mem, err := img.Memory(snapshotCeiling)
-	// The image serves this one child: its mapping keeps the pages.
-	closeErr := img.Close()
+	dup, err := base.ForkMemory(p.m.g, from, snapshotCeiling)
 	if err != nil {
-		return nil, fmt.Errorf("perl: map the fork child's memory: %w", err)
+		return nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
 	}
-	if closeErr != nil {
-		base.UnmapMemory(mem)
-		return nil, fmt.Errorf("perl: release the fork image: %w", closeErr)
+	image := p.image
+	if dup.Image != from {
+		image = &memoryImage{img: dup.Image}
+		if dup.Image == nil {
+			image = nil
+		}
+		if dup.Rebased {
+			p.image.release()
+			p.image = image.retain()
+		}
 	}
 
 	m := &Module{}
-	c := &Perl{m: m, wasi: childWASI, opts: p.opts, mapped: mem, h: p.h, intrAddr: p.intrAddr, family: p.family}
-	m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, mem, img.Size(), img.Globals())
+	c := &Perl{m: m, wasi: childWASI, opts: p.opts, mapped: dup.Memory, image: image.retain(), h: p.h, intrAddr: p.intrAddr, family: p.family}
+	m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, dup.Memory, dup.Size, dup.Globals)
 	// The copied fd table came with the parent's hook; the child's forks
 	// must snapshot the child.
 	c.installForkHook()
