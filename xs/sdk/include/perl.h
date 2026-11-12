@@ -338,6 +338,19 @@ typedef struct goperl_frame goperl_frame_t;
 #define dTHX \
     goperl_frame_t *const goperl_frame_arg __attribute__((unused)) = \
         goperl_cur_frame_v
+/* A function that has neither the parameter nor a dTHX may still say
+ * dXSARGS: perl without PERL_NO_GET_CONTEXT finds its interpreter from
+ * anywhere, and code is written for that — Inline::C's Inline_Stack_Vars is
+ * dXSARGS in a plain C function its XSUB wrapper calls. At file scope the
+ * name therefore stands for "no frame was handed over" (an object of a type
+ * of its own, which the parameter and dTHX shadow), and GOPERL_FRAME_HERE
+ * is the frame handed over where there is one and the current frame
+ * elsewhere — where dXSARGS re-parses the current activation, as it does
+ * after dTHX. */
+struct goperl_no_frame_arg {
+    char unused;
+};
+static const struct goperl_no_frame_arg goperl_frame_arg __attribute__((unused)) = {0};
 #define pTHX_1 2
 #define pTHX_2 3
 #define pTHX_3 4
@@ -3692,32 +3705,46 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
     if (f && f->jb == (void *)jb) goperl_xs_leave(f);
 }
 
+#ifdef __cplusplus
+static inline goperl_frame_t *goperl_frame_handed(goperl_frame_t *frame) { return frame; }
+static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
+    return goperl_cur_frame_v;
+}
+#define GOPERL_FRAME_HERE goperl_frame_handed(goperl_frame_arg)
+#else
+#define GOPERL_FRAME_HERE                                  \
+    _Generic((goperl_frame_arg),                           \
+        goperl_frame_t *: (goperl_frame_arg),              \
+        default: goperl_cur_frame_v)
+#endif
+
 #define dXSARGS                                            \
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave))); \
     {                                                      \
+        goperl_frame_t *const goperl_frame_here = GOPERL_FRAME_HERE; \
         /* current-frame FIRST: the shared-state macros below resolve  \
          * through it, and on a fresh thread the slot starts NULL */   \
         goperl_frame_t *goperl_prev_cur = goperl_cur_frame_v;          \
-        goperl_cur_frame_v = goperl_frame_arg;             \
+        goperl_cur_frame_v = goperl_frame_here;            \
         errno = GOPERL_ERRNO_UNSET;                        \
         int32_t goperl_entry_base = goperl_hostsave_n;     \
-        goperl_hostsave_i32(goperl_frame_arg,              \
-                            &goperl_frame_arg->hostsave_base); \
-        goperl_hostsave_ptr(goperl_frame_arg,              \
-                            (void **)&goperl_frame_arg->prev_frame); \
-        goperl_hostsave_ptr(goperl_frame_arg,              \
-                            (void **)&goperl_frame_arg->jb); \
-        goperl_frame_arg->prev_frame =                     \
-            (goperl_frame_arg == goperl_prev_cur)          \
-                ? (void *)goperl_frame_arg                 \
+        goperl_hostsave_i32(goperl_frame_here,              \
+                            &goperl_frame_here->hostsave_base); \
+        goperl_hostsave_ptr(goperl_frame_here,              \
+                            (void **)&goperl_frame_here->prev_frame); \
+        goperl_hostsave_ptr(goperl_frame_here,              \
+                            (void **)&goperl_frame_here->jb); \
+        goperl_frame_here->prev_frame =                     \
+            (goperl_frame_here == goperl_prev_cur)          \
+                ? (void *)goperl_frame_here                 \
                 : (void *)goperl_prev_cur;                 \
         goperl_xs_depth_v++;                               \
-        goperl_frame_arg->hostsave_base = goperl_entry_base; \
-        goperl_frame_arg->jb = (void *)&_gof_jb;           \
+        goperl_frame_here->hostsave_base = goperl_entry_base; \
+        goperl_frame_here->jb = (void *)&_gof_jb;           \
         if (setjmp(_gof_jb)) {                             \
             /* xs_leave unwinds the host saves itself, after reading \
              * the frame to return to: that link is one of them */  \
-            goperl_xs_leave(goperl_frame_arg);             \
+            goperl_xs_leave(goperl_frame_here);             \
             /* Real XSUBs are void; the sole non-void dXSARGS user \
              * (DBI's bounce) is reached nested, where a croak      \
              * unwinds to the OUTER activation's setjmp instead. */ \

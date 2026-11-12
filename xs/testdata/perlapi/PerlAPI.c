@@ -1674,6 +1674,45 @@ XS(XS_PerlAPI_rename_glob) {
     }
 }
 
+/* The argument stack read and written by a plain C function, the way
+ * Inline::C's glue does it: the function takes no interpreter context, says
+ * dXSARGS itself (Inline_Stack_Vars) and returns through XSRETURN; the XSUB
+ * that calls it un-pops the mark first so that the function finds the same
+ * arguments, and looks at the mark afterwards to learn whether the function
+ * left values. */
+static void stack_in_a_plain_function(SV *first, ...) {
+    dXSARGS;
+    int i;
+    IV sum = 0;
+    for (i = 0; i < items; i++) sum += SvIV(ST(i));
+    sp = mark;
+    XPUSHs(sv_2mortal(newSViv(items)));
+    XPUSHs(sv_2mortal(newSViv(sum)));
+    XPUSHs(sv_2mortal(newSVsv(first)));
+    PUTBACK;
+    XSRETURN(3);
+}
+
+XS(XS_PerlAPI_stack_in_a_plain_function) {
+    dXSARGS;
+    if (items < 1) croak_xs_usage(cv, "first, ...");
+    PERL_UNUSED_VAR(ax);
+    SP -= items;
+    {
+        SV *first = ST(0);
+        I32 *temp;
+        temp = PL_markstack_ptr++;
+        stack_in_a_plain_function(first);
+        if (PL_markstack_ptr != temp) {
+            /* truly void, because dXSARGS not invoked */
+            PL_markstack_ptr = temp;
+            XSRETURN_EMPTY; /* return empty stack */
+        }
+        /* must have used dXSARGS; list context implied */
+        return; /* assume stack size is correct */
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1776,5 +1815,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
     newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);
     newXS_deffile("PerlAPI::rename_glob", XS_PerlAPI_rename_glob);
+    newXS_deffile("PerlAPI::stack_in_a_plain_function", XS_PerlAPI_stack_in_a_plain_function);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

@@ -85,3 +85,17 @@ func TestNativeOpenFunctions(t *testing.T) {
 		{"PerlLIO", `PerlAPI::lio_peek($file)`, "18:f"},
 	})
 }
+
+// dXSARGS works in a function that was given no interpreter context: the
+// glue of Inline::C reads and returns its arguments from a plain C function
+// (Inline_Stack_Vars) that its XSUB calls.
+func TestNativeStackInAPlainFunction(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"arguments and results", `join ",", PerlAPI::stack_in_a_plain_function(5, 6, 7)`, "3,18,5"},
+		{"again, with one argument", `join ",", PerlAPI::stack_in_a_plain_function(40)`, "1,40,40"},
+		{"the caller's stack is intact", `my @r = (1, PerlAPI::stack_in_a_plain_function(2, 3), 9); "@r"`, "1 2 5 2 9"},
+	})
+}
+
