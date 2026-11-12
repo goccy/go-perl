@@ -5,9 +5,41 @@ package xs_test
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
+	"time"
 )
+
+// A module that sets a signal aside for a moment — it keeps the handler it
+// finds, sets the default action and puts the handler back, as IO::Tty
+// does with SIGCHLD around grantpt — leaves the process's handling of the
+// signal as it was: the next such signal is delivered to the process, not
+// the end of it. The signal is sent to the thread the test runs on where
+// the host has a way: a thread that is running the program is where a
+// handler that is not the process's own does its damage.
+func TestNativeModuleSetsASignalAside(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	delivered := make(chan os.Signal, 4)
+	signal.Notify(delivered, syscall.SIGCHLD)
+	defer signal.Stop(delivered)
+	for _, how := range []string{"sigaction", "signal"} {
+		runEvalCases(t, p, []evalCase{
+			{"a handler is found and put back with " + how, `PerlAPI::set_signal_aside("` + how + `", ` + strconv.Itoa(int(syscall.SIGCHLD)) + `) ? "handler" : "none"`, "handler"},
+		})
+		if err := signalThisThread(syscall.SIGCHLD); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-delivered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("after %s: the signal was not delivered to the process", how)
+		}
+	}
+}
 
 // A callback a module makes without G_EVAL leaves $@ as it was when the
 // code it called returns normally: only a call that asks for G_EVAL

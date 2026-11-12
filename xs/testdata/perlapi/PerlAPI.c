@@ -1902,6 +1902,40 @@ XS(XS_PerlAPI_lexical_keywords) {
     XSRETURN_EMPTY;
 }
 
+/* Sets a signal aside the way modules do around a call that must not be
+ * disturbed by it (IO::Tty around grantpt): the handler found there — the
+ * pointer alone — is kept, the default action is set, and the handler is
+ * put back with the flags the module has for handlers of its own. With
+ * "sigaction" it is done through sigaction, with "signal" through signal.
+ * Returns whether a handler was found. */
+XS(XS_PerlAPI_set_signal_aside) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "how, sig");
+    {
+        const char *const how = SvPV_nolen(ST(0));
+        const int sig = (int)SvIV(ST(1));
+        void (*found)(int);
+        if (strEQ(how, "sigaction")) {
+            struct sigaction sa, osa;
+            if (sigaction(sig, NULL, &osa) == -1) croak("sigaction: %s", strerror(errno));
+            found = osa.sa_handler;
+            memset(&sa, 0, sizeof(sa));
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sa.sa_handler = SIG_DFL;
+            if (sigaction(sig, &sa, NULL) == -1) croak("sigaction: %s", strerror(errno));
+            sa.sa_handler = found;
+            if (sigaction(sig, &sa, NULL) == -1) croak("sigaction: %s", strerror(errno));
+        } else {
+            found = signal(sig, SIG_DFL);
+            if (found == SIG_ERR) croak("signal: %s", strerror(errno));
+            if (signal(sig, found) == SIG_ERR) croak("signal: %s", strerror(errno));
+        }
+        ST(0) = boolSV(found != SIG_DFL && found != SIG_IGN);
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -2011,5 +2045,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::stack_in_a_plain_function", XS_PerlAPI_stack_in_a_plain_function);
     newXS_deffile("PerlAPI::look_without_magic", XS_PerlAPI_look_without_magic);
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
+    newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

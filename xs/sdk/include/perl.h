@@ -92,6 +92,64 @@
 
 #define GOPERL_XS_ABI 14u
 
+/* Signal actions of the process.
+ *
+ * The process a module is loaded into has a handler of its own for every
+ * signal, which runs on an alternate signal stack and takes the three
+ * arguments of an SA_SIGINFO handler; a signal that reaches it in any other
+ * way ends the process. A module that sets a signal aside for a moment
+ * keeps the handler it found — the pointer alone — and puts that back with
+ * the flags it has for handlers of its own:
+ *
+ *     old = signal(SIGCHLD, SIG_DFL);  ...;  signal(SIGCHLD, old);
+ *
+ * which is right for a process whose handlers are all like the module's.
+ * So sigaction and signal, as a module calls them, keep the action each
+ * signal was found with, and a handler that goes back goes back with all of
+ * that action. A handler that is the module's own is installed as the
+ * module asks, on the alternate stack every thread of the process has.
+ *
+ * goperl_seen_action is what this translation unit was shown, by signal: a
+ * handler pointer does not tell what action it came from. */
+#ifndef NSIG
+#define NSIG 65
+#endif
+static struct sigaction goperl_seen_action[NSIG] __attribute__((unused));
+
+static inline int goperl_sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+    struct sigaction current, with;
+    if (sig <= 0 || sig >= NSIG)
+        return (sigaction)(sig, act, old);
+    if ((sigaction)(sig, NULL, &current) == 0 &&
+        current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN)
+        goperl_seen_action[sig] = current;
+    if (act != NULL && act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN) {
+        if (act->sa_handler == goperl_seen_action[sig].sa_handler) {
+            with = goperl_seen_action[sig];
+        } else {
+            with = *act;
+            with.sa_flags |= SA_ONSTACK;
+        }
+        act = &with;
+    }
+    return (sigaction)(sig, act, old);
+}
+
+static inline void (*goperl_signal(int sig, void (*handler)(int)))(int) {
+    struct sigaction act, old;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = SA_RESTART;
+    if (goperl_sigaction(sig, &act, &old) != 0)
+        return SIG_ERR;
+    return old.sa_handler;
+}
+
+#define sigaction(sig, act, old) goperl_sigaction((sig), (act), (old))
+#undef signal
+#define signal(sig, handler) goperl_signal((sig), (handler))
+
 /* The perl this SDK targets (the embedded interpreter's version). */
 #include "patchlevel.h"
 #define PERL_VERSION_DECIMAL(r, v, s) ((r)*1000000 + (v)*1000 + (s))
