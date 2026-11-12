@@ -48,13 +48,11 @@ report("protocols: tcp=", scalar(getprotobyname("tcp")), " 17=", scalar(getproto
        " unknown=", (defined getprotobyname("no-such-protocol") ? "found" : "none"));
 my @all; setprotoent(0); while (my @p = getprotoent()) { push @all, $p[0] } endprotoent();
 report("protocol table: @all");
-report("services: ", (defined getservbyname("http", "tcp") ? "found" : "none"));
 report("networks: ", (defined getnetbyname("loopback") ? "found" : "none"));
 my @host = gethostbyname("127.0.0.1");
 report("host by number: ", (@host ? inet_ntoa($host[4]) : "none"));
 my @local = gethostbyname("localhost");
 report("host by name: ", (@local ? inet_ntoa($local[4]) : "none"));
-report("host by address: ", (defined gethostbyaddr(inet_aton("127.0.0.1"), AF_INET) ? "found" : "none"));
 report("inet_aton of a number: ", inet_ntoa(inet_aton("10.1.2.3")));
 `)
 	wantLines(t, got,
@@ -68,11 +66,9 @@ report("inet_aton of a number: ", inet_ntoa(inet_aton("10.1.2.3")));
 		"cuserid: "+me.Username,
 		"protocols: tcp=6 17=udp unknown=none",
 		"protocol table: ip icmp tcp udp ipv6 ipv6-icmp",
-		"services: none",
 		"networks: none",
 		"host by number: 127.0.0.1",
 		"host by name: 127.0.0.1",
-		"host by address: none",
 		"inet_aton of a number: 10.1.2.3",
 	)
 }

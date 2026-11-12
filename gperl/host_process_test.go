@@ -149,3 +149,45 @@ report("getpriority=", (getpriority(0, 0) == getpriority(0, $$) ? "one value" : 
 		"getpriority=one value",
 	)
 }
+
+// The services database and the names of addresses are the host's:
+// getservbyname and getservbyport, gethostbyaddr, and getnameinfo with
+// names.
+func TestNetworkDatabasesAreTheHosts(t *testing.T) {
+	if _, err := os.Stat("/etc/services"); err != nil {
+		t.Skip("the host has no services database")
+	}
+	got := runForkScript(t, `
+use Socket qw(inet_aton pack_sockaddr_in getnameinfo AF_INET NI_NUMERICHOST NI_NUMERICSERV NI_NAMEREQD);
+my @by_name = getservbyname("http", "tcp");
+report("getservbyname: name=$by_name[0] port=$by_name[2] proto=$by_name[3]");
+report("in scalar context: ", scalar(getservbyname("domain", "udp")));
+my @by_port = getservbyport(80, "tcp");
+report("getservbyport: name=$by_port[0] port=$by_port[2] proto=$by_port[3]");
+report("by an alias: ", (getservbyname("www", "tcp"))[2] // "none");
+report("no such service: ", (defined getservbyname("no-such-service-anywhere", "tcp") ? "found" : "none"));
+report("no such protocol: ", (defined getservbyname("http", "no-such-protocol") ? "found" : "none"));
+
+my $name = gethostbyaddr(inet_aton("127.0.0.1"), AF_INET);
+report("gethostbyaddr of the loopback address: ", (defined $name && $name !~ /^[0-9.]+$/ ? "a name" : "none"));
+my ($err, $host, $service) = getnameinfo(pack_sockaddr_in(80, inet_aton("127.0.0.1")));
+report("getnameinfo: error=", ($err ? "$err" : "none"), " host=", ($host eq $name ? "the same name" : $host), " service=$service");
+($err, $host, $service) = getnameinfo(pack_sockaddr_in(80, inet_aton("127.0.0.1")), NI_NUMERICHOST | NI_NUMERICSERV);
+report("getnameinfo in numbers: host=$host service=$service");
+($err, $host, $service) = getnameinfo(pack_sockaddr_in(1, inet_aton("192.0.2.77")), NI_NAMEREQD);
+report("an address without a name, a name required: ", ($err ? "refused" : "host=$host"));
+`)
+	wantLines(t, got,
+		"getservbyname: name=http port=80 proto=tcp",
+		"in scalar context: 53",
+		"getservbyport: name=http port=80 proto=tcp",
+		"by an alias: 80",
+		"no such service: none",
+		"no such protocol: none",
+		"gethostbyaddr of the loopback address: a name",
+		"getnameinfo: error=none host=the same name service=http",
+		"getnameinfo in numbers: host=127.0.0.1 service=80",
+		"an address without a name, a name required: refused",
+	)
+}
+
