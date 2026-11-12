@@ -414,3 +414,36 @@ report("is killed: ", status());
 		"is killed: signal=15 exit=0",
 	)
 }
+
+// A signal the program ignores is ignored by the commands it starts, which
+// inherit that, and no longer once the program has given the signal its
+// default action back — nor by the commands of the next program of the
+// process, when the first ended with the signal ignored.
+func TestIgnoredSignalsGetTheirDefaultActionBack(t *testing.T) {
+	const survives = `sub survives { my $sig = shift; system("/bin/sh", "-c", "kill -$sig \$\$; exit 0"); $? == 0 ? "survives" : ($? & 127) ? "dies" : "fails with $?" }`
+	got := runForkScript(t, survives+`
+for my $sig (qw(HUP INT TERM USR1)) {
+    my @seen = (survives($sig));
+    {
+        local $SIG{$sig} = 'IGNORE';
+        push @seen, survives($sig);
+    }
+    push @seen, survives($sig);
+    $SIG{$sig} = 'IGNORE';
+    $SIG{$sig} = 'DEFAULT';
+    push @seen, survives($sig);
+    report("a command that sends itself $sig: at first it $seen[0], while the program ignores the signal it $seen[1], after the scope of that it $seen[2], after DEFAULT it $seen[3]");
+    $SIG{$sig} = 'IGNORE';   # and the program ends that way
+}
+`)
+	var want []string
+	for _, sig := range []string{"HUP", "INT", "TERM", "USR1"} {
+		want = append(want, "a command that sends itself "+sig+": at first it dies, while the program ignores the signal it survives, after the scope of that it dies, after DEFAULT it dies")
+	}
+	wantLines(t, got, want...)
+
+	got = runForkScript(t, survives+`
+report("in the next program: ", join(", ", map { "$_ " . survives($_) } qw(HUP INT TERM USR1)));
+`)
+	wantLines(t, got, "in the next program: HUP dies, INT dies, TERM dies, USR1 dies")
+}
