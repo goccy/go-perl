@@ -177,11 +177,11 @@ waitpid($pid, 0);
 chomp $reply;
 report("$reply; exit=", $? >> 8);
 report("end of input once the child is gone: ", (defined(my $more = <$parent>) ? "more" : "eof"));
-report("inet socketpair: ", (socketpair(my $a, my $b, AF_INET, SOCK_STREAM, 0) ? "made" : ($!{EAFNOSUPPORT} ? "EAFNOSUPPORT" : "error $!")));
+report("inet socketpair: ", (socketpair(my $a, my $b, AF_INET, SOCK_STREAM, 0) ? "made" : ($!{EOPNOTSUPP} ? "EOPNOTSUPP" : "error $!")));
 `)
 	wantLines(t, got,
 		"child got: ping; exit=0",
 		"end of input once the child is gone: eof",
-		"inet socketpair: EAFNOSUPPORT",
+		"inet socketpair: EOPNOTSUPP",
 	)
 }

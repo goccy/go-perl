@@ -76,6 +76,31 @@ func (d devNullFS) Chown(name string, uid, gid int, follow bool) error {
 	return owner.Chown(name, uid, gid, follow)
 }
 
+// HostPath and HostName pass on where the files of the wrapped backend are
+// in the host's filesystem, which is where a Unix-domain socket bound to
+// one of its names lives. A backend whose files are nowhere there (an
+// in-memory one) reports errors.ErrUnsupported and knows no host path: the
+// guest sees a filesystem that holds no sockets.
+func (d devNullFS) HostPath(name string) (string, error) {
+	located, can := d.FS.(interface {
+		HostPath(name string) (string, error)
+	})
+	if !can {
+		return "", errors.ErrUnsupported
+	}
+	return located.HostPath(name)
+}
+
+func (d devNullFS) HostName(path string) (string, bool) {
+	named, can := d.FS.(interface {
+		HostName(path string) (string, bool)
+	})
+	if !can {
+		return "", false
+	}
+	return named.HostName(path)
+}
+
 const devNullName = "dev/null"
 
 func (d devNullFS) OpenFile(name string, flag int, perm iofs.FileMode) (File, error) {
