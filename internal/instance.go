@@ -259,6 +259,18 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	return p, nil
 }
 
+// hostIDs is how a program that is the host process changes the process's
+// user and group ids when a package linked into the binary knows a way the
+// runtime does not have; see RegisterHostIDs. nil is the runtime's own way.
+var hostIDs base.HostIDs
+
+// RegisterHostIDs sets the way the ids of the host process are changed for
+// every instance made afterwards whose program is the host process. The
+// native module loader registers the C library's: a process that loads
+// native code is linked with a C runtime, and has to change its ids through
+// it. It is called from package initialization.
+func RegisterHostIDs(ids base.HostIDs) { hostIDs = ids }
+
 // buildWASI assembles the per-instance WASI host from the options. Sandbox
 // by default: no host environment, no host stdio.
 func buildWASI(opts InstanceOptions) *base.WasiStubs {
@@ -286,6 +298,9 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	}
 	wasi.SetExecHook(exec)
 	wasi.SetHostProcess(opts.HostProcess)
+	if opts.HostProcess && hostIDs != nil {
+		wasi.SetHostIDs(hostIDs)
+	}
 	// A program that is the host process is where the host is: when it
 	// names no time zone (TZ), its local time is the host's. An isolated
 	// program is in UTC.
