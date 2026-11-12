@@ -25,12 +25,18 @@ ln -s $G/proj/local/xs/.sdk $G/fakearchlib/CORE
 stdlib=$($G/bin/perl -e 'require strict; my $p = $INC{"strict.pm"}; $p =~ s{/strict\.pm\z}{}; print $p')
 test -f "$stdlib/strict.pm"
 
-sed "s|@STDLIB@|$stdlib|g" > $G/config-overlay.pl <<'EOF'
+# The compiler %Config describes is this machine's, in every key that names
+# it: build scripts choose flags by the compiler's identity.
+ccversion=$(cc -dumpfullversion)
+
+sed -e "s|@STDLIB@|$stdlib|g" -e "s|@CCVERSION@|$ccversion|g" > $G/config-overlay.pl <<'EOF'
 use Config ();
 my %over = (
     'perlpath' => '/opt/gperl/bin/perl', 'startperl' => '#!/opt/gperl/bin/perl',
     'cc' => 'cc', 'ld' => 'cc', 'ar' => 'ar', 'full_ar' => 'ar',
     'ranlib' => 'ranlib', 'make' => 'make',
+    'ccname' => 'gcc', 'gccversion' => '@CCVERSION@', 'ccversion' => '',
+    'cpp' => 'cc -E', 'cpprun' => 'cc -E', 'cppstdin' => 'cc -E', 'libc' => '',
     'ccflags' => '-fno-strict-aliasing -fstack-protector-strong -DPERL_USE_SAFE_PUTENV -D_GNU_SOURCE -I/opt/gperl/proj/local/xs/.sdk',
     'optimize' => '-O2', 'ldflags' => '', 'cccdlflags' => '-fPIC',
     'ccdlflags' => '', 'obj_ext' => '.o', 'exe_ext' => '', 'lib_ext' => '.a',
