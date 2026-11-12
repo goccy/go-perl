@@ -89,6 +89,14 @@ type Program struct {
 
 	// Args is @ARGV.
 	Args []string
+	// CommandLine, when non-nil, holds the words of the command line the
+	// program was started with, after the command's own name and exactly as
+	// they were given: perl's switches, the program, its arguments. Perl
+	// keeps them for one purpose: a program file whose #! line names
+	// another interpreter is handed to that interpreter with these words.
+	// When nil, the words are the program (File, "-e" and the code, or "-")
+	// followed by Args.
+	CommandLine []string
 	// Inc is put in front of @INC, in order (-I).
 	Inc []string
 	// Preamble holds Perl statements compiled ahead of the program text, in
@@ -298,6 +306,12 @@ func (prog *Program) encode() ([]byte, error) {
 		}
 	}
 	b = strs(b, prog.Args)
+	if prog.CommandLine != nil {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	b = strs(b, prog.CommandLine)
 	return b, nil
 }
 

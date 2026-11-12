@@ -115,6 +115,11 @@ func TestParsePerlCommand(t *testing.T) {
 			if len(got.Args) == 0 {
 				got.Args = nil
 			}
+			// The command line is kept as it was given, whatever it means.
+			if !reflect.DeepEqual(got.CommandLine, append([]string{}, tc.argv...)) {
+				t.Fatalf("command line kept = %q, want %q", got.CommandLine, tc.argv)
+			}
+			got.CommandLine = nil
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parsePerlCommand(%q)\n got %+v\nwant %+v", tc.argv, describe(got), describe(tc.want))
 			}

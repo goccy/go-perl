@@ -63,6 +63,7 @@ const bitBucketPath = "/dev/null"
 // PATH).
 func parsePerlCommand(argv, env []string) (*perlCommand, error) {
 	c := &perlCommand{}
+	c.prog.CommandLine = append([]string{}, argv...)
 	i := 0
 args:
 	for ; i < len(argv); i++ {

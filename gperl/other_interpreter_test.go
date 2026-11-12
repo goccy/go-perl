@@ -41,3 +41,35 @@ func TestProgramForAnotherInterpreterIsHandedOver(t *testing.T) {
 		t.Fatalf("report = %q, want %q", raw, "run by perl\n")
 	}
 }
+
+// A program handed to the interpreter its #! line names is handed over with
+// the command line perl was given, its own switches included, after the
+// argument of the #! line.
+func TestHandOverPassesTheCommandLine(t *testing.T) {
+	shim := perlCommandShim(t)
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report.txt")
+	interp := filepath.Join(dir, "interp")
+	if err := os.WriteFile(interp, []byte("#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > \""+report+"\"\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	program := writeScript(t, "handed-over", "#!"+interp+" -from-the-line\nthis is no perl\n")
+	script := writeScript(t, "run.pl", `
+use strict; use warnings;
+my ($perl, $program) = @ARGV;
+system($perl, "-w", "-I/some/dir", $program, "first", "second");
+exit($? >> 8);
+`)
+	status, err := gperl.Run(script, []string{shim, program})
+	if err != nil || status != 7 {
+		t.Fatalf("Run = (%d, %v), want (7, nil)", status, err)
+	}
+	raw, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("the interpreter named on the #! line did not run: %v", err)
+	}
+	want := []string{"-from-the-line", "-w", "-I/some/dir", program, "first", "second"}
+	if got := strings.Split(strings.TrimSpace(string(raw)), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("arguments of the interpreter:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+}
