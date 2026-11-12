@@ -3727,9 +3727,13 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
 }
 
 #ifdef __cplusplus
+/* Overloads need C++ linkage, and the header is usually included inside
+ * extern "C". */
+extern "C++" {
 static inline goperl_frame_t *goperl_frame_handed(goperl_frame_t *frame) { return frame; }
 static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
     return goperl_cur_frame_v;
+}
 }
 #define GOPERL_FRAME_HERE goperl_frame_handed(goperl_frame_arg)
 #else

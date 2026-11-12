@@ -210,4 +210,51 @@ func TestNativeCppObjectModule(t *testing.T) {
 	if want := "42|Obj::Demo::Stats|hits|42"; r.Error != nil || resultStr(r) != want {
 		t.Fatalf("ObjDemo = ok=%v result=%q error=%v, want %q", (r.Error == nil), resultStr(r), r.Error, want)
 	}
+
+	// dXSARGS in a function that was given no interpreter context.
+	r, err = p.Eval(ctx, `join ",", Obj::Demo::count_args(7, 8, 9), Obj::Demo::count_args()`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if want := "3,0"; r.Error != nil || resultStr(r) != want {
+		t.Fatalf("count_args = result=%q error=%v, want %q", resultStr(r), r.Error, want)
+	}
+}
+
+// The SDK headers compile as C++ with every C++ compiler of the host: a
+// module includes perl.h and XSUB.h inside extern "C" and says dXSARGS in
+// functions with and without an interpreter context. (g++ refuses what
+// clang++ lets pass, overloads with C linkage among them.)
+func TestSDKCompilesAsCxx(t *testing.T) {
+	tried := 0
+	for _, cxx := range []string{"c++", "g++", "clang++"} {
+		path, err := exec.LookPath(cxx)
+		if err != nil {
+			continue
+		}
+		args := []string{"-fsyntax-only", "-x", "c++", "-std=c++11", "-I", "sdk/include", "testdata/objdemo/ObjDemo.c"}
+		if runtime.GOOS == "darwin" {
+			if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
+				args = append([]string{"-isysroot", strings.TrimSpace(string(out))}, args...)
+			}
+		}
+		// Some hosts have a C++ compiler whose standard library headers
+		// are not installed: one that cannot compile a program of its own
+		// says nothing about the SDK's.
+		probe := filepath.Join(t.TempDir(), "probe.cpp")
+		if err := os.WriteFile(probe, []byte("#include <string>\nint main(){return 0;}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		probeArgs := append(append([]string{}, args[:len(args)-3]...), probe)
+		if exec.Command(path, probeArgs...).Run() != nil {
+			continue
+		}
+		tried++
+		if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+			t.Errorf("%s: %v\n%s", cxx, err, out)
+		}
+	}
+	if tried == 0 {
+		t.Skip("no working C++ compiler found")
+	}
 }
