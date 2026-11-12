@@ -185,3 +185,51 @@ report("inet socketpair: ", (socketpair(my $a, my $b, AF_INET, SOCK_STREAM, 0) ?
 		"inet socketpair: EOPNOTSUPP",
 	)
 }
+
+// A socket is connected until its connection is over: once the peer has
+// closed it and this side has shut its sending down, getpeername fails, and
+// IO::Socket's connected says no. A client that receives for as long as the
+// socket is connected (Starman's tests do) ends when the server is done.
+func TestSocketIsNotConnectedOnceTheConnectionIsOver(t *testing.T) {
+	got := runForkScript(t, `
+use IO::Socket::INET qw(SHUT_WR);
+my $listener = IO::Socket::INET->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => 0) or die "listen: $!";
+pipe(my $done_r, my $done_w) or die "pipe: $!";
+my $server = fork // die "fork: $!";
+if ($server == 0) {
+    close $done_w;
+    my $conn = $listener->accept or die "accept: $!";
+    my $request = '';
+    while (sysread($conn, my $buf, 1024)) { $request .= $buf }
+    syswrite($conn, "reply to " . length($request) . " bytes");
+    sysread($done_r, my $byte, 1);   # until the client has the reply
+    close $conn;
+    exit 0;
+}
+close $done_r;
+my $socket = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $listener->sockport, Proto => 'tcp') or die "connect: $!";
+report("connected at first: ", $socket->connected ? "yes" : "no");
+$socket->send("a request");
+$socket->shutdown(SHUT_WR);
+report("connected after shutting the sending side down: ", $socket->connected ? "yes" : "no");
+$socket->recv(my $reply, 1024);
+report("received '$reply'; connected while the server holds the connection: ", $socket->connected ? "yes" : "no");
+close $done_w;
+my $receives = 0;
+local $SIG{ALRM} = sub { report("still connected after $receives receives"); kill KILL => $server; exit 1 };
+alarm 20;
+while ($socket->connected) {
+    $socket->recv(my $rest, 1024);
+    $receives++;
+}
+alarm 0;
+report("the server closed: the loop ended after ", ($receives <= 2 ? "a receive or two" : "$receives receives"));
+waitpid($server, 0);
+`)
+	wantLines(t, got,
+		"connected at first: yes",
+		"connected after shutting the sending side down: yes",
+		"received 'reply to 9 bytes'; connected while the server holds the connection: yes",
+		"the server closed: the loop ended after a receive or two",
+	)
+}
