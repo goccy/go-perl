@@ -181,6 +181,9 @@ func (p *Perl) Clone() (*Perl, error) {
 // Close finalizes the instance. The Perl must not be used afterward: every
 // later Eval/Call errors, and outstanding *Ref handles become inert (their
 // finalizers only touch host-side state). Idempotent.
+//
+// Pseudo-processes forked from the instance (Config.Fork) that are still
+// running are ended with it.
 func (p *Perl) Close() error {
 	return p.raw.Close()
 }

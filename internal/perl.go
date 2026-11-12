@@ -1081,8 +1081,9 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 // not preempted until it returns to the run loop.
 //
 // Storing 0x100 | signal instead delivers a terminating signal to the
-// (pseudo-)process: no eval can catch it, and the program ends with exit
-// status 128 + signal at the next opcode boundary.
+// (pseudo-)process: no eval can catch it, and the process ends by that
+// signal at the next opcode boundary, where it stands (no END block, no
+// destructor).
 func PerlInterruptAddr(h uint64) (uint32, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)

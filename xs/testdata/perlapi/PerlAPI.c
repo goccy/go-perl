@@ -5,6 +5,8 @@
 #include "XSUB.h"
 #include "patchlevel.h"
 
+#include <unistd.h>
+
 /* The names of the value flags set on an SV, from the real flag word. */
 XS(XS_PerlAPI_flags) {
     dXSARGS;
@@ -467,6 +469,21 @@ XS(XS_PerlAPI_wide_made) {
     }
     PUTBACK;
     return;
+}
+
+/* ---- native code that blocks ------------------------------------------------ */
+
+/* Reads one byte from a descriptor of the host process with the C library,
+ * for as long as that takes, and returns what read returned. */
+XS(XS_PerlAPI_read_host_descriptor) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fd");
+    {
+        char byte;
+        ssize_t n = read((int)SvIV(ST(0)), &byte, 1);
+        ST(0) = sv_2mortal(newSViv((IV)n));
+        XSRETURN(1);
+    }
 }
 
 /* ---- an interpreter death inside a direct accessor ------------------------- */
@@ -1975,6 +1992,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::pointer_roundtrip", XS_PerlAPI_pointer_roundtrip);
     newXS_deffile("PerlAPI::wide_values", XS_PerlAPI_wide_values);
     newXS_deffile("PerlAPI::wide_made", XS_PerlAPI_wide_made);
+    newXS_deffile("PerlAPI::read_host_descriptor", XS_PerlAPI_read_host_descriptor);
     newXS_deffile("PerlAPI::read_then_mark", XS_PerlAPI_read_then_mark);
     newXS_deffile("PerlAPI::increment_all", XS_PerlAPI_increment_all);
     newXS_deffile("PerlAPI::late_store", XS_PerlAPI_late_store);

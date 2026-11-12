@@ -40,6 +40,10 @@ const interruptSignal = 0x100
 // sigKILL is the one signal a process cannot catch, block or ignore.
 const sigKILL = 9
 
+// errFamilyOver is the failure of a fork made by a pseudo-process that is
+// being ended because the first process of its family has ended.
+var errFamilyOver = errors.New("perl: fork: the program has ended")
+
 // installForkHook lets the guest fork when the configuration allows it.
 // Without the hook the import reports ENOSYS and fork returns undef.
 func (p *Perl) installForkHook() {
@@ -89,11 +93,10 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 		return nil, err
 	}
 
-	p.family.running.Add(1)
-	go func() {
-		defer p.family.running.Done()
-		exited(c.runForkChild(pid))
-	}()
+	if !p.family.start(c, pid, exited) {
+		c.discard()
+		return nil, errFamilyOver
+	}
 	return c.signalForkChild, nil
 }
 

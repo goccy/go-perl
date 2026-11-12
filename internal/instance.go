@@ -178,18 +178,96 @@ type Perl struct {
 	// (UserHandler) and OnFork.
 	OnFork func(child *Perl)
 	// family is shared by an instance and every pseudo-process forked from
-	// it, directly or not. The instance that was not itself forked waits
-	// for the whole family when it closes: the host process is what keeps
-	// the pseudo-processes alive, so it cannot end before they do.
+	// it, directly or not. The instance that was not itself forked is the
+	// family's first process: when it has ended, the pseudo-processes that
+	// are still running are ended with it (see forkFamily.end).
 	family *forkFamily
 	// killed is the signal this fork child died of (0 = none).
 	killed atomic.Int32
 }
 
-// forkFamily tracks the running pseudo-processes forked from one instance.
+// forkFamily knows the running pseudo-processes forked from one instance,
+// directly or not.
 type forkFamily struct {
-	origin  *Perl
-	running sync.WaitGroup
+	origin *Perl
+
+	mu sync.Mutex
+	// running holds the fork children whose program has not ended. Which
+	// ones those are can be learnt nowhere else: the process table of the
+	// host state knows a child only once the fork that made it is over.
+	running map[*Perl]struct{}
+	// over records that the first process has ended: no pseudo-process is
+	// started from then on. A child that forks while the others are being
+	// ended would otherwise outlive them.
+	over bool
+}
+
+// start runs child's program as the pseudo-process pid, on a goroutine of
+// its own; exited is told the status it ends with. It reports false, and
+// starts nothing, when the family is over.
+func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.over {
+		return false
+	}
+	if f.running == nil {
+		f.running = map[*Perl]struct{}{}
+	}
+	f.running[child] = struct{}{}
+	go func() {
+		status := child.runForkChild(pid)
+		f.mu.Lock()
+		delete(f.running, child)
+		f.mu.Unlock()
+		exited(status)
+	}()
+	return true
+}
+
+// isOver reports whether the first process of the family has ended.
+func (f *forkFamily) isOver() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.over
+}
+
+// end ends the pseudo-processes that are still running, when the first
+// process of the family has ended. To the program it is what the end of a
+// process group is: every one of them is killed as by SIGKILL — it runs no
+// Perl code from its next opcode on, no END block and no destructor — the
+// commands it started and has not waited for are killed and reaped, and its
+// descriptors are closed.
+//
+// end does not wait for the goroutine of a pseudo-process to notice. One
+// that is in a call the host cannot interrupt (native code of an XS module,
+// a Go function the embedder registered) would hold the first process's end
+// up for as long as that call takes, and a process does not wait for what
+// it kills. Every blocking call of the host's own is ended by the signal,
+// so the goroutine is normally gone a moment later; it gives back the
+// child's memory itself.
+func (f *forkFamily) end() {
+	f.mu.Lock()
+	f.over = true
+	children := make([]*Perl, 0, len(f.running))
+	for child := range f.running {
+		children = append(children, child)
+	}
+	f.mu.Unlock()
+	// Every one is killed before anything of any of them is taken away: a
+	// child that sees a command die, or a descriptor close, must not get
+	// to act on it.
+	for _, child := range children {
+		_ = child.signalForkChild(sigKILL)
+	}
+	// A child that has noticed by now has killed its commands itself
+	// (releaseHostState); this is for the ones that have not.
+	for _, child := range children {
+		child.wasi.KillCommands()
+	}
+	for _, child := range children {
+		_ = child.wasi.CloseDescriptors()
+	}
 }
 
 // Closed reports whether Close has run.
@@ -654,12 +732,19 @@ func (p *Perl) Close() error {
 
 // releaseHostState gives back what the host holds for an instance that
 // will never be entered again: its open descriptors and its memory mapping.
-// Descriptors go first and before the wait below — a fork child reading a
-// pipe from this instance sees end-of-file only once this end is closed.
+// The end of the family's first process is the end of the pseudo-processes
+// forked from it that are still running.
 func (p *Perl) releaseHostState() error {
+	first := p.family == nil || p.family.origin == p
+	if !first && p.family.isOver() {
+		// A pseudo-process that goes because the family is over takes its
+		// commands with it. It does that itself, here, before its process
+		// table goes: whoever ended it may find the table gone already.
+		p.wasi.KillCommands()
+	}
 	err := p.wasi.CloseAll()
-	if p.family != nil && p.family.origin == p {
-		p.family.running.Wait()
+	if first && p.family != nil {
+		p.family.end()
 	}
 	p.releaseMapping()
 	return err

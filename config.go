@@ -78,6 +78,11 @@ type Config struct {
 	// the way perl emulates fork on Windows. The child is subject to the
 	// same Config as its parent, and exec in a child goes through Exec like
 	// any other spawn. FAIL-CLOSED: when false, fork fails in the guest.
+	//
+	// The pseudo-processes live as long as the instance they were forked
+	// from: Close ends the ones that are still running, as SIGKILL would
+	// (no END block and no destructor of theirs runs), kills the commands
+	// they started and closes their descriptors. It does not wait for them.
 	Fork bool
 	// HostProcess declares that the program IS the host process, the way a
 	// command-line tool built around one instance is:

@@ -7,7 +7,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"testing"
+	"time"
 
 	perl "github.com/goccy/go-perl"
 	goperlfs "github.com/goccy/go-perl/fs"
@@ -74,10 +77,9 @@ func TestForkWithNativeState(t *testing.T) {
 	}
 }
 
-// The parent of a fork ends first, as a program that puts itself in the
-// background does: the child goes on using the native state it was forked
-// with.
-func TestForkParentEndsFirstWithNativeState(t *testing.T) {
+// The parent of a fork lets go of the native state it shares with its
+// child: the child goes on using the native state it was forked with.
+func TestForkChildKeepsNativeStateTheParentReleased(t *testing.T) {
 	dir := t.TempDir()
 	report := filepath.Join(dir, "report")
 	status, stdout, stderr := runForkingProgram(t,
@@ -94,17 +96,103 @@ func TestForkParentEndsFirstWithNativeState(t *testing.T) {
 		`}`,
 		`@box = (); close $w; close $r;`,
 		`print "parent released: ", PerlAPI::tally_freed(), "\n";`,
+		// The end of the program would be the end of the child.
+		`waitpid($pid, 0);`,
 	)
 	if status != 0 || stdout != "parent released: 0\n" {
 		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
 	}
-	// RunProgram and Close return once the instance's children have ended.
 	got, err := os.ReadFile(report)
 	if err != nil {
 		t.Fatalf("the child left no report: %v (stderr %q)", err, stderr)
 	}
 	if string(got) != "kept=11\n" {
 		t.Fatalf("child saw %q, want %q", got, "kept=11\n")
+	}
+}
+
+// The program ends while a fork child is inside native code that does not
+// return. The host cannot interrupt native code, and the end of the program
+// does not wait for it: the child is ended all the same, and runs no Perl
+// code once its native call does return.
+func TestProgramEndsWhileAChildIsInNativeCode(t *testing.T) {
+	so := buildPerlAPI(t)
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	// What the native code reads: nothing is written until the program has
+	// ended.
+	held, release, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	defer release.Close()
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report")
+	if err := os.WriteFile(filepath.Join(dir, "PerlAPI.pm"),
+		[]byte("package PerlAPI;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, Fork: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loadXSModule(t, p, "PerlAPI", so)
+
+	type outcome struct {
+		status int
+		err    error
+	}
+	ended := make(chan outcome, 1)
+	go func() {
+		status, err := p.RunProgram(context.Background(), perl.Program{
+			Code: []string{
+				`use PerlAPI;`,
+				`pipe(my $r, my $w) or die "pipe: $!";`,
+				`my $pid = fork // die "fork: $!";`,
+				`if (!$pid) {`,
+				`    close $r; syswrite($w, "in\n"); close $w;`,
+				`    PerlAPI::read_host_descriptor($ARGV[0]);`,
+				`    open my $fh, ">", $ARGV[1] or die $!; print $fh "the child went on\n"; close $fh;`,
+				`    exit 0;`,
+				`}`,
+				`close $w; my $in = <$r>; select(undef, undef, undef, 0.3);`,
+				`exit 5;`,
+			},
+			Args: []string{strconv.Itoa(int(held.Fd())), report},
+			Inc:  []string{dir},
+		})
+		if err == nil {
+			err = p.Close()
+		}
+		ended <- outcome{status, err}
+	}()
+	select {
+	case got := <-ended:
+		if got.err != nil || got.status != 5 {
+			t.Fatalf("the program ended with (%d, %v), want (5, nil); stderr %q", got.status, got.err, errOut.String())
+		}
+	case <-time.After(30 * time.Second):
+		release.Close()
+		t.Fatal("the program's end waits for the child's native call")
+	}
+	// The native call returns now; the child must not get any further.
+	before := runtime.NumGoroutine()
+	if _, err := release.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for runtime.NumGoroutine() >= before && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if runtime.NumGoroutine() >= before {
+		t.Errorf("the child's goroutine is still there after its native call returned")
+	}
+	if got, err := os.ReadFile(report); err == nil {
+		t.Fatalf("the child ran on after the program had ended: %q", got)
 	}
 }
 
