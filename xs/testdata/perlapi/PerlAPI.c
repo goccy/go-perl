@@ -1334,6 +1334,38 @@ XS(XS_PerlAPI_count_own_struct) {
     }
 }
 
+/* The body of the subs anonymous_subs makes: which one it is. */
+XS(XS_PerlAPI_anonymous_body) {
+    dXSARGS;
+    dXSI32;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(ix));
+    XSRETURN(1);
+}
+
+/* Makes n subs without a name (newXS(NULL, ...)), the way a module builds
+ * closures over native code, and returns references to them. The caller of
+ * newXS owns the one reference to such a sub: it is handed to the mortals
+ * here, and the reference returned keeps the sub. */
+XS(XS_PerlAPI_anonymous_subs) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        IV i;
+        SP -= items;
+        EXTEND(SP, n);
+        for (i = 0; i < n; i++) {
+            CV *const sub = newXS(NULL, XS_PerlAPI_anonymous_body, __FILE__);
+            CvXSUBANY(sub).any_i32 = (I32)i;
+            sv_2mortal((SV *)sub);
+            PUSHs(sv_2mortal(newRV_inc((SV *)sub)));
+        }
+        PUTBACK;
+        return;
+    }
+}
+
 /* The SVs the string constructors make without a string, and one with an
  * empty string: which of them are defined. */
 XS(XS_PerlAPI_null_strings) {
@@ -1875,6 +1907,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::lio_peek", XS_PerlAPI_lio_peek);
     newXS_deffile("PerlAPI::count_own_struct", XS_PerlAPI_count_own_struct);
     newXS_deffile("PerlAPI::null_strings", XS_PerlAPI_null_strings);
+    newXS_deffile("PerlAPI::anonymous_subs", XS_PerlAPI_anonymous_subs);
     newXS_deffile("PerlAPI::watch", XS_PerlAPI_watch);
     newXS_deffile("PerlAPI::watched", XS_PerlAPI_watched);
     newXS_deffile("PerlAPI::keyed_attach", XS_PerlAPI_keyed_attach);

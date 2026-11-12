@@ -473,7 +473,7 @@ func load(p *internal.Perl, module, path string) error {
 	if err != nil {
 		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
 	}
-	_, err = s.registerNative(nativeBootPrefix+module+"::bootstrap", bootFn)
+	_, err = s.registerNative(nativeBootPrefix+module+"::bootstrap", false, bootFn)
 	return err
 }
 
@@ -619,19 +619,25 @@ func installXSub(p *internal.Perl, name string, sym uint64) error {
 	}
 	fn := s.syms[sym-1]
 	s.mu.Unlock()
-	_, err := s.registerNative(name, fn)
+	_, err := s.registerNative(name, false, fn)
 	return err
 }
 
 // registerNative records fn and binds it as the Perl sub name via the
-// guest's generic thunk, returning the guest CV token.
-func (s *state) registerNative(name string, fn uintptr) (uint64, error) {
+// guest's generic thunk, returning the guest CV token. An anonymous sub
+// (newXS without a name) is in no glob: the reference the token stands for
+// is the caller's, as with newXS(NULL, ...).
+func (s *state) registerNative(name string, anonymous bool, fn uintptr) (uint64, error) {
 	s.mu.Lock()
 	s.fns = append(s.fns, fn)
 	s.fnNames = append(s.fnNames, append([]byte(name), 0))
 	id := int32(len(s.fns) - 1)
 	s.mu.Unlock()
-	cvTok, err := s.p.XSHelperOp(opNewXS, uint64(uint32(id)), 0, name)
+	var unnamed uint64
+	if anonymous {
+		unnamed = 1
+	}
+	cvTok, err := s.p.XSHelperOp(opNewXS, uint64(uint32(id)), unnamed, name)
 	if err != nil {
 		return 0, err
 	}
@@ -1500,7 +1506,7 @@ func buildVtable() {
 			return 0
 		}
 		s := stateFor(f.p)
-		if _, err := s.registerNative(cString(name), fn); err != nil {
+		if _, err := s.registerNative(cString(name), name == 0, fn); err != nil {
 			f.fail("newXS: " + err.Error())
 		}
 		return 0
@@ -1523,7 +1529,7 @@ func buildVtable() {
 			return 0
 		}
 		s := stateFor(f.p)
-		cvTok, err := s.registerNative(cString(name), fn)
+		cvTok, err := s.registerNative(cString(name), name == 0, fn)
 		if err != nil {
 			f.fail("newXS: " + err.Error())
 			return 0
