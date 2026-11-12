@@ -410,11 +410,13 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 		b.WriteString("    '" + k + "' => '" + v + "',\n")
 	}
 	b.WriteString(");\n")
-	// %Config is a tied read-only view; replace it with a writable copy
-	// carrying the overlay.
-	b.WriteString("my %full = %Config::Config;\n")
-	b.WriteString("untie %Config::Config;\n")
-	b.WriteString("%Config::Config = (%full, %over);\n")
+	// %Config stays what it is on every perl: a tied, read-only view (code
+	// that asks `tied %Config`, as modules that mock or inspect the
+	// configuration do, finds the Config object). The object keeps the
+	// values it has looked up, and looks there first: the overlay goes in
+	// as such values.
+	b.WriteString("my $config = tied %Config::Config;\n")
+	b.WriteString("$config->{$_} = $over{$_} for keys %over;\n")
 	// Build tools branch on $^O, not just $Config{osname}: the build must
 	// look like the host it targets.
 	b.WriteString("$^O = '" + tc["osname"] + "';\n1;\n")
