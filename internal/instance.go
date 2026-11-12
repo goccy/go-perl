@@ -70,6 +70,9 @@ type InstanceOptions struct {
 	// HostProcess makes the program the host process: its ids, user
 	// database and signals are the process's own.
 	HostProcess bool
+	// InheritDescriptors gives the program the descriptors above 2 that
+	// the host process was started with (the first instance that asks).
+	InheritDescriptors bool
 	// Syslog gives the program the host's system logger (see syslog.go).
 	Syslog bool
 	Stdin  io.Reader
@@ -288,6 +291,9 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 	// program is in UTC.
 	if opts.HostProcess {
 		wasi.SetLocalZone(time.Local)
+	}
+	if opts.InheritDescriptors {
+		wasi.AdoptInheritedDescriptors()
 	}
 	if opts.Syslog {
 		wasi.SetSyslogger(NewSyslogger())

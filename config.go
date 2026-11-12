@@ -115,6 +115,21 @@ type Config struct {
 	// working directory or environment — native code it calls sees the
 	// program's.
 	HostProcess bool
+	// InheritDescriptors gives the program the descriptors above the
+	// standard three that the host process was started with, under their
+	// numbers: started as `prog 5<file`, the program finds descriptor 5
+	// open and may read it or duplicate it (open(STDIN, "<&5")), as perl
+	// does. An inherited socket is the socket it is (a listening socket
+	// handed over by a supervisor accepts connections). The descriptors
+	// become the program's and are closed when it closes them, so this is
+	// for a program that is the host process (HostProcess) and nothing
+	// else in the process uses them. They exist once: the first instance
+	// created with InheritDescriptors gets them. Descriptor 3 is the
+	// interpreter's own (the root directory it opens paths from) and is
+	// not handed over.
+	// FAIL-CLOSED: when false, descriptors the process inherited are out
+	// of the program's reach.
+	InheritDescriptors bool
 	// Syslog lets the program log to the host's system logger. The
 	// interpreter has no log daemon of its own: when Syslog is set, what the
 	// program sends through syslog(3) — the "native" mechanism of

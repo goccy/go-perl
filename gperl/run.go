@@ -36,15 +36,17 @@ func HostConfig() (perl.Config, error) {
 		return perl.Config{}, fmt.Errorf("extract embedded stdlib: %w", err)
 	}
 	return perl.Config{
-		FS:            goperlfs.NewHostFS(),
-		StdlibDir:     stdlib,
-		Dial:          func(string, string, string, int) bool { return true },
-		Resolve:       func(string) bool { return true },
-		Exec:          func(string, []string) bool { return true },
-		Fork:          true,
-		HostProcess:   true,
-		Syslog:        true,
-		NativeModules: true,
+		FS:          goperlfs.NewHostFS(),
+		StdlibDir:   stdlib,
+		Dial:        func(string, string, string, int) bool { return true },
+		Resolve:     func(string) bool { return true },
+		Exec:        func(string, []string) bool { return true },
+		Fork:        true,
+		HostProcess: true,
+		// perl finds the descriptors it was started with (5<file) open.
+		InheritDescriptors: true,
+		Syslog:             true,
+		NativeModules:      true,
 	}, nil
 }
 
