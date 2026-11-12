@@ -5182,12 +5182,6 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
 /* nomg variants: the SDK's accessors go through the guest's public API,
  * which applies get-magic — acceptable for these dists' uses. */
 #define SvNVX(sv) (*(NV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_NV))
-#define SvPVutf8_force(sv, lenvar) \
-    ({ GOPERL_ONCE(goperl_SvPVutf8_force_sv_, sv); \
-       (sv_utf8_upgrade((SV *)(goperl_SvPVutf8_force_sv_)), SvPV_force((goperl_SvPVutf8_force_sv_), lenvar)); })
-#define SvPVutf8(sv, lenvar) \
-    ({ GOPERL_ONCE(goperl_SvPVutf8_sv_, sv); \
-       (sv_utf8_upgrade((SV *)(goperl_SvPVutf8_sv_)), SvPV((goperl_SvPVutf8_sv_), lenvar)); })
 #define SvSetMagicSV(dst, src) \
     ({ GOPERL_ONCE(goperl_SvSetMagicSV_dst_, dst); \
        (sv_setsv((goperl_SvSetMagicSV_dst_), (src)), (void)mg_set(goperl_SvSetMagicSV_dst_)); })
@@ -5385,9 +5379,6 @@ static void goperl_save_defsv(goperl_frame_t *f) {
 #define SvIOK_UV(sv) \
     ((GOPERL_SVINFO(sv) & (GOPERL_INFO_IOK | GOPERL_INFO_ISUV)) == \
      (GOPERL_INFO_IOK | GOPERL_INFO_ISUV))
-#define SvPVutf8_nolen(sv) \
-    ({ GOPERL_ONCE(goperl_SvPVutf8_nolen_sv_, sv); \
-       (sv_utf8_upgrade((SV *)(goperl_SvPVutf8_nolen_sv_)), SvPV_nolen(goperl_SvPVutf8_nolen_sv_)); })
 #define XST_mIV(i, v) (ST(i) = sv_2mortal(newSViv((IV)(v))))
 #define XST_mNV(i, v) (ST(i) = sv_2mortal(newSVnv((NV)(v))))
 #define XST_mPV(i, v) (ST(i) = sv_2mortal(newSVpv((v), 0)))
@@ -5950,7 +5941,6 @@ static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
     return (char *)goperl_guest_mem(f, r >> 32);
 }
 #define SvPV_force(sv, lenvar) goperl_sv_pv_force(_gof, (SV *)(sv), &(lenvar))
-#define SvPV_force_nomg(sv, lenvar) SvPV_force(sv, lenvar)
 #define sv_chop(sv, p) \
     ({ GOPERL_ONCE(goperl_sv_chop_sv_, sv); \
        ((void)goperl_op0(GOPERL_OP_SV_CHOP, GOPERL_TOK(goperl_sv_chop_sv_), (uint64_t)((const char *)(p)-SvPVX_const(goperl_sv_chop_sv_)))); })

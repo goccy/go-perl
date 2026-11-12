@@ -1334,6 +1334,47 @@ XS(XS_PerlAPI_count_own_struct) {
     }
 }
 
+/* The bytes, in hex, of the string of a value in one of the forms the
+ * SvPVutf8 and SvPVbyte families have, or "NULL" where the form has no
+ * string. */
+XS(XS_PerlAPI_string_form) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "form, sv");
+    {
+        const char *const form = SvPV_nolen(ST(0));
+        SV *const sv = ST(1);
+        STRLEN len = 0, i;
+        const char *p = NULL;
+        SV *out;
+        if (strEQ(form, "utf8")) p = SvPVutf8(sv, len);
+        else if (strEQ(form, "utf8_nomg")) p = SvPVutf8_nomg(sv, len);
+        else if (strEQ(form, "utf8x")) p = SvPVutf8x(sv, len);
+        else if (strEQ(form, "utf8_or_null")) p = SvPVutf8_or_null(sv, len);
+        else if (strEQ(form, "utf8_or_null_nomg")) p = SvPVutf8_or_null_nomg(sv, len);
+        else if (strEQ(form, "byte_or_null")) p = SvPVbyte_or_null(sv, len);
+        else if (strEQ(form, "byte_or_null_nomg")) p = SvPVbyte_or_null_nomg(sv, len);
+        else if (strEQ(form, "2pvutf8_flags")) p = sv_2pvutf8_flags(sv, &len, 0);
+        else if (strEQ(form, "2pvbyte_flags")) p = sv_2pvbyte_flags(sv, &len, SV_GMAGIC);
+        else if (strEQ(form, "utf8_nolen")) { p = SvPVutf8_nolen(sv); len = p ? strlen(p) : 0; }
+        else if (strEQ(form, "utf8_force")) p = SvPVutf8_force(sv, len);
+        else if (strEQ(form, "utf8x_force")) p = SvPVutf8x_force(sv, len);
+        else if (strEQ(form, "byte_force")) p = SvPVbyte_force(sv, len);
+        else if (strEQ(form, "bytex_force")) p = SvPVbytex_force(sv, len);
+        else if (strEQ(form, "force_nomg")) p = SvPV_force_nomg(sv, len);
+        else if (strEQ(form, "force_flags")) p = SvPV_force_flags(sv, len, SV_GMAGIC);
+        else if (strEQ(form, "pvn_force_nomg")) p = sv_pvn_force_nomg(sv, &len);
+        else croak("unknown form %s", form);
+        if (!p) {
+            ST(0) = sv_2mortal(newSVpvs("NULL"));
+            XSRETURN(1);
+        }
+        out = sv_2mortal(newSVpvs(""));
+        for (i = 0; i < len; i++) sv_catpvf(out, "%02x", (unsigned)(unsigned char)p[i]);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* A number formatted by a call whose result is dropped with
  * PERL_UNUSED_RESULT: the call is made. */
 XS(XS_PerlAPI_format_dropping_result) {
@@ -1950,6 +1991,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::null_strings", XS_PerlAPI_null_strings);
     newXS_deffile("PerlAPI::anonymous_subs", XS_PerlAPI_anonymous_subs);
     newXS_deffile("PerlAPI::array_slots", XS_PerlAPI_array_slots);
+    newXS_deffile("PerlAPI::string_form", XS_PerlAPI_string_form);
     newXS_deffile("PerlAPI::format_dropping_result", XS_PerlAPI_format_dropping_result);
     newXS_deffile("PerlAPI::watch", XS_PerlAPI_watch);
     newXS_deffile("PerlAPI::watched", XS_PerlAPI_watched);

@@ -46,6 +46,8 @@ enum {
 enum {
     GOPERL_SVCALL_TAINT_ENV = 54,
     GOPERL_SVCALL_TIED = 56,
+    GOPERL_SVCALL_PV_AS = 57,
+    GOPERL_SVCALL_PV_FORCE_AS = 58,
     GOPERL_SVCALL_MG_GET = 0,
     GOPERL_SVCALL_MG_CLEAR = 1,
     GOPERL_SVCALL_MG_FREE = 2,
@@ -1762,6 +1764,104 @@ static char *goperl_sv_pvbyte(goperl_frame_t *f, SV *sv, STRLEN *lenp,
 #define sv_2pvbyte(sv, lenp) \
     goperl_sv_pvbyte(_gof, (SV *)(sv), (lenp), SV_GMAGIC)
 #define sv_2pvbyte_nolen(sv) SvPVbyte_nolen(sv)
+#define sv_2pvbyte_flags(sv, lenp, flags) \
+    goperl_sv_pvbyte(_gof, (SV *)(sv), (lenp), (U32)(flags))
+#define sv_pvbyte(sv) SvPVbyte_nolen(sv)
+
+/* The string of an SV in an encoding — UTF-8, or bytes — as the
+ * interpreter gives it: get magic runs once or not at all (the _nomg
+ * forms), a value that cannot be changed in place is converted in a
+ * mortal copy, and the "or null" forms have no string for an undefined
+ * value. how is GOPERL_PV_UTF8 or GOPERL_PV_BYTES, with GOPERL_PV_OR_NULL
+ * for those; flags is SV_GMAGIC or 0. */
+#define GOPERL_PV_UTF8 1u
+#define GOPERL_PV_BYTES 2u
+#define GOPERL_PV_OR_NULL 0x100u
+static char *goperl_sv_pv_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                             uint32_t how, U32 flags) __attribute__((unused));
+static char *goperl_sv_pv_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                             uint32_t how, U32 flags) {
+    uint64_t r = goperl_do_op(
+        f, GOPERL_OP_SV_CALL,
+        ((uint64_t)GOPERL_SVCALL_PV_AS << 32) | (uint32_t)GOPERL_TOK(sv),
+        ((uint64_t)how << 32) | (flags & SV_GMAGIC), 0, 0);
+    if (lenp) *lenp = (STRLEN)(uint32_t)r;
+    if (!(r >> 32)) return 0;
+    return (char *)goperl_guest_mem(f, r >> 32);
+}
+/* The SV made a string of its own that may be written to, as it is (how 0)
+ * or in an encoding. */
+static char *goperl_sv_pv_force_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                                   uint32_t how, U32 flags)
+    __attribute__((unused));
+static char *goperl_sv_pv_force_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
+                                   uint32_t how, U32 flags) {
+    uint64_t r = goperl_do_op(
+        f, GOPERL_OP_SV_CALL,
+        ((uint64_t)GOPERL_SVCALL_PV_FORCE_AS << 32) | (uint32_t)GOPERL_TOK(sv),
+        ((uint64_t)how << 32) | flags, 0, 0);
+    if (lenp) *lenp = (STRLEN)(uint32_t)r;
+    if (!(r >> 32)) return 0;
+    return (char *)goperl_guest_mem(f, r >> 32);
+}
+#define SvPVutf8(sv, lenvar) \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, SV_GMAGIC)
+#define SvPVutf8_nomg(sv, lenvar) \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, 0)
+#define SvPVutf8_nolen(sv) \
+    goperl_sv_pv_as(_gof, (SV *)(sv), 0, GOPERL_PV_UTF8, SV_GMAGIC)
+#define SvPVutf8x(sv, lenvar) SvPVutf8(sv, lenvar)
+#define SvPVutf8_or_null(sv, lenvar)                         \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
+                    GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, SV_GMAGIC)
+#define SvPVutf8_or_null_nomg(sv, lenvar)                    \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
+                    GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, 0)
+#define SvPVbyte_or_null(sv, lenvar)                         \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
+                    GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, SV_GMAGIC)
+#define SvPVbyte_or_null_nomg(sv, lenvar)                    \
+    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
+                    GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, 0)
+#define sv_2pvutf8_flags(sv, lenp, flags) \
+    goperl_sv_pv_as(_gof, (SV *)(sv), (lenp), GOPERL_PV_UTF8, (U32)(flags))
+#define sv_2pvutf8(sv, lenp) sv_2pvutf8_flags(sv, lenp, SV_GMAGIC)
+#define sv_2pvutf8_nolen(sv) SvPVutf8_nolen(sv)
+#define sv_pvutf8(sv) SvPVutf8_nolen(sv)
+#define sv_2pv_nomg(sv, lenp) sv_2pv_flags(sv, lenp, 0)
+#define SvPV_flags_mutable(sv, lenvar, flags) SvPV_flags(sv, lenvar, flags)
+#define SvPV_flags_const_nolen(sv, flags) \
+    ((const char *)goperl_sv_pv_flags(_gof, (SV *)(sv), 0, (U32)(flags)))
+
+#define SvPV_force_flags(sv, lenvar, flags) \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), 0, (U32)(flags))
+#define SvPV_force_flags_nolen(sv, flags) \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), 0, 0, (U32)(flags))
+#define SvPV_force_flags_mutable(sv, lenvar, flags) \
+    SvPV_force_flags(sv, lenvar, flags)
+#define SvPV_force_nomg(sv, lenvar) SvPV_force_flags(sv, lenvar, 0)
+#define SvPV_force_nomg_nolen(sv) SvPV_force_flags_nolen(sv, 0)
+#define SvPVx_force(sv, lenvar) SvPV_force(sv, lenvar)
+#define SvPVutf8_force(sv, lenvar)                                    \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, \
+                          SV_GMAGIC)
+#define SvPVutf8x_force(sv, lenvar) SvPVutf8_force(sv, lenvar)
+#define SvPVbyte_force(sv, lenvar)                                     \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_BYTES, \
+                          SV_GMAGIC)
+#define SvPVbytex_force(sv, lenvar) SvPVbyte_force(sv, lenvar)
+#define sv_pvn_force_flags(sv, lenp, flags) \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), (lenp), 0, (U32)(flags))
+#define sv_pvn_force(sv, lenp) sv_pvn_force_flags(sv, lenp, SV_GMAGIC)
+#define sv_pvn_force_nomg(sv, lenp) sv_pvn_force_flags(sv, lenp, 0)
+#define sv_pvutf8n_force(sv, lenp)                                  \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), (lenp), GOPERL_PV_UTF8, \
+                          SV_GMAGIC)
+#define sv_pvbyten_force(sv, lenp)                                   \
+    goperl_sv_pv_force_as(_gof, (SV *)(sv), (lenp), GOPERL_PV_BYTES, \
+                          SV_GMAGIC)
+#define SvPVXx(sv) SvPVX(sv)
+#define SvPVCLEAR_FRESH(sv) SvPVCLEAR(sv)
 
 /* my_setenv: the environment of the interpreter (what %ENV's magic and the
  * programs it starts see) and the C environment of the host process (what
@@ -1847,9 +1947,6 @@ static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
             sv_force_normal_flags(goperl_SV_CHECK_THINKFIRST_COW_DROP_sv_, SV_COW_DROP_PV); \
     }                                                                 \
     STMT_END
-#define SvPVbyte_force(sv, lenvar) \
-    ({ GOPERL_ONCE(goperl_SvPVbyte_force_sv_, sv); \
-       (sv_utf8_downgrade((SV *)(goperl_SvPVbyte_force_sv_), 0), SvPV_force(goperl_SvPVbyte_force_sv_, lenvar)); })
 #define newSVpvn_utf8(s, len, u) newSVpvn_flags((s), (len), (u) ? SVf_UTF8 : 0)
 /* my_strlcpy (util.c): copies at most size-1 bytes, always terminates, and
  * returns the length of the source. */

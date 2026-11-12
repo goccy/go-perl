@@ -295,3 +295,27 @@ func TestNativeUnusedResultIsEvaluated(t *testing.T) {
 		{"Gconvert under PERL_UNUSED_RESULT", `join ",", map { PerlAPI::format_dropping_result($_) } 0.5, 100.01, 3`, "0.5,100.01,3"},
 	})
 }
+
+// The SvPVutf8 and SvPVbyte families give the string of a value in an
+// encoding the way the interpreter does: the _nomg forms run no get magic
+// and the others run it as often as perl's do (once; twice for the "or
+// null" forms, which look at the value before they convert it); the "or
+// null" forms have no string for an undefined value; a value that must not
+// change is converted in a copy; the _force forms leave the value itself a
+// string in that encoding.
+func TestNativeStringsInAnEncoding(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const tied = `{ package Counted; sub TIESCALAR { my $v = $_[1]; bless \$v } sub FETCH { $main::fetched++; ${$_[0]} } sub STORE { ${$_[0]} = $_[1] } } `
+	runEvalCases(t, p, []evalCase{
+		{"UTF-8 of a Latin-1 string", `my $s = "caf\xe9"; join ",", map { PerlAPI::string_form($_, $s) } qw(utf8 utf8_nomg utf8x utf8_nolen utf8_or_null utf8_or_null_nomg 2pvutf8_flags)`,
+			"636166c3a9,636166c3a9,636166c3a9,636166c3a9,636166c3a9,636166c3a9,636166c3a9"},
+		{"bytes of a string held as UTF-8", `my $s = "caf\xe9"; utf8::upgrade($s); join ",", map { PerlAPI::string_form($_, $s) } qw(byte_or_null byte_or_null_nomg 2pvbyte_flags)`, "636166e9,636166e9,636166e9"},
+		{"no string for an undefined value", `join ",", map { PerlAPI::string_form($_, undef) } qw(utf8_or_null utf8_or_null_nomg byte_or_null byte_or_null_nomg)`, "NULL,NULL,NULL,NULL"},
+		{"get magic as often as perl runs it", tied + `tie my $t, "Counted", "\xe9"; my @seen; for my $form (qw(utf8 utf8_or_null byte_or_null utf8_nomg utf8_or_null_nomg byte_or_null_nomg 2pvutf8_flags)) { local $main::fetched = 0; PerlAPI::string_form($form, $t); push @seen, $main::fetched } join ",", @seen`, "1,2,2,0,0,0,0"},
+		{"a read-only value is converted in a copy", `my $s = "\xe9"; $s .= "!"; Internals::SvREADONLY($s, 1); PerlAPI::string_form("utf8", $s) . "," . (utf8::is_utf8($s) ? "changed" : "as it was")`, "c3a921,as it was"},
+		{"forced into UTF-8", `my $s = "\xe9"; PerlAPI::string_form("utf8_force", $s) . "," . (utf8::is_utf8($s) ? "UTF-8" : "bytes") . "," . PerlAPI::string_form("utf8x_force", my $n = 42)`, "c3a9,UTF-8,3432"},
+		{"forced into bytes", `my $s = "\xe9"; utf8::upgrade($s); PerlAPI::string_form("byte_force", $s) . "," . (utf8::is_utf8($s) ? "UTF-8" : "bytes") . "," . PerlAPI::string_form("bytex_force", $s)`, "e9,bytes,e9"},
+		{"forced without get magic", tied + `tie my $t, "Counted", "ab"; local $main::fetched = 0; my $with = PerlAPI::string_form("force_flags", $t); my $after = $main::fetched; my $n = 7; join ",", $with, $after, PerlAPI::string_form("force_nomg", $n), PerlAPI::string_form("pvn_force_nomg", $n), PerlAPI::flags($n) =~ /POK/ ? "a string now" : "still a number"`, "6162,1,37,37,a string now"},
+	})
+}
