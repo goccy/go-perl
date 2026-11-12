@@ -41,9 +41,10 @@ my %over = (
     'sitelibexp' => '', 'sitearchexp' => '', 'vendorlibexp' => '', 'vendorarchexp' => '',
     'installprivlib' => '@STDLIB@', 'installarchlib' => '/opt/gperl/fakearchlib',
 );
-my %full = %Config::Config;
-untie %Config::Config;
-%Config::Config = (%full, %over);
+# %Config stays the tied, read-only view it is on every perl; the values go
+# into the Config object, where FETCH looks first.
+my $config = tied %Config::Config;
+$config->{$_} = $over{$_} for keys %over;
 $^O = 'linux';
 1;
 EOF

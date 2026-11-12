@@ -19,7 +19,6 @@ RUN sh /opt/cpancompat/setup.sh
 # name, and the preload describes the C toolchain of this machine to the
 # build tools (the interpreter's own %Config describes wasm32).
 ENV PATH=/opt/gperl/local/bin:/opt/gperl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    PERL=/opt/gperl/bin/perl \
     GPERL_PERL_EXE=/opt/gperl/bin/perl \
     GPERL_PERL_PRELOAD=/opt/gperl/config-overlay.pl \
     PERL5LIB=/opt/gperl/local/lib/perl5

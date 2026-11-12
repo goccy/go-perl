@@ -99,14 +99,18 @@ if [ "$mode" = shipped ]; then
     exit 0
 fi
 
+# An install step may load what it has just installed (XML::SAX registers its
+# parser that way). A client that installs into a directory of its own has
+# that directory in PERL5LIB, so the staging directory is there for the step.
+stagelib=$stage/lib/perl5
 if [ "$builder" = Makefile.PL ]; then
     phase build 1800 make || exit 0
     PERL5LIB=$PERL5LIB:$tools/lib phase test 1200 make test
-    phase install 600 make install || exit 0
+    PERL5LIB=$stagelib:$PERL5LIB phase install 600 make install || exit 0
 else
     phase build 1800 ./Build || exit 0
     PERL5LIB=$PERL5LIB:$tools/lib phase test 1200 ./Build test
-    phase install 600 ./Build install || exit 0
+    PERL5LIB=$stagelib:$PERL5LIB phase install 600 ./Build install || exit 0
 fi
 
 # Publish what was installed for the distributions that depend on this one.
