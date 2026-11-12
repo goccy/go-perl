@@ -19,6 +19,10 @@ package gperl
 // left alone. The marker is dropped before the interpreter starts, so
 // processes IT spawns see a clean environment (their shims re-add it
 // for their own exec).
+//
+// The other way in is the executable's name as the perl command (see
+// selfperl.go). Either way the process is the perl command: no project's
+// dependencies are resolved.
 
 import (
 	"os"
@@ -29,11 +33,19 @@ import (
 const perlCLIEnv = "GPERL_INTERNAL_PERL_CLI"
 
 func init() {
-	if os.Getenv(perlCLIEnv) == "" || len(os.Args) < 2 || os.Args[1] != "run" {
+	var argv []string
+	switch {
+	case startedAsPerl():
+		// The executable under its name as the perl command (selfperl.go):
+		// everything after the name is perl's command line.
+		argv = os.Args[1:]
+	case os.Getenv(perlCLIEnv) != "" && len(os.Args) >= 2 && os.Args[1] == "run":
+		os.Unsetenv(perlCLIEnv)
+		argv = os.Args[2:]
+	default:
 		return
 	}
-	os.Unsetenv(perlCLIEnv)
-	status, err := RunCLI(os.Args[2:])
+	status, err := runCommandLine(argv, false)
 	if err != nil {
 		PrintRunError(err)
 	}

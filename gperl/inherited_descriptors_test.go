@@ -29,7 +29,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(status)
 	}
-	os.Exit(m.Run())
+	status := m.Run()
+	gperl.RemoveSelfPerl()
+	os.Exit(status)
 }
 
 // perlProcess prepares the test binary to run as `perl args...`.

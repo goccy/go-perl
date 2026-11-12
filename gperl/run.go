@@ -104,12 +104,18 @@ func endOfProcess(status int, err error) (int, error) {
 //     dependency resolution. A scratch dist's own cpanfile must not start
 //     vendoring mid-build.
 func RunCLI(argv []string) (status int, err error) {
+	return runCommandLine(argv, true)
+}
+
+// runCommandLine is RunCLI; without projects every command line has plain perl
+// semantics.
+func runCommandLine(argv []string, projects bool) (status int, err error) {
 	env := os.Environ()
 	cmd, err := parsePerlCommand(argv, env)
 	if err != nil {
 		return switchFailure(err, perlRunOpts{})
 	}
-	project := !cmd.switches && cmd.action == actionRun && cmd.prog.File != "" &&
+	project := projects && !cmd.switches && cmd.action == actionRun && cmd.prog.File != "" &&
 		envValue(env, "GPERL_PERL_PRELOAD") == ""
 	return endOfProcess(runPerlCommand(cmd, perlRunOpts{project: project}))
 }

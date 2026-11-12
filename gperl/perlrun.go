@@ -71,7 +71,8 @@ const startupGlue = `sub {
 //
 //   - GPERL_PERL_EXE: the value for $^X (the perl shim path, so build
 //     systems that re-invoke $^X — Module::Build's ./Build — come back
-//     into the embedded interpreter);
+//     into the embedded interpreter); without it $^X is the executable's
+//     own name as the perl command (selfperl.go);
 //   - GPERL_PERL_PRELOAD: a Perl file `do`ne before anything else (the XS
 //     build's %Config toolchain overlay).
 func runPerlCLI(argv []string, opts perlRunOpts) (status int, err error) {
@@ -204,7 +205,14 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 			return 1, err
 		}
 	}
-	if err := startInterpreter(ctx, p, dir, envValue(env, "GPERL_PERL_EXE"), envValue(env, "GPERL_PERL_PRELOAD")); err != nil {
+	// The path the program can run its own perl by: the one the
+	// environment names (the build pipeline's), or this executable's name
+	// as the perl command.
+	exe := envValue(env, "GPERL_PERL_EXE")
+	if exe == "" {
+		exe = selfPerl()
+	}
+	if err := startInterpreter(ctx, p, dir, exe, envValue(env, "GPERL_PERL_PRELOAD")); err != nil {
 		return 1, err
 	}
 	return p.RunProgram(ctx, prog)

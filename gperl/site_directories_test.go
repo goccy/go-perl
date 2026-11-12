@@ -310,6 +310,10 @@ func TestMakeInstallOfANativeModuleGoesToTheSiteDirectories(t *testing.T) {
 			t.Errorf("not installed: %v", err)
 		}
 	}
+	// The record of the installation is with the site directories too.
+	if record, err := os.ReadFile(filepath.Join(arch, "perllocal.pod")); err != nil || !strings.Contains(string(record), "Demo::XS") {
+		t.Errorf("perllocal.pod in %s: %v\n%s", arch, err, record)
+	}
 	got := runStep(t, t.TempDir(), env, shim, "-MDemo::XS", "-e", `print "sum=", Demo::XS::add(40, 2), " from ", $INC{"Demo/XS.pm"}`)
 	if want := "sum=42 from " + filepath.Join(arch, "Demo", "XS.pm"); got != want {
 		t.Errorf("the installed module printed %q, want %q", got, want)

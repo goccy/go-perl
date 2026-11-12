@@ -489,8 +489,6 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 	tc["archlib"] = fakeArch
 	tc["vendorlibexp"] = ""
 	tc["vendorarchexp"] = ""
-	tc["installprivlib"] = stdlibDir
-	tc["installarchlib"] = fakeArch
 	// The perl that programs written during the build must name on their
 	// #! line (ExtUtils::MakeMaker's and ExtUtils::Helpers' script fixing)
 	// is the one running the build.
