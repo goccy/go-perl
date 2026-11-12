@@ -348,7 +348,109 @@ func hostToolchain() map[string]string {
 		common["dlext"] = "so"
 		common["lddlflags"] = "-shared"
 	}
+	// Everything else that identifies the C toolchain is the host
+	// compiler's too: build scripts choose flags by the compiler's name and
+	// version (gcc or clang), run its preprocessor, and look for libraries
+	// where it looks. The interpreter's own values describe the compiler
+	// the interpreter was built with, on the machine it was built on.
+	for key, value := range hostCompiler(common["cc"], common["ccflags"]) {
+		common[key] = value
+	}
 	return common
+}
+
+// hostCompiler returns the %Config keys that describe the C compiler cc of
+// this machine, as the compiler itself reports them: the macros it
+// predefines say what it is (-dM -E), and it names the directories it
+// searches for libraries and the C library it links (-print-search-dirs,
+// -print-file-name). What it does not say stays empty rather than
+// describing another compiler.
+func hostCompiler(cc, ccflags string) map[string]string {
+	keys := map[string]string{
+		"ccname": filepath.Base(cc), "gccversion": "", "ccversion": "", "gccosandvers": "",
+		"cpp": cc + " -E", "cpprun": cc + " -E", "cppstdin": cc + " -E",
+		"cppminus": "-", "cpplast": "-", "cppflags": ccflags,
+		"ccsymbols": "", "cppsymbols": "", "cppccsymbols": "",
+		"libc": "", "gnulibc_version": "",
+		"libs": "-lm", "perllibs": "-lm",
+	}
+	macros := compilerMacros(cc)
+	if _, gnu := macros["__GNUC__"]; gnu {
+		// perl's Configure takes __VERSION__ of a compiler that says it is
+		// GNU C, which clang says too.
+		keys["gccversion"] = strings.Trim(macros["__VERSION__"], `"`)
+		keys["ccname"] = "gcc"
+	}
+	if _, clang := macros["__clang__"]; clang {
+		keys["ccname"] = "clang"
+	}
+	if major, minor := compilerMacros(cc, "-include", "features.h")["__GLIBC__"], compilerMacros(cc, "-include", "features.h")["__GLIBC_MINOR__"]; major != "" && minor != "" {
+		keys["gnulibc_version"] = major + "." + minor
+	}
+	if runtime.GOOS != "darwin" {
+		if out, err := exec.Command(cc, "-print-file-name=libc.so.6").Output(); err == nil {
+			// a name without a directory is the compiler's way of saying
+			// that it did not find the file
+			if path := strings.TrimSpace(string(out)); filepath.IsAbs(path) && fileExists(path) {
+				keys["libc"] = filepath.Clean(path)
+			}
+		}
+	}
+	if dirs := compilerLibraryDirs(cc); len(dirs) > 0 {
+		list := strings.Join(dirs, " ")
+		keys["libpth"], keys["glibpth"], keys["libspath"] = list, list, list
+	}
+	return keys
+}
+
+// compilerMacros returns the macros cc predefines for C (with the extra
+// arguments), name to replacement text; none when cc cannot be asked.
+func compilerMacros(cc string, extra ...string) map[string]string {
+	args := append([]string{"-dM", "-E", "-x", "c"}, extra...)
+	out, err := exec.Command(cc, append(args, os.DevNull)...).Output()
+	if err != nil {
+		return nil
+	}
+	macros := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "#define NAME replacement": the format of -dM
+		rest, isDefine := strings.CutPrefix(line, "#define ")
+		if !isDefine {
+			continue
+		}
+		name, value, _ := strings.Cut(rest, " ")
+		macros[name] = value
+	}
+	return macros
+}
+
+// compilerLibraryDirs returns the directories cc searches for libraries
+// that exist, in its order.
+func compilerLibraryDirs(cc string) []string {
+	out, err := exec.Command(cc, "-print-search-dirs").Output()
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "libraries: =dir:dir:...": the format of -print-search-dirs
+		list, isLibraries := strings.CutPrefix(line, "libraries: =")
+		if !isLibraries {
+			continue
+		}
+		for _, dir := range filepath.SplitList(list) {
+			if dir == "" {
+				continue
+			}
+			dir = filepath.Clean(dir)
+			if !seen[dir] && dirExists(dir) {
+				seen[dir] = true
+				dirs = append(dirs, dir)
+			}
+		}
+	}
+	return dirs
 }
 
 // xsWritePerlShim writes the executable the build system knows as "perl":
