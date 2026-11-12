@@ -44,7 +44,7 @@ my %over = (
     'osname' => 'linux', 'so' => 'so', 'dlext' => 'so', 'lddlflags' => '-shared',
     'privlibexp' => '@STDLIB@', 'privlib' => '@STDLIB@',
     'archlibexp' => '/opt/gperl/fakearchlib', 'archlib' => '/opt/gperl/fakearchlib',
-    'sitelibexp' => '', 'sitearchexp' => '', 'vendorlibexp' => '', 'vendorarchexp' => '',
+    'vendorlibexp' => '', 'vendorarchexp' => '',
     'installprivlib' => '@STDLIB@', 'installarchlib' => '/opt/gperl/fakearchlib',
 );
 # %Config stays the tied, read-only view it is on every perl; the values go
