@@ -72,6 +72,11 @@ func Run(script string, args []string) (status int, err error) {
 func endOfProcess(status int, err error) (int, error) {
 	var killed *perl.SignalError
 	if !errors.As(err, &killed) {
+		if err != nil && status == 0 {
+			// A run that could not be carried out has not succeeded, and
+			// the process must not say it has.
+			status = 255
+		}
 		return status, err
 	}
 	internal.DieOfSignal(killed.Signal)

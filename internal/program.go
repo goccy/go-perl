@@ -10,12 +10,19 @@ import (
 	"github.com/goccy/perlwasm2go/base"
 )
 
+// crashStatus is the exit status of a program whose interpreter crashed:
+// perl's own status for a failure that has no number of its own.
+const crashStatus = 255
+
 // RunProgram runs the program desc describes (perl-wasm's perl_run_program
 // layout) to its end and returns its exit status. The end is a process's:
 // the END blocks, the flush of PerlIO and global destruction all run inside
 // the call, and the status is the one they leave (a destructor may assign
 // $?, exit, or be killed during global destruction). Afterwards the
 // instance holds no interpreter and only has to be closed.
+//
+// A guest that crashes instead of ending (a wasm trap) is discarded where
+// it stopped; the status is then crashStatus and err says what happened.
 func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -48,10 +55,16 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 		p.discard()
 		return int(raw.Code), nil
 	}
-	if err == nil {
-		err = pbExtractError(resp)
-	}
 	if err != nil {
+		// The call did not return: the guest trapped (a wild pointer, an
+		// exhausted stack, an abort). It stopped in the middle of whatever
+		// it was doing, so nothing of the interpreter may run again — no
+		// END blocks, no destructors on half-updated structures — and the
+		// program has not ended well, whatever it had done until then.
+		p.discard()
+		return crashStatus, fmt.Errorf("perl: the interpreter crashed: %w", err)
+	}
+	if err = pbExtractError(resp); err != nil {
 		return 0, err
 	}
 	code := readScalarAtField(resp, 1, (*pbReader).readUint32)
