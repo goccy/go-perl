@@ -274,3 +274,14 @@ func TestNativePerlIOHandles(t *testing.T) {
 		t.Errorf("stderr: got %q, want %q", got, want)
 	}
 }
+
+// AvARRAY is the body of an array: every slot the array has room for, and
+// the slots without an element are NULL — also the ones beyond the last
+// element, which code that extends an array and fills it by index looks at.
+func TestNativeArrayBodyHasEverySlot(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"filled, emptied, extended, one stored", `my @a; PerlAPI::array_slots(\@a)`, "8 filled; null null set null null null null null"},
+	})
+}

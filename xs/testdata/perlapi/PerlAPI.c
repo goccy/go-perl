@@ -1334,6 +1334,33 @@ XS(XS_PerlAPI_count_own_struct) {
     }
 }
 
+/* Which of the first eight slots of an array's body (AvARRAY) are filled,
+ * for an array that held eight elements and was then emptied, extended to
+ * room for eight and given one element at index 2: the slots the array has
+ * room for and no element in are NULL. */
+XS(XS_PerlAPI_array_slots) {
+    dXSARGS;
+    if (items != 1 || !SvROK(ST(0)) || SvTYPE(SvRV(ST(0))) != SVt_PVAV)
+        croak_xs_usage(cv, "arrayref");
+    {
+        AV *const av = (AV *)SvRV(ST(0));
+        SV *const out = sv_2mortal(newSVpvs(""));
+        IV i, filled = 0;
+        av_clear(av);
+        for (i = 0; i < 8; i++) av_push(av, newSViv(i));
+        for (i = 0; i < 8; i++)
+            if (AvARRAY(av)[i]) filled++;
+        sv_catpvf(out, "%" IVdf " filled;", filled);
+        av_clear(av);
+        av_extend(av, 7);
+        av_store(av, 2, newSViv(42));
+        for (i = 0; i < 8; i++)
+            sv_catpv(out, AvARRAY(av)[i] ? " set" : " null");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* The body of the subs anonymous_subs makes: which one it is. */
 XS(XS_PerlAPI_anonymous_body) {
     dXSARGS;
@@ -1908,6 +1935,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::count_own_struct", XS_PerlAPI_count_own_struct);
     newXS_deffile("PerlAPI::null_strings", XS_PerlAPI_null_strings);
     newXS_deffile("PerlAPI::anonymous_subs", XS_PerlAPI_anonymous_subs);
+    newXS_deffile("PerlAPI::array_slots", XS_PerlAPI_array_slots);
     newXS_deffile("PerlAPI::watch", XS_PerlAPI_watch);
     newXS_deffile("PerlAPI::watched", XS_PerlAPI_watched);
     newXS_deffile("PerlAPI::keyed_attach", XS_PerlAPI_keyed_attach);

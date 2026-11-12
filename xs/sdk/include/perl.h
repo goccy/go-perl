@@ -3134,6 +3134,14 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field) {
 
 /* ---- AvARRAY mirrors ----------------------------------------------------- */
 
+/* The number of slots the array has room for (AvMAX + 1); defined with the
+ * calls it is made of. */
+static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok)
+    __attribute__((unused));
+
+/* AvARRAY is the array's body: every slot the array has room for, the ones
+ * beyond its last element NULL. Code that extends an array and then looks
+ * which slots are filled (AvARRAY(av)[i] ? ... : ...) reads them. */
 static SV **goperl_av_array(goperl_frame_t *f, AV *av) {
     uint64_t tok = GOPERL_TOK(av);
     goperl_avmirror_t *mir = 0;
@@ -3156,9 +3164,11 @@ static SV **goperl_av_array(goperl_frame_t *f, AV *av) {
     int32_t len =
         (int32_t)(int64_t)goperl_xs_op(f, GOPERL_OP_AV_LEN, tok, 0, 0, 0) +
         1;
-    if (len > mir->cap) {
+    int32_t slots = goperl_av_slots(f, tok);
+    if (slots < len) slots = len;
+    if (slots > mir->cap) {
         int32_t ncap = mir->cap;
-        while (ncap < len) ncap *= 2;
+        while (ncap < slots) ncap *= 2;
         mir->buf = (uint64_t *)realloc(mir->buf, (size_t)ncap * 8);
         mir->shadow = (uint64_t *)realloc(mir->shadow, (size_t)ncap * 8);
         mir->cap = ncap;
@@ -3168,6 +3178,7 @@ static SV **goperl_av_array(goperl_frame_t *f, AV *av) {
                                           (uint64_t)(int64_t)i, 0, 0);
         mir->shadow[i] = mir->buf[i];
     }
+    for (int32_t i = len; i < slots; i++) mir->buf[i] = mir->shadow[i] = 0;
     mir->len = len;
     return (SV **)mir->buf;
 }

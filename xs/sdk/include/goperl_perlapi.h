@@ -1025,6 +1025,14 @@ static SV *goperl_newSVrv(goperl_frame_t *f, SV *rv, const char *classname) {
                             ((uint64_t)(U32)(flags) << 32) |              \
                                 (uint32_t)(int32_t)(key)))
 #define AvMAX(av) ((SSize_t)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_AV_MAX, av, 0))
+/* the caller has flushed */
+static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok) {
+    return (int32_t)(int64_t)goperl_xs_op(
+               f, GOPERL_OP_SV_CALL,
+               ((uint64_t)GOPERL_SVCALL_AV_MAX << 32) | (uint32_t)avtok, 0, 0,
+               0) +
+           1;
+}
 #define HvUSEDKEYS(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_USEDKEYS, hv, 0))
 #define HvTOTALKEYS(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_TOTALKEYS, hv, 0))
 #define HvFILL(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_FILL, hv, 0))
