@@ -319,3 +319,59 @@ report("not a number: ", show(getaddrinfo("localhost", "80", { flags => AI_NUMER
 		"not a number: error",
 	)
 }
+
+// An abstract Unix-domain name (Linux: one that starts with a NUL) is the
+// bytes the address has, NULs included, and comes back as long as it is. A
+// socket is bound to the name pack_sockaddr_un makes of "\0" (the whole
+// field, NULs alone) and found under it; a name with text in it, or with a
+// NUL inside, is reported by getsockname and getpeername without padding;
+// a socket without a name reports none.
+func TestAbstractUnixSocketNames(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract Unix-domain names are Linux's")
+	}
+	got := runForkScript(t, `
+use Socket qw(AF_UNIX SOCK_STREAM pack_sockaddr_un unpack_sockaddr_un);
+sub shown { my $name = shift; length($name) . " bytes, " . join("", map { $_ eq "\0" ? "\\0" : $_ } split //, $name) }
+sub listener {
+    my $address = shift;
+    socket(my $listener, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    bind($listener, $address) or return;
+    listen($listener, 5) or die "listen: $!";
+    $listener;
+}
+sub exchange {
+    my ($listener, $address) = @_;
+    socket(my $client, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    connect($client, $address) or return "connect: $!";
+    accept(my $conn, $listener) or return "accept: $!";
+    syswrite($client, "over\n");
+    my $line = <$conn>;
+    chomp $line;
+    my $peer = unpack_sockaddr_un(getpeername($client));
+    my $unnamed = unpack_sockaddr_un(getsockname($client));
+    "received: $line; the peer is " . shown($peer =~ s/-$$\z//r) . "; the client has " . (length($unnamed) ? "the name " . shown($unnamed) : "no name");
+}
+
+# the name of NULs alone
+my $nuls = pack_sockaddr_un("\0");
+my $listener = listener($nuls);
+report("bound to the name of \"\\0\": ", $listener ? "yes" : "no: $!");
+report("a second socket with that name: ", listener($nuls) ? "bound" : $!{EADDRINUSE} ? "EADDRINUSE" : "error $!");
+socket(my $client, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+report("connected by that name: ", connect($client, $nuls) ? "yes" : "no: $!");
+
+for my $name ("\0gperl-test-$$", "\0with\0inside-$$") {
+    my $listener = listener(pack_sockaddr_un($name)) or die "bind: $!";
+    my $bound = unpack_sockaddr_un(getsockname($listener));
+    report("bound to ", shown($bound =~ s/-$$\z//r), ($bound eq $name ? "" : " (not the name given)"), "; ", exchange($listener, pack_sockaddr_un($bound)));
+}
+`)
+	wantLines(t, got,
+		`bound to the name of "\0": yes`,
+		"a second socket with that name: EADDRINUSE",
+		"connected by that name: yes",
+		`bound to 11 bytes, \0gperl-test; received: over; the peer is 11 bytes, \0gperl-test; the client has no name`,
+		`bound to 12 bytes, \0with\0inside; received: over; the peer is 12 bytes, \0with\0inside; the client has no name`,
+	)
+}
