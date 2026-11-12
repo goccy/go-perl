@@ -99,3 +99,17 @@ func TestNativeStackInAPlainFunction(t *testing.T) {
 	})
 }
 
+// A native module registered with an instance defines nothing in its
+// package until it is loaded, like an extension linked into the
+// interpreter; loading it installs its boot function then.
+func TestNativeModuleIsNotInItsPackageUntilLoaded(t *testing.T) {
+	p := newHostPerl(t)
+	so := buildPerlAPI(t)
+	loadXSModule(t, p, "PerlAPI", so)
+	runEvalCases(t, p, []evalCase{
+		{"before the module is loaded", `no strict "refs"; join ",", (defined &PerlAPI::bootstrap ? "bootstrap" : "no bootstrap"), scalar(grep { defined &{"PerlAPI::$_"} } keys %PerlAPI::)`, "no bootstrap,0"},
+		{"loading it", `require XSLoader; XSLoader::load("PerlAPI"); "loaded"`, "loaded"},
+		{"after", `join ",", (defined &PerlAPI::bootstrap ? "bootstrap" : "no bootstrap"), (defined &PerlAPI::flags ? "functions" : "no functions")`, "bootstrap,functions"},
+		{"a module nobody registered", `eval { XSLoader::load("No::Such::Native::Module") }; $@ ? "refused" : "loaded"`, "refused"},
+	})
+}

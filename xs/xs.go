@@ -448,11 +448,17 @@ func stateFor(p *internal.Perl) *state {
 }
 
 // Load dlopens a native XS module built against the SDK, injects the vtable,
-// and registers its boot function as the Perl sub <Module>::bootstrap — the
-// exact contract a statically linked perl's XSLoader/DynaLoader resolve, so
-// a stock `use Module;` (whose .pm calls XSLoader::load) boots the native
-// module lazily at use time with no loader-side patching. module is the Perl
-// package the .xs declared (e.g. "Compiler::Lexer").
+// and registers its boot function with the instance, so that a stock
+// `use Module;` (whose .pm calls XSLoader::load) boots the native module
+// lazily at use time. module is the Perl package the .xs declared (e.g.
+// "Compiler::Lexer").
+//
+// Nothing is defined in the module's package until then, as for an
+// extension linked into the interpreter: a program that asks whether the
+// module is loaded must not find a sub in its package. The boot function
+// waits under nativeBootPrefix, where the interpreter's loaders find it
+// (DynaLoader::dl_static_boot) and install it as <Module>::bootstrap when
+// the module is loaded.
 func load(p *internal.Perl, module, path string) error {
 	s, err := loaderState(p)
 	if err != nil {
@@ -467,12 +473,14 @@ func load(p *internal.Perl, module, path string) error {
 	if err != nil {
 		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
 	}
-	// The static-perl bootstrap contract: DynaLoader::bootstrap (which
-	// XSLoader falls back to on a perl without dynamic loading) resolves
-	// and calls &{"${module}::bootstrap"}.
-	_, err = s.registerNative(module+"::bootstrap", bootFn)
+	_, err = s.registerNative(nativeBootPrefix+module+"::bootstrap", bootFn)
 	return err
 }
+
+// nativeBootPrefix is the package prefix under which the boot function of a
+// registered native module is kept until the module is loaded; see perl-wasm's
+// DynaLoader::dl_static_boot.
+const nativeBootPrefix = "DynaLoader::native::"
 
 // loaderState returns p's loader state once the C library the loader
 // allocates from is bound.
