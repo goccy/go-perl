@@ -1751,6 +1751,43 @@ XS(XS_PerlAPI_look_without_magic) {
     }
 }
 
+/* Two keywords that declare a lexical, the way a syntax module does it:
+ *
+ *   one_into_x;    is  my $x = 1;  — the assignment is built with newASSIGNOP
+ *   hello_into_y;  declares $y and gives its pad slot the value "Hello" at
+ *                  compile time, reached through PAD_SVl
+ */
+static Perl_keyword_plugin_t perlapi_next_keyword_plugin;
+
+static int perlapi_keyword_plugin(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
+    if (kwlen == 10 && strnEQ(kw, "one_into_x", 10)) {
+        PADOFFSET padix = pad_add_name_pvn("$x", 2, 0, NULL, NULL);
+        OP *varop, *assignop;
+        intro_my();
+        varop = newOP(OP_PADSV, OPf_MOD | OPf_REF | (OPpLVAL_INTRO << 8));
+        varop->op_targ = padix;
+        assignop = newASSIGNOP(OPf_WANT_VOID, varop, 0, newSVOP(OP_CONST, 0, newSViv(1)));
+        *op_ptr = assignop;
+        return KEYWORD_PLUGIN_STMT;
+    }
+    if (kwlen == 12 && strnEQ(kw, "hello_into_y", 12)) {
+        PADOFFSET padix = pad_add_name_pvn("$y", 2, 0, NULL, NULL);
+        intro_my();
+        sv_setpvs(PAD_SVl(padix), "Hello");
+        *op_ptr = newOP(OP_NULL, 0);
+        return KEYWORD_PLUGIN_STMT;
+    }
+    return (*perlapi_next_keyword_plugin)(aTHX_ kw, kwlen, op_ptr);
+}
+
+XS(XS_PerlAPI_lexical_keywords) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!perlapi_next_keyword_plugin)
+        wrap_keyword_plugin(perlapi_keyword_plugin, &perlapi_next_keyword_plugin);
+    XSRETURN_EMPTY;
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1855,5 +1892,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::rename_glob", XS_PerlAPI_rename_glob);
     newXS_deffile("PerlAPI::stack_in_a_plain_function", XS_PerlAPI_stack_in_a_plain_function);
     newXS_deffile("PerlAPI::look_without_magic", XS_PerlAPI_look_without_magic);
+    newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

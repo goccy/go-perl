@@ -111,3 +111,17 @@ func TestSyntaxKeywordMatch(t *testing.T) {
 		$err;
 	`, "boom\n")
 }
+
+// A keyword of a native module declares a lexical: its assignment is an op
+// tree built with newASSIGNOP, and the value of a pad slot is reached
+// through PAD_SVl.
+func TestNativeKeywordDeclaresALexical(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the keywords are installed", `PerlAPI::lexical_keywords(); "installed"`, "installed"},
+		{"an assignment built by the module", `eval q{ one_into_x; $x + 41 } // "died: $@"`, "42"},
+		{"twice in one block, each its own", `eval q{ my @seen; for my $i (1 .. 3) { one_into_x; push @seen, $x; $x += $i } "@seen" } // "died: $@"`, "1 1 1"},
+		{"a value put into the pad at compile time", `eval q{ hello_into_y; "$y, world" } // "died: $@"`, "Hello, world"},
+	})
+}

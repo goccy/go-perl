@@ -6912,7 +6912,9 @@ enum {
     GOPERL_OPC_METHOP_NAMED = 8,
     GOPERL_OPC_STATEOP = 9,
     GOPERL_OPC_CONDOP = 10,
-    GOPERL_OPC_SLICEOP = 11
+    GOPERL_OPC_SLICEOP = 11,
+    /* 12 is GOPERL_OPC_RAW, below */
+    GOPERL_OPC_ASSIGNOP = 13
 };
 
 static OP *goperl_newop(goperl_frame_t *f, int cls, I32 type, I32 flags,
@@ -6944,6 +6946,11 @@ static OP *goperl_newop(goperl_frame_t *f, int cls, I32 type, I32 flags,
 #define newLOGOP(type, flags, first, other) \
     ({ GOPERL_ONCE(goperl_newLOGOP_first_, first); GOPERL_ONCE(goperl_newLOGOP_other_, other); \
        goperl_newop(_gof, GOPERL_OPC_LOGOP, (type), (flags), (goperl_newLOGOP_first_) ? ((OP *)(goperl_newLOGOP_first_))->gop : 0, (goperl_newLOGOP_other_) ? ((OP *)(goperl_newLOGOP_other_))->gop : 0); })
+/* An assignment: optype is the operator of an assignment operator (OP_ADD
+ * for +=), 0 for plain assignment. */
+#define newASSIGNOP(flags, left, optype, right) \
+    ({ GOPERL_ONCE(goperl_newASSIGNOP_left_, left); GOPERL_ONCE(goperl_newASSIGNOP_right_, right); \
+       goperl_newop(_gof, GOPERL_OPC_ASSIGNOP, (optype), (flags), (goperl_newASSIGNOP_left_) ? ((OP *)(goperl_newASSIGNOP_left_))->gop : 0, (goperl_newASSIGNOP_right_) ? ((OP *)(goperl_newASSIGNOP_right_))->gop : 0); })
 #define newSVOP(type, flags, sv) \
     goperl_newop(_gof, GOPERL_OPC_SVOP, (type), (flags), GOPERL_TOK(sv), 0)
 #define newGVOP(type, flags, gv) \
@@ -7604,6 +7611,10 @@ static SV *goperl_pad_sv_fetch(goperl_frame_t *f, PADOFFSET ix) {
                                   (uint64_t)ix, 0, 0));
 }
 #define PAD_SV(ix) goperl_pad_sv_fetch(_gof, (PADOFFSET)(ix))
+/* The value in a pad slot, for code that names the slot as an lvalue to
+ * reach its value (sv_setpvs(PAD_SVl(ix), ...)). The slot itself is the
+ * interpreter's: putting another value in it is PAD_SETSV. */
+#define PAD_SVl(ix) PAD_SV(ix)
 #define dTARGET SV *targ = PAD_SV(PL_op->op_targ)
 #define GETTARGET dTARGET
 
