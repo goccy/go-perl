@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -371,15 +372,46 @@ func TestRunProgramCancel(t *testing.T) {
 	}
 }
 
+// $^T is the time the program started, and the ages of files (-M, -A, -C)
+// count from it — also in an interpreter made long after the first of the
+// process, which is a copy of that one.
+func TestBaseTimeIsTheStartOfTheProgram(t *testing.T) {
+	first, err := perl.New(perl.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	time.Sleep(2100 * time.Millisecond)
+	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+		`my $late = time - $^T;`,
+		`print $late >= 0 && $late <= 1 ? "started now\n" : "started $late seconds ago\n";`,
+	)}, "")
+	r.want(t, 0, "started now\n")
+}
+
 // times reports seconds: what the C library returns is scaled by the same
-// clock tick perl divides by.
+// clock tick perl divides by. The time is the process's, so it lies between
+// what the process had used before the program ran and what it has used
+// after (where the test can ask; elsewhere it is at least not in ticks).
 func TestTimesReportsSeconds(t *testing.T) {
+	before, known := processUserSeconds()
 	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
 		`my $n = 0; $n++ for 1 .. 200000;`,
 		`my ($user) = times;`,
-		`print $user >= 0 && $user < 60 ? "seconds\n" : "not seconds: $user\n";`,
+		`print "$user\n";`,
 	)}, "")
-	r.want(t, 0, "seconds\n")
+	after, _ := processUserSeconds()
+	user, err := strconv.ParseFloat(strings.TrimSpace(r.stdout), 64)
+	if r.status != 0 || err != nil {
+		t.Fatalf("status=%d stdout=%q stderr=%q", r.status, r.stdout, r.stderr)
+	}
+	if !known {
+		before, after = 0, 60
+	}
+	// times counts in clock ticks of a hundredth of a second
+	if user < before-0.02 || user > after+0.02 {
+		t.Fatalf("times reports %v seconds of user time; the process had used %v before the program and %v after", user, before, after)
+	}
 }
 
 // fork is a capability: denied unless Config.Fork grants it, and granted
