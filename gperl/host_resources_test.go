@@ -123,6 +123,64 @@ report("with a writer arriving: ", ($line // "failed: $@") =~ s/\n//r, "; writer
 	)
 }
 
+// An open of a FIFO that a signal interrupted is over when the program is
+// told: neither end of the FIFO is open any more, so the next open of the
+// other end finds nobody — a writer that does not wait is refused (ENXIO),
+// and a reader finds the end of input. Opening with O_NONBLOCK does not
+// wait for the other end at all.
+func TestInterruptedOpenOfAFIFOLeavesNoEndOpen(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("FIFOs are made on linux and darwin")
+	}
+	got := runForkScript(t, `
+use POSIX qw(mkfifo);
+use Fcntl qw(O_RDONLY O_WRONLY O_NONBLOCK);
+use Time::HiRes qw(alarm);
+use File::Temp ();
+my $dir = File::Temp::tempdir(CLEANUP => 1);
+my $fifo = "$dir/fifo";
+mkfifo($fifo, 0600) or die "mkfifo: $!";
+my $rounds = 20;
+my %seen;
+for my $round (1 .. $rounds) {
+    for my $mode ("<", ">") {
+        local $SIG{ALRM} = sub { };
+        alarm 0.02;
+        my $opened = open(my $fh, $mode, $fifo);
+        my $interrupted = !$opened && $!{EINTR};
+        alarm 0;
+        my $left;
+        if ($mode eq "<") {
+            # no reader may be left: a writer that does not wait is refused
+            $left = sysopen(my $w, $fifo, O_WRONLY | O_NONBLOCK) ? "a reader is left" : $!{ENXIO} ? "nothing is left" : "error $!";
+        } else {
+            # no writer may be left: a reader is at the end of input
+            sysopen(my $r, $fifo, O_RDONLY | O_NONBLOCK) or die "open for reading without waiting: $!";
+            my $n = sysread($r, my $byte, 1);
+            $left = defined $n ? "nothing is left" : $!{EAGAIN} ? "a writer is left" : "error $!";
+        }
+        $seen{"open $mode " . ($interrupted ? "interrupted" : $opened ? "opened" : "failed: $!") . ", $left"}++;
+    }
+}
+report("$_: $seen{$_}") for sort keys %seen;
+
+# without waiting, and with both ends open
+sysopen(my $r, $fifo, O_RDONLY | O_NONBLOCK) or die "open for reading without waiting: $!";
+sysopen(my $w, $fifo, O_WRONLY | O_NONBLOCK) or die "open for writing without waiting: $!";
+my $n = sysread($r, my $buf, 16);
+report("read of the empty FIFO: ", defined $n ? "$n bytes" : $!{EAGAIN} ? "EAGAIN" : "error $!");
+syswrite($w, "through") or die "write: $!";
+$n = sysread($r, $buf, 16);
+report("read after a write: ", defined $n ? "'$buf'" : "error $!");
+`)
+	wantLines(t, got,
+		"open < interrupted, nothing is left: 20",
+		"open > interrupted, nothing is left: 20",
+		"read of the empty FIFO: EAGAIN",
+		"read after a write: 'through'",
+	)
+}
+
 // A program that runs as root changes the ids of its process, for all of
 // the process (every thread of it), and has the rights of the user it
 // became. The program is the process, so it is run as one of its own.
