@@ -221,6 +221,13 @@ func (p *Perl) RawMemory() []byte {
 	return wasm2go.Memory(p.m.g)
 }
 
+// MemorySize returns the size of the instance's linear memory in bytes: what
+// the guest has grown it to, which is its peak, since a linear memory never
+// shrinks. (RawMemory is as long as the mapping the instance lives in.)
+func (p *Perl) MemorySize() uint64 {
+	return p.m.g.MemSize.Load()
+}
+
 // EnsureDispatcher registers this instance's callback handler with the
 // generated bridge machinery and tells the guest its callback id. Runs once
 // per instance.

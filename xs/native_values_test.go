@@ -49,10 +49,11 @@ func runEvalCases(t *testing.T, p *perl.Perl, cases []evalCase) {
 	}
 }
 
-// The IV and UV of native code are 64 bits wide and the interpreter's 32:
-// a pointer or a large integer a module stores with sv_setiv, newSViv or
-// sv_setref_pv comes back whole from SvIV, SvUV, SvIVX and INT2PTR, and
-// what the Perl program sees is the same number.
+// The IV and UV of native code and the interpreter's are the same 64 bits:
+// a pointer or any integer a module stores with sv_setiv, newSViv or
+// sv_setref_pv comes back whole from SvIV, SvUV, SvIVX and INT2PTR, what the
+// Perl program sees is the same integer, and the flags native code sees are
+// the interpreter's.
 func TestNativeIntegersCrossAtFullWidth(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
@@ -67,6 +68,29 @@ func TestNativeIntegersCrossAtFullWidth(t *testing.T) {
 		{"SvIV truncates a fraction", `PerlAPI::wide_values(-7.9)`, "-7/" + strconv.FormatUint(uint64(1<<64-7), 10)},
 		{"SvIV of a small integer", `PerlAPI::wide_values(-3)`, "-3/" + strconv.FormatUint(uint64(1<<64-3), 10)},
 		{"SvIV of undef", `no warnings; PerlAPI::wide_values(undef)`, "0/0"},
+		{"every integer made beyond 32 bits is an integer", `join "", map { PerlAPI::flags($_) } PerlAPI::wide_made()`, "IOK,IOK,IOK,IOK,IOK,"},
+		{"SvIV and SvUV of the largest signed integer", `PerlAPI::wide_values(9223372036854775807)`, "9223372036854775807/9223372036854775807"},
+		{"SvIV and SvUV of the smallest signed integer", `PerlAPI::wide_values(-9223372036854775807 - 1)`, "-9223372036854775808/9223372036854775808"},
+		{"SvIV and SvUV of the largest unsigned integer", `PerlAPI::wide_values(18446744073709551615)`, "-1/18446744073709551615"},
+		{"SvIV and SvUV of an integer beyond 2**53", `PerlAPI::wide_values(9007199254740993)`, "9007199254740993/9007199254740993"},
+		{"SvIV and SvUV of a string of 19 digits", `PerlAPI::wide_values("9223372036854775807")`, "9223372036854775807/9223372036854775807"},
+		{"SvIV of a float beyond the integers", `PerlAPI::wide_values(1e30)`, "-1/18446744073709551615"},
+		{"the limits, made by native code", `join ",", PerlAPI::integer_limits()`,
+			"9223372036854775807,-9223372036854775808,18446744073709551615,-9223372036854775808,18446744073709551615,9223372036854775807,8"},
+		{"the limits are integers to the program", `join "", map { PerlAPI::flags($_) } (PerlAPI::integer_limits())[0 .. 5]`, "IOK,IOK,IOK,IOK,IOK,IOK,"},
+		{"arithmetic on them is the interpreter's", `my @l = PerlAPI::integer_limits(); join ",", $l[0] - 1, $l[1] + 1, $l[2] - 1, $l[0] + 1`,
+			"9223372036854775806,-9223372036854775807,18446744073709551614,9223372036854775808"},
+		{"the slot of the largest signed integer", `PerlAPI::copy_integer(9223372036854775807)`, "9223372036854775807"},
+		{"the slot of the smallest signed integer", `PerlAPI::copy_integer(-9223372036854775807 - 1)`, "-9223372036854775808"},
+		{"the slot of the largest unsigned integer", `PerlAPI::copy_integer(~0)`, "18446744073709551615"},
+		{"the slot of an integer beyond 2**53", `PerlAPI::copy_integer(9007199254740993) + 0`, "9007199254740993"},
+		{"a float is not an integer to native code", `my $f = 4.611686018427388e18; PerlAPI::flags($f) . (defined PerlAPI::copy_integer(1e19) ? "copied" : "no integer")`, "NOK,no integer"},
+		{"an integer is not a float to native code", `my $i = 1 << 62; PerlAPI::flags($i)`, "IOK,"},
+		{"a number kept in the slot of a read-only scalar", `my $o = PerlAPI::sealed_new(9223372036854775800); my @r = ($$o + 0); push @r, PerlAPI::sealed_add($o, 7), $$o + 0; push @r, PerlAPI::sealed_add($o, -9223372036854775807), $$o + 0; join ",", @r`,
+			"9223372036854775800,9223372036854775807,9223372036854775807,0,0"},
+		{"that scalar stays read-only for the program", `my $o = PerlAPI::sealed_new(5); my $died = eval { $$o = 6; 1 } ? "assigned" : "refused"; PerlAPI::sealed_add($o, 1); join(",", $died, $$o + 0, PerlAPI::flags($$o))`,
+			"refused,6,IOK,READONLY,OBJECT,"},
+		{"a slot written through its lvalue is not converted", `my $s = "12abc"; my @c = (PerlAPI::copy_integer($s) // "no integer"); "$s,$c[0]"`, "12abc,no integer"},
 	})
 }
 

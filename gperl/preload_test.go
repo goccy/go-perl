@@ -43,7 +43,7 @@ print "listed: ", (scalar(grep { $_ eq "cc" } keys %Config) ? "cc among the keys
 `)
 	want := "tied to: Config\n" +
 		"overlaid: cc=cc privlibexp=/the/stdlib archlibexp=/the/arch perlpath=/the/perl\n" +
-		"the interpreter's own: ivsize=4 version=this perl's\n" +
+		"the interpreter's own: ivsize=8 version=this perl's\n" +
 		"exists: 10\n" +
 		"assignment: refused\n" +
 		"after it: cc=cc\n" +

@@ -25,6 +25,7 @@ const (
 	wireRef      = 5
 	wireHostFunc = 6
 	wireFlatten  = 7
+	wireUint     = 8
 )
 
 // Reference kinds (what the reference's referent is).
@@ -80,6 +81,9 @@ func (p *Perl) encodeValue(b []byte, v Value, listPos bool) ([]byte, error) {
 			return append(b, 0), nil
 		case KindInt:
 			b = append(b, wireInt)
+			return appendU64(b, uint64(x.i)), nil
+		case KindUint:
+			b = append(b, wireUint)
 			return appendU64(b, uint64(x.i)), nil
 		case KindFloat:
 			b = append(b, wireFloat)
@@ -235,6 +239,8 @@ func (p *Perl) decodeNode(r *nodeReader) (Value, error) {
 		return ScalarValue{kind: KindBool, b: r.u8() != 0}, nil
 	case wireInt:
 		return ScalarValue{kind: KindInt, i: int64(r.u64())}, nil
+	case wireUint:
+		return unsignedScalar(r.u64()), nil
 	case wireFloat:
 		return ScalarValue{kind: KindFloat, f: math.Float64frombits(r.u64())}, nil
 	case wireString:

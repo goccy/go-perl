@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 14u
+#define GOPERL_XS_ABI 15u
 
 /* Signal actions of the process.
  *
@@ -1373,7 +1373,14 @@ typedef struct goperl_shared {
  * operation. A slot keeps its address, and stays under that comparison,
  * until the outermost native call returns: C does not say whether the left
  * or the right side of an assignment is evaluated first, so the store may
- * come any number of guest operations after the accessor ran. */
+ * come any number of guest operations after the accessor ran.
+ *
+ * What is loaded and written back is the slot of the body and nothing
+ * else, as with the macros of sv.h: no flag changes, nothing is converted,
+ * and a read-only scalar is not refused (a module that keeps a number of
+ * its own in the slot of a scalar it has made read-only for the program
+ * goes on updating it there). The interpreter's IV, UV and NV slots are as
+ * wide as the host's. */
 #define GOPERL_LV_IV 0
 #define GOPERL_LV_UV 1
 #define GOPERL_LV_NV 2
@@ -3024,15 +3031,19 @@ static void goperl_lvslot_flush(goperl_frame_t *f) {
             if (m->val == m->shadow) continue;
             m->shadow = m->val;
             switch (m->field) {
+            /* the bits of the slot, whatever they mean: 2, 3 and 4 are
+             * GOPERL_SVSLOT_IV, _UV and _NV */
             case GOPERL_LV_IV:
-                goperl_xs_op(f, GOPERL_OP_SV_SETIV, m->svtok, m->val,
-                                    0, 0);
+                goperl_xs_op(
+                    f, GOPERL_OP_SV_SLOT_SET,
+                    ((uint64_t)2 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
                 break;
             case GOPERL_LV_UV:
-                goperl_xs_op(f, GOPERL_OP_SV_SETUV, m->svtok, m->val,
-                                    0, 0);
+                goperl_xs_op(
+                    f, GOPERL_OP_SV_SLOT_SET,
+                    ((uint64_t)3 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
                 break;
-            case GOPERL_LV_NV: /* the bits of the slot, whatever they mean */
+            case GOPERL_LV_NV:
                 goperl_xs_op(
                     f, GOPERL_OP_SV_SLOT_SET,
                     ((uint64_t)4 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
@@ -3173,10 +3184,12 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field) {
     uint64_t v;
     switch (field) {
     case GOPERL_LV_IV:
-        v = (uint64_t)goperl_direct_sv_iv(f, tok);
+        v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                         ((uint64_t)2 << 32) | (uint32_t)tok, 0, 0, 0);
         break;
     case GOPERL_LV_UV:
-        v = goperl_do_op(f, GOPERL_OP_SV_IV, tok, 1, 0, 0);
+        v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                         ((uint64_t)3 << 32) | (uint32_t)tok, 0, 0, 0);
         break;
     case GOPERL_LV_NV:
         v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
@@ -5212,26 +5225,19 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
 #define NV_MIN DBL_MIN
 #define NV_DIG DBL_DIG
 #endif
-/* The GUEST's integer geometry: wasm32 perl builds with 32-bit IV/UV
- * (ivsize=4), and every SEMANTIC decision a dist makes — "does this number
- * fit an IV?", IVSIZE branches — follows the guest, so that what a module
- * produces is what a perl of this configuration produces (Cpanel::JSON::XS
- * decoding 2^32+ integers into NVs).
- *
- * The C types IV and UV are 64 bits wide all the same, as wide as a host
- * pointer: XS code stores pointers in them with plain casts. Such a value
- * crosses intact in both directions. Going in (sv_setiv, newSViv,
- * sv_setref_pv, ...), an integer the interpreter's IV or UV cannot hold
- * becomes an NV, which is how a perl with 32-bit IVs holds any large
- * integer, and is exact up to 2**53. Coming out (SvIV, SvUV, SvIVX), the
- * value is read from whichever of the three holds it. */
+/* The interpreter's integer geometry, which every SEMANTIC decision a dist
+ * makes follows ("does this number fit an IV?", IVSIZE branches): its IV
+ * and UV are 64 bits wide (use64bitint), the same as the C types IV and UV
+ * here. An integer crosses as it is in both directions (sv_setiv, newSViv,
+ * sv_setref_pv going in; SvIV, SvUV, SvIVX coming out), a host pointer
+ * stored in one with a plain cast included. */
 #ifndef UV_MAX
-#define IVSIZE 4
-#define UVSIZE 4
-#define UV_MAX ((UV)UINT32_MAX)
+#define IVSIZE 8
+#define UVSIZE 8
+#define UV_MAX ((UV)UINT64_MAX)
 #define UV_MIN 0
-#define IV_MAX ((IV)INT32_MAX)
-#define IV_MIN ((IV)INT32_MIN)
+#define IV_MAX ((IV)INT64_MAX)
+#define IV_MIN ((IV)INT64_MIN)
 #endif
 #define Gconvert(x, n, t, b) snprintf((b), 64, "%.*g", (int)(n), (double)(x))
 #define PTR2ul(p) ((unsigned long)(uintptr_t)(p))

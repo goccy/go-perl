@@ -471,6 +471,84 @@ XS(XS_PerlAPI_wide_made) {
     return;
 }
 
+/* The limits of the integers, made by each constructor and through the
+ * lvalue of the IV slot, and the size the SDK says an IV has. */
+XS(XS_PerlAPI_integer_limits) {
+    dXSARGS;
+    SP -= items;
+    {
+        SV *set_iv = sv_newmortal();
+        SV *set_uv = sv_newmortal();
+        SV *slot = sv_2mortal(newSViv(0));
+        sv_setiv(set_iv, IV_MIN);
+        sv_setuv(set_uv, UV_MAX);
+        SvIVX(slot) = IV_MAX;
+        EXTEND(SP, 7);
+        PUSHs(sv_2mortal(newSViv(IV_MAX)));
+        PUSHs(sv_2mortal(newSViv(IV_MIN)));
+        PUSHs(sv_2mortal(newSVuv(UV_MAX)));
+        PUSHs(set_iv);
+        PUSHs(set_uv);
+        PUSHs(slot);
+        PUSHs(sv_2mortal(newSViv((IV)IVSIZE)));
+    }
+    PUTBACK;
+    return;
+}
+
+/* A number a module keeps in the IV slot of a scalar that is read-only for
+ * the program, the way Math::Int64 keeps its 64-bit values on a perl whose
+ * IV has 64 bits: sealed_new makes the object, sealed_add updates the slot
+ * in place through its address and returns what the slot holds. */
+XS(XS_PerlAPI_sealed_new) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "value");
+    {
+        IV value = SvIV(ST(0));
+        SV *inner = newSV(0);
+        SV *ref;
+        SvUPGRADE(inner, SVt_IV);
+        SvIOK_on(inner);
+        ref = newRV_noinc(inner);
+        sv_bless(ref, gv_stashpvs("PerlAPI::Sealed", TRUE));
+        *(int64_t *)(&(SvIVX(inner))) = (int64_t)value;
+        SvREADONLY_on(inner);
+        ST(0) = sv_2mortal(ref);
+        XSRETURN(1);
+    }
+}
+
+XS(XS_PerlAPI_sealed_add) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "object, n");
+    {
+        SV *inner = SvRV(ST(0));
+        IV n = SvIV(ST(1));
+        *(int64_t *)(&(SvIVX(inner))) += (int64_t)n;
+        SvIVX(inner)++;
+        SvIVX(inner)--;
+        ST(0) = sv_2mortal(newSViv(SvIVX(inner)));
+        XSRETURN(1);
+    }
+}
+
+/* A new scalar with the integer the argument holds, read from its slot:
+ * undef for an argument that is not an integer. */
+XS(XS_PerlAPI_copy_integer) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *sv = ST(0);
+        if (!SvIOK(sv))
+            ST(0) = &PL_sv_undef;
+        else if (SvIsUV(sv))
+            ST(0) = sv_2mortal(newSVuv(SvUVX(sv)));
+        else
+            ST(0) = sv_2mortal(newSViv(SvIVX(sv)));
+        XSRETURN(1);
+    }
+}
+
 /* ---- native code that blocks ------------------------------------------------ */
 
 /* Reads one byte from a descriptor of the host process with the C library,
@@ -1993,6 +2071,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::wide_values", XS_PerlAPI_wide_values);
     newXS_deffile("PerlAPI::wide_made", XS_PerlAPI_wide_made);
     newXS_deffile("PerlAPI::read_host_descriptor", XS_PerlAPI_read_host_descriptor);
+    newXS_deffile("PerlAPI::integer_limits", XS_PerlAPI_integer_limits);
+    newXS_deffile("PerlAPI::copy_integer", XS_PerlAPI_copy_integer);
+    newXS_deffile("PerlAPI::sealed_new", XS_PerlAPI_sealed_new);
+    newXS_deffile("PerlAPI::sealed_add", XS_PerlAPI_sealed_add);
     newXS_deffile("PerlAPI::read_then_mark", XS_PerlAPI_read_then_mark);
     newXS_deffile("PerlAPI::increment_all", XS_PerlAPI_increment_all);
     newXS_deffile("PerlAPI::late_store", XS_PerlAPI_late_store);

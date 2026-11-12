@@ -296,8 +296,8 @@ enum {
     (PERL_DECIMAL_VERSION != PERL_VERSION_DECIMAL(r, v, s))
 
 /* The host's C geometry. IVSIZE/UVSIZE and the IV/UV limits (perl.h)
- * describe the interpreter's 32-bit integers instead, because they decide
- * what a value can hold once it is stored in an SV. */
+ * describe the interpreter's integers, because they decide what a value
+ * can hold once it is stored in an SV; those are 64 bits wide as well. */
 /* What config.h says about the host: the headers and library functions a
  * unix C library always has. */
 #define I_STDBOOL
@@ -388,7 +388,12 @@ enum {
 typedef int64_t I64;
 typedef uint64_t U64;
 #define PTRV uintptr_t
-#define BYTEORDER 0x1234
+/* The order of the bytes of a UV, as perl's config.h has it. */
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define BYTEORDER 0x12345678
+#else
+#define BYTEORDER 0x87654321
+#endif
 #define MEM_SIZE size_t
 #define Malloc_t void *
 #define Free_t void
@@ -429,15 +434,20 @@ typedef uint64_t U64;
 #define DPTR2FPTR(t, p) ((t)PTR2nat(p))
 #define FPTR2DPTR(t, p) ((t)PTR2nat(p))
 
-/* The saturating NV casts of numeric.c, at the interpreter's integer width. */
+/* The saturating NV casts of numeric.c (Perl_cast_iv, Perl_cast_uv). The
+ * limits are written the way perl.h writes IV_MAX_P1 and UV_MAX_P1: an NV
+ * cannot hold IV_MAX + 1 computed in integers, but it holds twice the half
+ * exactly. */
+#define GOPERL_IV_MAX_P1 ((NV)((IV_MAX >> 1) + 1) * 2.0)
+#define GOPERL_UV_MAX_P1 ((NV)((UV_MAX >> 1) + 1) * 2.0)
 static inline IV goperl_cast_iv(NV f) {
-    if (f < (NV)IV_MAX + 1.0) return f < (NV)IV_MIN ? IV_MIN : (IV)f;
-    if (f < (NV)UV_MAX + 1.0) return (IV)(int32_t)(uint32_t)f;
-    return f > 0 ? (IV)(int32_t)(uint32_t)UV_MAX : 0; /* NaN */
+    if (f < GOPERL_IV_MAX_P1) return f < (NV)IV_MIN ? IV_MIN : (IV)f;
+    if (f < GOPERL_UV_MAX_P1) return (IV)(UV)f;
+    return f > 0 ? (IV)UV_MAX : 0; /* NaN */
 }
 static inline UV goperl_cast_uv(NV f) {
-    if (f < 0.0) return f < (NV)IV_MIN ? (UV)(uint32_t)IV_MIN : (UV)(uint32_t)(int32_t)f;
-    if (f < (NV)UV_MAX + 1.0) return (UV)f;
+    if (f < 0.0) return f < (NV)IV_MIN ? (UV)IV_MIN : (UV)(IV)f;
+    if (f < GOPERL_UV_MAX_P1) return (UV)f;
     return f > 0 ? UV_MAX : 0; /* NaN */
 }
 #define I_V(n) goperl_cast_iv((NV)(n))
