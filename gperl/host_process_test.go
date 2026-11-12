@@ -191,3 +191,25 @@ report("an address without a name, a name required: ", ($err ? "refused" : "host
 	)
 }
 
+// stat reports the preferred block size, the blocks allocated to a file,
+// and the device a special file stands for.
+func TestStatBlocksAndDevice(t *testing.T) {
+	got := runForkScript(t, `
+my $dir = $REPORT =~ s{/[^/]*$}{}r;
+open(my $out, ">", "$dir/data") or die "create: $!";
+print {$out} "x" x 10000;
+close $out;
+my @st = stat("$dir/data");
+report("a file of 10000 bytes: block size ", ($st[11] > 0 ? "named" : "'$st[11]'"), ", blocks ", ($st[12] * 512 >= 10000 ? "hold it" : "'$st[12]'"), ", device ", $st[6]);
+open(my $in, "<", "$dir/data") or die "open: $!";
+my @by_handle = stat($in);
+report("by handle: the same=", ("@st[6,11,12]" eq "@by_handle[6,11,12]" ? 1 : 0));
+my @zero = stat("/dev/zero");
+report("a device: is one=", (-c "/dev/zero" ? 1 : 0), " stands for a device=", ($zero[6] ? 1 : 0));
+`)
+	wantLines(t, got,
+		"a file of 10000 bytes: block size named, blocks hold it, device 0",
+		"by handle: the same=1",
+		"a device: is one=1 stands for a device=1",
+	)
+}
