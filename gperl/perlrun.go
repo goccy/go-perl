@@ -102,7 +102,20 @@ func switchFailure(err error, opts perlRunOpts) (int, error) {
 }
 
 // runPerlCommand runs a parsed command line.
+//
+// The interpreter is the host process while it runs: the process follows
+// its working directory and its environment, so that native code it loads
+// finds them. A run that is given a directory or an environment of its own
+// is not the process, which is only lent to it: the process gets its own
+// working directory and environment back when the run is over.
 func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) {
+	if opts.dir != "" || opts.env != nil {
+		giveBack, err := lendProcess(opts.env)
+		if err != nil {
+			return 1, err
+		}
+		defer giveBack()
+	}
 	env := opts.env
 	if env == nil {
 		env = os.Environ()
@@ -253,4 +266,32 @@ func runPerlInProcess(dir string, env []string, stdout io.Writer, args ...string
 		return fmt.Errorf("perl %s: exit status %d", strings.Join(args, " "), status)
 	}
 	return nil
+}
+
+// lendProcess gives the process the environment env (when it is not nil) and
+// returns the function that restores the working directory and the
+// environment the process has now.
+func lendProcess(env []string) (giveBack func(), err error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	own := os.Environ()
+	// An environment is a list of name=value entries: the form the
+	// operating system defines for it.
+	setEnviron := func(vars []string) {
+		os.Clearenv()
+		for _, kv := range vars {
+			if name, value, ok := strings.Cut(kv, "="); ok {
+				os.Setenv(name, value)
+			}
+		}
+	}
+	if env != nil {
+		setEnviron(env)
+	}
+	return func() {
+		setEnviron(own)
+		os.Chdir(dir)
+	}, nil
 }

@@ -11,8 +11,13 @@ import (
 	"github.com/goccy/go-perl/gperl"
 )
 
+// writeScript writes a program for a test to run. A program that runs in
+// the test process is that process while it runs (the process follows its
+// working directory and its environment), so the test gives the process
+// back as it found it.
 func writeScript(t *testing.T, name, src string) string {
 	t.Helper()
+	keepProcessState(t)
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -129,4 +134,26 @@ func TestBuildProducesStandaloneBinary(t *testing.T) {
 	if want := "greetings, gopher\n"; string(got) != want {
 		t.Fatalf("binary output = %q, want %q", got, want)
 	}
+}
+
+// keepProcessState restores the working directory and the environment of
+// the test process when the test is over.
+func keepProcessState(t *testing.T) {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := os.Environ()
+	t.Cleanup(func() {
+		if err := os.Chdir(dir); err != nil {
+			t.Errorf("back to the working directory of the test: %v", err)
+		}
+		os.Clearenv()
+		for _, kv := range env {
+			if name, value, ok := strings.Cut(kv, "="); ok {
+				os.Setenv(name, value)
+			}
+		}
+	})
 }
