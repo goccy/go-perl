@@ -55,8 +55,8 @@ my $conn = $server->accept or die "accept: $!";
 my $line = <$conn>;
 print {$conn} "ack $line";
 report("accepted at ", ($conn->hostpath eq $path ? "its path" : $conn->hostpath), "; peer name: '", ($conn->peerpath // ''), "'");
+waitpid($client, 0);   # the client asks for its peer's name while the connection stands
 close $conn;
-waitpid($client, 0);
 chomp $line;
 report("server got: $line; client exit=", $? >> 8);
 
@@ -320,6 +320,42 @@ report("not a number: ", show(getaddrinfo("localhost", "80", { flags => AI_NUMER
 	)
 }
 
+// The name of a Unix-domain socket is reported whole whatever its length:
+// by getsockname, by getpeername and by accept. (The interpreter took such
+// names into a buffer of 48 bytes, cut them after 46 bytes of path and set
+// the end of the string past the buffer.)
+func TestLongUnixSocketNames(t *testing.T) {
+	skipWithoutUnixSockets(t)
+	got := runForkScript(t, socketDir+`
+use Socket qw(AF_UNIX SOCK_STREAM pack_sockaddr_un unpack_sockaddr_un);
+my $canary = "x" x 64;
+for my $length (30, 46, 47, 70, 100) {
+    my $path = "$DIR/" . ("s" x ($length - length("$DIR/")));
+    socket(my $listener, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    bind($listener, pack_sockaddr_un($path)) or die "bind: $!";
+    listen($listener, 5) or die "listen: $!";
+    socket(my $client, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    connect($client, pack_sockaddr_un($path)) or die "connect: $!";
+    my $from = accept(my $conn, $listener) or die "accept: $!";
+    my %name = (
+        getsockname => unpack_sockaddr_un(getsockname($listener)),
+        getpeername => unpack_sockaddr_un(getpeername($client)),
+        "the accepted socket" => unpack_sockaddr_un(getsockname($conn)),
+    );
+    report("a path of ", length($path), " bytes: ", join(", ", map { "$_ " . ($name{$_} eq $path ? "right" : "wrong (" . length($name{$_}) . " bytes)") } sort keys %name));
+}
+report("what lay beside the names: ", ($canary eq "x" x 64 ? "untouched" : "overwritten"));
+`)
+	wantLines(t, got,
+		"a path of 30 bytes: getpeername right, getsockname right, the accepted socket right",
+		"a path of 46 bytes: getpeername right, getsockname right, the accepted socket right",
+		"a path of 47 bytes: getpeername right, getsockname right, the accepted socket right",
+		"a path of 70 bytes: getpeername right, getsockname right, the accepted socket right",
+		"a path of 100 bytes: getpeername right, getsockname right, the accepted socket right",
+		"what lay beside the names: untouched",
+	)
+}
+
 // An abstract Unix-domain name (Linux: one that starts with a NUL) is the
 // bytes the address has, NULs included, and comes back as long as it is. A
 // socket is bound to the name pack_sockaddr_un makes of "\0" (the whole
@@ -360,6 +396,9 @@ report("bound to the name of \"\\0\": ", $listener ? "yes" : "no: $!");
 report("a second socket with that name: ", listener($nuls) ? "bound" : $!{EADDRINUSE} ? "EADDRINUSE" : "error $!");
 socket(my $client, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
 report("connected by that name: ", connect($client, $nuls) ? "yes" : "no: $!");
+my $reported = unpack_sockaddr_un(getsockname($listener));
+socket(my $second, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+report("the name reported has ", length($reported), " bytes, ", ($reported =~ /\A\0+\z/ ? "NULs alone" : "not NULs alone"), "; connected by it: ", connect($second, pack_sockaddr_un($reported)) ? "yes" : "no: $!");
 
 for my $name ("\0gperl-test-$$", "\0with\0inside-$$") {
     my $listener = listener(pack_sockaddr_un($name)) or die "bind: $!";
@@ -371,6 +410,7 @@ for my $name ("\0gperl-test-$$", "\0with\0inside-$$") {
 		`bound to the name of "\0": yes`,
 		"a second socket with that name: EADDRINUSE",
 		"connected by that name: yes",
+		"the name reported has 108 bytes, NULs alone; connected by it: yes",
 		`bound to 11 bytes, \0gperl-test; received: over; the peer is 11 bytes, \0gperl-test; the client has no name`,
 		`bound to 12 bytes, \0with\0inside; received: over; the peer is 12 bytes, \0with\0inside; the client has no name`,
 	)
