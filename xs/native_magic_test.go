@@ -92,3 +92,31 @@ func TestNativeHandleLayersAndErrors(t *testing.T) {
 		{"errno left alone by an open and a seek that work", `open my $fh, "<", $file or die $!; join ",", PerlAPI::pio_failures($file, $fh)`, "0,none,0,none"},
 	})
 }
+
+// A module that has run the get magic of its argument itself (SvGETMAGIC)
+// looks at the value without running it again: a tied scalar is fetched
+// once, however often the module asks what it holds.
+func TestNativeLooksRunNoGetMagic(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	if r, err := p.Eval(context.Background(), `
+package Counted { sub TIESCALAR { bless { n => 0, v => $_[1] }, $_[0] } sub FETCH { $_[0]{n}++; $_[0]{v} } sub STORE { $_[0]{v} = $_[1] } }
+sub fetches { my ($how, $value) = @_; my $obj = tie my $s, "Counted", $value; PerlAPI::look_without_magic($s, $how); $obj->{n} }
+1`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	cases := []evalCase{{"SvGETMAGIC fetches once", `fetches("get", "text")`, "1"}}
+	for _, how := range []string{"ok", "pv", "pv_nolen", "pvbyte", "iv", "uv", "nv", "true", "utf8",
+		"tainted", "rok", "gmagical", "flags", "pok", "iok", "type", "cur", "copy"} {
+		cases = append(cases, evalCase{how + " fetches nothing", `fetches("` + how + `", "12")`, "0"})
+	}
+	// These run the get magic themselves in perl: sv_isobject once, and
+	// sv_derived_from as often as UNIVERSAL::isa does after its own fetch.
+	cases = append(cases,
+		evalCase{"sv_isobject fetches once", `fetches("isobject", "12")`, "1"},
+		evalCase{"sv_derived_from fetches as perl's does",
+			`my $obj = tie my $s, "Counted", "12"; UNIVERSAL::isa($s, "No::Such::Class"); fetches("derived", "12") - ($obj->{n} - 1)`, "0"})
+	cases = append(cases, evalCase{"the whole of a module's reading: one fetch",
+		`my $obj = tie my $s, "Counted", "text"; PerlAPI::look_without_magic($s, "get"); PerlAPI::look_without_magic($s, $_) for qw(ok pv utf8 tainted rok); $obj->{n}`, "1"})
+	runEvalCases(t, p, cases)
+}

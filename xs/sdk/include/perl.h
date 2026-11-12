@@ -2491,7 +2491,17 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 #define SvREADONLY(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_READONLY) != 0)
 #define SvOBJECT(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_OBJECT) != 0)
 #define SvRMAGICAL(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_RMAGICAL) != 0)
-#define sv_isobject(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISOBJ) != 0)
+/* sv_isobject runs the get magic of its argument, as perl's does; the flag
+ * query itself runs none. */
+#define sv_isobject(sv)                                    \
+    ({ GOPERL_ONCE(goperl_sv_isobject_sv_, sv);            \
+       int goperl_sv_isobject_ = 0;                        \
+       if (goperl_sv_isobject_sv_) {                       \
+           SvGETMAGIC(goperl_sv_isobject_sv_);             \
+           goperl_sv_isobject_ =                           \
+               (GOPERL_SVINFO(goperl_sv_isobject_sv_) & GOPERL_INFO_ISOBJ) != 0; \
+       }                                                   \
+       goperl_sv_isobject_; })
 #define SvTRUE(sv) (goperl_op0(GOPERL_OP_SV_TRUE, GOPERL_TOK(sv), 0) != 0)
 #define sv_true(sv) SvTRUE(sv)
 #define SvROK(sv) (goperl_op0(GOPERL_OP_SV_RV, GOPERL_TOK(sv), 0) != 0)

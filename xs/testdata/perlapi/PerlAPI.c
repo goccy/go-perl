@@ -1713,6 +1713,44 @@ XS(XS_PerlAPI_stack_in_a_plain_function) {
     }
 }
 
+/* One look at a value that must not run its get magic: what a module does
+ * after it has called SvGETMAGIC itself. "get" is the one that does run
+ * it. */
+XS(XS_PerlAPI_look_without_magic) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, how");
+    {
+        SV *sv = ST(0);
+        const char *how = SvPV_nolen(ST(1));
+        STRLEN len = 0;
+        IV seen = 0;
+        if (strEQ(how, "get")) { SvGETMAGIC(sv); }
+        else if (strEQ(how, "ok")) seen = SvOK(sv) ? 1 : 0;
+        else if (strEQ(how, "pv")) { const char *s = SvPV_nomg(sv, len); seen = (IV)len + (s ? 0 : 100); }
+        else if (strEQ(how, "pv_nolen")) seen = (IV)strlen(SvPV_nomg_nolen(sv));
+        else if (strEQ(how, "pvbyte")) { const char *s = SvPVbyte_nomg(sv, len); seen = (IV)len + (s ? 0 : 100); }
+        else if (strEQ(how, "iv")) seen = SvIV_nomg(sv);
+        else if (strEQ(how, "uv")) seen = (IV)SvUV_nomg(sv);
+        else if (strEQ(how, "nv")) seen = (IV)SvNV_nomg(sv);
+        else if (strEQ(how, "true")) seen = SvTRUE_nomg(sv) ? 1 : 0;
+        else if (strEQ(how, "utf8")) seen = SvUTF8(sv) ? 1 : 0;
+        else if (strEQ(how, "tainted")) seen = SvTAINTED(sv) ? 1 : 0;
+        else if (strEQ(how, "rok")) seen = SvROK(sv) ? 1 : 0;
+        else if (strEQ(how, "gmagical")) seen = SvGMAGICAL(sv) ? 1 : 0;
+        else if (strEQ(how, "flags")) seen = (SvFLAGS(sv) & SVs_GMG) ? 1 : 0;
+        else if (strEQ(how, "pok")) seen = SvPOK(sv) ? 1 : 0;
+        else if (strEQ(how, "iok")) seen = SvIOK(sv) ? 1 : 0;
+        else if (strEQ(how, "isobject")) seen = sv_isobject(sv) ? 1 : 0;
+        else if (strEQ(how, "derived")) seen = sv_derived_from(sv, "No::Such::Class") ? 1 : 0;
+        else if (strEQ(how, "type")) seen = (IV)SvTYPE(sv);
+        else if (strEQ(how, "cur")) seen = SvPOK(sv) ? (IV)SvCUR(sv) : -1;
+        else if (strEQ(how, "copy")) { SV *copy = sv_2mortal(newSVsv_nomg(sv)); seen = SvOK(copy) ? 1 : 0; }
+        else croak("look_without_magic: no such look: %s", how);
+        ST(0) = sv_2mortal(newSViv(seen));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -1816,5 +1854,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);
     newXS_deffile("PerlAPI::rename_glob", XS_PerlAPI_rename_glob);
     newXS_deffile("PerlAPI::stack_in_a_plain_function", XS_PerlAPI_stack_in_a_plain_function);
+    newXS_deffile("PerlAPI::look_without_magic", XS_PerlAPI_look_without_magic);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
