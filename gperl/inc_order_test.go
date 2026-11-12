@@ -28,10 +28,23 @@ func shadowLib(t *testing.T, name string) string {
 	return dir
 }
 
+// incNames is Perl code that defines inc_names: the directories it is given
+// with the interpreter's own ones under the names STDLIB, SITEARCH and
+// SITELIB (the site directories are the user's, whose name may have a space
+// in it).
+const incNames = `
+sub inc_names {
+    require Config;
+    my ($stdlib) = grep { -e "$_/strict.pm" } @_;
+    my %own = ($stdlib => "STDLIB", $Config::Config{sitearchexp} => "SITEARCH", $Config::Config{sitelibexp} => "SITELIB");
+    return join(" ", map { $own{$_} // $_ } @_);
+}
+`
+
 // incReport is a program that reports @INC and where modules come from.
-const incReport = `
+const incReport = incNames + `
 my ($stdlib) = grep { -e "$_/strict.pm" } @INC;
-report("inc: ", join(" ", map { $_ eq $stdlib ? "STDLIB" : $_ } @INC));
+report("inc: ", inc_names(@INC));
 require Text::Tabs;
 report("Text::Tabs from ", $Text::Tabs::FROM // "the standard library");
 require List::Util;
@@ -40,21 +53,22 @@ report("List::Util from ", ($INC{"List/Util.pm"} =~ /^\Q$stdlib\E/ ? "the standa
 
 // perl searches the -I directories, then PERL5LIB, then its own library:
 // a module in a PERL5LIB directory shadows the standard library's copy (this
-// is how `make test` hands blib/lib to the tests), and the directories of
-// the build-time configuration are not searched at all.
+// is how `make test` hands blib/lib to the tests), the site directories
+// come between the two, and the directories of the build-time configuration
+// are not searched at all.
 func TestIncOrderPERL5LIBBeforeTheStandardLibrary(t *testing.T) {
 	first, second := shadowLib(t, "first"), shadowLib(t, "second")
 	t.Setenv("PERL5LIB", first+string(os.PathListSeparator)+second)
 	got := runForkScript(t, incReport+`
 report("configured directories searched: ", scalar(grep { m{^/usr/lib/perl5} } @INC));
 my $pid = fork // die "fork: $!";
-if ($pid == 0) { report("fork child inc: ", join(" ", map { $_ eq $stdlib ? "STDLIB" : $_ } @INC)); exit 0 }
+if ($pid == 0) { report("fork child inc: ", inc_names(@INC)); exit 0 }
 waitpid($pid, 0);
 `)
 	// Run is the project runner: the script's directory leads, as a -I
 	// directory would.
 	scriptDir := strings.Fields(strings.TrimPrefix(got[0], "inc: "))[0]
-	inc := strings.Join([]string{scriptDir, first, second, "STDLIB"}, " ")
+	inc := strings.Join([]string{scriptDir, first, second, "SITEARCH", "SITELIB", "STDLIB"}, " ")
 	wantLines(t, got,
 		"inc: "+inc,
 		"Text::Tabs from first",
@@ -68,7 +82,7 @@ waitpid($pid, 0);
 func TestIncOrderStandardLibraryAlone(t *testing.T) {
 	t.Setenv("PERL5LIB", "")
 	got := runForkScript(t, incReport)
-	if len(got) != 3 || !strings.HasSuffix(got[0], " STDLIB") {
+	if len(got) != 3 || !strings.HasSuffix(got[0], " SITEARCH SITELIB STDLIB") {
 		t.Fatalf("report = %q", got)
 	}
 	wantLines(t, got[1:], "Text::Tabs from the standard library", "List::Util from the standard library")
@@ -95,33 +109,34 @@ exit(system($perl, @args) >> 8);
 	return string(raw)
 }
 
-// The perl command line: -I comes before PERL5LIB, use lib before both, a
+// The perl command line: -I comes before PERL5LIB, use lib before both, the
+// site directories and the standard library after them, a
 // -M module named in PERL5OPT is loaded once and from where @INC says, and
 // the current directory is searched only when PERL_USE_UNSAFE_INC asks for
 // it, and under -T neither PERL5LIB nor the current directory is.
 func TestIncOrderOnThePerlCommandLine(t *testing.T) {
 	first, second := shadowLib(t, "first"), shadowLib(t, "second")
 	t.Setenv("PERL5LIB", first)
-	const show = `my ($s) = grep { -e "$_/strict.pm" } @INC; print join(" ", map { $_ eq $s ? "STDLIB" : $_ } @INC), "\n";`
+	const show = incNames + `print inc_names(@INC), "\n";`
 	const from = `require Text::Tabs; print "from ", ($Text::Tabs::FROM // "stdlib"), "\n";`
 
-	if got, want := runPerl(t, "-e", show+from), first+" STDLIB\nfrom first\n"; got != want {
+	if got, want := runPerl(t, "-e", show+from), first+" SITEARCH SITELIB STDLIB\nfrom first\n"; got != want {
 		t.Errorf("PERL5LIB only:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-I"+second, "-e", show+from), second+" "+first+" STDLIB\nfrom second\n"; got != want {
+	if got, want := runPerl(t, "-I"+second, "-e", show+from), second+" "+first+" SITEARCH SITELIB STDLIB\nfrom second\n"; got != want {
 		t.Errorf("-I and PERL5LIB:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-e", "use lib '"+second+"';"+show+from), second+" "+first+" STDLIB\nfrom second\n"; got != want {
+	if got, want := runPerl(t, "-e", "use lib '"+second+"';"+show+from), second+" "+first+" SITEARCH SITELIB STDLIB\nfrom second\n"; got != want {
 		t.Errorf("use lib:\n%swant:\n%s", got, want)
 	}
 	t.Setenv("PERL_USE_UNSAFE_INC", "1")
-	if got, want := runPerl(t, "-e", show+from), first+" STDLIB .\nfrom first\n"; got != want {
+	if got, want := runPerl(t, "-e", show+from), first+" SITEARCH SITELIB STDLIB .\nfrom first\n"; got != want {
 		t.Errorf("PERL_USE_UNSAFE_INC:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-T", "-e", show+from), "STDLIB\nfrom stdlib\n"; got != want {
+	if got, want := runPerl(t, "-T", "-e", show+from), "SITEARCH SITELIB STDLIB\nfrom stdlib\n"; got != want {
 		t.Errorf("-T:\n%swant:\n%s", got, want)
 	}
-	if got, want := runPerl(t, "-T", "-I"+second, "-e", show+from), second+" STDLIB\nfrom second\n"; got != want {
+	if got, want := runPerl(t, "-T", "-I"+second, "-e", show+from), second+" SITEARCH SITELIB STDLIB\nfrom second\n"; got != want {
 		t.Errorf("-T -I:\n%swant:\n%s", got, want)
 	}
 
@@ -138,7 +153,7 @@ func TestIncOrderOnThePerlCommandLine(t *testing.T) {
 
 // An embedded interpreter has the same order: the directories it is given
 // (AddInc, RunFile's, Program.Inc) lead, PERL5LIB from its environment
-// follows, the standard library comes last — also in an instance cloned
+// follows, then its site directories, the standard library comes last — also in an instance cloned
 // from another.
 func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 	first, added := shadowLib(t, "first"), shadowLib(t, "added")
@@ -152,7 +167,7 @@ func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	const show = `my ($s) = grep { -e "$_/strict.pm" } @INC; join(" ", map { $_ eq $s ? "STDLIB" : $_ } @INC)`
+	const show = incNames + `inc_names(@INC)`
 	eval := func(p *perl.Perl) string {
 		t.Helper()
 		r, err := p.Eval(t.Context(), show)
@@ -165,13 +180,13 @@ func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 		}
 		return s.String()
 	}
-	if got, want := eval(p), first+" STDLIB"; got != want {
+	if got, want := eval(p), first+" SITEARCH SITELIB STDLIB"; got != want {
 		t.Fatalf("@INC = %q, want %q", got, want)
 	}
 	if err := p.AddInc(t.Context(), added); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := eval(p), added+" "+first+" STDLIB"; got != want {
+	if got, want := eval(p), added+" "+first+" SITEARCH SITELIB STDLIB"; got != want {
 		t.Fatalf("@INC after AddInc = %q, want %q", got, want)
 	}
 	clone, err := p.Clone()
@@ -179,7 +194,7 @@ func TestIncOrderOfAnEmbeddedInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer clone.Close()
-	if got, want := eval(clone), added+" "+first+" STDLIB"; got != want {
+	if got, want := eval(clone), added+" "+first+" SITEARCH SITELIB STDLIB"; got != want {
 		t.Fatalf("@INC of the clone = %q, want %q", got, want)
 	}
 }

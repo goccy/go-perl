@@ -10,9 +10,11 @@ package internal
 // of it. Instances re-run nothing and inherit a perl that is already
 // initialized; they pay only for the pages they actually write.
 //
-// Built on the bundle's base.NewSharedSnapshot. Two values are baked into
+// Built on the bundle's base.NewSharedSnapshot. Three values are baked into
 // the image and so key the snapshot cache:
 //   - the stdlib dir: perl_new(stdlibDir) writes it into @INC;
+//   - the site dir: perl_new lays the site directories out below it, in
+//     @INC and for %Config;
 //   - the environment: wasi libc caches environ at startup, so %ENV reflects
 //     what the snapshotted instance was booted with.
 // Everything else in Options (FS backend, hooks, stdio, memory caps) lives on
@@ -51,25 +53,26 @@ var (
 	snapshots = map[string]*perlSnapshot{}
 )
 
-// sharedSnapshot returns the process-wide snapshot for (stdlibDir, env),
-// building and caching it on first use. A failure is remembered, not retried:
-// New then initializes each instance privately, which is correct, only larger.
-func sharedSnapshot(stdlibDir string, env []string) *perlSnapshot {
+// sharedSnapshot returns the process-wide snapshot for (stdlibDir, siteDir,
+// env), building and caching it on first use. A failure is remembered, not
+// retried: New then initializes each instance privately, which is correct,
+// only larger.
+func sharedSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	if os.Getenv("GO_PERL_NO_SHARED_IMAGE") != "" {
 		return &perlSnapshot{err: fmt.Errorf("disabled by GO_PERL_NO_SHARED_IMAGE")}
 	}
-	key := fmt.Sprintf("lib=%q env=%q", stdlibDir, env)
+	key := fmt.Sprintf("lib=%q site=%q env=%q", stdlibDir, siteDir, env)
 	snapMu.Lock()
 	defer snapMu.Unlock()
 	if s, ok := snapshots[key]; ok {
 		return s
 	}
-	s := buildSnapshot(stdlibDir, env)
+	s := buildSnapshot(stdlibDir, siteDir, env)
 	snapshots[key] = s
 	return s
 }
 
-func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
+func buildSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	var handle uint64
 	img := base.NewSharedSnapshot(func() (g *base.Module, err error) {
 		defer func() {
@@ -89,7 +92,7 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 		_ = wasm2go.WasmInit(mod.g)
 
 		tmp := &Perl{m: mod, wasi: wasi}
-		h, err := tmp.perlNew(stdlibDir)
+		h, err := tmp.perlNew(stdlibDir, siteDir)
 		if err != nil {
 			return nil, fmt.Errorf("perl_new: %w", err)
 		}

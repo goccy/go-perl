@@ -487,8 +487,6 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 	tc["privlib"] = stdlibDir
 	tc["archlibexp"] = fakeArch
 	tc["archlib"] = fakeArch
-	tc["sitelibexp"] = ""
-	tc["sitearchexp"] = ""
 	tc["vendorlibexp"] = ""
 	tc["vendorarchexp"] = ""
 	tc["installprivlib"] = stdlibDir

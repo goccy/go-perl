@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,10 @@ type InstanceOptions struct {
 	Dial      func(network, host, ip string, port int) bool
 	Resolve   func(host string) bool
 	Exec      func(path string, argv []string) bool
+	// SiteDir is the directory the interpreter's site directories are
+	// under (perl-wasm's perl_new lays them out below it); empty for an
+	// interpreter without any.
+	SiteDir string
 	// Fork lets the guest fork: each fork runs a copy of the instance as a
 	// pseudo-process inside this host process (see fork.go).
 	Fork bool
@@ -422,7 +427,7 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 // boot brings the instance's wasm module up and obtains the interpreter
 // handle — via the copy-on-write snapshot when possible, privately otherwise.
 func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
-	if snap := sharedSnapshot(opts.StdlibDir, opts.Env); snap.err == nil {
+	if snap := sharedSnapshot(opts.StdlibDir, opts.SiteDir, opts.Env); snap.err == nil {
 		ceiling := snapshotCeiling
 		if opts.MaxMemoryBytes > 0 {
 			const wasmPage = 65536
@@ -478,7 +483,7 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 		return err
 	}
 
-	h, err := p.perlNew(opts.StdlibDir)
+	h, err := p.perlNew(opts.StdlibDir, opts.SiteDir)
 	if err != nil {
 		return fmt.Errorf("perl_new: %w", err)
 	}
@@ -796,9 +801,22 @@ func (i *memoryImage) release() {
 	}
 }
 
-func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
+// ArchTag names the kind of machine this process runs on, the way the
+// directories of architecture-specific files are named: the native modules
+// a process loads are built for it.
+func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
+
+// perlNew starts the interpreter with its library in stdlibDir and, when
+// siteDir is not empty, its site directories under siteDir. The
+// architecture-specific one among them holds native modules, which are
+// loaded into this process: it is named after this machine.
+func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
+	buf = pbAppendString(buf, 2, siteDir)
+	if siteDir != "" {
+		buf = pbAppendString(buf, 3, ArchTag())
+	}
 	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err

@@ -26,6 +26,30 @@ type Config struct {
 	// filesystem (fs.NewHostFS) points this at a host directory, e.g. the
 	// one ExtractStdlib returns.
 	StdlibDir string
+	// SiteDir is the path INSIDE the instance's filesystem under which the
+	// interpreter has its site directories: where the modules installed
+	// for it go (`perl Makefile.PL && make install`, `./Build install`) and
+	// where it finds them again.
+	//
+	//	SiteDir/site_perl/<version>          modules (sitelib)
+	//	SiteDir/site_perl/<version>/<arch>   architecture-specific files,
+	//	                                     native modules among them
+	//	                                     (sitearch; <arch> names the
+	//	                                     machine this process runs on)
+	//	SiteDir/bin                          programs (sitebin, sitescript)
+	//	SiteDir/man/man1, SiteDir/man/man3   manual pages
+	//
+	// %Config reports them under every key that names a site directory,
+	// and sitearch and sitelib are in @INC where perl has them: after the
+	// directories the instance is given and PERL5LIB, before the standard
+	// library. The directories are not created: an installation creates
+	// what it needs.
+	//
+	// Empty, the default, is an interpreter without site directories:
+	// @INC has none, and %Config keeps the directories of the build's
+	// configuration (/usr/lib/perl5/site_perl/...), where nothing is.
+	// gperl names a directory of the user's (HostConfig).
+	SiteDir string
 	// Env is the environment the guest sees (%ENV). nil means an empty
 	// environment — the host process os.Environ() is NOT leaked.
 	Env []string

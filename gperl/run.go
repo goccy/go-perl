@@ -29,7 +29,9 @@ import (
 // every capability hook allowing — perl(1) does not sandbox, so neither
 // does gperl (the library's zero Config denies these instead). The
 // program is the host process: its pid, user and signals are the
-// process's own, and it logs to the host's system logger.
+// process's own, and it logs to the host's system logger. Its site
+// directories — where `make install` puts modules, and where every run
+// finds them — are under a directory of the user's: see siteDir.
 func HostConfig() (perl.Config, error) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -38,6 +40,7 @@ func HostConfig() (perl.Config, error) {
 	return perl.Config{
 		FS:          goperlfs.NewHostFS(),
 		StdlibDir:   stdlib,
+		SiteDir:     siteDir(),
 		Dial:        func(string, string, string, int) bool { return true },
 		Resolve:     func(string) bool { return true },
 		Exec:        func(string, []string) bool { return true },

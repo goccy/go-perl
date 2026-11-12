@@ -72,6 +72,7 @@ func New(cfg Config) (*Perl, error) {
 	p := &Perl{}
 	raw, err := internal.New(internal.InstanceOptions{
 		StdlibDir: cfg.StdlibDir,
+		SiteDir:   cfg.SiteDir,
 		Env:       cfg.Env,
 		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
 		// bit bucket as its script filehandle); synthesize one over any

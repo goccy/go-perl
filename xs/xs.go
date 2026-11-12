@@ -209,7 +209,7 @@ func init() {
 // ArchTag names the per-architecture native-module directory
 // (local/xs/<goos>_<goarch>). The tag follows the RUNNING binary — its
 // dlopen must match the .so architecture.
-func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
+func ArchTag() string { return internal.ArchTag() }
 
 // LoadDir registers every native module under dir (a local/xs/<arch>
 // directory, the `gperl xs build` output layout: <Module-Name>.so with the

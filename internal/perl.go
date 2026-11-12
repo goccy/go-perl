@@ -1139,9 +1139,47 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // modules can be found on the runtime's WASI filesystem mount; pass NULL/empty
 // to run with only the built-in
 // .
-func PerlNew(libDir string) (uint64, error) {
+//
+// `site_dir`, when non-empty, is the directory the site directories are
+// under: where modules installed for this interpreter go and are found.
+//
+// <site
+// _dir>/site_perl/
+// <version
+// >               sitelib
+//
+// <site
+// _dir>/site_perl/
+// <version
+// >/
+// <site
+// _arch>   sitearch
+//
+// <site
+// _dir>/bin                               sitebin, sitescript
+//
+// <site
+// _dir>/man/man1,
+// <site
+// _dir>/man/man3     siteman1dir, siteman3dir
+//
+// <version
+// > is this interpreter's. `site_arch` names the kind of machine
+// the architecture-specific files there are for (the host's, when native
+// extensions are loaded into the host process); empty stands for the
+// interpreter's own architecture name. %Config reports the directories
+// under every key that names one of them, and sitearch and sitelib are in
+//
+// where perl has them: after the PERL5LIB directories and before the
+// standard library. None of them is created. Without a site_dir %Config
+// keeps the values of the build's configuration and
+// has no site
+// directory.
+func PerlNew(libDir string, siteDir string, siteArch string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
+	buf = pbAppendString(buf, 2, siteDir)
+	buf = pbAppendString(buf, 3, siteArch)
 	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
