@@ -53,6 +53,10 @@ const startupGlue = `sub {
         close $fh;
         do $preload;
         die $@ if $@;
+        # The preload belongs to how the interpreter was started, not to
+        # the program: a program that lists what it loaded (a dependency
+        # scanner reading %INC) must not find it.
+        delete $INC{$preload};
     }
     return;
 }`

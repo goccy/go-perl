@@ -51,3 +51,12 @@ print "listed: ", (scalar(grep { $_ eq "cc" } keys %Config) ? "cc among the keys
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// The preload is how the interpreter was started, not something the program
+// loaded: %INC does not list it.
+func TestPreloadLeavesNoTraceInINC(t *testing.T) {
+	got := overlayRun(t, "-e", `print join(",", sort grep { !/^(?:Config|strict|warnings|vars|Config_heavy)\b/ } keys %INC), "|", scalar(grep { /overlay/ } %INC), "\n";`)
+	if want := "|0\n"; got != want {
+		t.Fatalf("%%INC after the preload = %q, want %q", got, want)
+	}
+}
