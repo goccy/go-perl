@@ -335,3 +335,35 @@ report("stdout's number is ", fileno($fh));
 `)
 	wantLines(t, got, "same number", "stdout's number is 1")
 }
+
+// A fork child that is sent SIGKILL at the moment it ends has either ended
+// by itself or died of the signal, and the process goes on: the kill takes
+// effect by setting a flag in the child's memory, which the child gives back
+// when it ends — the flag must not be set in memory that is gone (or that
+// the next program has by then). The child ends by itself in half the
+// rounds and is busy in the other half, so that the kill meets every stage
+// of its end over the rounds.
+func TestKillOfAForkChildThatIsEnding(t *testing.T) {
+	got := runForkScript(t, `
+use POSIX ();
+my %seen;
+for my $round (1 .. 300) {
+    pipe(my $r, my $w) or die "pipe: $!";
+    my $pid = fork // die "fork: $!";
+    if ($pid == 0) {
+        close $r;
+        syswrite($w, "x");
+        POSIX::_exit(0) if $round % 2;
+        1 while 1;
+    }
+    close $w;
+    sysread($r, my $byte, 1);
+    kill(KILL => $pid);
+    waitpid($pid, 0) == $pid or die "waitpid: $!";
+    $seen{($? & 127) == 9 ? "killed" : $? == 0 ? "ended" : "status $?"}++;
+}
+my $other = join(", ", map { "$_ x $seen{$_}" } grep { !/^(killed|ended)$/ } sort keys %seen);
+report("300 children, each killed or ended", ($other ? "; but: $other" : ""), "; the busy ones were killed: ", (($seen{killed} // 0) >= 150 ? "yes" : "no"));
+`)
+	wantLines(t, got, "300 children, each killed or ended; the busy ones were killed: yes")
+}

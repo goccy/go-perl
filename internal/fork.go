@@ -163,6 +163,14 @@ func (c *Perl) signalForkChild(sig int32) error {
 	// and meets its end.
 	c.wasi.PostSignal(sig)
 	base.AccessMemory(c.m.g, func(mem []byte) {
+		// The child may have ended since it was found running above — of
+		// the signal just posted, even — and given its memory back. It is
+		// marked closed before that, and the memory goes under the lock
+		// held here (releaseMapping): a child that is not closed still
+		// has it.
+		if c.closed.Load() {
+			return
+		}
 		binary.LittleEndian.PutUint32(mem[c.intrAddr:], interruptSignal|uint32(sig))
 	})
 	return nil

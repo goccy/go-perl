@@ -678,7 +678,10 @@ func (p *Perl) stderr() io.Writer {
 // only run when the module will never be entered again.
 func (p *Perl) releaseMapping() {
 	if p.mapped != nil {
-		base.UnmapMemory(p.mapped)
+		// Under the lock of base.AccessMemory: another goroutine that is
+		// setting a flag in this memory (a signal for a fork child) is
+		// done first, and one that comes later finds the instance closed.
+		base.AccessMemory(p.m.g, func([]byte) { base.UnmapMemory(p.mapped) })
 		p.mapped = nil
 	}
 	p.image.release()
