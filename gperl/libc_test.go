@@ -9,7 +9,9 @@ import (
 )
 
 // What the platform cannot do fails with an error; nothing reports success
-// for something that did not happen. What it can do, it does.
+// for something that did not happen. What it can do, it does. (What the
+// process does as the host process — FIFOs, owners, sessions, priorities —
+// is in TestProcessIsTheHostProcess and TestProcessGroupsOfForkedProcesses.)
 func TestUnsupportedOperationsFailInsteadOfPretending(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("the superuser may give files away")
@@ -33,11 +35,6 @@ report("chown leaving both alone: ", attempt(chown(-1, -1, $file)));
 report("chown to another user: ", attempt(chown($uid + 1, -1, $file)), "; owner unchanged=", ((stat $file)[4] == $uid ? 1 : 0));
 report("chown of a missing file: ", (chown($uid, $gid, "$dir/missing") ? "done" : ($!{ENOENT} ? "ENOENT" : failure())));
 report("chroot: ", attempt(chroot($dir)));
-report("mkfifo: ", attempt(POSIX::mkfifo("$dir/fifo", 0600)), "; created=", (-e "$dir/fifo" ? 1 : 0));
-report("setsid: ", attempt(POSIX::setsid() != -1));
-report("setpgid: ", attempt(POSIX::setpgid(0, 0)));
-report("setpriority: ", attempt(eval { setpriority(0, 0, 5) }));
-report("nice: ", attempt(defined POSIX::nice(1) ? 1 : 0));
 report("ttyname of a file: ", (defined POSIX::ttyname(fileno(STDIN)) ? "named" : failure()));
 
 # a temporary file is a real file of its own
@@ -66,11 +63,6 @@ report("inet_aton of a number: ", inet_ntoa(inet_aton("10.1.2.3")));
 		"chown to another user: EPERM; owner unchanged=1",
 		"chown of a missing file: ENOENT",
 		"chroot: EPERM",
-		"mkfifo: ENOSYS; created=0",
-		"setsid: ENOSYS",
-		"setpgid: ENOSYS",
-		"setpriority: ENOSYS",
-		"nice: ENOSYS",
 		"ttyname of a file: ENOTTY",
 		"anonymous temporary file: fd above stdio=1 reads back=kept",
 		"cuserid: "+me.Username,

@@ -11,6 +11,7 @@ package perl
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
@@ -49,6 +50,30 @@ func (d devNullFS) Flock(f File, lock goperlfs.FileLock, wait bool) error {
 		return nil
 	}
 	return d.FS.Flock(f, lock, wait)
+}
+
+// Mkfifo and Chown pass what the host filesystem can do beyond FS — make a
+// FIFO, change a file's owner — on to the wrapped backend. A backend
+// without them (an in-memory one) reports errors.ErrUnsupported, which the
+// guest sees as a filesystem that has no FIFOs and keeps no owners.
+func (d devNullFS) Mkfifo(name string, perm iofs.FileMode) error {
+	maker, can := d.FS.(interface {
+		Mkfifo(name string, perm iofs.FileMode) error
+	})
+	if !can {
+		return errors.ErrUnsupported
+	}
+	return maker.Mkfifo(name, perm)
+}
+
+func (d devNullFS) Chown(name string, uid, gid int, follow bool) error {
+	owner, can := d.FS.(interface {
+		Chown(name string, uid, gid int, follow bool) error
+	})
+	if !can {
+		return errors.ErrUnsupported
+	}
+	return owner.Chown(name, uid, gid, follow)
 }
 
 const devNullName = "dev/null"

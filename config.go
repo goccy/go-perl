@@ -90,7 +90,16 @@ type Config struct {
 	//     and otherwise does to the host process what that signal does;
 	//   - a signal the program dies of ends the run with a *SignalError, for
 	//     the embedder to end the host process the same way;
-	//   - kill reaches the host's processes;
+	//   - kill reaches the host's processes, and a command the program
+	//     starts is known to it by its own pid;
+	//   - the process group and session of the program are the host
+	//     process's (getpgrp, setpgrp, POSIX::setsid), and so are its
+	//     scheduling priority, its CPU times and the name of the system it
+	//     runs on (POSIX::uname, Sys::Hostname);
+	//   - setting the user or group ids is the host's to allow;
+	//   - the host process follows the program's working directory and
+	//     environment (chdir, %ENV), so that native code running for the
+	//     program finds them;
 	//   - the program may listen for network connections (bind, listen);
 	//   - local time is the host's when the program names no time zone (the
 	//     TZ variable is not set).
@@ -100,8 +109,11 @@ type Config struct {
 	// reaches only the processes the program started, binding a socket
 	// to a local address fails with EACCES, and local time is UTC unless
 	// the program sets TZ. A pseudo-process forked from the program has the same user
-	// and group but is never the host process: its pid is its own, and a
-	// signal ends only that pseudo-process.
+	// and group but is never the host process: its pid is its own, a
+	// signal ends only that pseudo-process, it may form a process group or
+	// a session of its own, and the host process does not follow its
+	// working directory or environment — native code it calls sees the
+	// program's.
 	HostProcess bool
 	// Syslog lets the program log to the host's system logger. The
 	// interpreter has no log daemon of its own: when Syslog is set, what the
