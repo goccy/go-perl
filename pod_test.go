@@ -24,3 +24,19 @@ func TestStandardLibraryShipsItsPodFiles(t *testing.T) {
 	r.want(t, 0, "Config.pod beside Config.pm: found\nit documents Config: yes\n"+
 		"CORE.pod: found\nperlfaq.pod: found\nperlfunc.pod: missing\npod/perlfunc.pod: missing\n")
 }
+
+// The one manual page the library has is perldiag, where the diagnostics
+// pragma reads the explanations of perl's messages.
+func TestStandardLibraryShipsPerldiag(t *testing.T) {
+	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+		`use Config;`,
+		`my ($lib) = $INC{"Config.pm"} =~ m{^(.*)/Config\.pm\z}s;`,
+		`my $page = "$lib/pod/perldiag.pod";`,
+		`print "pod/perldiag.pod: ", (-f $page ? "found" : "missing"), "\n";`,
+		`open(my $pod, "<", $page) or die "open: $!";`,
+		`print "it explains a message: ", (grep(/^=item Can't locate %s/, <$pod>) ? "yes" : "no"), "\n";`,
+		`opendir(my $dir, "$lib/pod") or die "opendir: $!";`,
+		`print "pages: ", join(",", sort grep { !/^\./ } readdir $dir), "\n";`,
+	)}, "")
+	r.want(t, 0, "pod/perldiag.pod: found\nit explains a message: yes\npages: perldiag.pod\n")
+}
