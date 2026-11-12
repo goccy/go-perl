@@ -69,3 +69,72 @@ report("root: probe after its end=", kill(0, $grandchild), " ", ($!{ESRCH} ? "ES
 		"second child: kill sibling=1",
 	)
 }
+
+// A signal that a fork child sends to the program is pending for the program
+// when the child's kill returns: whatever the child does next — here, a
+// byte through a pipe — the program sees after its handler has run.
+func TestSignalFromAForkChildIsPendingWhenItsKillReturns(t *testing.T) {
+	got := runForkScript(t, `
+my $parent = $$;
+my $rounds = 400;
+my $handled = 0;
+$SIG{USR1} = sub { $handled++ };
+pipe(my $note_r, my $note_w) or die "pipe: $!";
+pipe(my $ack_r, my $ack_w) or die "pipe: $!";
+my $pid = fork // die "fork: $!";
+if ($pid == 0) {
+    close $note_r; close $ack_w;
+    for my $round (1 .. $rounds) {
+        kill(USR1 => $parent) == 1 or die "kill: $!";
+        syswrite($note_w, "n") == 1 or die "note: $!";
+        sysread($ack_r, my $ack, 1) == 1 or die "ack: $!";
+    }
+    exit 0;
+}
+close $note_w; close $ack_r;
+my $late = 0;
+for my $round (1 .. $rounds) {
+    my $read;
+    do { $read = sysread($note_r, my $note, 1) } until defined $read;   # the signal interrupts the read
+    $late++ if $handled < $round;
+    syswrite($ack_w, "a") // die "ack: $!";
+}
+waitpid($pid, 0);
+report("child exit=", $? >> 8, "; signals handled: $handled of $rounds; handled after the child had gone on: $late");
+`)
+	wantLines(t, got, "child exit=0; signals handled: 400 of 400; handled after the child had gone on: 0")
+}
+
+// A signal that arrives while the program is between two calls interrupts
+// the call that has to wait, not one that is carried out at once: writing
+// to a pipe with room and reading what is in it never fail with EINTR,
+// however many signals come in.
+func TestSignalsDoNotInterruptCallsThatNeedNotWait(t *testing.T) {
+	got := runForkScript(t, `
+my $parent = $$;
+my $handled = 0;
+$SIG{USR1} = sub { $handled++ };
+pipe(my $started_r, my $started_w) or die "pipe: $!";
+my $sender = fork // die "fork: $!";
+if ($sender == 0) {
+    close $started_r;
+    kill(USR1 => $parent);
+    syswrite($started_w, "s");
+    kill(USR1 => $parent) while 1;
+}
+close $started_w;
+my $started;
+do { $started = sysread($started_r, my $byte, 1) } until defined $started;
+pipe(my $r, my $w) or die "pipe: $!";
+my ($writes, $reads) = (0, 0);
+my %failed;
+for my $round (1 .. 20000) {
+    if (defined syswrite($w, "x")) { $writes++ } else { $failed{"write: $!"}++; next }
+    if (defined sysread($r, my $byte, 1)) { $reads++ } else { $failed{"read: $!"}++ }
+}
+kill(KILL => $sender);
+waitpid($sender, 0);
+report("signals came in: ", ($handled > 0 ? "yes" : "no"), "; writes: $writes; reads: $reads; failed: ", join(", ", map { "$_ x $failed{$_}" } sort keys %failed));
+`)
+	wantLines(t, got, "signals came in: yes; writes: 20000; reads: 20000; failed: ")
+}
