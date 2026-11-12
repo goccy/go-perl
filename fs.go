@@ -143,7 +143,21 @@ func (fi nullFileInfo) Size() int64         { return 0 }
 func (fi nullFileInfo) Mode() iofs.FileMode { return fi.mode }
 func (fi nullFileInfo) ModTime() time.Time  { return time.Time{} }
 func (fi nullFileInfo) IsDir() bool         { return fi.mode.IsDir() }
-func (fi nullFileInfo) Sys() any            { return nil }
+
+// Sys describes the null device as the host does where the host has one:
+// its device numbers and owner are what a program reads to tell a special
+// file from an ordinary one (the st_rdev of stat). The synthetic directory
+// above it has nothing of the host's.
+func (fi nullFileInfo) Sys() any {
+	if fi.mode&iofs.ModeCharDevice == 0 {
+		return nil
+	}
+	host, err := os.Stat(os.DevNull)
+	if err != nil || host.Mode()&iofs.ModeCharDevice == 0 {
+		return nil
+	}
+	return host.Sys()
+}
 
 // stdlibEntries caches the DECOMPRESSED embedded stdlib once per process:
 // building a MemFS per instance then only pays for copying bytes in

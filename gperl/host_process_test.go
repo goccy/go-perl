@@ -206,10 +206,13 @@ my @by_handle = stat($in);
 report("by handle: the same=", ("@st[6,11,12]" eq "@by_handle[6,11,12]" ? 1 : 0));
 my @zero = stat("/dev/zero");
 report("a device: is one=", (-c "/dev/zero" ? 1 : 0), " stands for a device=", ($zero[6] ? 1 : 0));
+my @null = stat("/dev/null");
+report("the null device stands for a device=", ($null[6] ? 1 : 0));
 `)
 	wantLines(t, got,
 		"a file of 10000 bytes: block size named, blocks hold it, device 0",
 		"by handle: the same=1",
 		"a device: is one=1 stands for a device=1",
+		"the null device stands for a device=1",
 	)
 }
