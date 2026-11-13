@@ -165,6 +165,9 @@ type cFrame struct {
 	// side (a destructor, a magic hook).
 	nativeCall int32
 	_          int32
+	// entryJB is the SDK's: the catch point of its XSUB entry while no
+	// XSUB has taken that activation over.
+	entryJB uintptr
 
 	// Go-only:
 	p *internal.Perl
@@ -315,6 +318,7 @@ type state struct {
 	ppInvoke     uintptr // __goperl_pp_invoke
 	dtorInvoke   uintptr // __goperl_dtor_invoke
 	svtInvoke    uintptr // __goperl_svt_invoke
+	xsInvoke     uintptr // __goperl_xs_invoke
 	xsEpilogue   uintptr // __goperl_xs_epilogue
 	perlioInvoke uintptr // __goperl_perlio_invoke
 	hostInvoke   uintptr // __goperl_host_invoke
@@ -368,6 +372,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		ppInvoke:      s.ppInvoke,
 		dtorInvoke:    s.dtorInvoke,
 		svtInvoke:     s.svtInvoke,
+		xsInvoke:      s.xsInvoke,
 		xsEpilogue:    s.xsEpilogue,
 		perlioInvoke:  s.perlioInvoke,
 		cloneHookSet:  true,
@@ -599,6 +604,11 @@ func (s *state) open(path string) (lib uintptr, err error) {
 		s.svtInvoke = fn
 		s.mu.Unlock()
 	}
+	if fn, err := purego.Dlsym(lib, "__goperl_xs_invoke"); err == nil {
+		s.mu.Lock()
+		s.xsInvoke = fn
+		s.mu.Unlock()
+	}
 	if fn, err := purego.Dlsym(lib, "__goperl_xs_epilogue"); err == nil {
 		s.mu.Lock()
 		s.xsEpilogue = fn
@@ -775,12 +785,19 @@ func (s *state) dispatch(req []byte) []byte {
 	// the two purego calls.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	purego.SyscallN(fn, fp, uintptr(cvTok))
+	s.mu.Lock()
+	inv, epi := s.xsInvoke, s.xsEpilogue
+	s.mu.Unlock()
+	if inv != 0 {
+		// The SDK's entry makes the frame current before the XSUB's first
+		// statement. A module built before the SDK had the entry is
+		// called directly: its XSUBs open their activation themselves.
+		purego.SyscallN(inv, fp, fn, uintptr(cvTok))
+	} else {
+		purego.SyscallN(fn, fp, uintptr(cvTok))
+	}
 	// Close any activation levels the XSUB left open (xsubpp PPCODE exits
 	// with a bare return, skipping XSRETURN's leave).
-	s.mu.Lock()
-	epi := s.xsEpilogue
-	s.mu.Unlock()
 	if epi != 0 {
 		purego.SyscallN(epi, fp)
 	}

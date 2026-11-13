@@ -31,7 +31,9 @@ func buildPerlAPI(t testing.TB) string {
 			args = append([]string{"-arch", "x86_64"}, args...)
 		}
 	} else {
-		args = append([]string{"-Wl,-z,defs"}, args...)
+		// perl's ccflags on Linux carry -D_GNU_SOURCE (gperl's do too): a
+		// source file may include a system header before perl.h.
+		args = append([]string{"-Wl,-z,defs", "-D_GNU_SOURCE"}, args...)
 	}
 	cmd := exec.Command(cc, args...)
 	out, err := cmd.CombinedOutput()

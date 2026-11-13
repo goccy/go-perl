@@ -268,6 +268,23 @@ func TestNativeStackInAPlainFunction(t *testing.T) {
 	})
 }
 
+// An XSUB may read its arguments with dMARK and dSP and never say dXSARGS
+// (Params::Classify's do): the frame is current, and has a catch point for
+// croak, before the function's first statement.
+func TestNativeXSUBWithoutDXSARGS(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"one argument", `PerlAPI::sum_without_dxsargs(5)`, "105"},
+		{"two arguments", `PerlAPI::sum_without_dxsargs(5, 6)`, "111"},
+		{"it croaks", `eval { PerlAPI::sum_without_dxsargs() }; $@ =~ /^Usage: PerlAPI::sum_without_dxsargs\(a, \[b\]\)/ ? "usage" : "other: $@"`, "usage"},
+		{"and is called again", `PerlAPI::sum_without_dxsargs(1)`, "101"},
+		{"the caller's stack is intact", `my @r = (1, PerlAPI::sum_without_dxsargs(2, 3), 9); "@r"`, "1 105 9"},
+		{"from a callback of another XSUB", `PerlAPI::call_on_new_stack(sub { PerlAPI::sum_without_dxsargs($_[0]) }, 21)`, "121"},
+		{"a croak in a callback leaves the outer XSUB running", `PerlAPI::call_on_new_stack(sub { eval { PerlAPI::sum_without_dxsargs() }; $@ ? "survived" : "no error" }, 1)`, "survived"},
+	})
+}
+
 // A native module registered with an instance defines nothing in its
 // package until it is loaded, like an extension linked into the
 // interpreter; loading it installs its boot function then.

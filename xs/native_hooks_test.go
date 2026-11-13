@@ -29,6 +29,21 @@ func TestNativeOpBuildHooksAndPPFunctions(t *testing.T) {
 	})
 }
 
+// The mark pointer a pp function finds is its own frame's from its first
+// statement, whatever native call went before: the frames of native calls
+// are short-lived, a new one may lie where an earlier one was, and a
+// pointer left by that one would be taken for the new frame's (the mark of
+// a join around the module's addition was lost that way, rarely). The
+// fixture's pp function counts the entries at which the pointer named
+// other marks.
+func TestNativePPFunctionMarksAfterEarlierCalls(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a join around an addition of the module's", `PerlAPI::hooks("add", 1); my $f = eval q{ sub { join "-", "a", $_[0] + $_[1], "b" } }; PerlAPI::hooks("add", 0); my %got; for (1 .. 100) { PerlAPI::big(); $got{$f->(1, 2)}++ } join ",", (map { "$_=$got{$_}" } sort keys %got), PerlAPI::hooks("add with foreign marks", 0)`, "a-1003-b=100,0"},
+	})
+}
+
 // A module puts a function of its own into PL_rpeepp and is handed every
 // sub the compiler finishes, in execution order; the op it sees there is
 // the op it sees when it is handed the same sub again.

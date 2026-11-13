@@ -2438,7 +2438,16 @@ XS(XS_PerlAPI_glob_slots) {
  * operands. */
 static Perl_check_t PerlAPI_add_hook_before;
 static IV PerlAPI_adds_seen;
+/* How often the pp function below found the mark pointer of the SDK naming
+ * the marks of another frame when it was entered. (This looks into the SDK:
+ * PL_markstack_ptr itself brings the pointer in line when it is read. A
+ * pointer left by a frame that is gone is taken for this frame's when this
+ * frame lies where that one was.) */
+static IV PerlAPI_adds_with_foreign_marks;
 static OP *PerlAPI_pp_add_more(pTHX) {
+    if (goperl_markstack_owner_v != aTHX ||
+        goperl_markstack_ptr_v != aTHX->marks + aTHX->markidx)
+        PerlAPI_adds_with_foreign_marks++;
     dSP;
     SV *right = POPs;
     SV *left = TOPs;
@@ -2511,6 +2520,8 @@ XS(XS_PerlAPI_hooks) {
                 PerlAPI_add_hook_before = NULL;
             }
             counter = PerlAPI_adds_seen;
+        } else if (strEQ(what, "add with foreign marks")) {
+            counter = PerlAPI_adds_with_foreign_marks;
         } else if (strEQ(what, "join")) {
             if (on) {
                 PerlAPI_join_hook_before = PL_check[OP_JOIN];
@@ -3184,6 +3195,23 @@ XS(XS_PerlAPI_stack_in_a_plain_function) {
     }
 }
 
+/* An XSUB that reads the stack with dMARK and dSP and never says dXSARGS,
+ * as hand-written XSUBs of one or two arguments do (Params::Classify). The
+ * number its sub carries in CvXSUBANY is added to the sum. */
+static void XS_PerlAPI_sum_without_dxsargs(pTHX_ CV *cv) {
+    I32 base = CvXSUBANY(cv).any_i32;
+    dMARK; dSP;
+    IV sum = base;
+    switch (SP - MARK) {
+        case 2: sum += SvIV(SP[-1]); /* FALLTHROUGH */
+        case 1: sum += SvIV(SP[0]); break;
+        default: croak_xs_usage(cv, "a, [b]");
+    }
+    SP = MARK;
+    XPUSHs(sv_2mortal(newSViv(sum)));
+    PUTBACK;
+}
+
 /* One look at a value that must not run its get magic: what a module does
  * after it has called SvGETMAGIC itself. "get" is the one that does run
  * it. */
@@ -3495,6 +3523,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::rename_glob", XS_PerlAPI_rename_glob);
     newXS_deffile("PerlAPI::stack_in_a_plain_function", XS_PerlAPI_stack_in_a_plain_function);
     newXS_deffile("PerlAPI::look_without_magic", XS_PerlAPI_look_without_magic);
+    {
+        CV *sum = newXS_deffile("PerlAPI::sum_without_dxsargs", XS_PerlAPI_sum_without_dxsargs);
+        CvXSUBANY(sum).any_i32 = 100;
+    }
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
     newXS_deffile("PerlAPI::fd_of", XS_PerlAPI_fd_of);

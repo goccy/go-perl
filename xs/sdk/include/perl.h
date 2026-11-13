@@ -684,6 +684,10 @@ struct goperl_frame {
                           * (an XSUB, a pp function, a hook), not of a
                           * function the loader runs on the side */
     int32_t pad5;
+    void *entry_jb; /* the catch point of the loader's entry while no XSUB
+                     * has taken that activation over (dXSARGS); the frame
+                     * of a module built before the entry existed ends at
+                     * pad5 for that module, which never looks here */
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) --------- */
@@ -3576,6 +3580,23 @@ static void goperl_marks_publish(goperl_frame_t *f) {
     goperl_markstack_owner_v = f;
     goperl_markstack_ptr_v = f->marks + f->markidx;
 }
+/* Makes a frame the current one. The mark pointer is the current frame's
+ * from then on: what the frame that ran before left there is not this
+ * frame's, and the owner's address does not tell the two apart, because
+ * frames are short-lived and a new one may lie where an earlier one was. A
+ * pointer the frame that was current had moved is taken into its marks
+ * first. An activation that opens on the frame that is current already (an
+ * XSUB called by C pointer from another) keeps the pointer: its caller may
+ * have moved it for it. */
+static void goperl_frame_enter(goperl_frame_t *f) {
+    goperl_frame_t *prev = goperl_cur_frame_v;
+    if (prev == f) return;
+    if (prev && goperl_markstack_owner_v == prev && goperl_markstack_ptr_v &&
+        !prev->st_stale)
+        prev->markidx = (int32_t)(goperl_markstack_ptr_v - prev->marks);
+    goperl_cur_frame_v = f;
+    goperl_marks_publish(f);
+}
 static int32_t **goperl_markstack_ref(goperl_frame_t *f) {
     goperl_marks_publish(f);
     return &goperl_markstack_ptr_v;
@@ -4060,6 +4081,8 @@ static void goperl_xs_leave(goperl_frame_t *f) {
      * entry protocol parked f->prev_frame's PRE-entry value there, and the
      * unwind below writes it back (for a fresh frame that value is 0) */
     goperl_frame_t *leave_prev = (goperl_frame_t *)f->prev_frame;
+    /* the entry's activation ends here if no XSUB took it over */
+    if (f->entry_jb == f->jb) f->entry_jb = 0;
     goperl_errno_leave(f); /* what the XSUB left in errno */
     goperl_flush(f); /* pending mirror writes must land before teardown */
     /* Host-location saves (SAVEVPTR/save_hptr) made at the XSUB's top-level
@@ -4124,6 +4147,45 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
         default: goperl_cur_frame_v)
 #endif
 
+/* Opens an activation on the frame: the frame becomes current, what the
+ * previous activation had in it is parked on the host save-stack, and the
+ * catch point of croak is the buffer declared here. */
+#define GOPERL_XS_OPEN(frame, prev_cur)                    \
+    {                                                      \
+        errno = GOPERL_ERRNO_UNSET;                        \
+        int32_t goperl_entry_base = goperl_hostsave_n;     \
+        goperl_hostsave_i32((frame), &(frame)->hostsave_base); \
+        goperl_hostsave_ptr((frame), (void **)&(frame)->prev_frame); \
+        goperl_hostsave_ptr((frame), (void **)&(frame)->jb); \
+        (frame)->prev_frame = ((frame) == (prev_cur))      \
+                                  ? (void *)(frame)        \
+                                  : (void *)(prev_cur);    \
+        goperl_xs_depth_v++;                               \
+        goperl_opreg_enter();                              \
+        (frame)->native_call = 1;                          \
+        (frame)->hostsave_base = goperl_entry_base;        \
+        (frame)->jb = (void *)&_gof_jb;                    \
+        if (setjmp(_gof_jb)) {                             \
+            /* xs_leave unwinds the host saves itself, after reading \
+             * the frame to return to: that link is one of them */  \
+            goperl_xs_leave(frame);                        \
+            /* Real XSUBs are void; the sole non-void dXSARGS user \
+             * (DBI's bounce) is reached nested, where a croak      \
+             * unwinds to the OUTER activation's setjmp instead. */ \
+            _Pragma("GCC diagnostic push")                 \
+            _Pragma("GCC diagnostic ignored \"-Wpragmas\"") \
+            _Pragma("GCC diagnostic ignored \"-Wreturn-mismatch\"") \
+            return;                                        \
+            _Pragma("GCC diagnostic pop")                  \
+        }                                                  \
+    }
+
+/* An XSUB the loader called through its entry (__goperl_xs_invoke) takes
+ * the activation the entry opened: the frame is current and croak has its
+ * catch point there. Every other dXSARGS opens an activation of its own:
+ * an XSUB called by C pointer from another on the same frame (the frame's
+ * catch point is then no longer the entry's), a module's own function, an
+ * XSUB of a module the loader calls directly. */
 #define dXSARGS                                            \
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave))); \
     {                                                      \
@@ -4131,36 +4193,13 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
         /* current-frame FIRST: the shared-state macros below resolve  \
          * through it, and on a fresh thread the slot starts NULL */   \
         goperl_frame_t *goperl_prev_cur = goperl_cur_frame_v;          \
-        goperl_cur_frame_v = goperl_frame_here;            \
-        errno = GOPERL_ERRNO_UNSET;                        \
-        int32_t goperl_entry_base = goperl_hostsave_n;     \
-        goperl_hostsave_i32(goperl_frame_here,              \
-                            &goperl_frame_here->hostsave_base); \
-        goperl_hostsave_ptr(goperl_frame_here,              \
-                            (void **)&goperl_frame_here->prev_frame); \
-        goperl_hostsave_ptr(goperl_frame_here,              \
-                            (void **)&goperl_frame_here->jb); \
-        goperl_frame_here->prev_frame =                     \
-            (goperl_frame_here == goperl_prev_cur)          \
-                ? (void *)goperl_frame_here                 \
-                : (void *)goperl_prev_cur;                 \
-        goperl_xs_depth_v++;                               \
-        goperl_opreg_enter();                              \
-        goperl_frame_here->native_call = 1;                \
-        goperl_frame_here->hostsave_base = goperl_entry_base; \
-        goperl_frame_here->jb = (void *)&_gof_jb;           \
-        if (setjmp(_gof_jb)) {                             \
-            /* xs_leave unwinds the host saves itself, after reading \
-             * the frame to return to: that link is one of them */  \
-            goperl_xs_leave(goperl_frame_here);             \
-            /* Real XSUBs are void; the sole non-void dXSARGS user \
-             * (DBI's bounce) is reached nested, where a croak      \
-             * unwinds to the OUTER activation's setjmp instead. */ \
-            _Pragma("GCC diagnostic push")                 \
-            _Pragma("GCC diagnostic ignored \"-Wreturn-mismatch\"") \
-            return;                                        \
-            _Pragma("GCC diagnostic pop")                  \
-        }                                                  \
+        goperl_frame_enter(goperl_frame_here);             \
+        if (goperl_frame_here == goperl_prev_cur &&        \
+            goperl_frame_here->entry_jb &&                 \
+            goperl_frame_here->entry_jb == goperl_frame_here->jb) \
+            goperl_frame_here->entry_jb = 0;               \
+        else                                               \
+            GOPERL_XS_OPEN(goperl_frame_here, goperl_prev_cur) \
     }                                                      \
     dSP;                                                   \
     dAXMARK;                                               \
@@ -5166,7 +5205,7 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
     f->jb = (void *)&jb;
     /* current frame before the table read: the destructor table is
      * per-instance state reached through it */
-    goperl_cur_frame_v = f;
+    goperl_frame_enter(f);
     goperl_dtor_t d = goperl_dtor_v[id1 - 1];
     goperl_dtor_v[id1 - 1].used = 0;
     if (!d.used || !d.fn) {
@@ -5188,6 +5227,22 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
         d.fn(f, d.arg);
     f->jb = prev_jb;
     goperl_cur_frame_v = prev_frame;
+}
+
+/* Loader entry: call an XSUB. The frame is current and has a catch point
+ * before the function's first statement, so an XSUB written without dXSARGS
+ * (Params::Classify's read the stack with dMARK and dSP alone) reads the
+ * stack, reaches the interpreter and croaks like any other. The dXSARGS of
+ * an XSUB that has one takes this activation over. */
+__attribute__((weak, visibility("default"), used)) void
+__goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
+    void (*fn)(pTHX_ CV *) = (void (*)(pTHX_ CV *))fnv;
+    jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave)));
+    goperl_frame_t *prev_cur = goperl_cur_frame_v;
+    goperl_frame_enter(f);
+    GOPERL_XS_OPEN(f, prev_cur)
+    f->entry_jb = (void *)&_gof_jb;
+    fn(f, (CV *)(uintptr_t)cv);
 }
 
 /* Loader entry: close any activation levels an XSUB left open. xsubpp's
@@ -5220,7 +5275,7 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     void *prev_jb = f->jb;
     goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
-    goperl_cur_frame_v = f;
+    goperl_frame_enter(f);
     if (setjmp(jb)) {
         fprintf(stderr, "goperl native XS: croak in magic hook: %s\n", f->err);
         f->failed = 0;
@@ -5359,7 +5414,7 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     jmp_buf jb;
     f->jb = (void *)&jb;
     f->prev_frame = (void *)goperl_cur_frame_v;
-    goperl_cur_frame_v = f;
+    goperl_frame_enter(f);
     goperl_xs_depth_v++;
     goperl_opreg_enter();
     f->native_call = 1;
@@ -8432,7 +8487,7 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
     goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
     f->prev_frame = (void *)prev_frame;
-    goperl_cur_frame_v = f;
+    goperl_frame_enter(f);
     goperl_xs_depth_v++;
     f->hostsave_base = goperl_hostsave_n;
     goperl_opreg_enter();
@@ -8699,7 +8754,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
     int32_t rlen = 0;
     f->jb = (void *)&jb;
     f->prev_frame = (void *)goperl_cur_frame_v;
-    goperl_cur_frame_v = f;
+    goperl_frame_enter(f);
     goperl_xs_depth_v++;
     goperl_opreg_enter();
     f->native_call = 1;
