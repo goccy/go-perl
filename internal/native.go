@@ -48,6 +48,11 @@ const magicLocalMethodID = -8
 // (perl.cc GOPERL_PERLIO_METHOD_ID).
 const perlioMethodID = -6
 
+// hostCallMethodID is the reserved callback method id of the calls of
+// native code that share one channel (op checkers, peephole hooks,
+// functions registered with call_atexit).
+const hostCallMethodID = -9
+
 // keywordMethodID is the reserved callback method id the guest keyword and
 // infix plugin wrappers dispatch on while compiling (perl.cc
 // GOPERL_KEYWORD_METHOD_ID).
@@ -110,9 +115,9 @@ func (p *Perl) SetMagicLocalHandler(fn func(id uint32, sv uint64)) error {
 
 // SetPPHookHandler installs the dispatcher for pp hooks: op types a native
 // module claimed by writing the SDK's PL_ppaddr proxy. req is the guest's
-// raw payload ([u32 op][u32 op_type][u32 n][u32 stack-top tokens]) and the
-// returned bytes are the raw response ([1][u32 next_op] on success,
-// [0]+message to croak in the interpreter).
+// raw payload ([u32 op][u32 op_type] and the perl stack) and the returned
+// bytes are the raw response ([1][u32 next_op] and what the function made
+// of the stack on success, [0]+message to croak in the interpreter).
 func (p *Perl) SetPPHookHandler(fn func(req []byte) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
@@ -150,6 +155,20 @@ func (p *Perl) SetKeywordHandler(fn func(req []byte) []byte) error {
 	}
 	p.hookMu.Lock()
 	p.keywordHook = fn
+	p.hookMu.Unlock()
+	return nil
+}
+
+// SetHostCallHandler installs the dispatcher of the host-call channel: the
+// calls of native code whose request starts with a kind ([u32 kind] and the
+// kind's words). The returned bytes are the raw response ([1] and the
+// result on success, [0]+message to croak in the interpreter).
+func (p *Perl) SetHostCallHandler(fn func(req []byte) []byte) error {
+	if err := p.EnsureDispatcher(); err != nil {
+		return err
+	}
+	p.hookMu.Lock()
+	p.hostCall = fn
 	p.hookMu.Unlock()
 	return nil
 }
@@ -345,6 +364,15 @@ func (d dispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
 			return append([]byte{0}, "no PerlIO layer handler installed"...), nil
 		}
 		return hook(req), nil
+	}
+	if methodID == hostCallMethodID {
+		d.p.hookMu.RLock()
+		call := d.p.hostCall
+		d.p.hookMu.RUnlock()
+		if call == nil {
+			return append([]byte{0}, "no host call handler installed"...), nil
+		}
+		return call(req), nil
 	}
 	if methodID == destructorMethodID {
 		d.p.hookMu.RLock()

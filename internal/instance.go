@@ -156,6 +156,9 @@ type Perl struct {
 	// keywordHook handles keyword/infix plugin forwarding while the guest
 	// parser compiles (reserved callback method id -7).
 	keywordHook func(req []byte) []byte
+	// hostCall handles the calls of native code that share one channel
+	// (reserved callback method id -9).
+	hostCall func(req []byte) []byte
 
 	// closed flips when Close runs; every entry point checks it so a
 	// straggler — including a handle release racing a Close — errors out

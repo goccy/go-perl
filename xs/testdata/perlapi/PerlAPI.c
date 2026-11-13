@@ -1,5 +1,6 @@
 /* Exercises the perl API surface of the SDK (goperl_perlapi.h) the way XS
  * distributions use it. Written directly in the shape xsubpp generates. */
+#include <time.h>
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -2009,6 +2010,497 @@ XS(XS_PerlAPI_glob_slots) {
     }
 }
 
+/* An op checker for additions, installed with wrap_op_checker and taken
+ * out by putting back the checker it found. It calls that checker, counts
+ * the ops it sees, and gives each addition a pp function of this module:
+ * the sum and a thousand, which it leaves on the stack in place of the two
+ * operands. */
+static Perl_check_t PerlAPI_add_hook_before;
+static IV PerlAPI_adds_seen;
+static OP *PerlAPI_pp_add_more(pTHX) {
+    dSP;
+    SV *right = POPs;
+    SV *left = TOPs;
+    SETs(sv_2mortal(newSViv(SvIV(left) + SvIV(right) + 1000)));
+    RETURN;
+}
+static OP *PerlAPI_on_new_add(pTHX_ OP *o) {
+    o = PerlAPI_add_hook_before(aTHX_ o);
+    PerlAPI_adds_seen++;
+    /* two operands that are not constants: the op is still an addition,
+     * and its operands are below it */
+    if (o->op_type == OP_ADD && (o->op_flags & OPf_KIDS) &&
+        cBINOPo->op_first && OpSIBLING(cBINOPo->op_first) == cBINOPo->op_last &&
+        o->op_ppaddr == PL_ppaddr[OP_ADD])
+        o->op_ppaddr = PerlAPI_pp_add_more;
+    return o;
+}
+
+/* An op checker for join that is assigned straight into PL_check. Its pp
+ * function looks at the list through the mark, replaces the separator,
+ * and runs the interpreter's join on what it left; how many values it saw
+ * is kept for the test. */
+static Perl_check_t PerlAPI_join_hook_before;
+static IV PerlAPI_join_values;
+static OP *PerlAPI_pp_join_plus(pTHX) {
+    dSP;
+    SV **mark = PL_stack_base + TOPMARK;
+    PerlAPI_join_values = (IV)(SP - mark) - 1;
+    mark[1] = sv_2mortal(newSVpvs("+"));
+    return PL_ppaddr[OP_JOIN](aTHX);
+}
+static OP *PerlAPI_on_new_join(pTHX_ OP *o) {
+    o = PerlAPI_join_hook_before(aTHX_ o);
+    if (o->op_type == OP_JOIN) o->op_ppaddr = PerlAPI_pp_join_plus;
+    return o;
+}
+
+/* A peephole hook: it runs the optimizer it replaced, then follows the
+ * execution order of what it was handed and remembers every join it has
+ * not seen before. */
+static peep_t PerlAPI_rpeep_before;
+static OP *PerlAPI_joins_seen[64];
+static IV PerlAPI_njoins_seen;
+static void PerlAPI_rpeep(pTHX_ OP *o) {
+    IV steps = 0;
+    PerlAPI_rpeep_before(aTHX_ o);
+    for (; o && steps < 100000; o = o->op_next, steps++) {
+        IV i;
+        if (o->op_type != OP_JOIN) continue;
+        for (i = 0; i < PerlAPI_njoins_seen; i++)
+            if (PerlAPI_joins_seen[i] == o) break;
+        if (i == PerlAPI_njoins_seen && i < 64) PerlAPI_joins_seen[PerlAPI_njoins_seen++] = o;
+    }
+}
+
+/* hooks(what, on): installs or removes one of the hooks above and returns
+ * its counter. */
+XS(XS_PerlAPI_hooks) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "what, on");
+    {
+        const char *what = SvPV_nolen(ST(0));
+        const int on = SvTRUE(ST(1));
+        IV counter = 0;
+        if (strEQ(what, "add")) {
+            if (on) {
+                wrap_op_checker(OP_ADD, PerlAPI_on_new_add, &PerlAPI_add_hook_before);
+            } else if (PerlAPI_add_hook_before) {
+                PL_check[OP_ADD] = PerlAPI_add_hook_before;
+                PerlAPI_add_hook_before = NULL;
+            }
+            counter = PerlAPI_adds_seen;
+        } else if (strEQ(what, "join")) {
+            if (on) {
+                PerlAPI_join_hook_before = PL_check[OP_JOIN];
+                PL_check[OP_JOIN] = PerlAPI_on_new_join;
+            } else if (PerlAPI_join_hook_before) {
+                PL_check[OP_JOIN] = PerlAPI_join_hook_before;
+                PerlAPI_join_hook_before = NULL;
+            }
+            counter = PerlAPI_join_values;
+        } else if (strEQ(what, "peep")) {
+            if (on) {
+                PerlAPI_njoins_seen = 0;
+                PerlAPI_rpeep_before = PL_rpeepp;
+                PL_rpeepp = PerlAPI_rpeep;
+            } else if (PerlAPI_rpeep_before) {
+                PL_rpeepp = PerlAPI_rpeep_before;
+                PerlAPI_rpeep_before = NULL;
+            }
+            counter = PerlAPI_njoins_seen;
+        } else {
+            croak("unknown hook %s", what);
+        }
+        ST(0) = sv_2mortal(newSViv(counter));
+        XSRETURN(1);
+    }
+}
+
+/* A function for call_atexit: it writes a line to the file it was given
+ * the name of, when the interpreter is destroyed. */
+static void PerlAPI_write_at_exit(pTHX_ void *arg) {
+    char *path = (char *)arg;
+    FILE *out = fopen(path, "w");
+    if (out) {
+        fputs("the interpreter is gone\n", out);
+        fclose(out);
+    }
+    free(path);
+}
+XS(XS_PerlAPI_at_exit_write) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "path");
+    call_atexit(PerlAPI_write_at_exit, strdup(SvPV_nolen(ST(0))));
+    XSRETURN_EMPTY;
+}
+
+/* rx_info(qr, text): the pattern of a compiled regexp, whether it folds
+ * case, and where it and its first group match in the text (through
+ * pregexec on the text's own buffer and the offsets of the regexp). */
+XS(XS_PerlAPI_rx_info) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "qr, text");
+    {
+        REGEXP *rx = SvRX(ST(0));
+        SV *text = ST(1);
+        STRLEN len;
+        char *p = SvPV(text, len);
+        SV *out;
+        if (!rx) croak("not a regexp");
+        out = newSVpvn(RX_PRECOMP(rx), RX_PRELEN(rx));
+        sv_catpvf(out, ":%s", (RX_EXTFLAGS(rx) & RXf_PMf_FOLD) ? "fold" : "exact");
+        if (pregexec(rx, p, p + len, p, 0, text, 1)) {
+            regexp *r = ReANY(rx);
+            sv_catpvf(out, ":%d-%d", (int)r->offs[0].start, (int)r->offs[0].end);
+            if (RX_NPARENS(rx) >= 1)
+                sv_catpvf(out, ":%d-%d", (int)RX_OFFS(rx)[1].start, (int)RX_OFFS(rx)[1].end);
+            sv_catpvf(out, ":%d", (int)((regexp *)SvANY(rx))->nparens);
+        } else {
+            sv_catpvs(out, ":no match");
+        }
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* rx_compile(pattern, text): compiles the pattern with pregcomp and matches
+ * a copy of the text that is this module's own memory; returns where. */
+XS(XS_PerlAPI_rx_compile) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "pattern, text");
+    {
+        REGEXP *rx = pregcomp(ST(0), 0);
+        STRLEN len;
+        const char *p = SvPV(ST(1), len);
+        char *own = (char *)malloc(len + 1);
+        SV *out = newSVpvs("");
+        memcpy(own, p, len + 1);
+        if (pregexec(rx, own, own + len, own, 0, ST(1), 1))
+            sv_catpvf(out, "%d-%d", (int)RX_OFFS(rx)[0].start, (int)RX_OFFS(rx)[0].end);
+        else
+            sv_catpvs(out, "no match");
+        free(own);
+        ReREFCNT_dec(rx);
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* own_magic(ref): what mg_find says of the magic the interpreter itself
+ * keeps on the referent: "backref" for one with weak references to it,
+ * "amt:<n>" for a stash with an overload table, n being 1 when the table
+ * has an array dereference. */
+XS(XS_PerlAPI_own_magic) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        SV *sv = SvRV(ST(0));
+        SV *out = newSVpvs("");
+        MAGIC *mg;
+        if (SvRMAGICAL(sv) && mg_find(sv, PERL_MAGIC_backref)) sv_catpvs(out, "backref");
+        if (SvOBJECT(sv) && Gv_AMG(SvSTASH(sv)) &&
+            (mg = mg_find((SV *)SvSTASH(sv), PERL_MAGIC_overload_table)) != NULL) {
+            const AMT *amt = (AMT *)mg->mg_ptr;
+            sv_catpvf(out, "amt:%d", (AMT_AMAGIC(amt) && amt->table[to_av_amg]) ? 1 : 0);
+        }
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* A call checker: every call of the sub it is given to compiles into the
+ * value it was given with. */
+static OP *PerlAPI_compile_to_constant(pTHX_ OP *entersubop, GV *namegv, SV *ckobj) {
+    PERL_UNUSED_ARG(namegv);
+    op_free(entersubop);
+    return newSVOP(OP_CONST, 0, newSVsv(ckobj));
+}
+/* call_checker(code, value): gives the sub the checker above; returns
+ * whether the sub had the interpreter's own checker before and has this
+ * one after. */
+XS(XS_PerlAPI_constant_calls) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "code, value");
+    {
+        CV *target = (CV *)SvRV(ST(0));
+        Perl_call_checker before, after;
+        SV *obj_before, *obj_after;
+        cv_get_call_checker(target, &before, &obj_before);
+        cv_set_call_checker(target, PerlAPI_compile_to_constant, ST(1));
+        cv_get_call_checker(target, &after, &obj_after);
+        ST(0) = sv_2mortal(newSVpvf(
+            "%s,%s,%s", before == Perl_ck_entersub_args_proto_or_list ? "default" : "other",
+            after == PerlAPI_compile_to_constant ? "ours" : "other", SvPV_nolen(obj_after)));
+        XSRETURN(1);
+    }
+}
+
+/* A destructor for a variable of the function that registers it: it notes
+ * what it finds there. */
+struct PerlAPI_guarded {
+    int marker;
+    char *buffer;
+};
+static int PerlAPI_destructor_found;
+static void PerlAPI_release_guarded(pTHX_ void *arg) {
+    struct PerlAPI_guarded *g = (struct PerlAPI_guarded *)arg;
+    PerlAPI_destructor_found = g->marker;
+    free(g->buffer);
+    g->buffer = NULL;
+}
+/* croak_guarded(nested): registers the destructor for a local (inside a
+ * scope of its own when nested is true) and croaks; destructor_found says
+ * what the destructor saw. */
+XS(XS_PerlAPI_croak_guarded) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "nested");
+    {
+        struct PerlAPI_guarded g;
+        const int nested = SvTRUE(ST(0));
+        g.marker = 4711;
+        g.buffer = (char *)malloc(64);
+        PerlAPI_destructor_found = 0;
+        if (nested) {
+            ENTER;
+            SAVETMPS;
+        }
+        SAVEDESTRUCTOR_X(PerlAPI_release_guarded, &g);
+        croak("guarded failure");
+    }
+}
+XS(XS_PerlAPI_destructor_found) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PerlAPI_destructor_found));
+    XSRETURN(1);
+}
+
+/* show(text, max): pv_pretty of the text in quotes, pv_display of it, and
+ * how much of it pv_escape took. */
+XS(XS_PerlAPI_show) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "text, max");
+    {
+        STRLEN len, taken = 0;
+        const char *p = SvPV(ST(0), len);
+        SV *a = sv_2mortal(newSVpvs(""));
+        SV *b = sv_2mortal(newSVpvs(""));
+        SV *c = sv_2mortal(newSVpvs(""));
+        SV *out = newSVpvs("");
+        pv_pretty(a, p, len, (STRLEN)SvIV(ST(1)), NULL, NULL, PERL_PV_PRETTY_DUMP);
+        pv_display(b, p, len, len + 1, 0);
+        pv_escape(c, p, len, (STRLEN)SvIV(ST(1)), &taken, 0);
+        sv_catpvf(out, "%s %s %d", SvPV_nolen(a), SvPV_nolen(b), (int)taken);
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* Magic that watches a variable: its vtable counts the reads, the writes
+ * and the clears, and on a read of a scalar it gives the scalar the number
+ * of reads so far when the scalar holds "count". */
+static IV PerlAPI_observed[3];
+static int PerlAPI_observe_get(pTHX_ SV *sv, MAGIC *mg) {
+    PERL_UNUSED_ARG(mg);
+    PerlAPI_observed[0]++;
+    if (SvTYPE(sv) < SVt_PVAV && SvPOK(sv) && strEQ(SvPVX(sv), "count"))
+        sv_setiv(sv, PerlAPI_observed[0]);
+    return 0;
+}
+static int PerlAPI_observe_set(pTHX_ SV *sv, MAGIC *mg) {
+    PERL_UNUSED_ARG(sv);
+    PERL_UNUSED_ARG(mg);
+    PerlAPI_observed[1]++;
+    return 0;
+}
+static int PerlAPI_observe_clear(pTHX_ SV *sv, MAGIC *mg) {
+    PERL_UNUSED_ARG(sv);
+    PERL_UNUSED_ARG(mg);
+    PerlAPI_observed[2]++;
+    return 0;
+}
+static MGVTBL PerlAPI_observe_vtbl = {PerlAPI_observe_get, PerlAPI_observe_set, NULL,
+                                    PerlAPI_observe_clear, NULL, NULL, NULL, NULL};
+/* observe(ref): attaches the magic; observed(): the three counts, which start
+ * again from zero. */
+XS(XS_PerlAPI_observe) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    sv_magicext(SvRV(ST(0)), NULL, PERL_MAGIC_ext, &PerlAPI_observe_vtbl, NULL, 0);
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_observed) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    SP -= items;
+    EXTEND(SP, 3);
+    mPUSHi(PerlAPI_observed[0]);
+    mPUSHi(PerlAPI_observed[1]);
+    mPUSHi(PerlAPI_observed[2]);
+    PerlAPI_observed[0] = PerlAPI_observed[1] = PerlAPI_observed[2] = 0;
+    PUTBACK;
+    return;
+}
+
+/* uvar magic for a hash: the function is called for every access with the
+ * key in the MAGIC's mg_obj, counts them, and makes the key "alias" the
+ * key "real". */
+static IV PerlAPI_uvar_calls;
+static struct ufuncs PerlAPI_uvar_funcs;
+static I32 PerlAPI_uvar_key(pTHX_ IV action, SV *hv) {
+    MAGIC *mg;
+    PERL_UNUSED_ARG(action);
+    PerlAPI_uvar_calls++;
+    for (mg = SvMAGIC(hv); mg; mg = mg->mg_moremagic)
+        if (mg->mg_type == PERL_MAGIC_uvar && (struct ufuncs *)mg->mg_ptr == &PerlAPI_uvar_funcs)
+            break;
+    if (mg && mg->mg_obj && SvPOK(mg->mg_obj) && strEQ(SvPV_nolen(mg->mg_obj), "alias"))
+        mg->mg_obj = sv_2mortal(newSVpvs("real"));
+    return 0;
+}
+XS(XS_PerlAPI_uvar_hash) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hashref");
+    PerlAPI_uvar_funcs.uf_val = PerlAPI_uvar_key;
+    PerlAPI_uvar_funcs.uf_set = NULL;
+    PerlAPI_uvar_funcs.uf_index = 0;
+    sv_magic(SvRV(ST(0)), NULL, PERL_MAGIC_uvar, (char *)&PerlAPI_uvar_funcs, 0);
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_uvar_calls) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PerlAPI_uvar_calls));
+    PerlAPI_uvar_calls = 0;
+    XSRETURN(1);
+}
+
+/* firsts(arrays): the first element of every array of the list, read
+ * from the array's body, and the last element of each array replaced by
+ * the count of its elements through the body. */
+XS(XS_PerlAPI_firsts) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "arrays");
+    {
+        AV *arrays = (AV *)SvRV(ST(0));
+        SSize_t n = av_len(arrays) + 1;
+        SV *joined = sv_2mortal(newSVpvs(""));
+        SSize_t i;
+        for (i = 0; i < n; i++) {
+            AV *av = (AV *)SvRV(AvARRAY(arrays)[i]);
+            SV **body = AvARRAY(av);
+            SSize_t last = av_len(av);
+            if (last < 0) continue;
+            sv_catsv(joined, body[0]);
+            if (last > 0) {
+                SvREFCNT_dec(body[last]);
+                body[last] = newSViv((IV)(last + 1));
+            }
+        }
+        ST(0) = joined;
+        XSRETURN(1);
+    }
+}
+
+/* take_buffer(text): the text, by way of an SV made with room for it
+ * whose buffer this code takes over (the SV is left without one and freed)
+ * and frees itself, as code that builds a table in the buffer of an SV and
+ * keeps the table does. */
+XS(XS_PerlAPI_take_buffer) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "text");
+    {
+        STRLEN len;
+        const char *text = SvPV(ST(0), len);
+        SV *sv = newSV(len + 16);
+        char *buf;
+        STRLEN room;
+        int emptied;
+        SV *copy;
+        sv_setpvn(sv, text, len);
+        buf = SvPVX(sv);
+        room = SvLEN(sv);
+        SvPVX(sv) = NULL;
+        SvLEN(sv) = 0;
+        emptied = SvPVX(sv) == NULL && SvLEN(sv) == 0;
+        SvREFCNT_dec(sv);
+        copy = newSVpvf("%d:%d:%.*s", emptied, room > len, (int)len, buf);
+        Safefree(buf);
+        ST(0) = sv_2mortal(copy);
+        XSRETURN(1);
+    }
+}
+
+/* const_ops(n): builds and frees n const ops, each from an SV of its own;
+ * the count of those whose SV the op holds. */
+XS(XS_PerlAPI_const_ops) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        IV n = SvIV(ST(0));
+        IV held = 0;
+        IV i;
+        for (i = 0; i < n; i++) {
+            SV *sv = newSVpvf("constant %d", (int)i);
+            OP *o = newSVOP(OP_CONST, 0, sv);
+            if (cSVOPx(o)->op_sv == sv) held++;
+            op_free(o);
+        }
+        ST(0) = sv_2mortal(newSViv(held));
+        XSRETURN(1);
+    }
+}
+
+/* spin(n): waits a millisecond n times, or until $PerlAPI::stop is true,
+ * letting the interpreter deliver what is pending after each wait; the
+ * count of waits. */
+XS(XS_PerlAPI_spin) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        IV n = SvIV(ST(0));
+        IV i;
+        SV *stop = get_sv("PerlAPI::stop", GV_ADD);
+        for (i = 0; i < n && !SvTRUE(stop); i++) {
+            struct timespec ms = {0, 1000000};
+            nanosleep(&ms, NULL);
+            PERL_ASYNC_CHECK();
+        }
+        ST(0) = sv_2mortal(newSViv(i));
+        XSRETURN(1);
+    }
+}
+
+/* first_index(code, values...): the index of the first value for which
+ * the code is true with the value in $_, by MULTICALL, as the list
+ * utilities do it. */
+XS(XS_PerlAPI_first_index) {
+    dXSARGS;
+    if (items < 1) croak_xs_usage(cv, "code, ...");
+    {
+        dMULTICALL;
+        I32 gimme = G_SCALAR;
+        IV found = -1;
+        I32 i;
+        CV *code = (CV *)SvRV(ST(0));
+        SV **args = &PL_stack_base[ax];
+        SAVESPTR(GvSV(PL_defgv));
+        PUSH_MULTICALL(code);
+        for (i = 1; i < items; i++) {
+            GvSV(PL_defgv) = args[i];
+            MULTICALL;
+            if (SvTRUE(*PL_stack_sp)) {
+                found = i - 1;
+                break;
+            }
+        }
+        POP_MULTICALL;
+        ST(0) = sv_2mortal(newSViv(found));
+        XSRETURN(1);
+    }
+}
+
 /* A warning of the utf8 category, given with Perl_warner (how 0),
  * Perl_ck_warner (1) or Perl_ck_warner_d (2). */
 XS(XS_PerlAPI_category_warning) {
@@ -2391,6 +2883,24 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::repoint", XS_PerlAPI_repoint);
     newXS_deffile("PerlAPI::kept_addresses", XS_PerlAPI_kept_addresses);
     newXS_deffile("PerlAPI::glob_slots", XS_PerlAPI_glob_slots);
+    newXS_deffile("PerlAPI::hooks", XS_PerlAPI_hooks);
+    newXS_deffile("PerlAPI::at_exit_write", XS_PerlAPI_at_exit_write);
+    newXS_deffile("PerlAPI::rx_info", XS_PerlAPI_rx_info);
+    newXS_deffile("PerlAPI::rx_compile", XS_PerlAPI_rx_compile);
+    newXS_deffile("PerlAPI::own_magic", XS_PerlAPI_own_magic);
+    newXS_deffile("PerlAPI::constant_calls", XS_PerlAPI_constant_calls);
+    newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);
+    newXS_deffile("PerlAPI::destructor_found", XS_PerlAPI_destructor_found);
+    newXS_deffile("PerlAPI::show", XS_PerlAPI_show);
+    newXS_deffile("PerlAPI::observe", XS_PerlAPI_observe);
+    newXS_deffile("PerlAPI::observed", XS_PerlAPI_observed);
+    newXS_deffile("PerlAPI::uvar_hash", XS_PerlAPI_uvar_hash);
+    newXS_deffile("PerlAPI::uvar_calls", XS_PerlAPI_uvar_calls);
+    newXS_deffile("PerlAPI::firsts", XS_PerlAPI_firsts);
+    newXS_deffile("PerlAPI::take_buffer", XS_PerlAPI_take_buffer);
+    newXS_deffile("PerlAPI::const_ops", XS_PerlAPI_const_ops);
+    newXS_deffile("PerlAPI::spin", XS_PerlAPI_spin);
+    newXS_deffile("PerlAPI::first_index", XS_PerlAPI_first_index);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
     newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);

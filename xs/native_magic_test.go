@@ -120,3 +120,28 @@ sub fetches { my ($how, $value) = @_; my $obj = tie my $s, "Counted", $value; Pe
 		`my $obj = tie my $s, "Counted", "text"; PerlAPI::look_without_magic($s, "get"); PerlAPI::look_without_magic($s, $_) for qw(ok pv utf8 tainted rok); $obj->{n}`, "1"})
 	runEvalCases(t, p, cases)
 }
+
+// The interpreter calls every hook of the vtable of magic native code
+// attached: get when the variable is read (the hook may change what is
+// read), set when it is written, clear when an aggregate is emptied.
+func TestNativeMagicVtableHooks(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a scalar read and written", `my $v = "x"; PerlAPI::observe(\$v); my $a = $v; $v = "y"; my $b = "$v$v"; $v .= "z"; join ",", $a, $b, $v, PerlAPI::observed()`, "x,yy,yz,4,2,0"},
+		{"the get hook gives the value", `my $v = "count"; PerlAPI::observe(\$v); PerlAPI::observed(); my $seen = $v; "$seen"`, "1"},
+		{"a hash emptied", `my %h = (a => 1); PerlAPI::observe(\%h); PerlAPI::observed(); %h = (); my @c = PerlAPI::observed(); $c[2]`, "1"},
+		{"a variable without the magic", `my $v = "x"; my $w = "x"; PerlAPI::observe(\$v); PerlAPI::observed(); $w = $w . "y"; join ",", PerlAPI::observed()`, "0,0,0"},
+	})
+}
+
+// uvar magic on a hash: the module's function is called for every access
+// with the key, and the key it leaves is the one that is used.
+func TestNativeUvarMagic(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the key is replaced", `my %h; PerlAPI::uvar_hash(\%h); $h{real} = "value"; my $got = $h{alias}; $h{alias} = "changed"; join ",", $got, $h{real}, join("|", sort keys %h), (PerlAPI::uvar_calls() >= 4 ? "called" : "not called")`, "value,changed,real,called"},
+		{"another hash is left alone", `my %h; my %other = (alias => 1); PerlAPI::uvar_hash(\%h); PerlAPI::uvar_calls(); my $x = $other{alias}; PerlAPI::uvar_calls()`, "0"},
+	})
+}

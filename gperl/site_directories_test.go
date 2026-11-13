@@ -200,14 +200,11 @@ func siteInstallEnv(t *testing.T, native bool) (env []string, shim string) {
 		if err := xs.WriteSDK(sdkDir); err != nil {
 			t.Fatal(err)
 		}
-		fakeArch := filepath.Join(work, "fakearchlib")
-		if err := os.MkdirAll(fakeArch, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
-			t.Fatal(err)
-		}
 		stdlib, err := perl.ExtractStdlib()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fakeArch, err := xsStandInArchlib(work, sdkDir, stdlib)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -50,7 +50,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 16
+const abiVersion = 17
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -138,6 +138,27 @@ type cFrame struct {
 	// exactly when it lies in the range.
 	memBase uintptr
 	memCap  uint64
+	// The perl stack of a pp function (ppFrame set): st is a copy of the
+	// interpreter's stack and marks of its mark stack, gmarkLo the
+	// interpreter's index of marks[0]. The SDK keeps what the copy was
+	// when the two were last in line (stSeen, which it allocates and
+	// frees) and whether the interpreter has moved on since (stStale); at
+	// the end of the function it leaves what the function made of the
+	// stack in ppState, a C heap block the loader frees.
+	ppFrame    int32
+	stStale    int32
+	gmarkLo    int32
+	markSeen   int32
+	stSeen     uintptr
+	stSeenN    int64
+	marksSeen  [maxMarks]int32
+	ppState    uintptr
+	ppStateLen int64
+	// nativeCall is set by the SDK in the frame of a native call the
+	// interpreter made, as opposed to a function the loader runs on the
+	// side (a destructor, a magic hook).
+	nativeCall int32
+	_          int32
 
 	// Go-only:
 	p *internal.Perl
@@ -281,6 +302,7 @@ type state struct {
 	svtInvoke    uintptr // __goperl_svt_invoke
 	xsEpilogue   uintptr // __goperl_xs_epilogue
 	perlioInvoke uintptr // __goperl_perlio_invoke
+	hostInvoke   uintptr // __goperl_host_invoke
 
 	// cloneHookSet records that Load registered adoptClone with the
 	// instance (once, however many modules load).
@@ -381,6 +403,9 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		return err
 	}
 	if err := clone.SetPerlIOHandler(cs.perlioHook); err != nil {
+		return err
+	}
+	if err := clone.SetHostCallHandler(cs.hostCall); err != nil {
 		return err
 	}
 	return clone.SetDestructorHandler(cs.dtorFired)
@@ -517,6 +542,9 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	if err := p.SetPerlIOHandler(s.perlioHook); err != nil {
 		return 0, err
 	}
+	if err := p.SetHostCallHandler(s.hostCall); err != nil {
+		return 0, err
+	}
 	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
 		return 0, err
 	}
@@ -566,6 +594,11 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	if fn, err := purego.Dlsym(lib, "__goperl_dtor_invoke"); err == nil {
 		s.mu.Lock()
 		s.dtorInvoke = fn
+		s.mu.Unlock()
+	}
+	if fn, err := purego.Dlsym(lib, "__goperl_host_invoke"); err == nil {
+		s.mu.Lock()
+		s.hostInvoke = fn
 		s.mu.Unlock()
 	}
 	return lib, nil
@@ -772,18 +805,28 @@ func (s *state) bootFrame() (*cFrame, uintptr) {
 	return f, pinFrame(f)
 }
 
+// ppMarksMax is the number of marks the guest hands over with the stack of
+// a pp function (GOPERL_PP_MARKS_MAX in perl-wasm): the top ones.
+const ppMarksMax = 32
+
 // ppHook runs a module's pp function for one guest op execution (reserved
-// callback method -3). Payload: [u32 op][u32 op_type][u32 n][u32 stack-top
-// tokens, bottom to top]; response [1][u32 next_op] or [0]+message.
+// callback method -3). Payload: [u32 op][u32 op_type] and the perl stack as
+// the interpreter has it: [u32 depth][i32 top mark][u32 n][n marks, the top
+// ones from the lowest][depth values from index 1]. Response: [1][u32
+// next_op] and, when the function changed its copy of the stack, what it
+// became (the SDK builds that part: see goperl_pp_state_build); or
+// [0]+message.
 func (s *state) ppHook(req []byte) []byte {
 	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
-	if len(req) < 12 {
+	if len(req) < 20 {
 		return fail("pp hook: short payload")
 	}
 	opTok := uint64(binary.LittleEndian.Uint32(req[0:]))
 	opType := int32(binary.LittleEndian.Uint32(req[4:]))
-	n := int(binary.LittleEndian.Uint32(req[8:]))
-	if n < 0 || n > 8 || len(req) < 12+4*n {
+	depth := int(binary.LittleEndian.Uint32(req[8:]))
+	topMark := int32(binary.LittleEndian.Uint32(req[12:]))
+	nmarks := int(binary.LittleEndian.Uint32(req[16:]))
+	if depth < 0 || nmarks < 0 || nmarks > ppMarksMax || len(req) < 20+4*nmarks+4*depth {
 		return fail("pp hook: truncated payload")
 	}
 	s.mu.Lock()
@@ -797,22 +840,35 @@ func (s *state) ppHook(req []byte) []byte {
 		return fail(fmt.Sprintf("pp hook: no host function for op %d", opType))
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d n=%d\n", opTok, opType, n)
+		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d depth=%d marks=%d\n", opTok, opType, depth, topMark)
 	}
 
 	f := s.newFrame()
 	f.hookOpTok = opTok
-	f.items = int32(n)
-	f.marks[0] = 0
-	f.markidx = 0
-	f.initStack(n)
-	for i := 0; i < n; i++ {
-		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[12+4*i:])))
+	f.items = int32(depth)
+	f.ppFrame = 1
+	f.initStack(depth)
+	for i := 0; i < depth; i++ {
+		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[20+4*nmarks+4*i:])))
 	}
-	f.psp = f.stBase + uintptr(n)*8
+	f.psp = f.stBase + uintptr(depth)*8
+	// marks[0] is the mark below the ones handed over (the interpreter's
+	// mark stack starts with an entry that is never a mark)
+	f.gmarkLo = topMark - int32(nmarks)
+	for i := 0; i < nmarks; i++ {
+		f.marks[1+i] = int32(binary.LittleEndian.Uint32(req[20+4*i:]))
+	}
+	f.markidx = int32(nmarks)
 	fp := pinFrame(f)
 	next, _, _ := purego.SyscallN(invoke, fp, fn)
 	unpinFrame(fp)
+	var stackState []byte
+	if f.ppState != 0 {
+		stackState = copyIn(f.ppState, int(f.ppStateLen))
+		cFree(f.ppState)
+		f.ppState = 0
+	}
+	f.releaseStack()
 	if f.failed != 0 {
 		if xsTrace {
 			fmt.Fprintf(os.Stderr, "[pphook] FAILED: %s\n", f.errString())
@@ -820,12 +876,49 @@ func (s *state) ppHook(req []byte) []byte {
 		return fail(f.errString())
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x\n", next)
+		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x state=%d bytes\n", next, len(stackState))
 	}
-	resp := make([]byte, 5)
+	resp := make([]byte, 5, 5+len(stackState))
 	resp[0] = 1
 	binary.LittleEndian.PutUint32(resp[1:], uint32(next))
-	return resp
+	return append(resp, stackState...)
+}
+
+// hostCall services reserved method -9: one call of native code through
+// the host-call channel (the SDK's __goperl_host_invoke runs it under a
+// croak guard). req is [u32 kind] and the kind's words; the response is
+// [1] and the words the SDK answered with, or [0]+message.
+func (s *state) hostCall(req []byte) []byte {
+	s.mu.Lock()
+	inv := s.hostInvoke
+	s.mu.Unlock()
+	if inv == 0 {
+		return append([]byte{0}, "host call: no native module provides the entry point"...)
+	}
+	const respCap = 64
+	reqC := cMalloc(len(req) + 1)
+	pokeBytes(reqC, req)
+	respC := cMalloc(respCap)
+	f, fp := s.bootFrame()
+	// One OS thread for the whole call: the SDK's current frame is per
+	// thread.
+	runtime.LockOSThread()
+	n, _, _ := purego.SyscallN(inv, fp, reqC, uintptr(len(req)), respC, respCap)
+	runtime.UnlockOSThread()
+	unpinFrame(fp)
+	var out []byte
+	switch rlen := int(int32(n)); {
+	case f.failed != 0:
+		out = append([]byte{0}, f.errString()...)
+	case rlen < 0 || rlen > respCap:
+		out = append([]byte{0}, "host call: bad response"...)
+	default:
+		out = append([]byte{1}, copyIn(respC, rlen)...)
+	}
+	f.releaseStack()
+	cFree(reqC)
+	cFree(respC)
+	return out
 }
 
 // dtorFired runs a save-stack destructor the guest scope pop released
@@ -861,8 +954,12 @@ const (
 	mgOffLen     = 20
 	mgOffObj     = 24
 	mgOffPtr     = 32
+	vtblOffGet   = 0
 	vtblOffSet   = 8
+	vtblOffLen   = 16
+	vtblOffClear = 24
 	vtblOffFree  = 32
+	vtblOffCopy  = 40
 	vtblOffLocal = 56
 	mgfLocal     = 0x20 // MGf_LOCAL
 	hefSVKey     = -2   // HEf_SVKEY: the name of a MAGIC is an SV
@@ -956,17 +1053,24 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 	binary.LittleEndian.PutUint64(buf[mgOffPtr:], uint64(mgPtr))
 	pokeBytes(mg, buf[:])
 
-	// A vtbl with svt_set needs the guest anchor upgraded so assignments
-	// to the SV are reported back (reserved method -5). Anchors start
-	// set-less: most mirrors only carry svt_free, and a set-firing anchor
-	// costs a host round trip on every write to the SV.
-	wantSet := false
+	// A vtbl with svt_get, svt_set, svt_len, svt_clear or svt_copy needs
+	// the guest anchor to have that hook too, so that the interpreter
+	// reports the access (set by reserved method -5, the others through
+	// the host-call channel). Anchors start without: most mirrors only
+	// carry svt_free, and a hook on the anchor costs a host round trip on
+	// every such access to the SV.
+	var hooks uint64
 	if vtbl != 0 {
-		setFn := copyIn(vtbl+vtblOffSet, 8)
-		wantSet = binary.LittleEndian.Uint64(setFn) != 0
+		fns := copyIn(vtbl, 8*8)
+		for bit, off := range []int{vtblOffGet, vtblOffSet, vtblOffLen, vtblOffClear, vtblOffCopy} {
+			if binary.LittleEndian.Uint64(fns[off:]) != 0 {
+				hooks |= 1 << bit
+			}
+		}
 	}
+	wantSet := hooks != 0
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[magicExt] sv=%#x how=%d vtbl=%#x wantSet=%v first=%v\n", sv, how, vtbl, wantSet, first)
+		fmt.Fprintf(os.Stderr, "[magicExt] sv=%#x how=%d vtbl=%#x hooks=%#x first=%v\n", sv, how, vtbl, hooks, first)
 	}
 
 	if first {
@@ -984,7 +1088,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 			return 0
 		}
 		if wantSet {
-			r, err := s.p.XSHelperOp(opMagicSetHook, sv, 0, "")
+			r, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, "")
 			if err != nil {
 				f.fail("sv_magicext: " + err.Error())
 			}
@@ -994,7 +1098,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		}
 	} else {
 		if wantSet {
-			if _, err := s.p.XSHelperOp(opMagicSetHook, sv, 0, ""); err != nil {
+			if _, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, ""); err != nil {
 				f.fail("sv_magicext: " + err.Error())
 			}
 		}

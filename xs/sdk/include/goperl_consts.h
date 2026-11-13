@@ -1363,4 +1363,658 @@
 #ifndef WARN_VOID
 #define WARN_VOID 45
 #endif
+#ifndef CVf_METHOD
+#define CVf_METHOD 1
+#endif
+#ifndef MDEREF_ACTION_MASK
+#define MDEREF_ACTION_MASK 0xf
+#endif
+#ifndef MDEREF_AV_gvav_aelem
+#define MDEREF_AV_gvav_aelem 6
+#endif
+#ifndef MDEREF_AV_gvsv_vivify_rv2av_aelem
+#define MDEREF_AV_gvsv_vivify_rv2av_aelem 2
+#endif
+#ifndef MDEREF_AV_padav_aelem
+#define MDEREF_AV_padav_aelem 5
+#endif
+#ifndef MDEREF_AV_padsv_vivify_rv2av_aelem
+#define MDEREF_AV_padsv_vivify_rv2av_aelem 3
+#endif
+#ifndef MDEREF_AV_pop_rv2av_aelem
+#define MDEREF_AV_pop_rv2av_aelem 1
+#endif
+#ifndef MDEREF_AV_vivify_rv2av_aelem
+#define MDEREF_AV_vivify_rv2av_aelem 4
+#endif
+#ifndef MDEREF_FLAG_last
+#define MDEREF_FLAG_last 0x40
+#endif
+#ifndef MDEREF_HV_gvhv_helem
+#define MDEREF_HV_gvhv_helem 0xd
+#endif
+#ifndef MDEREF_HV_gvsv_vivify_rv2hv_helem
+#define MDEREF_HV_gvsv_vivify_rv2hv_helem 9
+#endif
+#ifndef MDEREF_HV_padhv_helem
+#define MDEREF_HV_padhv_helem 0xc
+#endif
+#ifndef MDEREF_HV_padsv_vivify_rv2hv_helem
+#define MDEREF_HV_padsv_vivify_rv2hv_helem 0xa
+#endif
+#ifndef MDEREF_HV_pop_rv2hv_helem
+#define MDEREF_HV_pop_rv2hv_helem 8
+#endif
+#ifndef MDEREF_HV_vivify_rv2hv_helem
+#define MDEREF_HV_vivify_rv2hv_helem 0xb
+#endif
+#ifndef MDEREF_INDEX_MASK
+#define MDEREF_INDEX_MASK 0x30
+#endif
+#ifndef MDEREF_INDEX_const
+#define MDEREF_INDEX_const 0x10
+#endif
+#ifndef MDEREF_INDEX_gvsv
+#define MDEREF_INDEX_gvsv 0x30
+#endif
+#ifndef MDEREF_INDEX_none
+#define MDEREF_INDEX_none 0
+#endif
+#ifndef MDEREF_INDEX_padsv
+#define MDEREF_INDEX_padsv 0x20
+#endif
+#ifndef MDEREF_MASK
+#define MDEREF_MASK 0x7f
+#endif
+#ifndef MDEREF_SHIFT
+#define MDEREF_SHIFT 7
+#endif
+#ifndef MDEREF_reload
+#define MDEREF_reload 0
+#endif
+#ifndef OA_AVREF
+#define OA_AVREF 3
+#endif
+#ifndef OA_CVREF
+#define OA_CVREF 5
+#endif
+#ifndef OA_FILEREF
+#define OA_FILEREF 6
+#endif
+#ifndef OA_HVREF
+#define OA_HVREF 4
+#endif
+#ifndef OA_LIST
+#define OA_LIST 2
+#endif
+#ifndef OA_OPTIONAL
+#define OA_OPTIONAL 8
+#endif
+#ifndef OA_SCALAR
+#define OA_SCALAR 1
+#endif
+#ifndef OA_SCALARREF
+#define OA_SCALARREF 7
+#endif
+#ifndef OPpALLOW_FAKE
+#define OPpALLOW_FAKE 0x40
+#endif
+#ifndef OPpARG1_MASK
+#define OPpARG1_MASK 1
+#endif
+#ifndef OPpARG2_MASK
+#define OPpARG2_MASK 3
+#endif
+#ifndef OPpARG3_MASK
+#define OPpARG3_MASK 7
+#endif
+#ifndef OPpARG4_MASK
+#define OPpARG4_MASK 0xf
+#endif
+#ifndef OPpARGELEM_AV
+#define OPpARGELEM_AV 2
+#endif
+#ifndef OPpARGELEM_HV
+#define OPpARGELEM_HV 4
+#endif
+#ifndef OPpARGELEM_MASK
+#define OPpARGELEM_MASK 6
+#endif
+#ifndef OPpARGELEM_SV
+#define OPpARGELEM_SV 0
+#endif
+#ifndef OPpARG_IF_FALSE
+#define OPpARG_IF_FALSE 0x40
+#endif
+#ifndef OPpARG_IF_UNDEF
+#define OPpARG_IF_UNDEF 0x80
+#endif
+#ifndef OPpASSIGN_BACKWARDS
+#define OPpASSIGN_BACKWARDS 0x40
+#endif
+#ifndef OPpASSIGN_COMMON_AGG
+#define OPpASSIGN_COMMON_AGG 0x10
+#endif
+#ifndef OPpASSIGN_COMMON_RC1
+#define OPpASSIGN_COMMON_RC1 0x20
+#endif
+#ifndef OPpASSIGN_COMMON_SCALAR
+#define OPpASSIGN_COMMON_SCALAR 0x40
+#endif
+#ifndef OPpASSIGN_CV_TO_GV
+#define OPpASSIGN_CV_TO_GV 0x80
+#endif
+#ifndef OPpASSIGN_TRUEBOOL
+#define OPpASSIGN_TRUEBOOL 4
+#endif
+#ifndef OPpAVHVSWITCH_MASK
+#define OPpAVHVSWITCH_MASK 3
+#endif
+#ifndef OPpCONCAT_NESTED
+#define OPpCONCAT_NESTED 0x40
+#endif
+#ifndef OPpCONST_ENTERED
+#define OPpCONST_ENTERED 0x10
+#endif
+#ifndef OPpCONST_NOVER
+#define OPpCONST_NOVER 2
+#endif
+#ifndef OPpCONST_SHORTCIRCUIT
+#define OPpCONST_SHORTCIRCUIT 4
+#endif
+#ifndef OPpCONST_TOKEN_BITS
+#define OPpCONST_TOKEN_BITS 2
+#endif
+#ifndef OPpCONST_TOKEN_FILE
+#define OPpCONST_TOKEN_FILE 0x80
+#endif
+#ifndef OPpCONST_TOKEN_LINE
+#define OPpCONST_TOKEN_LINE 0x40
+#endif
+#ifndef OPpCONST_TOKEN_MASK
+#define OPpCONST_TOKEN_MASK 0xc0
+#endif
+#ifndef OPpCONST_TOKEN_PACKAGE
+#define OPpCONST_TOKEN_PACKAGE 0xc0
+#endif
+#ifndef OPpCONST_TOKEN_SHIFT
+#define OPpCONST_TOKEN_SHIFT 6
+#endif
+#ifndef OPpCOREARGS_DEREF1
+#define OPpCOREARGS_DEREF1 1
+#endif
+#ifndef OPpCOREARGS_DEREF2
+#define OPpCOREARGS_DEREF2 2
+#endif
+#ifndef OPpCOREARGS_PUSHMARK
+#define OPpCOREARGS_PUSHMARK 0x80
+#endif
+#ifndef OPpCOREARGS_SCALARMOD
+#define OPpCOREARGS_SCALARMOD 0x40
+#endif
+#ifndef OPpDEFER_FINALLY
+#define OPpDEFER_FINALLY 0x80
+#endif
+#ifndef OPpDEREF
+#define OPpDEREF 0x30
+#endif
+#ifndef OPpDEREF_AV
+#define OPpDEREF_AV 0x10
+#endif
+#ifndef OPpDEREF_HV
+#define OPpDEREF_HV 0x20
+#endif
+#ifndef OPpDEREF_SV
+#define OPpDEREF_SV 0x30
+#endif
+#ifndef OPpDONT_INIT_GV
+#define OPpDONT_INIT_GV 4
+#endif
+#ifndef OPpEARLY_CV
+#define OPpEARLY_CV 0x20
+#endif
+#ifndef OPpEMPTYAVHV_IS_HV
+#define OPpEMPTYAVHV_IS_HV 0x20
+#endif
+#ifndef OPpENTERSUB_AMPER
+#define OPpENTERSUB_AMPER 8
+#endif
+#ifndef OPpENTERSUB_DB
+#define OPpENTERSUB_DB 0x40
+#endif
+#ifndef OPpENTERSUB_HASTARG
+#define OPpENTERSUB_HASTARG 4
+#endif
+#ifndef OPpENTERSUB_INARGS
+#define OPpENTERSUB_INARGS 1
+#endif
+#ifndef OPpENTERSUB_NOPAREN
+#define OPpENTERSUB_NOPAREN 0x80
+#endif
+#ifndef OPpEVAL_BYTES
+#define OPpEVAL_BYTES 8
+#endif
+#ifndef OPpEVAL_COPHH
+#define OPpEVAL_COPHH 0x10
+#endif
+#ifndef OPpEVAL_EVALSV
+#define OPpEVAL_EVALSV 0x40
+#endif
+#ifndef OPpEVAL_HAS_HH
+#define OPpEVAL_HAS_HH 2
+#endif
+#ifndef OPpEVAL_RE_REPARSING
+#define OPpEVAL_RE_REPARSING 0x20
+#endif
+#ifndef OPpEVAL_UNICODE
+#define OPpEVAL_UNICODE 4
+#endif
+#ifndef OPpEXISTS_SUB
+#define OPpEXISTS_SUB 0x40
+#endif
+#ifndef OPpFLIP_LINENUM
+#define OPpFLIP_LINENUM 0x40
+#endif
+#ifndef OPpFT_ACCESS
+#define OPpFT_ACCESS 2
+#endif
+#ifndef OPpFT_AFTER_t
+#define OPpFT_AFTER_t 0x10
+#endif
+#ifndef OPpFT_STACKED
+#define OPpFT_STACKED 4
+#endif
+#ifndef OPpFT_STACKING
+#define OPpFT_STACKING 8
+#endif
+#ifndef OPpHELEMEXISTSOR_DELETE
+#define OPpHELEMEXISTSOR_DELETE 0x80
+#endif
+#ifndef OPpHINT_STRICT_REFS
+#define OPpHINT_STRICT_REFS 2
+#endif
+#ifndef OPpHUSH_VMSISH
+#define OPpHUSH_VMSISH 0x20
+#endif
+#ifndef OPpINDEX_BOOLNEG
+#define OPpINDEX_BOOLNEG 0x40
+#endif
+#ifndef OPpINITFIELDS
+#define OPpINITFIELDS 0x80
+#endif
+#ifndef OPpINITFIELD_AV
+#define OPpINITFIELD_AV 2
+#endif
+#ifndef OPpINITFIELD_HV
+#define OPpINITFIELD_HV 4
+#endif
+#ifndef OPpITER_DEF
+#define OPpITER_DEF 8
+#endif
+#ifndef OPpITER_INDEXED
+#define OPpITER_INDEXED 4
+#endif
+#ifndef OPpITER_REFALIAS
+#define OPpITER_REFALIAS 8
+#endif
+#ifndef OPpITER_REVERSED
+#define OPpITER_REVERSED 2
+#endif
+#ifndef OPpKVSLICE
+#define OPpKVSLICE 0x20
+#endif
+#ifndef OPpLIST_GUESSED
+#define OPpLIST_GUESSED 0x40
+#endif
+#ifndef OPpLVALUE
+#define OPpLVALUE 0x80
+#endif
+#ifndef OPpLVAL_DEFER
+#define OPpLVAL_DEFER 0x40
+#endif
+#ifndef OPpLVREF_AV
+#define OPpLVREF_AV 0x10
+#endif
+#ifndef OPpLVREF_CV
+#define OPpLVREF_CV 0x30
+#endif
+#ifndef OPpLVREF_ELEM
+#define OPpLVREF_ELEM 4
+#endif
+#ifndef OPpLVREF_HV
+#define OPpLVREF_HV 0x20
+#endif
+#ifndef OPpLVREF_ITER
+#define OPpLVREF_ITER 8
+#endif
+#ifndef OPpLVREF_SV
+#define OPpLVREF_SV 0
+#endif
+#ifndef OPpLVREF_TYPE
+#define OPpLVREF_TYPE 0x30
+#endif
+#ifndef OPpMAYBE_LVSUB
+#define OPpMAYBE_LVSUB 8
+#endif
+#ifndef OPpMAYBE_TRUEBOOL
+#define OPpMAYBE_TRUEBOOL 0x10
+#endif
+#ifndef OPpMAY_RETURN_CONSTANT
+#define OPpMAY_RETURN_CONSTANT 0x20
+#endif
+#ifndef OPpMETH_NO_BAREWORD_IO
+#define OPpMETH_NO_BAREWORD_IO 2
+#endif
+#ifndef OPpMULTICONCAT_APPEND
+#define OPpMULTICONCAT_APPEND 0x40
+#endif
+#ifndef OPpMULTICONCAT_FAKE
+#define OPpMULTICONCAT_FAKE 0x20
+#endif
+#ifndef OPpMULTICONCAT_STRINGIFY
+#define OPpMULTICONCAT_STRINGIFY 8
+#endif
+#ifndef OPpMULTIDEREF_DELETE
+#define OPpMULTIDEREF_DELETE 0x20
+#endif
+#ifndef OPpMULTIDEREF_EXISTS
+#define OPpMULTIDEREF_EXISTS 0x10
+#endif
+#ifndef OPpOFFBYONE
+#define OPpOFFBYONE 0x80
+#endif
+#ifndef OPpOPEN_IN_CRLF
+#define OPpOPEN_IN_CRLF 0x20
+#endif
+#ifndef OPpOPEN_IN_RAW
+#define OPpOPEN_IN_RAW 0x10
+#endif
+#ifndef OPpOPEN_OUT_CRLF
+#define OPpOPEN_OUT_CRLF 0x80
+#endif
+#ifndef OPpOPEN_OUT_RAW
+#define OPpOPEN_OUT_RAW 0x40
+#endif
+#ifndef OPpOUR_INTRO
+#define OPpOUR_INTRO 0x40
+#endif
+#ifndef OPpPADHV_ISKEYS
+#define OPpPADHV_ISKEYS 1
+#endif
+#ifndef OPpPADRANGE_COUNTMASK
+#define OPpPADRANGE_COUNTMASK 0x7f
+#endif
+#ifndef OPpPADRANGE_COUNTSHIFT
+#define OPpPADRANGE_COUNTSHIFT 7
+#endif
+#ifndef OPpPAD_STATE
+#define OPpPAD_STATE 0x40
+#endif
+#ifndef OPpPARAM_IF_FALSE
+#define OPpPARAM_IF_FALSE 0x40
+#endif
+#ifndef OPpPARAM_IF_UNDEF
+#define OPpPARAM_IF_UNDEF 0x80
+#endif
+#ifndef OPpPV_IS_UTF8
+#define OPpPV_IS_UTF8 0x80
+#endif
+#ifndef OPpREFCOUNTED
+#define OPpREFCOUNTED 0x40
+#endif
+#ifndef OPpREPEAT_DOLIST
+#define OPpREPEAT_DOLIST 0x40
+#endif
+#ifndef OPpREVERSE_INPLACE
+#define OPpREVERSE_INPLACE 8
+#endif
+#ifndef OPpRV2HV_ISKEYS
+#define OPpRV2HV_ISKEYS 1
+#endif
+#ifndef OPpSELF_IN_PAD
+#define OPpSELF_IN_PAD 0x40
+#endif
+#ifndef OPpSLICE
+#define OPpSLICE 0x40
+#endif
+#ifndef OPpSLICEWARNING
+#define OPpSLICEWARNING 4
+#endif
+#ifndef OPpSORT_DESCEND
+#define OPpSORT_DESCEND 0x10
+#endif
+#ifndef OPpSORT_INPLACE
+#define OPpSORT_INPLACE 8
+#endif
+#ifndef OPpSORT_INTEGER
+#define OPpSORT_INTEGER 2
+#endif
+#ifndef OPpSORT_NUMERIC
+#define OPpSORT_NUMERIC 1
+#endif
+#ifndef OPpSORT_REVERSE
+#define OPpSORT_REVERSE 4
+#endif
+#ifndef OPpSPLIT_ASSIGN
+#define OPpSPLIT_ASSIGN 0x10
+#endif
+#ifndef OPpSPLIT_IMPLIM
+#define OPpSPLIT_IMPLIM 4
+#endif
+#ifndef OPpSPLIT_LEX
+#define OPpSPLIT_LEX 8
+#endif
+#ifndef OPpSTATEMENT
+#define OPpSTATEMENT 0x40
+#endif
+#ifndef OPpSUBSTR_REPL_FIRST
+#define OPpSUBSTR_REPL_FIRST 0x10
+#endif
+#ifndef OPpTARGET_MY
+#define OPpTARGET_MY 0x10
+#endif
+#ifndef OPpTRANS_BITS
+#define OPpTRANS_BITS 2
+#endif
+#ifndef OPpTRANS_CAN_FORCE_UTF8
+#define OPpTRANS_CAN_FORCE_UTF8 2
+#endif
+#ifndef OPpTRANS_COMPLEMENT
+#define OPpTRANS_COMPLEMENT 0x20
+#endif
+#ifndef OPpTRANS_DELETE
+#define OPpTRANS_DELETE 0x80
+#endif
+#ifndef OPpTRANS_GROWS
+#define OPpTRANS_GROWS 3
+#endif
+#ifndef OPpTRANS_IDENTICAL
+#define OPpTRANS_IDENTICAL 4
+#endif
+#ifndef OPpTRANS_MASK
+#define OPpTRANS_MASK 3
+#endif
+#ifndef OPpTRANS_ONLY_UTF8_INVARIANTS
+#define OPpTRANS_ONLY_UTF8_INVARIANTS 1
+#endif
+#ifndef OPpTRANS_SHIFT
+#define OPpTRANS_SHIFT 0
+#endif
+#ifndef OPpTRANS_SQUASH
+#define OPpTRANS_SQUASH 8
+#endif
+#ifndef OPpTRANS_USE_SVOP
+#define OPpTRANS_USE_SVOP 0x40
+#endif
+#ifndef OPpTRUEBOOL
+#define OPpTRUEBOOL 0x20
+#endif
+#ifndef OPpUNDEF_KEEP_PV
+#define OPpUNDEF_KEEP_PV 0x20
+#endif
+#ifndef OPpUSEINT
+#define OPpUSEINT 4
+#endif
+#ifndef PMf_CHARSET
+#define PMf_CHARSET 0x380
+#endif
+#ifndef PMf_CODELIST_PRIVATE
+#define PMf_CODELIST_PRIVATE 0x10000000
+#endif
+#ifndef PMf_CONST
+#define PMf_CONST 0x200000
+#endif
+#ifndef PMf_CONTINUE
+#define PMf_CONTINUE 0x1000000
+#endif
+#ifndef PMf_EVAL
+#define PMf_EVAL 0x2000000
+#endif
+#ifndef PMf_EXTENDED
+#define PMf_EXTENDED 8
+#endif
+#ifndef PMf_EXTENDED_MORE
+#define PMf_EXTENDED_MORE 0x10
+#endif
+#ifndef PMf_FOLD
+#define PMf_FOLD 4
+#endif
+#ifndef PMf_GLOBAL
+#define PMf_GLOBAL 0x800000
+#endif
+#ifndef PMf_HAS_CV
+#define PMf_HAS_CV 0x8000000
+#endif
+#ifndef PMf_HAS_ERROR
+#define PMf_HAS_ERROR 0x20000
+#endif
+#ifndef PMf_IS_QR
+#define PMf_IS_QR 0x20000000
+#endif
+#ifndef PMf_KEEP
+#define PMf_KEEP 0x400000
+#endif
+#ifndef PMf_KEEPCOPY
+#define PMf_KEEPCOPY 0x40
+#endif
+#ifndef PMf_MULTILINE
+#define PMf_MULTILINE 1
+#endif
+#ifndef PMf_NOCAPTURE
+#define PMf_NOCAPTURE 0x20
+#endif
+#ifndef PMf_NONDESTRUCT
+#define PMf_NONDESTRUCT 0x4000000
+#endif
+#ifndef PMf_ONCE
+#define PMf_ONCE 0x80000
+#endif
+#ifndef PMf_RETAINT
+#define PMf_RETAINT 0x40000
+#endif
+#ifndef PMf_SINGLELINE
+#define PMf_SINGLELINE 2
+#endif
+#ifndef PMf_SPLIT
+#define PMf_SPLIT 0x800
+#endif
+#ifndef PMf_STRICT
+#define PMf_STRICT 0x400
+#endif
+#ifndef PMf_USED
+#define PMf_USED 0x100000
+#endif
+#ifndef PMf_USE_RE_EVAL
+#define PMf_USE_RE_EVAL 0x40000000
+#endif
+#ifndef PMf_WILDCARD
+#define PMf_WILDCARD 0x80000000
+#endif
+#ifndef RXf_CHECK_ALL
+#define RXf_CHECK_ALL 0x80000
+#endif
+#ifndef RXf_COPY_DONE
+#define RXf_COPY_DONE 0x2000000
+#endif
+#ifndef RXf_EVAL_SEEN
+#define RXf_EVAL_SEEN 0x20000
+#endif
+#ifndef RXf_INTUIT_TAIL
+#define RXf_INTUIT_TAIL 0x800000
+#endif
+#ifndef RXf_IS_ANCHORED
+#define RXf_IS_ANCHORED 0x1000000
+#endif
+#ifndef RXf_MATCH_UTF8
+#define RXf_MATCH_UTF8 0x100000
+#endif
+#ifndef RXf_NO_INPLACE_SUBST
+#define RXf_NO_INPLACE_SUBST 0x10000
+#endif
+#ifndef RXf_NULL
+#define RXf_NULL 0x80000000
+#endif
+#ifndef RXf_PMf_CHARSET
+#define RXf_PMf_CHARSET 0x380
+#endif
+#ifndef RXf_PMf_EXTENDED
+#define RXf_PMf_EXTENDED 8
+#endif
+#ifndef RXf_PMf_EXTENDED_MORE
+#define RXf_PMf_EXTENDED_MORE 0x10
+#endif
+#ifndef RXf_PMf_FOLD
+#define RXf_PMf_FOLD 4
+#endif
+#ifndef RXf_PMf_KEEPCOPY
+#define RXf_PMf_KEEPCOPY 0x40
+#endif
+#ifndef RXf_PMf_MULTILINE
+#define RXf_PMf_MULTILINE 1
+#endif
+#ifndef RXf_PMf_NOCAPTURE
+#define RXf_PMf_NOCAPTURE 0x20
+#endif
+#ifndef RXf_PMf_SINGLELINE
+#define RXf_PMf_SINGLELINE 2
+#endif
+#ifndef RXf_PMf_SPLIT
+#define RXf_PMf_SPLIT 0x800
+#endif
+#ifndef RXf_PMf_STRICT
+#define RXf_PMf_STRICT 0x400
+#endif
+#ifndef RXf_SKIPWHITE
+#define RXf_SKIPWHITE 0x20000000
+#endif
+#ifndef RXf_START_ONLY
+#define RXf_START_ONLY 0x10000000
+#endif
+#ifndef RXf_TAINTED
+#define RXf_TAINTED 0x8000000
+#endif
+#ifndef RXf_TAINTED_SEEN
+#define RXf_TAINTED_SEEN 0x4000000
+#endif
+#ifndef RXf_UNBOUNDED_QUANTIFIER_SEEN
+#define RXf_UNBOUNDED_QUANTIFIER_SEEN 0x40000
+#endif
+#ifndef RXf_USE_INTUIT_ML
+#define RXf_USE_INTUIT_ML 0x400000
+#endif
+#ifndef RXf_USE_INTUIT_NOML
+#define RXf_USE_INTUIT_NOML 0x200000
+#endif
+#ifndef RXf_WHITE
+#define RXf_WHITE 0x40000000
+#endif
+#ifndef SVpad_OUR
+#define SVpad_OUR 0x10
+#endif
+#ifndef SVpad_STATE
+#define SVpad_STATE 2
+#endif
+#ifndef SVpad_TYPED
+#define SVpad_TYPED 8
+#endif
 #endif /* GOPERL_XS_SDK_CONSTS_H */

@@ -159,6 +159,16 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 3, 0, 0);
     case GOPERL_LV_GVSV:
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 5, 0, 0);
+    case GOPERL_LV_REFCNT:
+        return goperl_do_op(f, GOPERL_OP_SV_REFCNT, tok, 0, 0, 0);
+    case GOPERL_LV_PVX:
+        return (uint64_t)(uintptr_t)goperl_sv_pvx(f, (SV *)(uintptr_t)tok);
+    case GOPERL_LV_LEN:
+        return goperl_do_op(f, GOPERL_OP_SV_LEN_BUF, tok, 0, 0, 0);
+    case GOPERL_LV_CVOUTSIDE:
+        return goperl_do_op(f, GOPERL_OP_GV_CALL,
+                            ((uint64_t)GOPERL_GVCALL_CV_OUTSIDE << 32) | (uint32_t)tok,
+                            0, 0, 0);
     default:
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CVGEN << 32) | (uint32_t)tok,
@@ -205,6 +215,33 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_GVSV:
         goperl_xs_op(f, GOPERL_OP_GV_CALL,
                      ((uint64_t)GOPERL_GVCALL_SV_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_PVX: {
+        /* The buffer of a string is interpreter memory. A pointer into this
+         * process's own memory cannot be one: the interpreter could not
+         * read it. Code stores such a pointer as a note for itself (the
+         * name of a source file in the slot of a sub, which the
+         * interpreter records by itself), and the SV keeps the buffer it
+         * has. */
+        const void *p = (const void *)(uintptr_t)val;
+        const uint64_t g = goperl_guest_addr(f, p);
+        if (p && !g) break;
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)GOPERL_SVSLOT_PV << 32) | (uint32_t)tok, g, 0,
+                     0);
+        break;
+    }
+    case GOPERL_LV_LEN:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)GOPERL_SVSLOT_LEN << 32) | (uint32_t)tok, val,
+                     0, 0);
+        break;
+    case GOPERL_LV_REFCNT: /* FIELD 0: the count itself, nothing is freed */
+        goperl_xs_op(f, GOPERL_OP_FIELD, (uint32_t)tok, (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_CVOUTSIDE: /* FIELD 16: the plain store */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)16 << 32) | (uint32_t)tok,
                      (uint32_t)val, 0, 0);
         break;
     default:
@@ -1375,7 +1412,17 @@ static void goperl_gv_fullname4(goperl_frame_t *f, SV *sv, const GV *gv,
 #define CvLVALUE(cv) (CvFLAGS(cv) & CVf_LVALUE)
 #define CvLVALUE_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_LVALUE, 0)
 #define CvLVALUE_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_LVALUE)
-#define CvMETHOD(cv) (CvFLAGS(cv) & CVf_IsMETHOD)
+/* CvMETHOD is the :method attribute, which perl now calls
+ * CvNOWARN_AMBIGUOUS; a method of a class is CvIsMETHOD. */
+#define CvMETHOD(cv) (CvFLAGS(cv) & CVf_METHOD)
+#define CvMETHOD_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_METHOD, 0)
+#define CvMETHOD_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_METHOD)
+#define CvNOWARN_AMBIGUOUS(cv) CvMETHOD(cv)
+#define CvNOWARN_AMBIGUOUS_on(cv) CvMETHOD_on(cv)
+#define CvNOWARN_AMBIGUOUS_off(cv) CvMETHOD_off(cv)
+#define CvIsMETHOD(cv) (CvFLAGS(cv) & CVf_IsMETHOD)
+#define CvIsMETHOD_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_IsMETHOD, 0)
+#define CvIsMETHOD_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_IsMETHOD)
 #define CvCLONE(cv) (CvFLAGS(cv) & CVf_CLONE)
 #define CvCLONED(cv) (CvFLAGS(cv) & CVf_CLONED)
 #define CvUNIQUE(cv) (CvFLAGS(cv) & CVf_UNIQUE)
@@ -2050,5 +2097,926 @@ static inline __attribute__((unused)) unsigned char *goperl_hek_flags(HEK *hek) 
 /* The stash a COP was compiled in; the interpreter keeps it by name too. */
 #define CopSTASH(c) gv_stashpv(CopSTASHPV(c), 0)
 #define CopSTASH_eq(c, hv) (CopSTASH(c) == (HV *)(hv))
+
+
+/* ---- fields of interpreter structures ------------------------------------ */
+
+/* FIELD selectors. */
+enum {
+    GOPERL_FIELD_REFCNT_SET = 0,
+    GOPERL_FIELD_HVAUX_BACKREFS = 1,
+    GOPERL_FIELD_HVAUX_RITER = 2,
+    GOPERL_FIELD_HVAUX_RITER_SET = 3,
+    GOPERL_FIELD_HVAUX_EITER = 4,
+    GOPERL_FIELD_HVAUX_EITER_SET = 5,
+    GOPERL_FIELD_AV_FILLP = 6,
+    GOPERL_FIELD_AV_FILLP_SET = 7,
+    GOPERL_FIELD_CV_DEPTH_SET = 8,
+    GOPERL_FIELD_LV_TYPE = 9,
+    GOPERL_FIELD_LV_TARG = 10,
+    GOPERL_FIELD_SHARED_HASH = 11,
+    GOPERL_FIELD_OP_SV = 12,
+    GOPERL_FIELD_OP_GV = 13,
+    GOPERL_FIELD_IS_FREED = 14
+};
+#define GOPERL_FIELD(sel, tok, b)                                           \
+    goperl_op0(GOPERL_OP_FIELD,                                             \
+               ((uint64_t)(sel) << 32) | (uint32_t)GOPERL_TOK(tok), (b))
+
+#define VOL volatile
+
+/* The reference count is an lvalue (`--SvREFCNT(sv)`, which frees nothing).
+ * A U32, as in the interpreter: the low half of the slot. */
+#undef SvREFCNT
+#define SvREFCNT(sv) \
+    (*(U32 *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_REFCNT, GOPERL_LV_AT))
+
+#define LvTYPE(sv) ((char)GOPERL_FIELD(GOPERL_FIELD_LV_TYPE, sv, 0))
+#define LvTARG(sv) GOPERL_SV(GOPERL_FIELD(GOPERL_FIELD_LV_TARG, sv, 0))
+#define SvSHARED_HASH(sv) ((U32)GOPERL_FIELD(GOPERL_FIELD_SHARED_HASH, sv, 0))
+#define SvIS_FREED(sv) (GOPERL_FIELD(GOPERL_FIELD_IS_FREED, sv, 0) != 0)
+#define HvRITER_get(hv) ((I32)(int64_t)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER, hv, 0))
+#define HvRITER_set(hv, r) \
+    ((void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER_SET, hv, (uint64_t)(int64_t)(r)))
+
+/* ---- ops ----------------------------------------------------------------- */
+
+#define cSVOP cSVOPx(PL_op)
+#define cSVOP_sv cSVOPx_sv(PL_op)
+#define cSVOPo_sv cSVOPx_sv(o)
+#define cGVOPx_gv(o) ((GV *)cSVOPx(o)->op_sv)
+#define cGVOP_gv cGVOPx_gv(PL_op)
+#define cGVOPo_gv cGVOPx_gv(o)
+#define cCOP cCOPx(PL_op)
+#define cCOPo cCOPx(o)
+#define cPADOPx(o) ((PADOP *)(o))
+#undef cPMOPx
+#define cPMOPx(o) ((PMOP *)(o))
+#define cMETHOPx_meth(o) (cMETHOPx(o)->op_u.op_meth_sv)
+#define cMETHOPo_meth cMETHOPx_meth(o)
+#define cMETHOP_meth cMETHOPx_meth(PL_op)
+typedef struct op PMOP;
+
+/* The class of an op, as an OA_ value: the interpreter's for an op of its
+ * own (a custom op has the class it was registered with), and the class of
+ * the type for one a module is still building. */
+static U32 goperl_op_class(const OP *o) __attribute__((unused));
+static U32 goperl_op_class(const OP *o) {
+    static const U32 by_class[] = {OA_BASEOP, OA_BASEOP, OA_UNOP, OA_BINOP,
+                                   OA_LOGOP, OA_LISTOP, OA_PMOP, OA_SVOP,
+                                   OA_PADOP, OA_PVOP_OR_SVOP, OA_LOOP, OA_COP,
+                                   OA_METHOP, OA_UNOP_AUX};
+    if (o->op_type == OP_CUSTOM) {
+        /* the class its pp function was registered with */
+        const goperl_hooks_t *h = goperl_hooks_v;
+        for (int32_t i = 0; h && i < h->xop_n; i++)
+            if (h->xops[i].pp == o->op_ppaddr) return h->xops[i].xop->xop_class;
+    }
+    if (o->gop_class && (size_t)(o->gop_class - 1) < sizeof(by_class) / sizeof(by_class[0]))
+        return by_class[o->gop_class - 1];
+    return o->op_type < OP_max ? (PL_opargs[o->op_type] & OA_CLASS_MASK) : OA_BASEOP;
+}
+#define OP_CLASS(o) goperl_op_class((const OP *)(o))
+#undef OA_LIST
+#define OA_LIST 2
+#define OPpTRANS_FROM_UTF OPpTRANS_USE_SVOP
+#define OPpTRANS_TO_UTF OPpTRANS_CAN_FORCE_UTF8
+
+#define RETURNX(x) return (x, PUTBACK, NORMAL)
+#define RETPUSHYES RETURNX(PUSHs(&PL_sv_yes))
+#define RETPUSHNO RETURNX(PUSHs(&PL_sv_no))
+#define RETPUSHUNDEF RETURNX(PUSHs(&PL_sv_undef))
+#define RETSETYES RETURNX(SETs(&PL_sv_yes))
+#define RETSETNO RETURNX(SETs(&PL_sv_no))
+#define RETSETUNDEF RETURNX(SETs(&PL_sv_undef))
+
+/* ---- COPs ---------------------------------------------------------------- */
+
+/* CALL selectors. */
+enum {
+    GOPERL_CALL_PV_DISPLAY = 0,
+    GOPERL_CALL_PV_ESCAPE = 1,
+    GOPERL_CALL_PV_PRETTY = 2,
+    GOPERL_CALL_CV_CLONE = 3,
+    GOPERL_CALL_NEW_WARNINGS = 4,
+    GOPERL_CALL_GETCWD_SV = 5,
+    GOPERL_CALL_COP_SET = 6,
+    GOPERL_CALL_MESS_SV = 7
+};
+#define GOPERL_CALL(sel, tok, b)                                            \
+    goperl_op0(GOPERL_OP_CALL,                                              \
+               ((uint64_t)(sel) << 32) | (uint32_t)GOPERL_TOK(tok), (b))
+#define GOPERL_PL_COMPILING 63
+#define GOPERL_PL_WARN_ALL 64
+#define GOPERL_PL_WARN_NONE 65
+#define GOPERL_PL_ERRORS 66
+#define GOPERL_PL_SCOPESTACK 67
+#define GOPERL_PL_SAVEBEGIN 68
+#define GOPERL_PL_MARKSTACK 77
+
+/* PL_compiling is the COP the compiler fills in for the statement it is
+ * compiling. */
+#define PL_compiling \
+    (*goperl_cop_shadow(_gof, GOPERL_PLVAR(GOPERL_PL_COMPILING)))
+#define IN_PERL_COMPILETIME cBOOL(PL_curcop == &PL_compiling)
+#define IN_PERL_RUNTIME cBOOL(PL_curcop != &PL_compiling)
+
+/* The warnings of a COP are a buffer of the interpreter's, one of its two
+ * markers, or NULL: cop_warnings holds what the interpreter holds. */
+#undef pWARN_STD
+#undef pWARN_ALL
+#undef pWARN_NONE
+#define pWARN_STD ((char *)0)
+#define pWARN_ALL \
+    ((char *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_WARN_ALL)))
+#define pWARN_NONE \
+    ((char *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_WARN_NONE)))
+#define specialWARN(x)                                         \
+    ({ const char *const goperl_specialWARN_x_ = (x);          \
+       goperl_specialWARN_x_ == pWARN_STD ||                   \
+           goperl_specialWARN_x_ == pWARN_ALL ||               \
+           goperl_specialWARN_x_ == pWARN_NONE; })
+/* The size of a warnings buffer and the buffer with every category on:
+ * the interpreter's warnings.h. */
+#define WARNsize 21
+#define WARN_ALLstring \
+    "\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125\125"
+#define WARN_NONEstring \
+    "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
+                                          const char *bits, STRLEN size)
+    __attribute__((unused));
+static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
+                                          const char *bits, STRLEN size) {
+    /* the buffer to reuse is the interpreter's, or none (a marker is not
+     * a buffer) */
+    const uintptr_t d = (uintptr_t)buffer - (uintptr_t)f->membase;
+    uint32_t old = 0;
+    if (buffer && d < f->memcap && buffer != pWARN_ALL && buffer != pWARN_NONE)
+        old = (uint32_t)d;
+    return (char *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_CALL,
+                        ((uint64_t)GOPERL_CALL_NEW_WARNINGS << 32) | old,
+                        (uint64_t)size, bits, (uint64_t)size));
+}
+#define Perl_new_warnings_bitfield goperl_new_warnings_bitfield
+#define new_warnings_bitfield(buffer, bits, size) \
+    goperl_new_warnings_bitfield(_gof, (buffer), (bits), (size))
+
+#define CopLINE_set(c, l) ((c)->cop_line = (l))
+#define CopLINE_inc(c) (++(c)->cop_line)
+#define CopLINE_dec(c) (--(c)->cop_line)
+static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv)
+    __attribute__((unused));
+static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv) {
+    if (c->gop)
+        goperl_do_op(f, GOPERL_OP_CALL,
+                     ((uint64_t)GOPERL_CALL_COP_SET << 32) | (uint32_t)c->gop,
+                     (uint64_t)4 << 32, pv, strlen(pv));
+    c->cop_file = goperl_intern(pv, strlen(pv));
+}
+#define CopFILE_set(c, pv) goperl_cop_file_set(_gof, (c), (pv))
+static void goperl_cop_stash_set(goperl_frame_t *f, COP *c, HV *hv)
+    __attribute__((unused));
+static void goperl_cop_stash_set(goperl_frame_t *f, COP *c, HV *hv) {
+    if (c->gop)
+        goperl_do_op(f, GOPERL_OP_CALL,
+                     ((uint64_t)GOPERL_CALL_COP_SET << 32) | (uint32_t)c->gop,
+                     ((uint64_t)3 << 32) | (uint32_t)GOPERL_TOK(hv), 0, 0);
+    const char *name = hv ? HvNAME(hv) : 0;
+    c->cop_stashpv = name ? goperl_intern(name, strlen(name)) : "";
+}
+#define CopSTASH_set(c, hv) goperl_cop_stash_set(_gof, (c), (HV *)(hv))
+#define CopFILESV(c) GvSV(CopFILEGV(c))
+#define CopFILEAV(c) GvAV(CopFILEGV(c))
+
+/* ---- the context stack ----------------------------------------------------- */
+
+/* CX selectors. */
+enum { GOPERL_CX_DUMP = 0, GOPERL_CX_DOUNWIND = 1, GOPERL_CX_MAX = 2 };
+/* dounwind pops contexts: interpreter code that works on the stacks as a
+ * pp function left them. */
+static void goperl_dounwind(goperl_frame_t *f, I32 cxix) __attribute__((unused));
+static void goperl_dounwind(goperl_frame_t *f, I32 cxix) {
+    goperl_pp_stack_push(f);
+    goperl_do_op(f, GOPERL_OP_CX, (uint64_t)GOPERL_CX_DOUNWIND << 32,
+                 (uint64_t)(int64_t)cxix, 0, 0);
+    f->st_stale = f->pp_frame;
+}
+#define dounwind(cxix) goperl_dounwind(_gof, (cxix))
+#define Perl_dounwind goperl_dounwind
+#define cxstack_max \
+    ((I32)(int64_t)goperl_op0(GOPERL_OP_CX, (uint64_t)GOPERL_CX_MAX << 32, 0))
+#define CX_CUR() (&cxstack[cxstack_ix])
+
+/* ---- the regular expression API ------------------------------------------- */
+
+/* REGEXP selectors. */
+enum {
+    GOPERL_RX_OF_SV = 0,
+    GOPERL_RX_COMP = 1,
+    GOPERL_RX_EXEC = 2,
+    GOPERL_RX_BODY = 3,
+    GOPERL_RX_OFFS = 4,
+    GOPERL_RX_COMP_PV = 5
+};
+#define GOPERL_RX(sel, tok, b)                                              \
+    goperl_op0(GOPERL_OP_REGEXP,                                            \
+               ((uint64_t)(sel) << 32) | (uint32_t)GOPERL_TOK(tok), (b))
+
+/* A REGEXP is a value of the interpreter, as an SV is. Its body, which
+ * perl's macros read through ReANY (and old code through SvANY), is a copy
+ * here: what the interpreter held when the macro ran. */
+typedef struct goperl_sv REGEXP;
+typedef struct regexp_engine {
+    int goperl_opaque;
+} regexp_engine;
+typedef struct regexp_paren_pair {
+    SSize_t start;
+    SSize_t end;
+    SSize_t start_tmp;
+} regexp_paren_pair;
+typedef struct regexp {
+    const regexp_engine *engine;
+    REGEXP *mother_re;
+    HV *paren_names;
+    U32 extflags;
+    U32 nparens;
+    SSize_t minlen;
+    SSize_t minlenret;
+    STRLEN gofs;
+    U32 intflags;
+    U32 lastparen;
+    U32 lastcloseparen;
+    regexp_paren_pair *offs;
+    char *subbeg;
+    SSize_t sublen;
+    SSize_t suboffset;
+    SSize_t subcoffset;
+    U32 compflags;
+    char *precomp;
+    STRLEN prelen;
+    char *wrapped;
+    STRLEN wraplen;
+} regexp;
+
+static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) __attribute__((unused));
+static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
+    const uint32_t *w = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_REGEXP,
+                        ((uint64_t)GOPERL_RX_BODY << 32) | (uint32_t)GOPERL_TOK(rx),
+                        0, 0, 0));
+    if (!w) return 0;
+    uint32_t c[20];
+    memcpy(c, w, sizeof c);
+    regexp *r = (regexp *)goperl_arena_alloc(
+        sizeof(regexp) + sizeof(regexp_paren_pair) * ((size_t)c[4] + 1));
+    if (!r) goperl_croakf(f, "Out of memory!");
+    /* an engine is known by its address in the interpreter */
+    r->engine = (const regexp_engine *)(uintptr_t)c[0];
+    r->mother_re = (REGEXP *)GOPERL_SV(c[1]);
+    r->paren_names = (HV *)GOPERL_SV(c[2]);
+    r->extflags = c[3];
+    r->nparens = c[4];
+    r->minlen = (SSize_t)(int32_t)c[5];
+    r->minlenret = (SSize_t)(int32_t)c[6];
+    r->gofs = c[7];
+    r->intflags = c[8];
+    r->lastparen = c[9];
+    r->lastcloseparen = c[10];
+    r->subbeg = c[11] ? (char *)goperl_guest_mem(f, c[11]) : 0;
+    r->sublen = (SSize_t)(int32_t)c[12];
+    r->suboffset = (SSize_t)(int32_t)c[13];
+    r->subcoffset = (SSize_t)(int32_t)c[14];
+    r->compflags = c[15];
+    r->precomp = c[16] ? (char *)goperl_guest_mem(f, c[16]) : 0;
+    r->prelen = c[17];
+    r->wrapped = c[18] ? (char *)goperl_guest_mem(f, c[18]) : 0;
+    r->wraplen = c[19];
+    r->offs = (regexp_paren_pair *)(r + 1);
+    for (U32 i = 0; i <= r->nparens; i++) {
+        const uint64_t se = goperl_do_op(
+            f, GOPERL_OP_REGEXP,
+            ((uint64_t)GOPERL_RX_OFFS << 32) | (uint32_t)GOPERL_TOK(rx), i, 0, 0);
+        r->offs[i].start = (SSize_t)(int32_t)(se >> 32);
+        r->offs[i].end = (SSize_t)(int32_t)se;
+        r->offs[i].start_tmp = -1;
+    }
+    return r;
+}
+#define ReANY(rx) goperl_reany(_gof, (REGEXP *)(rx))
+static void *goperl_svany(goperl_frame_t *f, SV *sv) __attribute__((unused));
+static void *goperl_svany(goperl_frame_t *f, SV *sv) {
+    if (sv && SvTYPE(sv) == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
+    return 0;
+}
+#undef SvANY
+#define SvANY(sv) goperl_svany(_gof, (SV *)(sv))
+
+#define SvRX(sv) ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_OF_SV, sv, 0)))
+#define pregcomp(pattern, flags) \
+    ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_COMP, pattern, (U32)(flags))))
+#define re_compile(pattern, flags) pregcomp((pattern), (flags))
+#define CALLREGCOMP(pattern, flags) pregcomp((pattern), (flags))
+#define pregfree(rx) SvREFCNT_dec((SV *)(rx))
+#define ReREFCNT_dec(rx) SvREFCNT_dec((SV *)(rx))
+#define ReREFCNT_inc(rx) ((REGEXP *)SvREFCNT_inc((SV *)(rx)))
+#define RX_ENGINE(rx) (ReANY(rx)->engine)
+#define RX_EXTFLAGS(rx) (ReANY(rx)->extflags)
+#define RX_COMPFLAGS(rx) (ReANY(rx)->compflags)
+#define RX_PRECOMP(rx) (ReANY(rx)->precomp)
+#define RX_PRECOMP_const(rx) ((const char *)RX_PRECOMP(rx))
+#define RX_PRELEN(rx) (ReANY(rx)->prelen)
+#define RX_WRAPPED(rx) (ReANY(rx)->wrapped)
+#define RX_WRAPPED_const(rx) ((const char *)RX_WRAPPED(rx))
+#define RX_WRAPLEN(rx) (ReANY(rx)->wraplen)
+#define RX_NPARENS(rx) (ReANY(rx)->nparens)
+#define RX_LASTPAREN(rx) (ReANY(rx)->lastparen)
+#define RX_LASTCLOSEPAREN(rx) (ReANY(rx)->lastcloseparen)
+#define RX_OFFS(rx) (ReANY(rx)->offs)
+#define RX_SUBBEG(rx) (ReANY(rx)->subbeg)
+#define RX_SUBLEN(rx) (ReANY(rx)->sublen)
+#define RX_SUBOFFSET(rx) (ReANY(rx)->suboffset)
+#define RX_SUBCOFFSET(rx) (ReANY(rx)->subcoffset)
+#define RX_MINLEN(rx) (ReANY(rx)->minlen)
+#define RX_MINLENRET(rx) (ReANY(rx)->minlenret)
+#define RX_GOFS(rx) (ReANY(rx)->gofs)
+#define RX_UTF8(rx) SvUTF8((SV *)(rx))
+#define RX_MATCH_UTF8(rx) cBOOL(RX_EXTFLAGS(rx) & RXf_MATCH_UTF8)
+#define get_regex_charset(flags) \
+    ((regex_charset)(((flags) & RXf_PMf_CHARSET) >> 5))
+typedef enum {
+    REGEX_DEPENDS_CHARSET = 0,
+    REGEX_LOCALE_CHARSET,
+    REGEX_UNICODE_CHARSET,
+    REGEX_ASCII_RESTRICTED_CHARSET,
+    REGEX_ASCII_MORE_RESTRICTED_CHARSET
+} regex_charset;
+#define set_regex_charset(flagsp, cs) \
+    (*(flagsp) = (*(flagsp) & ~RXf_PMf_CHARSET) | ((U32)(cs) << 5))
+
+/* pregexec matches in a string of the interpreter's memory (the buffer of
+ * the SV it is given, as a rule). A string that lies elsewhere is matched
+ * in a copy the interpreter keeps for the match, and the offsets it reports
+ * are the same either way. */
+static I32 goperl_pregexec(goperl_frame_t *f, REGEXP *rx, char *stringarg,
+                           char *strend, char *strbeg, SSize_t minend,
+                           SV *screamer, U32 nosave) __attribute__((unused));
+static I32 goperl_pregexec(goperl_frame_t *f, REGEXP *rx, char *stringarg,
+                           char *strend, char *strbeg, SSize_t minend,
+                           SV *screamer, U32 nosave) {
+    uint32_t w[6];
+    const uintptr_t b = (uintptr_t)strbeg - (uintptr_t)f->membase;
+    const uintptr_t e = (uintptr_t)strend - (uintptr_t)f->membase;
+    if (b < f->memcap && e < f->memcap) {
+        w[0] = (uint32_t)((uintptr_t)stringarg - (uintptr_t)f->membase);
+        w[1] = (uint32_t)e;
+        w[2] = (uint32_t)b;
+    } else {
+        SV *copy = sv_2mortal(newSVpvn(strbeg, (STRLEN)(strend - strbeg)));
+        if (screamer && SvUTF8(screamer)) SvUTF8_on(copy);
+        const uint32_t base = (uint32_t)goperl_do_op(f, GOPERL_OP_SV_PVX_RAW,
+                                                     GOPERL_TOK(copy), 0, 0, 0);
+        w[2] = base;
+        w[0] = base + (uint32_t)(stringarg - strbeg);
+        w[1] = base + (uint32_t)(strend - strbeg);
+        screamer = copy;
+    }
+    w[3] = (uint32_t)(int32_t)minend;
+    w[4] = (uint32_t)GOPERL_TOK(screamer);
+    w[5] = nosave;
+    return (I32)(int64_t)goperl_do_op(
+        f, GOPERL_OP_REGEXP,
+        ((uint64_t)GOPERL_RX_EXEC << 32) | (uint32_t)GOPERL_TOK(rx), sizeof w,
+        (const char *)w, sizeof w);
+}
+#define pregexec(rx, stringarg, strend, strbeg, minend, screamer, nosave)   \
+    goperl_pregexec(_gof, (REGEXP *)(rx), (char *)(stringarg),              \
+                    (char *)(strend), (char *)(strbeg), (SSize_t)(minend),  \
+                    (SV *)(screamer), (U32)(nosave))
+
+/* ---- strings for display --------------------------------------------------- */
+
+/* pv_display, pv_escape and pv_pretty are the interpreter's: the request is
+ * [count][max][flags][len][n1][n2], the two colour strings, the text. */
+static char *goperl_pv_show(goperl_frame_t *f, int fn, SV *dsv, const char *pv,
+                            STRLEN count, STRLEN len, STRLEN max,
+                            STRLEN *escaped, const char *c1, const char *c2,
+                            U32 flags) __attribute__((unused));
+static char *goperl_pv_show(goperl_frame_t *f, int fn, SV *dsv, const char *pv,
+                            STRLEN count, STRLEN len, STRLEN max,
+                            STRLEN *escaped, const char *c1, const char *c2,
+                            U32 flags) {
+    const size_t n1 = c1 ? strlen(c1) : 0, n2 = c2 ? strlen(c2) : 0;
+    const size_t total = 24 + n1 + n2 + count;
+    char *req = (char *)malloc(total ? total : 1);
+    if (!req) goperl_croakf(f, "Out of memory!");
+    const uint32_t w[6] = {(uint32_t)count, (uint32_t)max, flags,
+                           (uint32_t)len, (uint32_t)n1, (uint32_t)n2};
+    memcpy(req, w, 24);
+    if (n1) memcpy(req + 24, c1, n1);
+    if (n2) memcpy(req + 24 + n1, c2, n2);
+    if (count) memcpy(req + 24 + n1 + n2, pv, count);
+    /* -> how much of the text was taken << 32 | where the result is */
+    const uint64_t r = goperl_do_op(
+        f, GOPERL_OP_CALL, ((uint64_t)fn << 32) | (uint32_t)GOPERL_TOK(dsv),
+        (uint64_t)total, req, (uint64_t)total);
+    free(req);
+    if (escaped) *escaped = (STRLEN)(r >> 32);
+    return (uint32_t)r ? (char *)goperl_guest_mem(f, (uint32_t)r) : 0;
+}
+#define pv_display(dsv, pv, cur, len, pvlim)                                \
+    goperl_pv_show(_gof, GOPERL_CALL_PV_DISPLAY, (dsv), (pv), (cur), (len), \
+                   (pvlim), 0, 0, 0, 0)
+#define pv_escape(dsv, str, count, max, escaped, flags)                    \
+    goperl_pv_show(_gof, GOPERL_CALL_PV_ESCAPE, (dsv), (str), (count), 0,  \
+                   (max), (escaped), 0, 0, (flags))
+#define pv_pretty(dsv, str, count, max, start_color, end_color, flags)     \
+    goperl_pv_show(_gof, GOPERL_CALL_PV_PRETTY, (dsv), (str), (count), 0,  \
+                   (max), 0, (start_color), (end_color), (flags))
+#define PERL_PV_ESCAPE_QUOTE 0x000001
+#define PERL_PV_PRETTY_QUOTE PERL_PV_ESCAPE_QUOTE
+#define PERL_PV_PRETTY_ELLIPSES 0x000002
+#define PERL_PV_PRETTY_LTGT 0x000004
+#define PERL_PV_PRETTY_EXACTSIZE 0x000008
+#define PERL_PV_ESCAPE_UNI 0x000100
+#define PERL_PV_ESCAPE_UNI_DETECT 0x000200
+#define PERL_PV_ESCAPE_NONASCII 0x000400
+#define PERL_PV_ESCAPE_FIRSTCHAR 0x000800
+#define PERL_PV_ESCAPE_ALL 0x001000
+#define PERL_PV_ESCAPE_NOBACKSLASH 0x002000
+#define PERL_PV_ESCAPE_NOCLEAR 0x004000
+#define PERL_PV_PRETTY_NOCLEAR PERL_PV_ESCAPE_NOCLEAR
+#define PERL_PV_ESCAPE_RE 0x008000
+#define PERL_PV_ESCAPE_DWIM 0x010000
+#define PERL_PV_PRETTY_DUMP (PERL_PV_PRETTY_ELLIPSES | PERL_PV_PRETTY_QUOTE)
+#define PERL_PV_PRETTY_REGPROP \
+    (PERL_PV_PRETTY_ELLIPSES | PERL_PV_PRETTY_LTGT | PERL_PV_ESCAPE_RE | \
+     PERL_PV_ESCAPE_NONASCII)
+
+/* ---- more calls ------------------------------------------------------------- */
+
+#define cv_clone(cv) ((CV *)GOPERL_SV(GOPERL_CALL(GOPERL_CALL_CV_CLONE, cv, 0)))
+static CV *goperl_cv_clone_fn(pTHX_ CV *proto) __attribute__((unused));
+static CV *goperl_cv_clone_fn(pTHX_ CV *proto) { return cv_clone(proto); }
+#define Perl_cv_clone goperl_cv_clone_fn
+#define getcwd_sv(sv) (GOPERL_CALL(GOPERL_CALL_GETCWD_SV, sv, 0) != 0)
+#define mess_sv(sv, consume) \
+    GOPERL_SV(GOPERL_CALL(GOPERL_CALL_MESS_SV, sv, (consume) ? 1 : 0))
+
+/* ---- more interpreter variables --------------------------------------------- */
+
+#define PL_errors (*goperl_plsv_ref(_gof, GOPERL_PL_ERRORS))
+/* The interpreter's mark stack, where it is: what a context's
+ * blk_oldmarksp indexes. (The marks of the running native function are its
+ * own: PL_markstack_ptr, TOPMARK.) */
+#define PL_markstack \
+    ((I32 *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_MARKSTACK)))
+#define PL_savebegin (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_SAVEBEGIN))
+/* The scope stack is the interpreter's array, read where it is. */
+#define PL_scopestack \
+    ((I32 *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_SCOPESTACK)))
+#undef PL_sub_generation
+#define PL_sub_generation \
+    (*(U32 *)goperl_plint_ref(_gof, GOPERL_PL_SUB_GENERATION))
+
+
+/* ---- DBM filters (the macros of perl.h the DBM extensions are written
+ * with: a filter is a sub called with the key or value in $_) ------------ */
+
+#define DBM_setFilter(db_type, code)                 \
+    STMT_START {                                     \
+        if (db_type) RETVAL = sv_mortalcopy(db_type); \
+        ST(0) = RETVAL;                              \
+        if (db_type && (code == &PL_sv_undef)) {     \
+            SvREFCNT_dec_NN(db_type);                \
+            db_type = NULL;                          \
+        } else if (code) {                           \
+            if (db_type)                             \
+                sv_setsv(db_type, code);             \
+            else                                     \
+                db_type = newSVsv(code);             \
+        }                                            \
+    }                                                \
+    STMT_END
+
+#define DBM_ckFilter(arg, type, name)                              \
+    STMT_START {                                                   \
+        if (db->type) {                                            \
+            if (db->filtering) {                                   \
+                croak("recursion detected in %s", name);           \
+            }                                                      \
+            ENTER;                                                 \
+            SAVETMPS;                                              \
+            SAVEINT(db->filtering);                                \
+            db->filtering = TRUE;                                  \
+            SAVE_DEFSV;                                            \
+            if (name[7] == 's') arg = newSVsv(arg);                \
+            DEFSV_set(arg);                                        \
+            SvTEMP_off(arg);                                       \
+            PUSHMARK(SP);                                          \
+            PUTBACK;                                               \
+            (void)perl_call_sv(db->type, G_DISCARD);               \
+            SPAGAIN;                                               \
+            PUTBACK;                                               \
+            FREETMPS;                                              \
+            LEAVE;                                                 \
+            if (name[7] == 's') {                                  \
+                arg = sv_2mortal(arg);                             \
+            }                                                      \
+        }                                                          \
+    }                                                              \
+    STMT_END
+
+
+/* ---- the overload table of a stash ----------------------------------------- */
+
+#define AMTf_AMAGIC 1
+#define AMT_AMAGIC(amt) ((amt)->flags & AMTf_AMAGIC)
+#define AMT_AMAGIC_on(amt) ((amt)->flags |= AMTf_AMAGIC)
+#define AMT_AMAGIC_off(amt) ((amt)->flags &= ~AMTf_AMAGIC)
+/* As the interpreter keeps it, with room for every overload method it has
+ * (the table is given with their number). A copy: good until the
+ * outermost native call returns. */
+#define GOPERL_AMT_METHODS 128
+typedef struct am_table {
+    U8 flags;
+    U8 fallback;
+    U16 spare;
+    U32 was_ok_sub;
+    CV *table[GOPERL_AMT_METHODS];
+} AMT;
+static void *goperl_amt(goperl_frame_t *f, SV *stash) {
+    /* CALL 10: AMT -> [flags][fallback][was_ok_sub][n], n subs */
+    const uint32_t *w = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_CALL,
+                        ((uint64_t)10 << 32) | (uint32_t)GOPERL_TOK(stash), 0, 0, 0));
+    if (!w) return 0;
+    AMT *amt = (AMT *)goperl_arena_alloc(sizeof(AMT));
+    if (!amt) goperl_croakf(f, "Out of memory!");
+    if (w[3] > GOPERL_AMT_METHODS)
+        goperl_croakf(f, "the interpreter has more overload methods than the "
+                         "go-perl XS SDK's AMT");
+    amt->flags = (U8)w[0];
+    amt->fallback = (U8)w[1];
+    amt->was_ok_sub = w[2];
+    for (uint32_t i = 0; i < w[3]; i++) amt->table[i] = (CV *)GOPERL_SV(w[4 + i]);
+    return amt;
+}
+
+/* ---- small additions --------------------------------------------------------- */
+
+#define sv_catpvn_mg(sv, p, l)                                    \
+    ({ GOPERL_ONCE(goperl_sv_catpvn_mg_sv_, sv);                  \
+       sv_catpvn(goperl_sv_catpvn_mg_sv_, (p), (l));              \
+       SvSETMAGIC(goperl_sv_catpvn_mg_sv_); })
+static NV goperl_my_atof(goperl_frame_t *f, const char *s) __attribute__((unused));
+static NV goperl_my_atof(goperl_frame_t *f, const char *s) {
+    union {
+        uint64_t u;
+        NV d;
+    } cvt;
+    /* CALL 9: ATOF */
+    cvt.u = goperl_do_op(f, GOPERL_OP_CALL, (uint64_t)9 << 32, 0, s, strlen(s));
+    return cvt.d;
+}
+#define my_atof(s) goperl_my_atof(_gof, (s))
+#define Atof my_atof
+#define HV_ITERNEXT_WANTPLACEHOLDERS 0x01
+#define hv_iternext_flags(hv, flags)                                         \
+    ({ GOPERL_ONCE(goperl_hv_iternext_flags_hv_, hv);                        \
+       goperl_he_shadow(_gof, (HV *)(goperl_hv_iternext_flags_hv_),          \
+                        goperl_op0(GOPERL_OP_HV_ITERNEXT,                    \
+                                   GOPERL_TOK(goperl_hv_iternext_flags_hv_), \
+                                   (uint64_t)(int64_t)(flags))); })
+#define CvSPECIAL_on(cv)                          \
+    ({ GOPERL_ONCE(goperl_CvSPECIAL_on_cv_, cv);  \
+       GOPERL_CVFLAGS_CHANGE(goperl_CvSPECIAL_on_cv_, CVf_UNIQUE, 0); \
+       GOPERL_FLAGS_CHANGE(goperl_CvSPECIAL_on_cv_, SVf_FAKE, 0); (void)0; })
+#define CvSPECIAL(cv) \
+    ((CvFLAGS(cv) & CVf_UNIQUE) && (SvFLAGS((SV *)(cv)) & SVf_FAKE))
+#define HeKFLAGS(he) HEK_FLAGS(HeKEY_hek(he))
+#define HvSHAREKEYS_on(hv) GOPERL_FLAGS_CHANGE(hv, SVphv_SHAREKEYS, 0)
+#define HvSHAREKEYS_off(hv) GOPERL_FLAGS_CHANGE(hv, 0, SVphv_SHAREKEYS)
+#define HvSHAREKEYS(hv) (SvFLAGS((SV *)(hv)) & SVphv_SHAREKEYS)
+#define UV_MAX_P1 (4.0 * (1 + ((UV_MAX) >> 2)))
+#define UV_MAX_P1_HALF (2.0 * (1 + ((UV_MAX) >> 2)))
+#define IV_MAX_P1 (2.0 * (1 + ((IV_MAX) >> 1)))
+#define start_subparse(is_format, flags) \
+    goperl_start_subparse_(_gof, (is_format), (flags))
+#define newATTRSUB(floor, o, proto, attrs, block)                         \
+    goperl_newattrsub(_gof, (floor), (OP *)(o), (OP *)(proto), (OP *)(attrs), \
+                      (OP *)(block))
+#define newSUB(floor, o, proto, block) newATTRSUB((floor), (o), (proto), 0, (block))
+#define cxinc() ((I32)(int64_t)goperl_tree(_gof, GOPERL_TREE_CXINC, 0, 0))
+static I32 goperl_cxinc_fn(pTHX) __attribute__((unused));
+static I32 goperl_cxinc_fn(pTHX) { return cxinc(); }
+#define Perl_cxinc goperl_cxinc_fn
+#define find_runcv(db_seqp)                                              \
+    ({ U32 *const goperl_find_runcv_p_ = (db_seqp);                      \
+       if (goperl_find_runcv_p_) *goperl_find_runcv_p_ = 0;              \
+       (CV *)GOPERL_SV(goperl_tree(_gof, GOPERL_TREE_FIND_RUNCV, 0, 0)); })
+static void goperl_lex_stuff_sv(goperl_frame_t *f, SV *sv, U32 flags)
+    __attribute__((unused));
+static void goperl_lex_stuff_sv(goperl_frame_t *f, SV *sv, U32 flags) {
+    const uint32_t w[2] = {(uint32_t)GOPERL_TOK(sv), flags};
+    goperl_parser_push(f);
+    goperl_tree(f, GOPERL_TREE_LEX_STUFF_SV, 2, w);
+    goperl_parser_pull(f);
+}
+#define lex_stuff_sv(sv, flags) goperl_lex_stuff_sv(_gof, (SV *)(sv), (U32)(flags))
+static PADOFFSET goperl_pad_add_name_sv(goperl_frame_t *f, SV *name, U32 flags,
+                                        HV *typestash, HV *ourstash)
+    __attribute__((unused));
+static PADOFFSET goperl_pad_add_name_sv(goperl_frame_t *f, SV *name, U32 flags,
+                                        HV *typestash, HV *ourstash) {
+    const uint32_t w[4] = {(uint32_t)GOPERL_TOK(name), flags,
+                           (uint32_t)GOPERL_TOK(typestash),
+                           (uint32_t)GOPERL_TOK(ourstash)};
+    return (PADOFFSET)goperl_tree(f, GOPERL_TREE_PAD_ADD_NAME_SV, 4, w);
+}
+#define pad_add_name_sv(name, flags, typestash, ourstash)               \
+    goperl_pad_add_name_sv(_gof, (SV *)(name), (U32)(flags),            \
+                           (HV *)(typestash), (HV *)(ourstash))
+
+
+/* ---- a parser of its own, COP saves ------------------------------------------ */
+
+/* lex_start makes a parser for a string (or for nothing); the scope that
+ * was open when it was called ends it. */
+static void goperl_lex_start(goperl_frame_t *f, SV *line, void *rsfp, U32 flags)
+    __attribute__((unused));
+static void goperl_lex_start(goperl_frame_t *f, SV *line, void *rsfp, U32 flags) {
+    if (rsfp)
+        goperl_croakf(f, "lex_start with a file handle is not supported by "
+                         "the go-perl XS SDK");
+    goperl_parser_push(f);
+    /* CALL 14: LEX_START */
+    goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)14 << 32) | (uint32_t)GOPERL_TOK(line),
+                 flags, 0, 0);
+    goperl_parser_pull(f);
+}
+#define lex_start(line, rsfp, flags) \
+    goperl_lex_start(_gof, (SV *)(line), (void *)(rsfp), (U32)(flags))
+/* The line and the file of a COP are saved by the interpreter, which puts
+ * them back when the scope ends (CALL 13: 0 the line, 1 the file). */
+#define SAVECOPLINE(c)                                              \
+    ((void)goperl_op0(GOPERL_OP_CALL,                               \
+                      ((uint64_t)13 << 32) | (uint32_t)(c)->gop, 0))
+#define SAVECOPFILE_FREE(c)                                         \
+    ((void)goperl_op0(GOPERL_OP_CALL,                               \
+                      ((uint64_t)13 << 32) | (uint32_t)(c)->gop, 1))
+#define SAVECOPFILE(c) SAVECOPFILE_FREE(c)
+
+/* ---- a few more fields --------------------------------------------------------- */
+
+#define GvREFCNT(gv) ((U32)GOPERL_FIELD(15, gv, 0)) /* FIELD_GV_REFCNT */
+/* CvOUTSIDE is an lvalue (`CvOUTSIDE(cv) = NULL`: the plain store). */
+#undef CvOUTSIDE
+#define CvOUTSIDE(cv) \
+    (*(CV **)goperl_lv_ref(_gof, (SV *)(cv), GOPERL_LV_CVOUTSIDE, GOPERL_LV_AT))
+#define CvWEAKOUTSIDE(cv) (CvFLAGS(cv) & CVf_WEAKOUTSIDE)
+#define CvWEAKOUTSIDE_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_WEAKOUTSIDE, 0)
+#define CvWEAKOUTSIDE_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_WEAKOUTSIDE)
+#define isWORDCHAR_utf8_safe(p, e)              \
+    goperl_charclass_uv(_gof, GOPERL_CC_WORDCHAR, \
+                        goperl_utf8_cp(_gof, (const U8 *)(p), (const U8 *)(e)))
+
+
+/* ---- ops with auxiliary data ----------------------------------------------------
+ * What the aux pointer of an op means is the op type's: an argument check
+ * has a struct of three fields, an argument element a number in place of a
+ * pointer, a custom op whatever its module made. The interpreter is given
+ * what it runs itself (the first two), in its own memory; the data of a
+ * custom op stays with the module. */
+#define GOPERL_TREE_NEWUNOP_AUX 23
+static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
+                              UNOP_AUX_item *aux) __attribute__((unused));
+static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
+                              UNOP_AUX_item *aux) {
+    uint32_t w[7] = {(uint32_t)type, (uint32_t)flags, goperl_optok(f, first), 0, 0, 0, 0};
+    switch (type) {
+    case OP_ARGELEM:
+        w[3] = 1;
+        w[4] = (uint32_t)(uintptr_t)aux;
+        break;
+    case OP_ARGCHECK:
+        if (aux) {
+            const struct op_argcheck_aux *ca = (const struct op_argcheck_aux *)aux;
+            w[3] = 2;
+            w[4] = (uint32_t)ca->params;
+            w[5] = (uint32_t)ca->opt_params;
+            w[6] = (uint32_t)(unsigned char)ca->slurpy;
+        }
+        break;
+    case OP_CUSTOM:
+        break;
+    default:
+        goperl_croakf(f, "newUNOP_AUX of %s is not supported by the go-perl XS SDK",
+                      PL_op_name[type]);
+    }
+    OP *o = goperl_tree_op(f, goperl_tree(f, GOPERL_TREE_NEWUNOP_AUX, 7, w));
+    if (type == OP_ARGCHECK && aux) Safefree(aux); /* the op has its own */
+    if (type == OP_CUSTOM) o->op_aux = aux;
+    if (type == OP_ARGELEM) o->op_aux = aux;
+    return o;
+}
+#define newUNOP_AUX(type, flags, first, aux) \
+    goperl_newunop_aux(_gof, (type), (flags), (OP *)(first), (UNOP_AUX_item *)(aux))
+#define UNOP_AUX_item_sv(item) ((item)->sv)
+
+/* ---- pads ----------------------------------------------------------------------
+ * A pad is an array (PAD is AV), so its values are reached as an array's
+ * are. A padlist, a list of pad names and a pad name are the interpreter's
+ * own structures: tokens here, whose arrays are copied out when they are
+ * asked for (good until the outermost native call returns). */
+typedef struct goperl_padlist PADLIST;
+typedef struct goperl_padnamelist PADNAMELIST;
+typedef struct goperl_padname PADNAME;
+typedef AV PAD;
+#define GOPERL_PL_CURPAD 69
+#define GOPERL_PL_COMPPAD 70
+#define GOPERL_PL_COMPPAD_NAME 71
+enum {
+    GOPERL_PAD_CV_PADLIST = 6,
+    GOPERL_PAD_PADLIST = 7,
+    GOPERL_PAD_NAMELIST = 8,
+    GOPERL_PAD_NAME = 9,
+    GOPERL_PAD_SAVE_CLEARSV = 10
+};
+#define PL_comppad ((PAD *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_COMPPAD)))
+#define PL_comppad_name \
+    ((PADNAMELIST *)(uintptr_t)GOPERL_PLVAR(GOPERL_PL_COMPPAD_NAME))
+/* The pad that is in use, as an array of its values: stores through it go
+ * to the pad (see AvARRAY). */
+#define PL_curpad AvARRAY(PL_comppad)
+#undef PAD_SVl
+#define PAD_SVl(ix) (PL_curpad[ix])
+#define PadARRAY(pad) AvARRAY(pad)
+#define PadMAX(pad) AvFILLp(pad)
+#define CvPADLIST(cv)                                        \
+    ((PADLIST *)(uintptr_t)goperl_op0(GOPERL_OP_PAD, GOPERL_PAD_CV_PADLIST, \
+                                      GOPERL_TOK(cv)))
+/* The fields of a padlist or of a list of names: [0] and [1] two numbers,
+ * the entries after them. */
+static const uint32_t *goperl_pad_words(goperl_frame_t *f, int sel, const void *tok)
+    __attribute__((unused));
+static const uint32_t *goperl_pad_words(goperl_frame_t *f, int sel, const void *tok) {
+    const uint32_t *w = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_PAD, (uint64_t)sel, (uint64_t)(uintptr_t)tok, 0, 0));
+    if (!w) goperl_croakf(f, "no such pad structure");
+    return w;
+}
+static void **goperl_pad_entries(goperl_frame_t *f, int sel, const void *tok)
+    __attribute__((unused));
+static void **goperl_pad_entries(goperl_frame_t *f, int sel, const void *tok) {
+    const uint32_t *w = goperl_pad_words(f, sel, tok);
+    const int32_t n = (int32_t)w[0] + 1;
+    void **out = (void **)goperl_arena_alloc(sizeof(void *) * (size_t)(n > 0 ? n : 1));
+    if (!out) goperl_croakf(f, "Out of memory!");
+    for (int32_t i = 0; i < n; i++) out[i] = (void *)(uintptr_t)w[2 + i];
+    return out;
+}
+#define PadlistARRAY(pl) \
+    ((PAD **)goperl_pad_entries(_gof, GOPERL_PAD_PADLIST, (pl)))
+#define PadlistMAX(pl) \
+    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_PADLIST, (pl))[0])
+#define PadlistNAMES(pl) \
+    ((PADNAMELIST *)(uintptr_t)goperl_pad_words(_gof, GOPERL_PAD_PADLIST, (pl))[1])
+#define PadlistNAMESARRAY(pl) PadnamelistARRAY(PadlistNAMES(pl))
+#define PadlistNAMESMAX(pl) PadnamelistMAX(PadlistNAMES(pl))
+#define PadnamelistARRAY(pnl) \
+    ((PADNAME **)goperl_pad_entries(_gof, GOPERL_PAD_NAMELIST, (pnl)))
+#define PadnamelistMAX(pnl) \
+    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_NAMELIST, (pnl))[0])
+#define PadnamelistMAXNAMED(pnl) \
+    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_NAMELIST, (pnl))[1])
+#define padnamelist_fetch(pnl, key)                                  \
+    ({ PADNAMELIST *const goperl_pnl_ = (pnl);                       \
+       const SSize_t goperl_key_ = (key);                            \
+       goperl_key_ > PadnamelistMAX(goperl_pnl_)                     \
+           ? (PADNAME *)0                                            \
+           : PadnamelistARRAY(goperl_pnl_)[goperl_key_]; })
+/* [pv][len][flags][refcnt][low][high][ourstash][type] */
+#define GOPERL_PADNAME(pn) goperl_pad_words(_gof, GOPERL_PAD_NAME, (pn))
+#define PadnamePV(pn)                                                \
+    ({ const uint32_t goperl_pv_ = GOPERL_PADNAME(pn)[0];            \
+       goperl_pv_ ? (char *)goperl_guest_mem(_gof, goperl_pv_) : (char *)0; })
+#define PadnameLEN(pn) ((STRLEN)GOPERL_PADNAME(pn)[1])
+#define PadnameUTF8(pn) 1
+#define PadnameSV(pn) \
+    newSVpvn_flags(PadnamePV(pn), PadnameLEN(pn), SVs_TEMP | SVf_UTF8)
+#define PadnameFLAGS(pn) ((U8)GOPERL_PADNAME(pn)[2])
+#define PadnameREFCNT(pn) ((U32)GOPERL_PADNAME(pn)[3])
+#define COP_SEQ_RANGE_LOW(pn) ((U32)GOPERL_PADNAME(pn)[4])
+#define COP_SEQ_RANGE_HIGH(pn) ((U32)GOPERL_PADNAME(pn)[5])
+#define PadnameOURSTASH(pn) ((HV *)GOPERL_SV(GOPERL_PADNAME(pn)[6]))
+#define PadnameTYPE(pn) ((HV *)GOPERL_SV(GOPERL_PADNAME(pn)[7]))
+#define PadnameIsOUR(pn) cBOOL(GOPERL_PADNAME(pn)[6])
+#define PadnameHasTYPE(pn) cBOOL(GOPERL_PADNAME(pn)[7])
+#define PadnameOUTER(pn) (PadnameFLAGS(pn) & PADNAMEf_OUTER)
+#define PadnameIsSTATE(pn) (PadnameFLAGS(pn) & PADNAMEf_STATE)
+#define PadnameLVALUE(pn) (PadnameFLAGS(pn) & PADNAMEf_LVALUE)
+#define PadnameIsFIELD(pn) (PadnameFLAGS(pn) & PADNAMEf_FIELD)
+#define PadnameIN_SCOPE(pn, seq) \
+    (COP_SEQ_RANGE_LOW(pn) != PERL_PADSEQ_INTRO && COP_SEQ_RANGE_LOW(pn) < (seq) && \
+     (seq) <= COP_SEQ_RANGE_HIGH(pn))
+#define PERL_PADSEQ_INTRO U32_MAX
+/* save_clearsv is given the address of a value of the pad in use: of the
+ * array PL_curpad is. */
+static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) __attribute__((unused));
+static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) {
+    SV **pad = PL_curpad;
+    const ptrdiff_t ix = svp - pad;
+    if (ix < 0 || ix > (ptrdiff_t)goperl_av_slots(f, GOPERL_TOK(PL_comppad)))
+        goperl_croakf(f, "save_clearsv of a value that is not of the pad in use");
+    goperl_do_op(f, GOPERL_OP_PAD, GOPERL_PAD_SAVE_CLEARSV, (uint64_t)ix, 0, 0);
+}
+#define save_clearsv(svp) goperl_save_clearsv(_gof, (SV **)(svp))
+#define SvPADSTALE_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_PADSTALE, 0)
+#define SvPADSTALE_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_PADSTALE)
+#define SvPADTMP_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_PADTMP, 0)
+#define SvPADTMP_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_PADTMP)
+#define KEY_sigvar 0xFFFF
+
+
+#define CvCLONE_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_CLONE, 0)
+#define CvCLONE_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_CLONE)
+#define CvCLONE(cv) (CvFLAGS(cv) & CVf_CLONE)
+/* FIELD 17: the aux flags of a stash (0 for a hash without aux) */
+#define HvAUXf_IS_CLASS 0x4
+#define HvSTASH_IS_CLASS(hv) ((GOPERL_FIELD(17, hv, 0) & HvAUXf_IS_CLASS) != 0)
+#define gv_init_sv(gv, stash, namesv, flags)                              \
+    ({ STRLEN goperl_gv_init_sv_len_;                                     \
+       SV *const goperl_gv_init_sv_name_ = (SV *)(namesv);                \
+       const char *const goperl_gv_init_sv_p_ =                           \
+           SvPV(goperl_gv_init_sv_name_, goperl_gv_init_sv_len_);         \
+       gv_init_pvn((gv), (stash), goperl_gv_init_sv_p_,                   \
+                   goperl_gv_init_sv_len_,                                \
+                   (flags) | (SvUTF8(goperl_gv_init_sv_name_) ? SVf_UTF8 : 0)); })
+
+
+/* ---- MULTICALL -------------------------------------------------------------------
+ * Calls one sub many times (the block of a first { ... } @list): the sub
+ * is given no arguments, reads $_ or $a and $b as the caller set them, and
+ * leaves what it returns at the top of the stack, where the caller reads
+ * it (*PL_stack_sp) before the next call. perl saves the cost of entering
+ * the sub each time; here each MULTICALL is a call of the sub, in the
+ * context of the variable gimme the caller has in scope, as perl's macro
+ * takes it. */
+#define dMULTICALL                         \
+    CV *multicall_cv __attribute__((unused)) = NULL; \
+    OP *multicall_cop __attribute__((unused)) = NULL; \
+    SSize_t goperl_multicall_sp __attribute__((unused)) = 0
+#define PUSH_MULTICALL_FLAGS(the_cv, flags)                        \
+    STMT_START {                                                   \
+        multicall_cv = (CV *)(the_cv);                             \
+        goperl_multicall_sp = (SSize_t)(PL_stack_sp - PL_stack_base); \
+    }                                                              \
+    STMT_END
+#define PUSH_MULTICALL(the_cv) PUSH_MULTICALL_FLAGS((the_cv), 0)
+#define MULTICALL                                                  \
+    STMT_START {                                                   \
+        PL_stack_sp = PL_stack_base + goperl_multicall_sp;         \
+        {                                                          \
+            dSP;                                                   \
+            PUSHMARK(SP);                                          \
+            PUTBACK;                                               \
+            if (call_sv((SV *)multicall_cv, (gimme) | G_NOARGS) == 0 && \
+                (gimme) == G_SCALAR) {                             \
+                SPAGAIN;                                           \
+                XPUSHs(&PL_sv_undef);                              \
+                PUTBACK;                                           \
+            }                                                      \
+        }                                                          \
+    }                                                              \
+    STMT_END
+#define POP_MULTICALL \
+    STMT_START { PL_stack_sp = PL_stack_base + goperl_multicall_sp; } STMT_END
+#define CHANGE_MULTICALL_FLAGS(the_cv, flags) \
+    STMT_START { multicall_cv = (CV *)(the_cv); } STMT_END
+
+/* ---- pp.h: taking from the stack ---------------------------------------------- */
+#define dTOPss SV *sv = TOPs
+#define dPOPss SV *sv = POPs
+#define dTOPiv IV value = TOPi
+#define dPOPiv IV value = POPi
+#define dTOPnv NV value = TOPn
+#define dPOPnv NV value = POPn
+#define dTOPuv UV value = TOPu
+#define dPOPuv UV value = POPu
+#define dPOPTOPssrl SV *right = POPs; SV *left = TOPs
+#define dPOPTOPnnrl NV right = POPn; NV left = TOPn
+#define dPOPTOPiirl IV right = POPi; IV left = TOPi
+#ifndef TOPi
+#define TOPi ((IV)SvIV(TOPs))
+#define TOPu ((UV)SvUV(TOPs))
+#define TOPn ((NV)SvNV(TOPs))
+#endif
+#ifndef POPi
+#define POPi ((IV)SvIV(POPs))
+#define POPu ((UV)SvUV(POPs))
+#define POPn ((NV)SvNV(POPs))
+#endif
 
 #endif /* GOPERL_XS_SDK_PERLAPI_H */

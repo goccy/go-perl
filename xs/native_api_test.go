@@ -73,6 +73,105 @@ func TestNativeModuleFreesAndResizesInterpreterBuffers(t *testing.T) {
 	})
 }
 
+// A compiled regular expression is a value native code can ask about and
+// match with: its pattern and flags, a match in a string of the
+// interpreter's or of the module's own, and where the groups matched.
+func TestNativeRegexps(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the pattern, the flags, the offsets", `PerlAPI::rx_info(qr/a(b+)c/i, "xxABBCxx")`, "a(b+)c:fold:2-6:3-5:1"},
+		{"no match", `PerlAPI::rx_info(qr/z/, "abc")`, "z:exact:no match"},
+		{"a match leaves the capture variables of the program alone", `"keep" =~ /(ee)/; PerlAPI::rx_info(qr/a(b)/, "ab"); $1`, "ee"},
+		{"pregcomp, and a string that is not the interpreter's", `PerlAPI::rx_compile("b+", "aabbbcc")`, "2-5"},
+		{"a wide pattern and text", `PerlAPI::rx_compile("\x{263A}+", "ab\x{263A}\x{263A}c")`, "2-8"},
+	})
+}
+
+// mg_find finds the magic the interpreter itself keeps on a value: the back
+// references of a referent with weak references to it, the overload table
+// of a class.
+func TestNativeFindsInterpreterMagic(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"no magic", `my @a; PerlAPI::own_magic(\@a)`, ""},
+		{"back references", `require Scalar::Util; my @a; my $w = \@a; Scalar::Util::weaken($w); PerlAPI::own_magic(\@a)`, "backref"},
+		{"an overload table with the method", `package WithDeref { use overload '@{}' => sub { [] } } PerlAPI::own_magic(bless {}, "WithDeref")`, "amt:1"},
+		{"an overload table without it", `package WithString { use overload '""' => sub { "s" } } PerlAPI::own_magic(bless {}, "WithString")`, "amt:0"},
+	})
+}
+
+// pv_pretty, pv_display and pv_escape are the interpreter's.
+func TestNativeStringsForDisplay(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"plain text", `PerlAPI::show("abc", 20)`, `"abc" "abc"\0 3`},
+		{"control characters, cut short", `PerlAPI::show("a\tb\ncdefgh", 6)`, `"a\tb\n"... "a\tb\ncdefgh"\0 4`},
+	})
+}
+
+// AvARRAY is the body of an array for as long as the code that asked for it
+// uses it: one native call reads and stores into the bodies of any number
+// of arrays.
+func TestNativeArrayBodiesInOneCall(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a few arrays", `my @a = ([1, 2, 3], [4], [], [5, 6]); join "|", PerlAPI::firsts(\@a), map { "@$_" } @a`, "145|1 2 3|4||5 2"},
+		{"many arrays", `my @a = map { [$_ % 10, "x", "y"] } 1 .. 1000; my $f = PerlAPI::firsts(\@a); join ",", length($f), substr($f, 0, 12), scalar(grep { $_->[2] == 3 && $_->[1] eq "x" } @a)`, "1000,123456789012,1000"},
+		{"an array twice", `my $r = [7, 8]; my @a = ($r, $r, $r); join "|", PerlAPI::firsts(\@a), "@$r"`, "777|7 2"},
+	})
+}
+
+// SvPVX and SvLEN are lvalues: code that takes the buffer of an SV over
+// leaves the SV without one, and the buffer outlives the SV.
+func TestNativeStringBufferTakenOver(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the buffer is taken", `PerlAPI::take_buffer("taken over")`, "1:1:taken over"},
+		{"many times", `my $n = 0; for my $i (1 .. 300) { $n++ if PerlAPI::take_buffer("s$i" x 20) eq "1:1:" . ("s$i" x 20) } $n`, "300"},
+	})
+}
+
+// A const op is built from an SV, which is not an op: the constructor
+// describes the op, not its operand.
+func TestNativeConstOpsFromSVs(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"many const ops", `PerlAPI::const_ops(2000)`, "2000"},
+	})
+}
+
+// PERL_ASYNC_CHECK is where native code that runs long lets a signal's
+// handler run: the handler's die ends the native call.
+func TestNativeLoopIsInterruptedByASignalHandler(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"nothing pending", `PerlAPI::spin(5)`, "5"},
+		{"the handler dies", `my $t = time; my $n = eval { local $SIG{ALRM} = sub { die "TIMEOUT\n" }; alarm 1; PerlAPI::spin(20000) }; alarm 0; join "|", $n // "undef", $@, time - $t < 10 ? "soon" : "late"`, "undef|TIMEOUT\n|soon"},
+		{"the handler returns", `local $SIG{ALRM} = sub { $PerlAPI::stop = 1 }; alarm 1; my $n = PerlAPI::spin(20000); alarm 0; $n < 10000 ? "stopped" : "ran $n"`, "stopped"},
+	})
+}
+
+// MULTICALL calls a block many times with $_ as the caller sets it, and
+// the caller reads what the block returned from the top of the stack.
+func TestNativeMulticall(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the first match", `PerlAPI::first_index(sub { $_ > 3 }, 1, 5, 2, 9)`, "1"},
+		{"no match", `PerlAPI::first_index(sub { $_ eq "x" }, qw(a b c))`, "-1"},
+		{"a block that returns nothing", `PerlAPI::first_index(sub { return }, 1, 2)`, "-1"},
+		{"many calls", `my $n = 0; join ",", PerlAPI::first_index(sub { $n++; $_ == 4999 }, 0 .. 5000), $n`, "4999,5000"},
+		{"$_ is the caller's again", `my @r; for ("outer") { PerlAPI::first_index(sub { 0 }, 1, 2); push @r, $_ } "@r"`, "outer"},
+	})
+}
+
 // TAINT_IF and TAINT_PROPER are the interpreter's taint check: with taint
 // mode on, tainted data in use ends the call with perl's message.
 func TestNativeTaintChecks(t *testing.T) {

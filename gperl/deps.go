@@ -105,11 +105,8 @@ func runCpanmArgs(work, dir string, cpanmArgs []string) error {
 	if err := xs.WriteSDK(sdkDir); err != nil {
 		return fmt.Errorf("materialize SDK headers: %w", err)
 	}
-	fakeArch := filepath.Join(work, "fakearchlib")
-	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
-		return err
-	}
-	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
+	fakeArch, err := xsStandInArchlib(work, sdkDir, stdlibDir)
+	if err != nil {
 		return err
 	}
 	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, shim)

@@ -100,17 +100,11 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The compiler's CORE include directory is the SDK, via a fake
-	// archlib whose CORE symlinks to it (both ExtUtils::MakeMaker and
-	// Module::Build spell it $Config{archlibexp}/CORE).
-	fakeArch := filepath.Join(work, "fakearchlib")
-	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
-		return nil, err
-	}
 	stdlibDir, err := perl.ExtractStdlib()
+	if err != nil {
+		return nil, err
+	}
+	fakeArch, err := xsStandInArchlib(work, sdkDir, stdlibDir)
 	if err != nil {
 		return nil, err
 	}
@@ -476,6 +470,27 @@ func xsWritePerlShim(work string) (string, error) {
 // %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
 // generate a build for THIS machine while everything else about %Config
 // (version, ivsize, ...) stays guest-true.
+// xsStandInArchlib makes the directory an XS build is told is the
+// interpreter's architecture library. The compiler's CORE include
+// directory is the SDK, via a CORE in it that links to the SDK (both
+// ExtUtils::MakeMaker and Module::Build spell it $Config{archlibexp}/CORE);
+// and since the SDK has a config.h, as a perl's headers do, the Makefile
+// MakeMaker writes depends on <archlib>/Config.pm, which is the standard
+// library's.
+func xsStandInArchlib(work, sdkDir, stdlibDir string) (string, error) {
+	dir := filepath.Join(work, "fakearchlib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Symlink(sdkDir, filepath.Join(dir, "CORE")); err != nil {
+		return "", err
+	}
+	if err := os.Symlink(filepath.Join(stdlibDir, "Config.pm"), filepath.Join(dir, "Config.pm")); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
 	tc := hostToolchain()
 	if sdkDir != "" {
