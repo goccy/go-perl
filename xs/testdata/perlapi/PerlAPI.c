@@ -3272,6 +3272,18 @@ static int perlapi_keyword_plugin(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
         native_went_on_count++;
         return KEYWORD_PLUGIN_STMT;
     }
+    if (kwlen == 10 && strnEQ(kw, "throw_hash", 10)) {
+        /* a plugin that dies with an object */
+        HV *const hv = newHV();
+        (void)hv_stores(hv, "code", newSViv(9));
+        croak_sv(sv_2mortal(newRV_noinc((SV *)hv)));
+    }
+    if (kwlen == 10 && strnEQ(kw, "throw_wide", 10)) {
+        /* and one that dies with a message that has a name in UTF-8 in it */
+        SV *const name = sv_2mortal(newSVpvs("p\xc5\x95\xc3\xb6\xc3\xa7"));
+        SvUTF8_on(name);
+        croak("In %" SVf ": refused", SVfARG(name));
+    }
     if (kwlen == 7 && strnEQ(kw, "twice_z", 7)) {
         ENTER;
         SAVEI16(PL_parser->in_my);

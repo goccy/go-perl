@@ -3362,18 +3362,30 @@ static SV **goperl_plsv_ref(goperl_frame_t *f, int id) {
 
 /* An evaluation is over. A slot without users stays under the comparison
  * of the flush for a while (see GOPERL_LV_IV), in place of the oldest such
- * slot, which is given up. */
+ * slot, which is given up.
+ *
+ * The body of an array is given up last: code keeps the address AvARRAY
+ * gave it for as long as it works with the array (a template engine keeps
+ * the base of its current frame), and reads the scalar fields of many
+ * values meanwhile (AvFILLp, SvIVX, SvRV). The oldest slot that is no body
+ * goes first; a body goes only when the slots kept are all bodies. */
 static void goperl_lvuse_end(goperl_frame_t *f, goperl_lvstate_t *st,
                              goperl_lvslot_t *m) {
     if (--m->users > 0) return;
     if (st->nrecent == GOPERL_LV_RECENT) {
-        goperl_lvslot_t *old = st->recent[0];
+        int32_t at = 0;
+        for (int32_t i = 0; i < st->nrecent; i++)
+            if (st->recent[i]->field != GOPERL_LV_AVBODY) {
+                at = i;
+                break;
+            }
+        goperl_lvslot_t *old = st->recent[at];
         goperl_lvslot_store(f, old);
         goperl_lvslot_release(old);
         old->free_next = st->free;
         st->free = old;
-        memmove(&st->recent[0], &st->recent[1],
-                (GOPERL_LV_RECENT - 1) * sizeof(st->recent[0]));
+        memmove(&st->recent[at], &st->recent[at + 1],
+                (size_t)(st->nrecent - at - 1) * sizeof(st->recent[0]));
         st->nrecent--;
     }
     st->recent[st->nrecent++] = m;

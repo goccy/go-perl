@@ -890,6 +890,9 @@ func (s *state) ppHook(req []byte) []byte {
 		f.ppState = 0
 	}
 	f.releaseStack()
+	if f.failed == failedThrown {
+		return []byte{respThrow}
+	}
 	if f.failed != 0 {
 		if xsTrace {
 			fmt.Fprintf(os.Stderr, "[pphook] FAILED: %s\n", f.errString())
@@ -929,6 +932,8 @@ func (s *state) hostCall(req []byte) []byte {
 	unpinFrame(fp)
 	var out []byte
 	switch rlen := int(int32(n)); {
+	case f.failed == failedThrown:
+		out = []byte{respThrow}
 	case f.failed != 0:
 		out = append([]byte{0}, f.errString()...)
 	case rlen < 0 || rlen > respCap:
@@ -1354,9 +1359,14 @@ func (s *state) keywordHook(req []byte) []byte {
 	switch int32(rc) {
 	case -1:
 		msg := f.errString()
+		thrown := f.failed == failedThrown
 		cFree(retC)
 		cFree(tokC)
 		unpinFrame(fp)
+		if thrown {
+			// the interpreter holds the value the plugin threw
+			return []byte{respThrow}
+		}
 		return append([]byte{0}, msg...)
 	case 1:
 		out[0] = 1

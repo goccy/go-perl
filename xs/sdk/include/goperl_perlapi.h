@@ -188,7 +188,20 @@ static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) __attribute__((unused));
 #define STRUCT_OFFSET(s, m) offsetof(s, m)
 #define MAXARG (PL_op->op_private & OPpARG4_MASK)
 #define kUNOP cUNOPx(kid)
-#define Perl_mfree(ctx, p) goperl_safefree((void *)(p))
+/* perl's own malloc, which a module built with -Dmalloc=Perl_malloc
+ * -Dfree=Perl_mfree (MakeMaker's PERL_EXTMALLOC_DEF) calls for all of its
+ * memory: the C library's. (A macro is not expanded inside its own
+ * expansion, so `free` here is the function.) */
+#ifndef Perl_malloc
+#define Perl_malloc(n) malloc(n)
+#endif
+#ifndef Perl_calloc
+#define Perl_calloc(n, size) calloc((n), (size))
+#endif
+#ifndef Perl_realloc
+#define Perl_realloc(p, n) realloc((p), (n))
+#endif
+#define Perl_mfree(p) free(p)
 /* sv_usepvn_flags: the buffer becomes the SV's string, with set magic when
  * asked for. */
 #define sv_usepvn_flags(sv, p, len, flags)                              \

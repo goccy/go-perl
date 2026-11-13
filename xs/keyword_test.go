@@ -128,6 +128,8 @@ func TestNativeKeywordDeclaresALexical(t *testing.T) {
 		{"and the next compilation is not affected", `eval q{ my $r = 0; in_block { $r = 6 } $r } // "died: $@"`, "6"},
 		{"the module does not go on after a block that does not parse", `PerlAPI::native_went_on(); my $r = eval q{ counted_block { 1 + } 1 }; join ",", defined $r ? "compiled" : "syntax error", PerlAPI::native_went_on()`, "syntax error,0"},
 		{"and goes on after one that does", `my $r = eval q{ my $v = 0; counted_block { $v = 7 } $v }; join ",", $r // "died: $@", PerlAPI::native_went_on()`, "7,1"},
+		{"a plugin that dies with an object", `my $r = eval q{ throw_hash; 1 }; join ",", defined $r ? "compiled" : "died", ref $@, ref $@ ? $@->{code} : $@`, "died,HASH,9"},
+		{"a plugin that dies with characters beyond Latin-1", `my $r = eval q{ throw_wide; 1 }; join ",", (utf8::is_utf8($@) ? "characters" : "bytes"), ($@ =~ /^In p\x{155}\x{f6}\x{e7}: refused at / ? "the text" : "other: $@")`, "characters,the text"},
 		{"a field of the parser the module set is the interpreter's at once", `my @w; local $SIG{__WARN__} = sub { push @w, $_[0] }; eval q{ use warnings; twice_z; 1 } // die $@; join "|", map { /^("\w+" variable \$z masks earlier declaration)/ ? $1 : $_ } @w`, `"my" variable $z masks earlier declaration`},
 	})
 }
