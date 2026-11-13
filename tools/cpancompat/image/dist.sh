@@ -34,7 +34,9 @@ phase() {
     local name=$1 limit=$2
     shift 2
     local start=$SECONDS status seconds timed_out=false
-    timeout --kill-after=10 "$limit" "$@" > "$out/$name.log" 2>&1 < /dev/null
+    # By its full path: distributions install programs into a directory that
+    # comes first in PATH, and one of them is named timeout.
+    /usr/bin/timeout --kill-after=10 "$limit" "$@" > "$out/$name.log" 2>&1 < /dev/null
     status=$?
     seconds=$((SECONDS - start))
     # A command that outlived its limit was ended by timeout (status 124, or
