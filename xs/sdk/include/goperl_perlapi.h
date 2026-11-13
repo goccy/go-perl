@@ -132,13 +132,33 @@ enum {
     GOPERL_GVCALL_STASH_SET = 17
 };
 
-/* The glob and CV fields that are lvalues (see GOPERL_LV_CVXSUB). */
+/* What the interpreter holds in a field that is an lvalue (see
+ * GOPERL_LV_IV), and the store of one. 0, 2, 3 and 4 are GOPERL_SVSLOT_RV,
+ * _IV, _UV and _NV; 2, 3 and 5 name the hash, the array and the scalar of
+ * a glob for GV_PTR. */
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     switch (field) {
+    case GOPERL_LV_IV:
+        return goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                            ((uint64_t)2 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_UV:
+        return goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                            ((uint64_t)3 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_NV:
+        return goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                            ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_RV:
+        return goperl_do_op(f, GOPERL_OP_SV_RV, tok, 0, 0, 0);
     case GOPERL_LV_CVXSUB:
         return (uint64_t)(uintptr_t)goperl_api_cv_xsub(f, tok);
     case GOPERL_LV_GVSTASH:
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 0, 0, 0);
+    case GOPERL_LV_GVHV:
+        return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 2, 0, 0);
+    case GOPERL_LV_GVAV:
+        return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 3, 0, 0);
+    case GOPERL_LV_GVSV:
+        return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 5, 0, 0);
     default:
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CVGEN << 32) | (uint32_t)tok,
@@ -148,12 +168,43 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
 static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
                                   uint64_t val) {
     switch (field) {
+    case GOPERL_LV_IV:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)2 << 32) | (uint32_t)tok, val, 0, 0);
+        break;
+    case GOPERL_LV_UV:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)3 << 32) | (uint32_t)tok, val, 0, 0);
+        break;
+    case GOPERL_LV_NV:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)4 << 32) | (uint32_t)tok, val, 0, 0);
+        break;
+    case GOPERL_LV_RV:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET, (uint32_t)tok, (uint32_t)val, 0,
+                     0);
+        break;
     case GOPERL_LV_CVXSUB:
         goperl_api_cv_set_xsub(f, tok, (void *)(uintptr_t)val);
         break;
     case GOPERL_LV_GVSTASH:
         goperl_xs_op(f, GOPERL_OP_GV_CALL,
                      ((uint64_t)GOPERL_GVCALL_STASH_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_GVHV:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_HV_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_GVAV:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_AV_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_GVSV:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_SV_SET << 32) | (uint32_t)tok,
                      (uint32_t)val, 0, 0);
         break;
     default:
@@ -1229,7 +1280,8 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvIMPORTED_SV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_SV, 0)
 #define GvIMPORTED_AV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_AV, 0)
 #define GvIMPORTED_HV_on(gv) GOPERL_GVFLAGS_CHANGE(gv, GVf_IMPORTED_HV, 0)
-#define GvCVGEN(gv) (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVCVGEN))
+#define GvCVGEN(gv) \
+    (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVCVGEN, GOPERL_LV_AT))
 /* The name of a glob is changed with gv_name_set; GvNAME is not an lvalue
  * (nor is it on perl). */
 #define gv_name_set(gv, name, len, flags) \

@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 15u
+#define GOPERL_XS_ABI 16u
 
 /* Signal actions of the process.
  *
@@ -1285,23 +1285,43 @@ typedef struct goperl_avmirror {
     int32_t len;
     int32_t cap;
 } goperl_avmirror_t;
-/* One lvalue an accessor macro handed out (SvIVX, SvUVX, SvNVX): val is the
- * storage the macro designates, shadow what the interpreter held when it
- * was loaded. */
+/* One field an accessor macro designated as an lvalue (SvIVX, SvRV, GvSV,
+ * ...): val is the storage, shadow what the interpreter held when it was
+ * loaded, users the evaluations of a macro that designate it and are not
+ * known to be over. */
 typedef struct goperl_lvslot {
-    uint64_t svtok;
-    int32_t field; /* a GOPERL_LV_ id */
-    int32_t pad;
     uint64_t val;
     uint64_t shadow;
+    uint64_t svtok;
+    int32_t field; /* a GOPERL_LV_ id */
+    int32_t users;
+    struct goperl_lvslot *free_next;
 } goperl_lvslot_t;
-#define GOPERL_LVCHUNK 62
+#define GOPERL_LVCHUNK 64
 typedef struct goperl_lvchunk {
     struct goperl_lvchunk *next;
-    int32_t n;
-    int32_t pad;
     goperl_lvslot_t slots[GOPERL_LVCHUNK];
 } goperl_lvchunk_t;
+/* One evaluation of an accessor macro: the expansion, the activation of the
+ * function it is expanded in, and the slot it designates. */
+typedef struct goperl_lvuse {
+    const void *site;
+    uintptr_t frame;
+    goperl_lvslot_t *slot;
+} goperl_lvuse_t;
+/* The slots no evaluation designates any more, kept a while longer for code
+ * that holds on to the address of one (see goperl_lv_ref). */
+#define GOPERL_LV_RECENT 16
+typedef struct goperl_lvstate {
+    goperl_lvuse_t *uses; /* in the order they were made */
+    int32_t nuses;
+    int32_t capuses;
+    goperl_lvslot_t *recent[GOPERL_LV_RECENT]; /* oldest first */
+    int32_t nrecent;
+    int32_t pad;
+    goperl_lvslot_t *free;
+    goperl_lvchunk_t *chunks;
+} goperl_lvstate_t;
 #define GOPERL_OPREG_BUCKETS 1024
 typedef struct goperl_shared {
     goperl_frame_t *cur_frame; /* unused since ABI 9 (per-thread table) */
@@ -1322,7 +1342,7 @@ typedef struct goperl_shared {
     int32_t avmirror_n;
     goperl_hostsave_t hostsave[GOPERL_HOSTSAVE_MAX];
     goperl_avmirror_t avmirrors[64];
-    goperl_lvchunk_t *lvchunks; /* the lvalue slots of this activation */
+    goperl_lvstate_t *lvstate; /* the lvalue slots accessor macros handed out */
     /* v8 parse surface — one copy for ALL loaded modules (weak globals do
      * not coalesce across .so files; see the v6 shared-state lesson) */
     void *kw_head;    /* host keyword-plugin chain head */
@@ -1372,33 +1392,54 @@ typedef struct goperl_shared {
 #define goperl_avmirrors_v (GOPERL_SHARED->avmirrors)
 #define goperl_avmirror_n (GOPERL_SHARED->avmirror_n)
 
-/* Body slots as lvalues (`SvIVX(counter)++`, `&SvNVX(sv)`): the accessor
- * designates host storage loaded from the interpreter, and a value that
- * differs from what was loaded is written back before the next guest
- * operation. A slot keeps its address, and stays under that comparison,
- * until the outermost native call returns: C does not say whether the left
- * or the right side of an assignment is evaluated first, so the store may
- * come any number of guest operations after the accessor ran.
+/* Fields as lvalues (`SvIVX(counter)++`, `&SvNVX(sv)`, `SvRV(rv) = sv`,
+ * `GvSV(gv) = NULL`, `--SvREFCNT(sv)`): the accessor designates host storage
+ * loaded from the interpreter, and a value that differs from what was
+ * loaded is written back before the next guest operation.
  *
- * What is loaded and written back is the slot of the body and nothing
- * else, as with the macros of sv.h: no flag changes, nothing is converted,
- * and a read-only scalar is not refused (a module that keeps a number of
- * its own in the slot of a scalar it has made read-only for the program
- * goes on updating it there). The interpreter's IV, UV and NV slots are as
- * wide as the host's. */
+ * C does not say whether the left or the right side of an assignment is
+ * evaluated first, so the store may come any number of guest operations
+ * after the accessor ran (`SvRV(clone) = clone_of(SvRV(ref))`, where the
+ * right side is a recursion through this very line). A slot therefore stays
+ * under that comparison until the evaluation that made it is over, which
+ * is known in two ways: the same expansion of the macro is evaluated again
+ * by the same activation of the function it is written in (control cannot
+ * come back to an expression that is still being evaluated), or a function
+ * above that activation on the C stack evaluates one (the activation has
+ * returned). Evaluations that designate the same field get the same
+ * storage, so two addresses of one field are one address. A slot that no
+ * evaluation designates any more is not given up at once: the last
+ * GOPERL_LV_RECENT of them stay under the comparison, for code that keeps
+ * the address of a field and stores through it later
+ * (`IV *n = counter_of(sv); ... *n += 1;`). An address kept while that many
+ * other fields were designated and given up no longer designates the
+ * field.
+ *
+ * What is loaded and written back is the field and nothing else, as with
+ * the macros of sv.h: no flag changes, nothing is converted, and a
+ * read-only scalar is not refused (a module that keeps a number of its own
+ * in the slot of a scalar it has made read-only for the program goes on
+ * updating it there). */
 #define GOPERL_LV_IV 0
 #define GOPERL_LV_UV 1
 #define GOPERL_LV_NV 2
-/* The same mechanism gives the function of an XSUB and two fields of a
- * glob as lvalues: `CvXSUB(cv) = fn`, `GvSTASH(gv) = stash`,
- * `GvCVGEN(gv) = 0`. */
 #define GOPERL_LV_CVXSUB 3
 #define GOPERL_LV_GVSTASH 4
 #define GOPERL_LV_GVCVGEN 5
+#define GOPERL_LV_RV 6
+#define GOPERL_LV_GVSV 7
+#define GOPERL_LV_GVAV 8
+#define GOPERL_LV_GVHV 9
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field);
 static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
                                   uint64_t val);
-#define goperl_lvchunks_v (GOPERL_SHARED->lvchunks)
+#define goperl_lvstate_v (GOPERL_SHARED->lvstate)
+/* Which evaluation an accessor macro is: an object of its own for every
+ * expansion, and the frame of the function the expansion is in. */
+#define GOPERL_LV_AT                                              \
+    ({ static const char goperl_lv_site_ = 0;                     \
+       (const void *)&goperl_lv_site_; }),                        \
+    (uintptr_t)__builtin_frame_address(0)
 
 /* PL_ppaddr proxy: every slot is the same generic trampoline. */
 __attribute__((weak)) Perl_ppaddr_t goperl_ppaddr_v[OP_max];
@@ -1674,7 +1715,8 @@ enum {
 /* ---- the guest-op funnel: every operation flushes host state first ------ */
 
 static void goperl_flush(goperl_frame_t *f);
-static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field);
+static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
+                               const void *site, uintptr_t frame);
 static void goperl_hostsave_ptr(goperl_frame_t *f, void **loc);
 static void goperl_hostsave_i32(goperl_frame_t *f, int32_t *loc);
 static void goperl_svcur_writeback(goperl_frame_t *f);
@@ -2276,10 +2318,12 @@ static void Perl_ck_warner_d(pTHX_ U32 cat, const char *fmt, ...) {
 #define SvIV(sv) \
     (goperl_flush(_gof), goperl_direct_sv_iv(_gof, GOPERL_TOK(sv)))
 /* SvIVX is an LVALUE in the wild (`SvIVX(counter)++`): host IV mirror. */
-#define SvIVX(sv) (*(IV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_IV))
+#define SvIVX(sv) \
+    (*(IV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_IV, GOPERL_LV_AT))
 #define SvIVx(sv) SvIV(sv)
 #define SvUV(sv) ((UV)goperl_op0(GOPERL_OP_SV_IV, GOPERL_TOK(sv), 1))
-#define SvUVX(sv) (*(UV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_UV))
+#define SvUVX(sv) \
+    (*(UV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_UV, GOPERL_LV_AT))
 #define SvUVx(sv) SvUV(sv)
 
 static double goperl_sv_nv(goperl_frame_t *f, SV *sv) {
@@ -2575,7 +2619,9 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 #define SvTRUE(sv) (goperl_op0(GOPERL_OP_SV_TRUE, GOPERL_TOK(sv), 0) != 0)
 #define sv_true(sv) SvTRUE(sv)
 #define SvROK(sv) (goperl_op0(GOPERL_OP_SV_RV, GOPERL_TOK(sv), 0) != 0)
-#define SvRV(sv) GOPERL_SV(goperl_op0(GOPERL_OP_SV_RV, GOPERL_TOK(sv), 0))
+/* SvRV is an lvalue (`SvRV(rv) = sv`, with SvROK_on before or after). */
+#define SvRV(sv) \
+    (*(SV **)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_RV, GOPERL_LV_AT))
 #define SvTYPE(sv) \
     ((svtype)goperl_op0(GOPERL_OP_SV_TYPE, GOPERL_TOK(sv), 0))
 #define isGV(sv) (SvTYPE((SV *)(sv)) == SVt_PVGV)
@@ -3029,50 +3075,44 @@ static void goperl_avmirror_flush(goperl_frame_t *f) {
     }
 }
 
+static void goperl_lvslot_store(goperl_frame_t *f, goperl_lvslot_t *m) {
+    if (m->val == m->shadow) return;
+    m->shadow = m->val;
+    goperl_lv_store_field(f, m->svtok, m->field, m->val);
+}
+
 static void goperl_lvslot_flush(goperl_frame_t *f) {
-    for (goperl_lvchunk_t *c = goperl_lvchunks_v; c; c = c->next) {
-        for (int32_t i = 0; i < c->n; i++) {
-            goperl_lvslot_t *m = &c->slots[i];
-            if (m->val == m->shadow) continue;
-            m->shadow = m->val;
-            switch (m->field) {
-            /* the bits of the slot, whatever they mean: 2, 3 and 4 are
-             * GOPERL_SVSLOT_IV, _UV and _NV */
-            case GOPERL_LV_IV:
-                goperl_xs_op(
-                    f, GOPERL_OP_SV_SLOT_SET,
-                    ((uint64_t)2 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
-                break;
-            case GOPERL_LV_UV:
-                goperl_xs_op(
-                    f, GOPERL_OP_SV_SLOT_SET,
-                    ((uint64_t)3 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
-                break;
-            case GOPERL_LV_NV:
-                goperl_xs_op(
-                    f, GOPERL_OP_SV_SLOT_SET,
-                    ((uint64_t)4 << 32) | (uint32_t)m->svtok, m->val, 0, 0);
-                break;
-            default:
-                goperl_lv_store_field(f, m->svtok, m->field, m->val);
-                break;
-            }
-        }
-    }
+    goperl_lvstate_t *st = goperl_lvstate_v;
+    if (!st) return;
+    /* a slot with several users is looked at once for each: the second
+     * look finds it written back */
+    for (int32_t i = 0; i < st->nuses; i++)
+        goperl_lvslot_store(f, st->uses[i].slot);
+    for (int32_t i = 0; i < st->nrecent; i++)
+        goperl_lvslot_store(f, st->recent[i]);
 }
 
 /* Forgets every lvalue slot (the outermost native call has returned, and
  * with it every expression that could still store through one). */
 static void goperl_lvslot_reset(void) {
-    goperl_lvchunk_t *c = goperl_lvchunks_v;
-    if (!c) return;
-    for (goperl_lvchunk_t *x = c->next; x;) {
-        goperl_lvchunk_t *next = x->next;
-        free(x);
-        x = next;
+    goperl_lvstate_t *st = goperl_lvstate_v;
+    if (!st) return;
+    st->nuses = 0;
+    st->nrecent = 0;
+    st->free = 0;
+    for (goperl_lvchunk_t *c = st->chunks; c;) {
+        goperl_lvchunk_t *next = c->next;
+        if (c == st->chunks) {
+            for (int32_t i = 0; i < GOPERL_LVCHUNK; i++) {
+                c->slots[i].free_next = st->free;
+                st->free = &c->slots[i];
+            }
+            c->next = 0;
+        } else {
+            free(c);
+        }
+        c = next;
     }
-    c->next = 0;
-    c->n = 0;
 }
 
 /* Interpreter-variable shadows beyond the die/warn hooks: read-through on
@@ -3153,57 +3193,98 @@ static SV **goperl_plsv_ref(goperl_frame_t *f, int id) {
     return (SV **)goperl_plint_ref(f, id);
 }
 
-/* The lvalue of a body slot (see GOPERL_LV_IV): pending stores are written
- * back, the slot of (sv, field) is found or made, and it is loaded from the
- * interpreter. */
-static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field) {
+/* An evaluation is over. A slot without users stays under the comparison
+ * of the flush for a while (see GOPERL_LV_IV), in place of the oldest such
+ * slot, which is given up. */
+static void goperl_lvuse_end(goperl_frame_t *f, goperl_lvstate_t *st,
+                             goperl_lvslot_t *m) {
+    if (--m->users > 0) return;
+    if (st->nrecent == GOPERL_LV_RECENT) {
+        goperl_lvslot_t *old = st->recent[0];
+        goperl_lvslot_store(f, old);
+        old->free_next = st->free;
+        st->free = old;
+        memmove(&st->recent[0], &st->recent[1],
+                (GOPERL_LV_RECENT - 1) * sizeof(st->recent[0]));
+        st->nrecent--;
+    }
+    st->recent[st->nrecent++] = m;
+}
+
+/* The lvalue of a field (see GOPERL_LV_IV): pending stores are written
+ * back, the evaluations that are known to be over are ended, and the slot
+ * of the field is found or made, and loaded from the interpreter. */
+static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
+                               const void *site, uintptr_t frame) {
     uint64_t tok = GOPERL_TOK(sv);
     goperl_lvslot_t *m = 0;
-    goperl_lvchunk_t *last = 0;
     goperl_flush(f);
-    for (goperl_lvchunk_t *c = goperl_lvchunks_v; c && !m; c = c->next) {
-        last = c;
-        for (int32_t i = 0; i < c->n; i++)
-            if (c->slots[i].svtok == tok && c->slots[i].field == field) {
-                m = &c->slots[i];
-                break;
-            }
+    goperl_lvstate_t *st = goperl_lvstate_v;
+    if (!st) {
+        st = (goperl_lvstate_t *)calloc(1, sizeof(goperl_lvstate_t));
+        if (!st) goperl_croakf(f, "out of memory for an lvalue slot");
+        goperl_lvstate_v = st;
+    }
+    /* made by functions that have returned: the stack grows downwards, and
+     * this function's frame is above theirs */
+    while (st->nuses > 0 && st->uses[st->nuses - 1].frame < frame)
+        goperl_lvuse_end(f, st, st->uses[--st->nuses].slot);
+    /* an earlier evaluation of this expansion in this activation */
+    for (int32_t i = st->nuses - 1; i >= 0; i--) {
+        goperl_lvuse_t *u = &st->uses[i];
+        if (u->site != site || u->frame != frame) continue;
+        goperl_lvslot_t *ended = u->slot;
+        memmove(u, u + 1, (size_t)(st->nuses - i - 1) * sizeof(*u));
+        st->nuses--;
+        goperl_lvuse_end(f, st, ended);
+        break;
+    }
+    /* the slot the field has */
+    for (int32_t i = st->nuses - 1; i >= 0 && !m; i--)
+        if (st->uses[i].slot->svtok == tok && st->uses[i].slot->field == field)
+            m = st->uses[i].slot;
+    for (int32_t i = st->nrecent - 1; i >= 0 && !m; i--)
+        if (st->recent[i]->svtok == tok && st->recent[i]->field == field) {
+            m = st->recent[i];
+            memmove(&st->recent[i], &st->recent[i + 1],
+                    (size_t)(st->nrecent - i - 1) * sizeof(st->recent[0]));
+            st->nrecent--;
+        }
+    if (st->nuses == st->capuses) {
+        int32_t ncap = st->capuses ? st->capuses * 2 : 64;
+        goperl_lvuse_t *nu = (goperl_lvuse_t *)realloc(
+            st->uses, (size_t)ncap * sizeof(st->uses[0]));
+        if (!nu) goperl_croakf(f, "out of memory for an lvalue slot");
+        st->uses = nu;
+        st->capuses = ncap;
     }
     if (!m) {
-        if (!last || last->n == GOPERL_LVCHUNK) {
+        if (!st->free) {
             goperl_lvchunk_t *c =
                 (goperl_lvchunk_t *)calloc(1, sizeof(goperl_lvchunk_t));
             if (!c) goperl_croakf(f, "out of memory for an lvalue slot");
-            if (last)
-                last->next = c;
-            else
-                goperl_lvchunks_v = c;
-            last = c;
+            c->next = st->chunks;
+            st->chunks = c;
+            for (int32_t i = 0; i < GOPERL_LVCHUNK; i++) {
+                c->slots[i].free_next = st->free;
+                st->free = &c->slots[i];
+            }
         }
-        m = &last->slots[last->n];
+        m = st->free;
+        st->free = m->free_next;
         m->svtok = tok;
         m->field = field;
+        m->users = 0;
         m->val = m->shadow = 0;
-        last->n++;
     }
-    uint64_t v;
-    switch (field) {
-    case GOPERL_LV_IV:
-        v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
-                         ((uint64_t)2 << 32) | (uint32_t)tok, 0, 0, 0);
-        break;
-    case GOPERL_LV_UV:
-        v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
-                         ((uint64_t)3 << 32) | (uint32_t)tok, 0, 0, 0);
-        break;
-    case GOPERL_LV_NV:
-        v = goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
-                         ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0);
-        break;
-    default:
-        v = goperl_lv_load_field(f, tok, field);
-        break;
-    }
+    m->users++;
+    st->uses[st->nuses].site = site;
+    st->uses[st->nuses].frame = frame;
+    st->uses[st->nuses].slot = m;
+    st->nuses++;
+    /* the load is a guest operation, which flushes: the slot is clean (the
+     * flush above wrote it back) and stays so until the value is in */
+    uint64_t v = goperl_lv_load_field(f, tok, field);
     m->val = m->shadow = v;
     return &m->val;
 }
@@ -3771,6 +3852,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
             goperl_avmirrors_v[i].avtok = 0;
         }
         goperl_avmirror_n = 0;
+        goperl_lvslot_flush(f);
         goperl_lvslot_reset();
         goperl_arena_free_all(); /* context-stack shadows */
         goperl_opreg_clear();    /* guest op addresses recycle across evals */
@@ -3916,7 +3998,7 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
     ((char *)goperl_intern_packed(                     \
         _gof, goperl_op0(GOPERL_OP_CV_FILE, GOPERL_TOK(cv), 0)))
 #define GvSTASH(gv) \
-    (*(HV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVSTASH))
+    (*(HV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVSTASH, GOPERL_LV_AT))
 #define GvCVu(gv) \
     ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 1)))
 /* GvCV is the sub of the glob whatever the glob is; GvCVu leaves out the
@@ -3924,12 +4006,14 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
  * entries, and their callers take the sub with GvCV. */
 #define GvCV(gv) \
     ((CV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 7)))
+/* The scalar, array and hash slots of a glob are lvalues (`GvSV(gv) = sv`):
+ * the plain store of gv.h, which counts no reference. */
 #define GvHV(gv) \
-    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 2)))
+    (*(HV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVHV, GOPERL_LV_AT))
 #define GvAV(gv) \
-    ((AV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 3)))
+    (*(AV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVAV, GOPERL_LV_AT))
 #define GvSV(gv) \
-    GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 5))
+    (*(SV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVSV, GOPERL_LV_AT))
 #define GvIO(gv) \
     GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 6))
 #define GvNAME(gv)                                     \
@@ -3949,7 +4033,8 @@ typedef union goperl_any {
 #define XSANY CvXSUBANY(cv)
 #define dXSI32 I32 ix = XSANY.any_i32
 #define CvXSUB(cv) \
-    (*(void (**)(pTHX_ CV *))goperl_lv_ref(_gof, (SV *)(cv), GOPERL_LV_CVXSUB))
+    (*(void (**)(pTHX_ CV *))goperl_lv_ref(_gof, (SV *)(cv), GOPERL_LV_CVXSUB, \
+                                           GOPERL_LV_AT))
 
 /* newXS family: every native XSUB is registered through the loader, which
  * assigns the dispatch id and returns the guest CV token. Prototypes and
@@ -5254,7 +5339,8 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
     ((int)goperl_op0(GOPERL_OP_SV_IS_BOOL, GOPERL_TOK(sv), 0))
 /* nomg variants: the SDK's accessors go through the guest's public API,
  * which applies get-magic — acceptable for these dists' uses. */
-#define SvNVX(sv) (*(NV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_NV))
+#define SvNVX(sv) \
+    (*(NV *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_NV, GOPERL_LV_AT))
 #define SvSetMagicSV(dst, src) \
     ({ GOPERL_ONCE(goperl_SvSetMagicSV_dst_, dst); \
        (sv_setsv((goperl_SvSetMagicSV_dst_), (src)), (void)mg_set(goperl_SvSetMagicSV_dst_)); })

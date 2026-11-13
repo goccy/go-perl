@@ -19,6 +19,24 @@ func TestNativeAccessorAssignments(t *testing.T) {
 	})
 }
 
+// The referent of a reference and the variables of a glob are lvalues of the
+// perl API: `SvRV(rv) = sv` (also where the right side comes back to the
+// same line, as a recursive copy does), `GvSV(gv) = sv`, `GvAV(gv) = av`,
+// `GvHV(gv) = hv`. An address taken of such a field stays good while the
+// code that took it goes on, and reading a field of many values costs no
+// more for each than for the first.
+func TestNativeFieldAssignments(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"SvRV", `my ($a, $b) = (1, 2); my $r = \$a; my $got = PerlAPI::repoint($r, \$b); "$$r,$$got," . ($r == \$b ? "same" : "other")`, "2,2,same"},
+		{"SvRV in a recursive copy", `my $v = "deep"; my $c = PerlAPI::clone_chain(\\\\$v); $v = "changed"; ref($c) . "," . ref($$c) . "," . $$$$$c`, "REF,REF,deep"},
+		{"SvRV of a value that is no reference", `my $c = PerlAPI::clone_chain("plain"); $c`, "plain"},
+		{"addresses kept", `my @n = (1 .. 8); my @refs = map { \my $x } 1 .. 20000; ${$refs[$_]} = 1 for 0 .. 9999; join ",", PerlAPI::kept_addresses(\@refs, @n), @n`, "10000,12,23,4,5,6,7,8,9"},
+		{"GvSV, GvAV, GvHV", `our ($slots, @slots, %slots) = ("old"); @slots = (9); join ",", (PerlAPI::glob_slots("main::slots") ? "set" : "not set"), $main::slots, "@main::slots", %main::slots`, "set,scalar,1 2,key,value"},
+	})
+}
+
 // A warning of a category is given the way the interpreter gives its own:
 // Perl_warner always, Perl_ck_warner where the category is enabled,
 // Perl_ck_warner_d unless it is disabled, and as an exception where the

@@ -1916,6 +1916,99 @@ XS(XS_PerlAPI_glob_fields) {
     }
 }
 
+/* A copy of a chain of references, made the way Clone does it: the
+ * referent of the new reference is assigned through SvRV, and the right
+ * side of that assignment comes back to the same line for every level. */
+static SV *PerlAPI_clone_chain(pTHX_ SV *sv) {
+    SV *clone;
+    if (!SvROK(sv)) return newSVsv(sv);
+    clone = newSV(0);
+    sv_upgrade(clone, SVt_IV);
+    SvRV(clone) = PerlAPI_clone_chain(aTHX_ SvRV(sv));
+    SvROK_on(clone);
+    return clone;
+}
+XS(XS_PerlAPI_clone_chain) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    ST(0) = sv_2mortal(PerlAPI_clone_chain(aTHX_ ST(0)));
+    XSRETURN(1);
+}
+
+/* Makes the first reference point at what the second points at, by
+ * assigning to SvRV; returns what SvRV says afterwards, as a reference. */
+XS(XS_PerlAPI_repoint) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "ref, to");
+    {
+        SV *old = SvRV(ST(0));
+        SvRV(ST(0)) = SvREFCNT_inc(SvRV(ST(1)));
+        SvREFCNT_dec(old);
+        ST(0) = sv_2mortal(newRV_inc(SvRV(ST(0))));
+        XSRETURN(1);
+    }
+}
+
+/* The address of the integer of a scalar, from a function of its own. */
+static IV *PerlAPI_integer_of(pTHX_ SV *sv) { return &SvIVX(sv); }
+
+/* Adds one to the integer of every argument through addresses that were
+ * all taken first, by one accessor expression in a loop and by a function
+ * that returns the address; then reads every referent of an array of
+ * references and returns how many are defined. */
+XS(XS_PerlAPI_kept_addresses) {
+    dXSARGS;
+    {
+        IV *at[8];
+        IV *first, *second;
+        I32 i, n = items - 1 > 8 ? 8 : items - 1;
+        IV defined_referents = 0;
+        AV *refs;
+        if (items < 3) croak_xs_usage(cv, "refs, a, b, ...");
+        refs = (AV *)SvRV(ST(0));
+        for (i = 0; i < n; i++) at[i] = &SvIVX(ST(i + 1));
+        first = PerlAPI_integer_of(aTHX_ ST(1));
+        second = PerlAPI_integer_of(aTHX_ ST(2));
+        for (i = 0; i < n; i++) *at[i] += 1;
+        (void)SvIV(ST(1));
+        *first += 10;
+        *second += 20;
+        for (i = 0; i <= av_len(refs); i++) {
+            SV **e = av_fetch(refs, i, 0);
+            if (e && SvROK(*e) && SvOK(SvRV(*e))) defined_referents++;
+        }
+        ST(0) = sv_2mortal(newSViv(defined_referents));
+        XSRETURN(1);
+    }
+}
+
+/* Replaces the scalar, the array and the hash of a glob by assigning to
+ * GvSV, GvAV and GvHV, as code that installs variables does; the values
+ * that were there are released. */
+XS(XS_PerlAPI_glob_slots) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "name");
+    {
+        GV *gv = gv_fetchpv(SvPV_nolen(ST(0)), GV_ADD, SVt_PV);
+        SV *old_sv = GvSV(gv);
+        AV *old_av = GvAV(gv);
+        HV *old_hv = GvHV(gv);
+        AV *av = newAV();
+        HV *hv = newHV();
+        av_push(av, newSViv(1));
+        av_push(av, newSViv(2));
+        (void)hv_store(hv, "key", 3, newSVpvs("value"), 0);
+        GvSV(gv) = newSVpvs("scalar");
+        GvAV(gv) = av;
+        GvHV(gv) = hv;
+        SvREFCNT_dec(old_sv);
+        SvREFCNT_dec((SV *)old_av);
+        SvREFCNT_dec((SV *)old_hv);
+        ST(0) = boolSV(GvSV(gv) && GvAV(gv) == av && GvHV(gv) == hv);
+        XSRETURN(1);
+    }
+}
+
 /* A warning of the utf8 category, given with Perl_warner (how 0),
  * Perl_ck_warner (1) or Perl_ck_warner_d (2). */
 XS(XS_PerlAPI_category_warning) {
@@ -2294,6 +2387,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::impl", XS_PerlAPI_impl_one);
     newXS_deffile("PerlAPI::exchange", XS_PerlAPI_exchange);
     newXS_deffile("PerlAPI::glob_fields", XS_PerlAPI_glob_fields);
+    newXS_deffile("PerlAPI::clone_chain", XS_PerlAPI_clone_chain);
+    newXS_deffile("PerlAPI::repoint", XS_PerlAPI_repoint);
+    newXS_deffile("PerlAPI::kept_addresses", XS_PerlAPI_kept_addresses);
+    newXS_deffile("PerlAPI::glob_slots", XS_PerlAPI_glob_slots);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
     newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);
