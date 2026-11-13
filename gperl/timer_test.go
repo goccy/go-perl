@@ -57,3 +57,32 @@ report("ITIMER_VIRTUAL: ", (eval { Time::HiRes::ITIMER_VIRTUAL(); 1 } ? "offered
 		"ITIMER_VIRTUAL: not offered",
 	)
 }
+
+// A timer and a sleep of the same length, the timer set first: the timer's
+// moment comes first, so its handler has run when the statement after the
+// sleep runs, as it has where a kernel keeps both. (Lock::File restores an
+// outer alarm around its own and tests that it fired by the end of a sleep
+// that ends with it.)
+func TestTimerSetBeforeASleepOfTheSameLengthFiresFirst(t *testing.T) {
+	got := runForkScript(t, `
+use Time::HiRes qw(ualarm usleep);
+my ($before, $after) = (0, 0);
+for (1 .. 40) {
+    my $fired = 0;
+    local $SIG{ALRM} = sub { $fired++ };
+    ualarm(30_000);
+    usleep(30_000);
+    if ($fired) { $before++ } else { $after++ }
+    usleep(20_000);
+}
+report("the handler ran before the statement after the sleep $before times, after it $after times");
+$SIG{ALRM} = sub { $before = "fired" };
+alarm(1);
+sleep(1);
+report("alarm(1); sleep(1): $before");
+`)
+	wantLines(t, got,
+		"the handler ran before the statement after the sleep 40 times, after it 0 times",
+		"alarm(1); sleep(1): fired",
+	)
+}

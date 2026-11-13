@@ -41,34 +41,44 @@ func TestSetlocaleRefusesLocalesWithoutData(t *testing.T) {
 		"decimal point: .\n")
 }
 
-// The locale of the environment is not one the program asked for by name: a
-// user whose environment names a locale the C library has no data for gets
-// the locale it has for that character encoding, under its own name, and no
-// complaint when the interpreter starts.
+// The interpreter starts in the locale of the environment. A user whose
+// environment names a locale the C library has no data for gets the locale
+// it has for that character encoding, and no complaint at the start.
+//
+// A program that asks for the locale of the environment itself
+// (setlocale(LC_ALL, "")) is answered like one that asks by name: the call
+// fails when the environment names a locale there is no data for, and the
+// locale stays as it was. Test suites find out that way whether a locale is
+// installed (libintl-perl: `setlocale(LC_ALL, "") ? "" : "locale missing"`).
 func TestLocaleOfTheEnvironment(t *testing.T) {
+	const utf8, plain = "start=C.UTF-8;C;C;C;C;C", "start=C"
 	for _, tc := range []struct {
 		env  []string
 		want string
 	}{
-		{[]string{"LANG=ja_JP.UTF-8"}, "all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
-		{[]string{"LANG=de_DE.utf8@euro"}, "all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
-		{[]string{"LANG=de_DE"}, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
-		{[]string{"LANG=de_DE.ISO-8859-1"}, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
-		{[]string{"LANG=C", "LC_ALL=en_US.UTF-8", "EXPECT_LC_ALL=1"}, "all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
-		{[]string{"LANG=en_US.UTF-8", "LC_CTYPE=C"}, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
-		{[]string{"LANG=C", "LC_CTYPE=fr_FR.UTF-8"}, "all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
-		{[]string{"LANG=POSIX"}, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG=ja_JP.UTF-8"}, utf8 + " asked=refused all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
+		{[]string{"LANG=de_DE.utf8@euro"}, utf8 + " asked=refused all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
+		{[]string{"LANG=de_DE"}, plain + " asked=refused all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG=de_DE.ISO-8859-1"}, plain + " asked=refused all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG=C", "LC_ALL=en_US.UTF-8", "EXPECT_LC_ALL=1"}, utf8 + " asked=refused all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
+		{[]string{"LANG=en_US.UTF-8", "LC_CTYPE=C"}, plain + " asked=refused all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG=C", "LC_CTYPE=fr_FR.UTF-8"}, utf8 + " asked=refused all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
+		// Locales there is data for are given to the program too.
+		{[]string{"LANG=POSIX"}, plain + " asked=C all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG=C.UTF-8"}, utf8 + " asked=C.UTF-8;C;C;C;C;C all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
+		{[]string{"LANG=de_DE", "LC_ALL=C.UTF-8", "EXPECT_LC_ALL=1"}, utf8 + " asked=C.UTF-8;C;C;C;C;C all=C.UTF-8;C;C;C;C;C ctype=C.UTF-8 numeric=C codeset=UTF-8 utf8=1\n"},
 		// An environment that names no locale means "C", and stays as it
 		// is: no variable is added to it.
-		{nil, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
-		{[]string{"LANG="}, "all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{nil, plain + " asked=C all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
+		{[]string{"LANG="}, plain + " asked=C all=C ctype=C numeric=C codeset=ASCII utf8=0\n"},
 	} {
 		r := runProgram(t, perl.Config{Env: tc.env}, perl.Program{Code: code(
 			`use POSIX qw(setlocale LC_ALL LC_CTYPE LC_NUMERIC);`,
 			`use I18N::Langinfo qw(langinfo CODESET);`,
-			`my $all = setlocale(LC_ALL, "");`,
-			`print "all=", $all // "refused", " ctype=", setlocale(LC_CTYPE), " numeric=", setlocale(LC_NUMERIC),`,
-			`    " codeset=", langinfo(CODESET), " utf8=", (${^UTF8LOCALE} ? 1 : 0), "\n";`,
+			`my $start = setlocale(LC_ALL);`,
+			`my $asked = setlocale(LC_ALL, "");`,
+			`print "start=$start asked=", $asked // "refused", " all=", setlocale(LC_ALL), " ctype=", setlocale(LC_CTYPE),`,
+			`    " numeric=", setlocale(LC_NUMERIC), " codeset=", langinfo(CODESET), " utf8=", (${^UTF8LOCALE} ? 1 : 0), "\n";`,
 			`print "LC_ALL was added to the environment\n" if exists $ENV{LC_ALL} && !$ENV{EXPECT_LC_ALL};`,
 		)}, "")
 		if r.stderr != "" {
@@ -78,4 +88,23 @@ func TestLocaleOfTheEnvironment(t *testing.T) {
 			t.Errorf("%v: status=%d\n got %q\nwant %q", tc.env, r.status, r.stdout, tc.want)
 		}
 	}
+}
+
+// One category asked for from the environment is refused or given by
+// itself, and a refusal changes nothing: not the categories that came
+// before it in a request for all of them either.
+func TestLocaleOfTheEnvironmentByCategory(t *testing.T) {
+	r := runProgram(t, perl.Config{Env: []string{"LANG=C.UTF-8", "LC_NUMERIC=de_DE.UTF-8"}}, perl.Program{Code: code(
+		`use POSIX qw(setlocale LC_ALL LC_CTYPE LC_NUMERIC);`,
+		`setlocale(LC_ALL, "C");`,
+		`print "numeric: ", setlocale(LC_NUMERIC, "") // "refused", "\n";`,
+		`print "all: ", setlocale(LC_ALL, "") // "refused", ", is ", setlocale(LC_ALL), "\n";`,
+		`print "ctype: ", setlocale(LC_CTYPE, "") // "refused", ", all is ", setlocale(LC_ALL), "\n";`,
+	)}, "")
+	if r.stderr != "" {
+		t.Errorf("stderr: %q", r.stderr)
+	}
+	r.want(t, 0, "numeric: refused\n"+
+		"all: refused, is C\n"+
+		"ctype: C.UTF-8, all is C.UTF-8;C;C;C;C;C\n")
 }
