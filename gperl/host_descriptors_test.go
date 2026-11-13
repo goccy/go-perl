@@ -100,7 +100,10 @@ report("after closing 20: ", (defined POSIX::dup2(20, 21) ? "still open" : "clos
 // A forked process starts with its parent's descriptors, under the same
 // numbers. Where it puts a file of its own under a number its parent still
 // uses, the parent's stays what it was; a command it then runs has the
-// child's file there.
+// child's file there. Its new descriptors have the lowest number that is
+// free for it, as in any process: after it closes one, standard output
+// included, the next file it opens has that number, whether or not the
+// parent still has its own descriptor there.
 func TestForkedProcessDescriptors(t *testing.T) {
 	hostDescriptorsHere(t)
 	dir := t.TempDir()
@@ -123,8 +126,15 @@ if (!$pid) {
     # a descriptor the parent still has
     close($shared);
     open(my $own, ">", "child-own.txt") or die "open: $!";
-    print $w "after closing it, the child's next file is ", (fileno($own) == $number ? "the parent's number" : "another number"), "\n";
+    print $w "after closing it, the child's next file is ", (fileno($own) == $number ? "the number it closed" : "another number"), "\n";
     print $own "the child's own\n";
+    # standard output closed and opened again, as a program does that puts
+    # a file in its place
+    close(STDOUT);
+    open(STDOUT, ">>", "child-again.txt") or die "reopen: $!";
+    print $w "standard output closed and opened again is ", fileno(STDOUT), "\n";
+    print "from the child again\n";
+    system("/bin/sh", "-c", "echo from its second command");
     exit 0;
 }
 close($w);
@@ -135,19 +145,21 @@ syswrite($shared, "parent");
 seek($shared, 0, 0);
 report("the shared file: ", scalar(<$shared>));
 report("still the parent's standard output");
-for my $name ("child-out.txt", "child-own.txt") {
+for my $name ("child-out.txt", "child-own.txt", "child-again.txt") {
     open(my $in, "<", $name) or die "$name: $!";
     report("$name: ", join("|", map { chomp; $_ } <$in>));
 }
 `)
 	wantOutput(t, got,
 		"child sees the file as 3",
-		"after closing it, the child's next file is another number",
+		"after closing it, the child's next file is the number it closed",
+		"standard output closed and opened again is 1",
 		"child status: 0",
 		"the shared file: child,parent",
 		"still the parent's standard output",
 		"child-out.txt: from the child|from its command",
 		"child-own.txt: the child's own",
+		"child-again.txt: from the child again|from its second command",
 	)
 }
 
