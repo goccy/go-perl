@@ -23,6 +23,11 @@ import (
 	"github.com/goccy/go-perl/internal"
 )
 
+// A program gperl runs is the host process and has its descriptors: the Go
+// runtime's own are kept out of the low numbers from the start, so that the
+// program's first descriptor is 3, as it is for perl.
+func init() { internal.KeepRuntimeDescriptorsHigh() }
+
 // HostConfig is the perl-like base configuration every gperl entry point
 // (and every binary `gperl build` produces) starts from: the operating
 // system's filesystem with the embedded stdlib extracted onto it, and

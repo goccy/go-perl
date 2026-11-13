@@ -1,3 +1,8 @@
+// The tests run programs in the test process, and in processes started from
+// the test binary as the perl command: like the gperl command, it leaves
+// the lowest descriptor numbers to the program (see cmd/gperl).
+//
+//go:debug containermaxprocs=0
 package gperl_test
 
 import (

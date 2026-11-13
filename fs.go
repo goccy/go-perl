@@ -101,6 +101,26 @@ func (d devNullFS) HostName(path string) (string, bool) {
 	return named.HostName(path)
 }
 
+// OpenDescriptor passes on how the wrapped backend opens a file as a
+// descriptor of the host process, which is how a program that is the host
+// process (Config.HostProcess) has its files. A backend without files of
+// the host (an in-memory one) reports errors.ErrUnsupported, and so does
+// this one for the bit bucket when the wrapped backend has none of its own:
+// the file is then opened the usual way.
+func (d devNullFS) OpenDescriptor(name string, flag int, perm iofs.FileMode) (File, error) {
+	opener, can := d.FS.(interface {
+		OpenDescriptor(name string, flag int, perm iofs.FileMode) (File, error)
+	})
+	if !can {
+		return nil, errors.ErrUnsupported
+	}
+	f, err := opener.OpenDescriptor(name, flag, perm)
+	if err != nil && name == devNullName {
+		return nil, errors.ErrUnsupported
+	}
+	return f, err
+}
+
 const devNullName = "dev/null"
 
 func (d devNullFS) OpenFile(name string, flag int, perm iofs.FileMode) (File, error) {

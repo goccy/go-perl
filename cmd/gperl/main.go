@@ -15,6 +15,15 @@
 //
 // Every subcommand is a thin wrapper over the github.com/goccy/go-perl/gperl
 // library, so applications can drive the same functionality programmatically.
+
+// A program gperl runs is the process and has its descriptor numbers, the
+// lowest free one first: its first file is descriptor 3. On Linux the Go
+// runtime otherwise keeps the file of the process's CPU limit open from its
+// own start, under that number, to follow the limit while the process runs.
+// With this setting it reads the limit of the control group at no time and
+// sizes itself by the CPUs of the machine, as it did before Go 1.25.
+//
+//go:debug containermaxprocs=0
 package main
 
 import (

@@ -342,6 +342,15 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	return p, nil
 }
 
+// KeepRuntimeDescriptorsHigh has the Go runtime make the descriptors it
+// needs for itself now, above the numbers a program's descriptors get. A
+// program that is the host process (InstanceOptions.HostProcess) has the
+// host's descriptor numbers, lowest free first, and expects the first file
+// it opens to be descriptor 3. A command built around such a program calls
+// this while its packages are initialized: the earlier, the fewer
+// descriptors the runtime has made already.
+func KeepRuntimeDescriptorsHigh() { base.KeepRuntimeDescriptorsHigh() }
+
 // hostIDs is how a program that is the host process changes the process's
 // user and group ids when a package linked into the binary knows a way the
 // runtime does not have; see RegisterHostIDs. nil is the runtime's own way.
