@@ -123,5 +123,8 @@ func TestNativeKeywordDeclaresALexical(t *testing.T) {
 		{"an assignment built by the module", `eval q{ one_into_x; $x + 41 } // "died: $@"`, "42"},
 		{"twice in one block, each its own", `eval q{ my @seen; for my $i (1 .. 3) { one_into_x; push @seen, $x; $x += $i } "@seen" } // "died: $@"`, "1 1 1"},
 		{"a value put into the pad at compile time", `eval q{ hello_into_y; "$y, world" } // "died: $@"`, "Hello, world"},
+		{"a block parsed by the module", `eval q{ my $r = 0; in_block { $r = 5 } $r } // "died: $@"`, "5"},
+		{"a block that does not parse is a syntax error", `eval q{ my $r = 0; in_block { $r = } $r } // ($@ =~ /syntax error/ ? "syntax error" : "died: $@")`, "syntax error"},
+		{"and the next compilation is not affected", `eval q{ my $r = 0; in_block { $r = 6 } $r } // "died: $@"`, "6"},
 	})
 }

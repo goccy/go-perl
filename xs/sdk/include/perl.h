@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 18u
+#define GOPERL_XS_ABI 19u
 
 /* Signal actions of the process.
  *
@@ -4467,6 +4467,9 @@ typedef struct goperl_opreg_ent {
     U8 active;
     U16 pad;
     uint32_t gen; /* the generation its links were described in */
+    void *aux_own; /* the aux of the op in this process's layout (a signature's
+                    * parameters), which lasts as long as the shadow: code
+                    * keeps the op and reads its aux in a later call */
     OP op;        /* last: an entry of a module's own op struct extends past it */
 } goperl_opreg_ent_t;
 typedef struct goperl_opreg {
@@ -4582,6 +4585,8 @@ static void goperl_opreg_sync(goperl_frame_t *f, goperl_opreg_t *r) {
         if (e->active || e->persist) continue; /* given up when the list is */
         free(e->op.gop_base);
         e->op.gop_base = 0;
+        free(e->aux_own);
+        e->aux_own = 0;
         e->next = r->spare;
         r->spare = e;
     }
@@ -4599,6 +4604,8 @@ static void goperl_opreg_clear(void) {
         e->active = 0;
         e->active_next = 0;
         if (!e->op.gop && !e->persist) { /* its op was freed meanwhile */
+            free(e->aux_own);
+            e->aux_own = 0;
             e->next = r->spare;
             r->spare = e;
         }
@@ -4628,6 +4635,14 @@ static OP *goperl_op_link(goperl_frame_t *f, goperl_opreg_t *r, uint32_t tok) {
     goperl_opreg_ent_t *e = goperl_op_ent(f, r, tok);
     return e ? &e->op : 0;
 }
+
+/* The parameters of a signature, read from the interpreter's struct (g: its
+ * words there: min_args, n_positional, n_named, slurpy, slurpy_padix, the
+ * address of the pad indexes, the address of the named parameters, each of
+ * which is padix, the address of the name, its length, its hash and the
+ * required bit). The copy is the caller's to free. */
+struct op_multiparam_aux;
+static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g);
 
 /* One record of the interpreter's answer becomes the state of its shadow. */
 static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
@@ -4685,7 +4700,12 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     o->op_pv = w[GOPERL_OPREC_PV]
                    ? (char *)goperl_guest_mem(f, w[GOPERL_OPREC_PV])
                    : 0;
-    if (w[GOPERL_OPREC_AUX]) {
+    if (w[GOPERL_OPREC_AUX] && o->op_type == OP_MULTIPARAM) {
+        free(e->aux_own);
+        e->aux_own = goperl_multiparam_aux(
+            f, (const uint32_t *)goperl_guest_mem(f, w[GOPERL_OPREC_AUX]));
+        o->op_aux = (UNOP_AUX_item *)e->aux_own;
+    } else if (w[GOPERL_OPREC_AUX]) {
         /* the items of a multideref, which are the interpreter's memory */
         o->op_aux = (UNOP_AUX_item *)goperl_guest_mem(f, w[GOPERL_OPREC_AUX]);
         o->op_aux_n = w[GOPERL_OPREC_AUX_N];
@@ -7601,16 +7621,24 @@ static void goperl_parser_push(goperl_frame_t *f) {
     yy_parser *p = goperl_parser_ptr_v;
     goperl_parser_state_t *st = goperl_parser_state_v;
     if (!p || !st) return;
-    if (p->bufptr && goperl_parser_pvg_v) {
+    /* Only what the module assigned goes to the interpreter: a field the
+     * module left alone may have moved on there since it was read (a parse
+     * that failed counted an error), and must not be put back. */
+    if (p->bufptr != st->seen.bufptr && p->bufptr && goperl_parser_pvg_v) {
         char *hbase = (char *)goperl_guest_mem(f, goperl_parser_pvg_v);
         goperl_do_op(f, GOPERL_OP_PARSER_SET, GOPERL_PARSER_BUFPTR,
                      goperl_parser_pvg_v + (uint32_t)(p->bufptr - hbase), 0,
                      0);
     }
-    goperl_do_op(f, GOPERL_OP_PARSER_SET, GOPERL_PARSER_ERROR_COUNT,
-                 (uint64_t)(uint32_t)p->error_count, 0, 0);
-    goperl_do_op(f, GOPERL_OP_PARSER_SET, GOPERL_PARSER_IN_MY,
-                 (uint64_t)p->in_my, 0, 0);
+    if (p->error_count != st->seen.error_count)
+        goperl_do_op(f, GOPERL_OP_PARSER_SET, GOPERL_PARSER_ERROR_COUNT,
+                     (uint64_t)(uint32_t)p->error_count, 0, 0);
+    if (p->in_my != st->seen.in_my)
+        goperl_do_op(f, GOPERL_OP_PARSER_SET, GOPERL_PARSER_IN_MY,
+                     (uint64_t)p->in_my, 0, 0);
+    st->seen.bufptr = p->bufptr;
+    st->seen.error_count = p->error_count;
+    st->seen.in_my = p->in_my;
     /* 100 + the word of the field: the ones a module may also assign */
     if (p->expect != st->seen.expect)
         goperl_do_op(f, GOPERL_OP_PARSER_SET, 100 + GOPERL_PARSERW_EXPECT,
@@ -8738,6 +8766,24 @@ static int goperl_sv_classify(goperl_frame_t *f, SV *sv, int mode, U32 flags,
     goperl_sv_classify(_gof, (SV *)(hv), 4, 0, 0, 0, 0)
 #define HvNAMELEN_get(hv) HvNAMELEN(hv)
 
+/* The parameters of a signature (the aux of OP_MULTIPARAM), as perl
+ * declares them. */
+struct op_multiparam_named_aux {
+    PADOFFSET padix;
+    const char *namepv;
+    STRLEN namelen;
+    U32 namehash;
+    bool is_required : 1;
+};
+struct op_multiparam_aux {
+    size_t min_args;
+    size_t n_positional;
+    size_t n_named;
+    char slurpy;
+    PADOFFSET slurpy_padix;
+    PADOFFSET *param_padix;
+    struct op_multiparam_named_aux *named;
+};
 struct op_argcheck_aux {
     UV params;
     UV opt_params;

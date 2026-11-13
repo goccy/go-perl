@@ -169,6 +169,33 @@ func TestNativeHashKeysAreBytes(t *testing.T) {
 	})
 }
 
+// CvNAME_HEK is the name a sub has by itself, and CvNAME_HEK_set gives it
+// one made with share_hek.
+func TestNativeSubOwnName(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a lexical sub", `use feature "lexical_subs"; my sub lexy { 1 } PerlAPI::own_name(\&lexy)`, "lexy"},
+		{"a sub in a glob", `sub PerlAPITest::in_glob { 1 } PerlAPI::own_name(\&PerlAPITest::in_glob)`, ""},
+		{"renamed", `use feature "lexical_subs"; my sub lexy { (caller(0))[3] } join "|", PerlAPI::own_name(\&lexy, "other"), PerlAPI::own_name(\&lexy), lexy()`, "other|other|other"},
+		{"a name in UTF-8", `use utf8; use feature "lexical_subs"; my sub lexy { 1 } my $n = PerlAPI::own_name(\&lexy, "n\x{e9}\x{263a}"); join "|", length($n), utf8::is_utf8($n) ? 1 : 0, ord(substr($n, 2))`, "3|1|9786"},
+	})
+}
+
+// The aux of a signature op is perl's op_multiparam_aux: the counts of the
+// parameters, their pad indexes and the named ones.
+func TestNativeSignatureParameters(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"no signature", `PerlAPI::signature(sub { 1 })`, "none"},
+		{"positional", `use feature "signatures"; PerlAPI::signature(sub ($a, $b) { 1 })`, "2:2:0:-:p:p"},
+		{"optional, unnamed and slurpy", `use feature "signatures"; PerlAPI::signature(sub ($a, $, $c = 3, @rest) { 1 })`, "2:3:0:@:p:_:p"},
+		{"a hash", `use feature "signatures"; PerlAPI::signature(sub ($a, %h) { 1 })`, "1:1:0:%:p"},
+		{"the op kept for a later call", `use feature "signatures"; my $code = sub ($a, $b, $c = 1) { 1 }; my @s = (PerlAPI::signature($code)); my @junk = map { [1 .. 50] } 1 .. 200; push @s, PerlAPI::signature(); "@s"`, "2:3:0:-:p:p:p 2:3:0:-:p:p:p"},
+	})
+}
+
 // MULTICALL calls a block many times with $_ as the caller sets it, and
 // the caller reads what the block returned from the top of the stack.
 func TestNativeMulticall(t *testing.T) {

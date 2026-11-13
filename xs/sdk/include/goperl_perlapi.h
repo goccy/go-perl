@@ -3019,4 +3019,119 @@ static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) {
 #define POPn ((NV)SvNV(POPs))
 #endif
 
+
+/* ---- subs built by a module -------------------------------------------------- */
+#define GOPERL_TREE_PARSE_SUBSIGNATURE 24
+#define GOPERL_TREE_NEWMYSUB 25
+#define GOPERL_TREE_CV_NAME 26
+static inline __attribute__((unused)) OP *goperl_parse_subsignature(
+    goperl_frame_t *f, U32 flags) {
+    const uint32_t w[1] = {flags};
+    goperl_parser_push(f);
+    const uint64_t tok = goperl_tree(f, GOPERL_TREE_PARSE_SUBSIGNATURE, 1, w);
+    goperl_parser_pull(f);
+    return goperl_tree_op(f, tok);
+}
+#define parse_subsignature(flags) goperl_parse_subsignature(_gof, (U32)(flags))
+static inline __attribute__((unused)) CV *goperl_newmysub(
+    goperl_frame_t *f, I32 floor, OP *o, OP *proto, OP *attrs, OP *block) {
+    const uint32_t w[5] = {(uint32_t)floor, goperl_optok(f, o),
+                           goperl_optok(f, proto), goperl_optok(f, attrs),
+                           goperl_optok(f, block)};
+    return (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWMYSUB, 5, w));
+}
+#define newMYSUB(floor, o, proto, attrs, block)                         \
+    goperl_newmysub(_gof, (I32)(floor), (OP *)(o), (OP *)(proto),       \
+                    (OP *)(attrs), (OP *)(block))
+
+/* A key as perl shares it: here the key itself, laid out like perl's HEK
+ * (NUL after the bytes, then the flags byte), for as long as the outermost
+ * native call runs; the interpreter shares the key when it is given to it
+ * (CvNAME_HEK_set). A negative length says the key is UTF-8. */
+static HEK *goperl_hek_of(goperl_frame_t *f, const char *key, I32 len,
+                          int utf8, U32 hash) __attribute__((unused));
+static HEK *goperl_hek_of(goperl_frame_t *f, const char *key, I32 len,
+                          int utf8, U32 hash) {
+    HEK *hek = (HEK *)goperl_arena_alloc(sizeof(HEK) + (size_t)len + 2);
+    if (!hek) goperl_croakf(f, "share_hek: out of memory");
+    hek->hek_hash = hash;
+    hek->hek_len = len;
+    memcpy(hek->hek_key, key, (size_t)len);
+    hek->hek_key[len] = 0;
+    hek->hek_key[len + 1] = (char)(utf8 ? 1 : 0); /* HVhek_UTF8 */
+    return hek;
+}
+#define share_hek(key, len, hash)                                          \
+    ({ const I32 goperl_share_hek_len_ = (I32)(len);                       \
+       goperl_hek_of(_gof, (key),                                          \
+                     goperl_share_hek_len_ < 0 ? -goperl_share_hek_len_    \
+                                               : goperl_share_hek_len_,    \
+                     goperl_share_hek_len_ < 0, (U32)(hash)); })
+/* The name a sub has by itself (a sub that is not in a glob), or NULL. */
+static HEK *goperl_cv_name_hek(goperl_frame_t *f, CV *cv)
+    __attribute__((unused));
+static HEK *goperl_cv_name_hek(goperl_frame_t *f, CV *cv) {
+    const uint32_t w[4] = {(uint32_t)GOPERL_TOK(cv), 0, 0, 0};
+    const uint64_t r = goperl_tree(f, GOPERL_TREE_CV_NAME, 4, w);
+    if (!r) return 0;
+    const I32 len = (I32)((uint32_t)r >> 1);
+    return goperl_hek_of(f, (const char *)goperl_guest_mem(f, r >> 32), len,
+                         (int)(r & 1), 0);
+}
+#define CvNAME_HEK(cv) goperl_cv_name_hek(_gof, (CV *)(cv))
+static void goperl_cv_name_hek_set(goperl_frame_t *f, CV *cv, HEK *hek)
+    __attribute__((unused));
+static void goperl_cv_name_hek_set(goperl_frame_t *f, CV *cv, HEK *hek) {
+    const size_t len = (size_t)hek->hek_len;
+    char *req = (char *)malloc(16 + len + 1);
+    if (!req) goperl_croakf(f, "Out of memory!");
+    const uint32_t w[4] = {(uint32_t)GOPERL_TOK(cv), 1,
+                           (uint32_t)(hek->hek_key[len + 1] & 1),
+                           (uint32_t)len};
+    memcpy(req, w, 16);
+    memcpy(req + 16, hek->hek_key, len);
+    req[16 + len] = 0;
+    goperl_optree_flush(f);
+    goperl_do_op(f, GOPERL_OP_TREE, GOPERL_TREE_CV_NAME, 16 + len + 1, req,
+                 16 + len + 1);
+    free(req);
+}
+#define CvNAME_HEK_set(cv, hek) \
+    goperl_cv_name_hek_set(_gof, (CV *)(cv), (HEK *)(hek))
+
+
+static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g) {
+    if (!g) return 0;
+    const size_t n_positional = g[1], n_named = g[2];
+    struct op_multiparam_aux *aux = (struct op_multiparam_aux *)malloc(
+        sizeof(*aux) + n_positional * sizeof(PADOFFSET) +
+        n_named * sizeof(struct op_multiparam_named_aux));
+    if (!aux) goperl_croakf(f, "out of memory for the parameters of a signature");
+    aux->min_args = g[0];
+    aux->n_positional = n_positional;
+    aux->n_named = n_named;
+    aux->slurpy = (char)(g[3] & 0xFF);
+    aux->slurpy_padix = (PADOFFSET)g[4];
+    aux->param_padix = (PADOFFSET *)(aux + 1);
+    aux->named = (struct op_multiparam_named_aux *)(aux->param_padix + n_positional);
+    const uint32_t *padix = (const uint32_t *)goperl_guest_mem(f, g[5]);
+    for (size_t i = 0; padix && i < n_positional; i++)
+        aux->param_padix[i] = (PADOFFSET)padix[i];
+    const uint32_t *named = (const uint32_t *)goperl_guest_mem(f, g[6]);
+    for (size_t i = 0; named && i < n_named; i++) {
+        const uint32_t *n = named + i * 5;
+        aux->named[i].padix = (PADOFFSET)n[0];
+        aux->named[i].namepv = (const char *)goperl_guest_mem(f, n[1]);
+        aux->named[i].namelen = (STRLEN)n[2];
+        aux->named[i].namehash = n[3];
+        aux->named[i].is_required = (n[4] & 1) != 0;
+    }
+    if (!named) aux->named = 0;
+    return aux;
+}
+
+/* A pad name in a message: %" PNf " with PNfARG(pn). */
+#define PNf UTF8f
+#define PNfARG(pn) (int)1, (UV)PadnameLEN(pn), (void *)PadnamePV(pn)
+
 #endif /* GOPERL_XS_SDK_PERLAPI_H */

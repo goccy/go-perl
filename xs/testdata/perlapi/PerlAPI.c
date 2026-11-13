@@ -2498,6 +2498,81 @@ XS(XS_PerlAPI_by_number) {
     }
 }
 
+/* own_name(code [, name]): the name the sub has by itself (a lexical sub
+ * has one; a sub in a glob has the glob's), "" when it has none; with a
+ * name, the sub is given it first. */
+XS(XS_PerlAPI_own_name) {
+    dXSARGS;
+    if (items < 1 || items > 2) croak_xs_usage(cv, "code [, name]");
+    {
+        CV *code = (CV *)SvRV(ST(0));
+        HEK *hek;
+        if (items == 2) {
+            STRLEN len;
+            const char *name = SvPV(ST(1), len);
+            U32 hash;
+            PERL_HASH(hash, name, len);
+            CvNAME_HEK_set(code, share_hek(name, SvUTF8(ST(1)) ? -(I32)len : (I32)len, hash));
+        }
+        hek = CvNAME_HEK(code);
+        if (!hek) {
+            ST(0) = sv_2mortal(newSVpvs(""));
+        } else {
+            SV *name = newSVpvn(HEK_KEY(hek), HEK_LEN(hek));
+            if (HEK_UTF8(hek)) SvUTF8_on(name);
+            ST(0) = sv_2mortal(name);
+        }
+        XSRETURN(1);
+    }
+}
+
+/* The op of the type below the op, first found. */
+static OP *perlapi_find_op(pTHX_ OP *o, OPCODE type) {
+    OP *kid;
+    if (!o) return NULL;
+    if (o->op_type == type) return o;
+    if (!(o->op_flags & OPf_KIDS)) return NULL;
+    for (kid = cUNOPx(o)->op_first; kid; kid = OpSIBLING(kid)) {
+        OP *found = perlapi_find_op(aTHX_ kid, type);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+/* signature([code]): what the sub's signature op says of its parameters:
+ * "min:positional:named:slurpy:names of the named ones", or "none".
+ * Without a sub, the op found by the call before is read again (the sub
+ * has to exist still), as code that keeps the op of a signature does. */
+static OP *perlapi_signature_op;
+XS(XS_PerlAPI_signature) {
+    dXSARGS;
+    if (items > 1) croak_xs_usage(cv, "[code]");
+    {
+        OP *o = items ? perlapi_find_op(aTHX_ CvROOT((CV *)SvRV(ST(0))), OP_MULTIPARAM)
+                      : perlapi_signature_op;
+        SV *out;
+        perlapi_signature_op = o;
+        if (!o) {
+            out = newSVpvs("none");
+        } else {
+            struct op_multiparam_aux *aux =
+                (struct op_multiparam_aux *)cUNOP_AUXx(o)->op_aux;
+            size_t i;
+            out = newSVpvf("%d:%d:%d:%s", (int)aux->min_args,
+                           (int)aux->n_positional, (int)aux->n_named,
+                           aux->slurpy == '@' ? "@" : aux->slurpy == '%' ? "%" : "-");
+            for (i = 0; i < aux->n_positional; i++)
+                sv_catpvf(out, ":%s", aux->param_padix[i] ? "p" : "_");
+            for (i = 0; i < aux->n_named; i++)
+                sv_catpvf(out, ":%.*s%s", (int)aux->named[i].namelen,
+                          aux->named[i].namepv,
+                          aux->named[i].is_required ? "!" : "");
+        }
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
 /* first_index(code, values...): the index of the first value for which
  * the code is true with the value in $_, by MULTICALL, as the list
  * utilities do it. */
@@ -2731,6 +2806,10 @@ XS(XS_PerlAPI_look_without_magic) {
  *   one_into_x;    is  my $x = 1;  — the assignment is built with newASSIGNOP
  *   hello_into_y;  declares $y and gives its pad slot the value "Hello" at
  *                  compile time, reached through PAD_SVl
+ *
+ * and one that takes a block:
+ *
+ *   in_block { ... }  is the block, parsed with parse_block
  */
 static Perl_keyword_plugin_t perlapi_next_keyword_plugin;
 
@@ -2750,6 +2829,11 @@ static int perlapi_keyword_plugin(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
         intro_my();
         sv_setpvs(PAD_SVl(padix), "Hello");
         *op_ptr = newOP(OP_NULL, 0);
+        return KEYWORD_PLUGIN_STMT;
+    }
+    if (kwlen == 8 && strnEQ(kw, "in_block", 8)) {
+        lex_read_space(0);
+        *op_ptr = parse_block(0);
         return KEYWORD_PLUGIN_STMT;
     }
     return (*perlapi_next_keyword_plugin)(aTHX_ kw, kwlen, op_ptr);
@@ -2927,6 +3011,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::const_ops", XS_PerlAPI_const_ops);
     newXS_deffile("PerlAPI::spin", XS_PerlAPI_spin);
     newXS_deffile("PerlAPI::by_number", XS_PerlAPI_by_number);
+    newXS_deffile("PerlAPI::own_name", XS_PerlAPI_own_name);
+    newXS_deffile("PerlAPI::signature", XS_PerlAPI_signature);
     newXS_deffile("PerlAPI::first_index", XS_PerlAPI_first_index);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
