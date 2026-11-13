@@ -205,6 +205,13 @@ func TestNativeMulticall(t *testing.T) {
 		{"the first match", `PerlAPI::first_index(sub { $_ > 3 }, 1, 5, 2, 9)`, "1"},
 		{"no match", `PerlAPI::first_index(sub { $_ eq "x" }, qw(a b c))`, "-1"},
 		{"a block that returns nothing", `PerlAPI::first_index(sub { return }, 1, 2)`, "-1"},
+		{"a block that compares $a and $b, called where only multicall_cop is known", `PerlAPI::largest(sub { $a <=> $b }, 3, 11, 7, 2)`, "11,plain"},
+		{"the block is called in the context of the call, void too", `our $kept; sub keep { $kept = PerlAPI::largest(sub { $a <=> $b }, 4, 8, 6); 1 } keep(); my @l = PerlAPI::largest(sub { $a <=> $b }, 5, 9, 7); PerlAPI::largest(sub { $a <=> $b }, 1, 2); "$kept|@l"`, "8,plain|9,plain"},
+		{"by another order", `PerlAPI::largest(sub { length($a) <=> length($b) }, "ccc", "a", "bbbbb", "dd")`, "bbbbb,plain"},
+		{"the caller's $a and $b are as they were", `our ($a, $b) = ("left", "right"); PerlAPI::largest(sub { $a <=> $b }, 1, 2); "$a,$b"`, "left,right"},
+		{"what a block returns in list context is on the stack of the calls", `PerlAPI::each_pair(sub { ($a + $b, $a * $b) }, 1, 2, 3, 4)`, "3,2,;5,6,;7,12,;args 1 2 3 4"},
+		{"a block that returns nothing, and one that returns more than the stack held", `PerlAPI::each_pair(sub { $a == 1 ? () : (($a) x 3) }, 1, 2, 3) . "|" . length(PerlAPI::each_pair(sub { (1) x 200 }, 1, 2))`, ";2,2,2,;args 1 2 3|409"},
+		{"an overloaded <=>", `{ package Rank; use overload "<=>" => sub { ($_[2] ? -1 : 1) * ($_[0]{r} <=> (ref $_[1] ? $_[1]{r} : $_[1])) }, q("") => sub { "rank" . $_[0]{r} }; } PerlAPI::largest(sub { $a <=> $b }, (map { bless { r => $_ }, "Rank" } 2, 9, 4))`, "rank9,overloaded -1"},
 		{"many calls", `my $n = 0; join ",", PerlAPI::first_index(sub { $n++; $_ == 4999 }, 0 .. 5000), $n`, "4999,5000"},
 		{"$_ is the caller's again", `my @r; for ("outer") { PerlAPI::first_index(sub { 0 }, 1, 2); push @r, $_ } "@r"`, "outer"},
 	})

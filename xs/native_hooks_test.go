@@ -138,8 +138,8 @@ func TestNativeOtherNames(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
 	runEvalCases(t, p, []evalCase{
-		{"each does what the name it stands for does", `my %h; my $r = PerlAPI::other_names(\%h, "main::made_on_demand"); join "|", $r, scalar(keys %h), (defined *main::made_on_demand{HASH} ? "hash" : "no hash")`,
-			"destructor 3,fetched value,exists 10,deleted 1,glob 11,array 10,pad 11,string handed over|0|hash"},
+		{"each does what the name it stands for does", `my %h; my $r = PerlAPI::other_names(\%h, "main::made_on_demand"); join "|", $r, join(",", sort keys %h), (defined *main::made_on_demand{HASH} ? "hash" : "no hash")`,
+			"destructor 3,fetched value,entry value,made 1,put there,absent 0,exists 10,deleted 1,glob 11,array 10,pad 11,string handed over|made,put|hash"},
 	})
 }
 

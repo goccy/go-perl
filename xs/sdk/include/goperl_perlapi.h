@@ -1630,6 +1630,11 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_errgv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_ERRGV)))
 #define PL_defstash ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_DEFSTASH)))
 #define PL_incgv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_INCGV)))
+/* The globs of $a and $b of the sort block that is running: a module that
+ * calls a block with the two (List::MoreUtils' pairwise and its sorts)
+ * saves them, points them at the caller's *a and *b, and sets the scalars. */
+#define PL_firstgv (*(GV **)goperl_plsv_ref(_gof, GOPERL_PL_FIRSTGV))
+#define PL_secondgv (*(GV **)goperl_plsv_ref(_gof, GOPERL_PL_SECONDGV))
 #define PL_stderrgv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_STDERRGV)))
 #define PL_stdingv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_STDINGV)))
 #define PL_defoutgv (*(GV **)goperl_plsv_ref(_gof, GOPERL_PL_DEFOUTGV))
@@ -3110,42 +3115,98 @@ static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) {
 /* ---- MULTICALL -------------------------------------------------------------------
  * Calls one sub many times (the block of a first { ... } @list): the sub
  * is given no arguments, reads $_ or $a and $b as the caller set them, and
- * leaves what it returns at the top of the stack, where the caller reads
- * it (*PL_stack_sp) before the next call. perl saves the cost of entering
- * the sub each time; here each MULTICALL is a call of the sub, in the
- * context of the variable gimme the caller has in scope, as perl's macro
- * takes it. */
-#define dMULTICALL                         \
-    CV *multicall_cv __attribute__((unused)) = NULL; \
-    OP *multicall_cop __attribute__((unused)) = NULL; \
-    SSize_t goperl_multicall_sp __attribute__((unused)) = 0
-#define PUSH_MULTICALL_FLAGS(the_cv, flags)                        \
-    STMT_START {                                                   \
-        multicall_cv = (CV *)(the_cv);                             \
-        goperl_multicall_sp = (SSize_t)(PL_stack_sp - PL_stack_base); \
-    }                                                              \
-    STMT_END
+ * leaves what it returns on the stack, where the caller reads it before
+ * the next call. perl saves the cost of entering the sub each time; here
+ * each MULTICALL is a call of the sub.
+ *
+ * As in perl, the calls run on a stack of their own, from PUSH_MULTICALL
+ * to POP_MULTICALL: what a call returns is PL_stack_base[1] and up to
+ * PL_stack_sp (a block in list context: List::MoreUtils' pairwise), and
+ * the stack the caller had, with its arguments, is as it was afterwards
+ * (a pointer to the arguments taken before PUSH_MULTICALL stays good: a
+ * sort that calls the block rearranges them in place).
+ *
+ * As in perl, MULTICALL needs nothing but multicall_cop: a module hands
+ * that one variable to a function of its own and says MULTICALL there. So
+ * what the call needs — the sub, the context the variable gimme had at
+ * PUSH_MULTICALL, the caller's stack — is kept in a record that
+ * multicall_cop points into.
+ *
+ * A function that leaves by croak between the two leaves the frame on the
+ * stack of the calls, which is given up with the frame. */
+typedef struct {
+    OP op; /* what multicall_cop points to */
+    CV *cv;
+    U8 gimme;
+    SV **outer_base; /* the caller's stack */
+    SV **outer_sp;
+    int64_t outer_cap;
+} goperl_multicall_t;
+#define dMULTICALL                                                   \
+    goperl_multicall_t goperl_multicall_v __attribute__((unused));   \
+    OP *multicall_cop __attribute__((unused)) =                      \
+        (memset(&goperl_multicall_v, 0, sizeof(goperl_multicall_v)), \
+         &goperl_multicall_v.op);                                    \
+    bool multicall_oldcatch __attribute__((unused)) = 0
+static void goperl_multicall_push(goperl_frame_t *f, goperl_multicall_t *m, CV *cv, U8 gimme)
+    __attribute__((unused));
+static void goperl_multicall_push(goperl_frame_t *f, goperl_multicall_t *m, CV *cv, U8 gimme) {
+    enum { first_cap = 64 };
+    goperl_stk(f);
+    /* the stack of a pp function is the interpreter's own, kept in step
+     * with it: another one cannot stand in for it */
+    if (f->pp_frame)
+        goperl_croakf(f, "MULTICALL in a pp function is not supported by the go-perl XS SDK");
+    SV **calls = (SV **)malloc(first_cap * sizeof(SV *));
+    if (!calls) goperl_croakf(f, "Out of memory for the stack of a MULTICALL");
+    /* the entry below the first value is undef, as on every stack of
+     * perl's: *PL_stack_sp is undef after a call that returned nothing */
+    calls[0] = &PL_sv_undef;
+    m->cv = cv;
+    m->gimme = gimme;
+    m->outer_base = f->stbase;
+    m->outer_sp = f->psp;
+    m->outer_cap = f->stcap;
+    f->stbase = calls;
+    f->stcap = first_cap;
+    f->psp = calls;
+}
+#define PUSH_MULTICALL_FLAGS(the_cv, flags)                                    \
+    goperl_multicall_push(_gof, (goperl_multicall_t *)multicall_cop,           \
+                          (CV *)(the_cv), (U8)(gimme))
 #define PUSH_MULTICALL(the_cv) PUSH_MULTICALL_FLAGS((the_cv), 0)
-#define MULTICALL                                                  \
-    STMT_START {                                                   \
-        PL_stack_sp = PL_stack_base + goperl_multicall_sp;         \
-        {                                                          \
-            dSP;                                                   \
-            PUSHMARK(SP);                                          \
-            PUTBACK;                                               \
-            if (call_sv((SV *)multicall_cv, (gimme) | G_NOARGS) == 0 && \
-                (gimme) == G_SCALAR) {                             \
-                SPAGAIN;                                           \
-                XPUSHs(&PL_sv_undef);                              \
-                PUTBACK;                                           \
-            }                                                      \
-        }                                                          \
-    }                                                              \
-    STMT_END
-#define POP_MULTICALL \
-    STMT_START { PL_stack_sp = PL_stack_base + goperl_multicall_sp; } STMT_END
+static void goperl_multicall(goperl_frame_t *f, goperl_multicall_t *m)
+    __attribute__((unused));
+static void goperl_multicall(goperl_frame_t *f, goperl_multicall_t *m) {
+    (void)f;
+    PL_stack_sp = PL_stack_base;
+    {
+        dSP;
+        PUSHMARK(SP);
+        PUTBACK;
+        /* perl's MULTICALL runs the ops of the sub and leaves the stack as
+         * the last of them left it: the value of the last statement is
+         * there in void context too (List::MoreUtils' qsort calls its
+         * block in the context qsort itself was called in, and reads the
+         * result). A call in void context would drop it, so the block is
+         * called for one value then. */
+        (void)call_sv((SV *)m->cv, (m->gimme == G_VOID ? G_SCALAR : m->gimme) | G_NOARGS);
+    }
+}
+#define MULTICALL goperl_multicall(_gof, (goperl_multicall_t *)multicall_cop)
+static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m)
+    __attribute__((unused));
+static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m) {
+    if (!m->outer_base) return;
+    free(f->stbase);
+    f->stbase = m->outer_base;
+    f->stcap = m->outer_cap;
+    f->psp = m->outer_sp;
+    m->outer_base = 0;
+}
+#define POP_MULTICALL goperl_multicall_pop(_gof, (goperl_multicall_t *)multicall_cop)
 #define CHANGE_MULTICALL_FLAGS(the_cv, flags) \
-    STMT_START { multicall_cv = (CV *)(the_cv); } STMT_END
+    STMT_START { ((goperl_multicall_t *)multicall_cop)->cv = (CV *)(the_cv); } STMT_END
 
 /* ---- pp.h: taking from the stack ---------------------------------------------- */
 #define dTOPss SV *sv = TOPs

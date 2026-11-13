@@ -455,7 +455,20 @@ XS(XS_PerlAPI_other_names) {
 
         (void)hv_common_key_len(hv, "stored", 6, HV_FETCH_ISSTORE | HV_FETCH_JUST_SV, newSVpvs("value"), 0);
         svp = (SV **)hv_common_key_len(hv, "stored", 6, HV_FETCH_JUST_SV, NULL, 0);
-        sv_catpvf(out, ",fetched %s", svp ? SvPV_nolen((SV *)svp) : "nothing");
+        sv_catpvf(out, ",fetched %s", svp ? SvPV_nolen(*svp) : "nothing");
+        {
+            /* the other shapes of hv_common: the entry by a scalar key,
+             * the place of a value stored, a value made on demand */
+            SV *key = sv_2mortal(newSVpvs("stored"));
+            HE *he = (HE *)hv_common(hv, key, NULL, 0, 0, 0, NULL, 0);
+            SV **made = (SV **)hv_common_key_len(hv, "made", 4, HV_FETCH_JUST_SV | HV_FETCH_LVALUE, NULL, 0);
+            SV **put = (SV **)hv_common(hv, NULL, "put", 3, 0, HV_FETCH_ISSTORE | HV_FETCH_JUST_SV,
+                                        newSVpvs("there"), 0);
+            sv_catpvf(out, ",entry %s,made %d,put %s,absent %d", he ? SvPV_nolen(HeVAL(he)) : "nothing",
+                      made && *made && !SvOK(*made) && hv_exists(hv, "made", 4) ? 1 : 0,
+                      put ? SvPV_nolen(*put) : "nothing",
+                      hv_common_key_len(hv, "absent", 6, HV_FETCH_JUST_SV, NULL, 0) ? 1 : 0);
+        }
         sv_catpvf(out, ",exists %d%d",
                   hv_common_key_len(hv, "stored", 6, HV_FETCH_ISEXISTS, NULL, 0) ? 1 : 0,
                   hv_common_key_len(hv, "absent", 6, HV_FETCH_ISEXISTS, NULL, 0) ? 1 : 0);
@@ -3016,6 +3029,104 @@ XS(XS_PerlAPI_signature) {
     }
 }
 
+/* The comparison of two values by a block that reads $a and $b, in a
+ * function that is handed nothing of the MULTICALL but multicall_cop, as
+ * List::MoreUtils' sort hands it on. */
+static IV PerlAPI_compare_in_block(pTHX_ SV *left, SV *right, OP *multicall_cop) {
+    SV *olda = GvSV(PL_firstgv);
+    SV *oldb = GvSV(PL_secondgv);
+    GvSV(PL_firstgv) = SvREFCNT_inc_simple_NN(left);
+    GvSV(PL_secondgv) = SvREFCNT_inc_simple_NN(right);
+    SvREFCNT_dec(olda);
+    SvREFCNT_dec(oldb);
+    MULTICALL;
+    return SvIV(*PL_stack_sp);
+}
+
+/* largest(code, values...): the value that the block, comparing $a and $b,
+ * puts last; then what the overloaded <=> of the first two values says, or
+ * "plain" when neither overloads it. */
+XS(XS_PerlAPI_largest) {
+    dXSARGS;
+    if (items < 3) croak_xs_usage(cv, "code, value, value, ...");
+    {
+        dMULTICALL;
+        I32 gimme = GIMME_V; /* the context largest itself was called in */
+        I32 i, best = 1;
+        CV *code = (CV *)SvRV(ST(0));
+        SV **args = &PL_stack_base[ax];
+        SV *out;
+        PUSH_MULTICALL(code);
+        SAVEGENERICSV(PL_firstgv);
+        SAVEGENERICSV(PL_secondgv);
+        PL_firstgv = MUTABLE_GV(SvREFCNT_inc(gv_fetchpvs("a", GV_ADD | GV_NOTQUAL, SVt_PV)));
+        PL_secondgv = MUTABLE_GV(SvREFCNT_inc(gv_fetchpvs("b", GV_ADD | GV_NOTQUAL, SVt_PV)));
+        save_gp(PL_firstgv, 0);
+        save_gp(PL_secondgv, 0);
+        GvINTRO_off(PL_firstgv);
+        GvINTRO_off(PL_secondgv);
+        SAVEGENERICSV(GvSV(PL_firstgv));
+        SvREFCNT_inc(GvSV(PL_firstgv));
+        SAVEGENERICSV(GvSV(PL_secondgv));
+        SvREFCNT_inc(GvSV(PL_secondgv));
+        for (i = 2; i < items; i++)
+            if (PerlAPI_compare_in_block(aTHX_ args[best], args[i], multicall_cop) < 0) best = i;
+        POP_MULTICALL;
+        out = newSVsv(args[best]);
+        if (SvAMAGIC(args[1]) || SvAMAGIC(args[2]))
+            sv_catpvf(out, ",overloaded %" IVdf, SvIV(amagic_call(args[1], args[2], ncmp_amg, 0)));
+        else
+            sv_catpvs(out, ",plain");
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* each_pair(code, values...): what the block returns for each pair of
+ * neighbours ($a, $b), in list context: every value of every call, read
+ * off the stack of the calls the way List::MoreUtils' pairwise reads it;
+ * then the arguments as they are afterwards. */
+XS(XS_PerlAPI_each_pair) {
+    dXSARGS;
+    if (items < 3) croak_xs_usage(cv, "code, value, value, ...");
+    {
+        dMULTICALL;
+        I32 gimme = G_LIST;
+        I32 i;
+        CV *code = (CV *)SvRV(ST(0));
+        SV **args = &PL_stack_base[ax];
+        SV *out = sv_2mortal(newSVpvs(""));
+        PUSH_MULTICALL(code);
+        SAVEGENERICSV(PL_firstgv);
+        SAVEGENERICSV(PL_secondgv);
+        PL_firstgv = MUTABLE_GV(SvREFCNT_inc(gv_fetchpvs("a", GV_ADD | GV_NOTQUAL, SVt_PV)));
+        PL_secondgv = MUTABLE_GV(SvREFCNT_inc(gv_fetchpvs("b", GV_ADD | GV_NOTQUAL, SVt_PV)));
+        save_gp(PL_firstgv, 0);
+        save_gp(PL_secondgv, 0);
+        GvINTRO_off(PL_firstgv);
+        GvINTRO_off(PL_secondgv);
+        SAVEGENERICSV(GvSV(PL_firstgv));
+        SvREFCNT_inc(GvSV(PL_firstgv));
+        SAVEGENERICSV(GvSV(PL_secondgv));
+        SvREFCNT_inc(GvSV(PL_secondgv));
+        for (i = 1; i + 1 < items; i++) {
+            SV **j;
+            SV *olda = GvSV(PL_firstgv), *oldb = GvSV(PL_secondgv);
+            GvSV(PL_firstgv) = SvREFCNT_inc_simple_NN(args[i]);
+            GvSV(PL_secondgv) = SvREFCNT_inc_simple_NN(args[i + 1]);
+            SvREFCNT_dec(olda);
+            SvREFCNT_dec(oldb);
+            MULTICALL;
+            for (j = PL_stack_base + 1; j <= PL_stack_sp; j++) sv_catpvf(out, "%" SVf ",", SVfARG(*j));
+            sv_catpvs(out, ";");
+        }
+        POP_MULTICALL;
+        for (i = 1; i < items; i++) sv_catpvf(out, "%s%" SVf, i == 1 ? "args " : " ", SVfARG(ST(i)));
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* first_index(code, values...): the index of the first value for which
  * the code is true with the value in $_, by MULTICALL, as the list
  * utilities do it. */
@@ -3528,6 +3639,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::own_name", XS_PerlAPI_own_name);
     newXS_deffile("PerlAPI::signature", XS_PerlAPI_signature);
     newXS_deffile("PerlAPI::first_index", XS_PerlAPI_first_index);
+    newXS_deffile("PerlAPI::largest", XS_PerlAPI_largest);
+    newXS_deffile("PerlAPI::each_pair", XS_PerlAPI_each_pair);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
     newXS_deffile("PerlAPI::encode_uv", XS_PerlAPI_encode_uv);

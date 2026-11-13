@@ -273,13 +273,24 @@ typedef enum {
 #define GV_ADD 0x01
 #define GV_ADDMULTI 0x02
 
-/* overload (amagic) — real perl 5.44 values used by deref overloading. */
-#define fallback_amg 0
-#define to_sv_amg 1
-#define to_av_amg 2
-#define to_hv_amg 3
-#define to_gv_amg 4
-#define to_cv_amg 5
+/* overload (amagic): the index of every operator a class can overload, in
+ * the order of perl 5.44's overload.h (fallback_amg is 0, regexp_amg 0x4a).
+ * The interpreter takes them as they are (amagic_call). */
+enum {
+    fallback_amg, to_sv_amg, to_av_amg, to_hv_amg, to_gv_amg, to_cv_amg,
+    inc_amg, dec_amg, bool__amg, numer_amg, string_amg, not_amg, copy_amg,
+    abs_amg, neg_amg, iter_amg, int_amg, lt_amg, le_amg, gt_amg, ge_amg,
+    eq_amg, ne_amg, slt_amg, sle_amg, sgt_amg, sge_amg, seq_amg, sne_amg,
+    nomethod_amg, add_amg, add_ass_amg, subtr_amg, subtr_ass_amg, mult_amg,
+    mult_ass_amg, div_amg, div_ass_amg, modulo_amg, modulo_ass_amg,
+    pow_amg, pow_ass_amg, lshift_amg, lshift_ass_amg, rshift_amg,
+    rshift_ass_amg, band_amg, band_ass_amg, sband_amg, sband_ass_amg,
+    bor_amg, bor_ass_amg, sbor_amg, sbor_ass_amg, bxor_amg, bxor_ass_amg,
+    sbxor_amg, sbxor_ass_amg, ncmp_amg, scmp_amg, compl_amg, scompl_amg,
+    atan2_amg, cos_amg, sin_amg, exp_amg, log_amg, sqrt_amg, repeat_amg,
+    repeat_ass_amg, concat_amg, concat_ass_amg, smart_amg, ftest_amg,
+    regexp_amg, max_amg_code
+};
 #define AMGf_noright 1
 #define AMGf_unary 8
 
@@ -1309,8 +1320,11 @@ typedef struct goperl_hostsave {
     void **loc;
     void *val;
     int32_t scope;
-    int32_t width; /* 0 = pointer-width; 1, 2, 4 = an integer of that size */
+    int32_t width; /* 0 = pointer-width; 1, 2, 4 = an integer of that size;
+                    * GOPERL_HOSTSAVE_GENERIC = an SV the location holds a
+                    * reference to (SAVEGENERICSV) */
 } goperl_hostsave_t;
+#define GOPERL_HOSTSAVE_GENERIC 9
 #define GOPERL_HOSTSAVE_MAX 256
 
 /* Control-flow state SHARED ACROSS MODULES. Weak globals only coalesce
@@ -1756,6 +1770,8 @@ enum {
 #define GOPERL_PL_DEFGV 26
 #define GOPERL_PL_HINTGV 27
 #define GOPERL_PL_COMPCV 28
+#define GOPERL_PL_FIRSTGV 81
+#define GOPERL_PL_SECONDGV 82
 
 /* GOPERL_ONCE binds the value of a macro argument, so that a macro standing
  * in for a function of the perl API evaluates the argument once, as a call
@@ -1811,21 +1827,30 @@ static uint64_t goperl_do_op(goperl_frame_t *f, int32_t op, uint64_t a,
 static void goperl_vfmt(goperl_frame_t *f, char *dst, size_t dstsize,
                         const char *fmt, va_list ap);
 
-/* A saved location gets back what it held: as many bytes as were saved. */
-static void goperl_hostsave_restore(const goperl_hostsave_t *e) {
+/* A saved location gets back what it held: as many bytes as were saved.
+ * The location of SAVEGENERICSV owns a reference to what it holds, as
+ * save_generic_svref has it: the value it holds now is released, and the
+ * saved one, whose reference was kept, is put back. */
+static void goperl_hostsave_restore(goperl_frame_t *f, const goperl_hostsave_t *e) {
     switch (e->width) {
     case 1: *(int8_t *)e->loc = (int8_t)(intptr_t)e->val; break;
     case 2: *(int16_t *)e->loc = (int16_t)(intptr_t)e->val; break;
     case 4: *(int32_t *)e->loc = (int32_t)(intptr_t)e->val; break;
+    case GOPERL_HOSTSAVE_GENERIC: {
+        void *const now = *e->loc;
+        *e->loc = e->val;
+        if (now)
+            goperl_xs_op(f, GOPERL_OP_SV_REFCNT_DEC, (uint64_t)(uintptr_t)now, 0, 0, 0);
+        break;
+    }
     default: *e->loc = e->val; break;
     }
 }
 
 static void goperl_hostsave_unwind_to(goperl_frame_t *f, int32_t base) {
-    (void)f;
     while (goperl_hostsave_n > base) {
         goperl_hostsave_t *e = &goperl_hostsave_v[--goperl_hostsave_n];
-        goperl_hostsave_restore(e);
+        goperl_hostsave_restore(f, e);
     }
 }
 
@@ -2837,11 +2862,15 @@ static SV *goperl_newRV_noinc(goperl_frame_t *f, SV *sv) {
 }
 #define newRV_noinc(sv) goperl_newRV_noinc(_gof, (SV *)(sv))
 
-#define amagic_call(sv, right, method, flags)                             \
-    GOPERL_SV(goperl_op0(GOPERL_OP_AMAGIC_CALL,                           \
-                         ((uint64_t)(uint32_t)(method) << 32) |           \
-                             (uint32_t)GOPERL_TOK(sv),                    \
-                         (uint64_t)(flags)))
+/* amagic_call: the overloaded operator of two operands (the right one is
+ * undef for the operators of one). NULL when neither overloads it. */
+#define amagic_call(left, right, method, flags)                           \
+    GOPERL_SV(goperl_op0(GOPERL_OP_SV_CALL,                               \
+                         ((uint64_t)61 /* GOPERL_SVCALL_AMAGIC */ << 32) | \
+                             (uint32_t)GOPERL_TOK(left),                  \
+                         (uint32_t)GOPERL_TOK(right) |                    \
+                             ((uint64_t)((uint32_t)(method) & 0xff) << 32) | \
+                             ((uint64_t)((uint32_t)(flags) & 0xffff) << 40)))
 #define amagic_deref_call(ref, method) \
     goperl_amagic_deref_call(_gof, (SV *)(ref), (method))
 static SV *goperl_amagic_deref_call(goperl_frame_t *f, SV *ref, int method)
@@ -4351,7 +4380,7 @@ static void goperl_leave(goperl_frame_t *f) {
     while (goperl_hostsave_n > 0 &&
            goperl_hostsave_v[goperl_hostsave_n - 1].scope >= goperl_scope_v) {
         goperl_hostsave_t *e = &goperl_hostsave_v[--goperl_hostsave_n];
-        goperl_hostsave_restore(e);
+        goperl_hostsave_restore(f, e);
     }
     goperl_scope_v--;
 }
@@ -4402,8 +4431,10 @@ static void goperl_save_sv_slot(goperl_frame_t *f, SV **loc, int generic) {
     else if (loc == (SV **)&f->hook_val[1])
         goperl_do_op(f, GOPERL_OP_SAVE_HOOK, GOPERL_PL_WARNHOOK,
                      (uint64_t)generic, 0, 0);
-    else
+    else {
         goperl_hostsave_ptr(f, (void **)loc);
+        if (generic) goperl_hostsave_v[goperl_hostsave_n - 1].width = GOPERL_HOSTSAVE_GENERIC;
+    }
 }
 #define SAVESPTR(s) goperl_save_sv_slot(_gof, &(s), 0)
 #define SAVEGENERICSV(s) goperl_save_sv_slot(_gof, &(s), 1)
@@ -6149,7 +6180,11 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
 #define SvTRUEx(sv) SvTRUE(sv)
 #define HvAMAGIC(hv) ((int)goperl_op0(GOPERL_OP_GV_AMG, GOPERL_TOK(hv), 0))
 
-/* hv_common: only the JUST_SV fetch/store shapes dists actually use. */
+/* hv_common: every way into a hash by one function, as hv.h's macros use
+ * it. What it returns depends on the action, as in perl: whether the key
+ * exists; the value that was deleted; and for a fetch or a store either
+ * the entry (HE *: hv_fetch_ent, hv_store_ent) or, with HV_FETCH_JUST_SV,
+ * the place of the value in the hash (SV **: hv_fetch, hv_store). */
 #define HV_FETCH_ISSTORE 0x04
 #define HV_FETCH_ISEXISTS 0x08
 #define HV_FETCH_LVALUE 0x10
@@ -6161,14 +6196,16 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
                               const char *key, STRLEN klen, int kflags,
                               int action, SV *val, U32 hash) {
     (void)hash;
-    char kbuf[8];
     if (keysv && !key) {
         uint64_t l = 0;
         key = goperl_direct_sv_pv(f, GOPERL_TOK(keysv), &l);
         klen = (STRLEN)l;
-        (void)kbuf;
+        if (goperl_do_op(f, GOPERL_OP_SV_INFO, GOPERL_TOK(keysv), 0, 0, 0) &
+            GOPERL_INFO_UTF8)
+            kflags |= HVhek_UTF8;
     }
-    /* a key's length is negative for these two when the key is UTF-8 */
+    /* a key's length is negative for the functions below when the key is
+     * UTF-8 */
     const I32 signed_klen = (kflags & HVhek_UTF8) ? -(I32)klen : (I32)klen;
     if (action & HV_DELETE)
         return (void *)GOPERL_SV(goperl_do_op(
@@ -6177,17 +6214,30 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
             (uint64_t)signed_klen));
     if (action & HV_FETCH_ISEXISTS)
         return goperl_hv_exists(f, hv, key, signed_klen) ? (void *)hv : 0;
+    if (action & HV_FETCH_JUST_SV) {
+        if (action & HV_FETCH_ISSTORE)
+            return (void *)goperl_hv_store(f, hv, key, signed_klen, val);
+        return (void *)goperl_hv_fetch(f, hv, key, signed_klen,
+                                       (action & HV_FETCH_LVALUE) ? 1 : 0);
+    }
+    /* the entry: by a key that is a scalar */
+    if (!keysv) {
+        keysv = GOPERL_SV(goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, klen, key, klen));
+        goperl_do_op(f, GOPERL_OP_SV_MORTAL, GOPERL_TOK(keysv), 0, 0, 0);
+        if (kflags & HVhek_UTF8)
+            goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, GOPERL_TOK(keysv), 0, 0, 0);
+    }
     if (action & HV_FETCH_ISSTORE)
-        return (void *)GOPERL_SV(goperl_do_op(
-            f, GOPERL_OP_HV_STORE_KLEN, GOPERL_HV_KEYED(hv, klen),
-            ((uint64_t)((kflags & HVhek_UTF8) ? 1 : 0) << 32) |
-                (uint32_t)GOPERL_TOK(val),
-            key, (uint64_t)klen));
-    return (void *)GOPERL_SV(goperl_do_op(
-        f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_HV_KEYED(hv, klen),
-        ((uint64_t)((kflags & HVhek_UTF8) ? 1 : 0) << 32) |
-            (uint32_t)((action & HV_FETCH_LVALUE) ? 1 : 0),
-        key, (uint64_t)klen));
+        return (void *)goperl_he_shadow(
+            f, (HV *)0,
+            goperl_do_op(f, GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv),
+                         (GOPERL_TOK(keysv) << 32) | (uint32_t)GOPERL_TOK(val), 0, 0));
+    return (void *)goperl_he_shadow(
+        f, (HV *)0,
+        goperl_do_op(f, GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv),
+                     (uint32_t)GOPERL_TOK(keysv) |
+                         ((uint64_t)((action & HV_FETCH_LVALUE) ? 1 : 0) << 32),
+                     0, 0));
 }
 #define hv_common(hv, keysv, key, klen, kflags, action, val, hash)        \
     goperl_hv_common(_gof, (HV *)(hv), (SV *)(keysv), (key),              \
@@ -7057,17 +7107,6 @@ static pid_t goperl_getpid(void) {
 #define sv_copypv(dsv, ssv) \
     ({ GOPERL_ONCE(goperl_sv_copypv_dsv_, dsv); GOPERL_ONCE(goperl_sv_copypv_ssv_, ssv); \
        do { STRLEN goperl_cl; const char *goperl_cp = SvPV((goperl_sv_copypv_ssv_), goperl_cl); sv_setpvn((goperl_sv_copypv_dsv_), goperl_cp, goperl_cl); if (SvUTF8(goperl_sv_copypv_ssv_)) SvUTF8_on(goperl_sv_copypv_dsv_); else SvUTF8_off(goperl_sv_copypv_dsv_); } while (0); })
-/* Overload (amagic) calls: the *_amg indexes below are perl 5.44's
- * overload.h values — the guest passes them straight to amagic_call. */
-enum {
-    bool__amg = 8,
-    numer_amg = 9,
-    string_amg = 10,
-    eq_amg = 0x15,
-    ne_amg = 0x16,
-    seq_amg = 0x1b,
-    sne_amg = 0x1c
-};
 #define AMG_CALLunary(sv, meth)                                     \
     GOPERL_SV(goperl_op0(GOPERL_OP_AMAGIC_CALL,                     \
                          ((uint64_t)(meth) << 32) |                 \
