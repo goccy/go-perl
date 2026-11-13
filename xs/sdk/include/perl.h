@@ -5777,6 +5777,48 @@ static int goperl_pio_close(goperl_frame_t *f, const void *h) {
 }
 #define PerlIO_open(path, mode) goperl_perlio_open(_gof, (path), (mode))
 #define PerlIO_close(io) goperl_pio_close(_gof, (io))
+/* PerlIO_fdopen: a handle on a descriptor. For a program that is the host
+ * process the interpreter's descriptors are the process's, so the
+ * descriptor can be one this code made (a socket, a pipe, a terminal): the
+ * handle reads and writes it, and closing the handle closes it. */
+static PerlIO *goperl_pio_fdopen(goperl_frame_t *f, int fd, const char *mode)
+    __attribute__((unused));
+static PerlIO *goperl_pio_fdopen(goperl_frame_t *f, int fd, const char *mode) {
+    if (!mode) mode = "r";
+    PerlIO *const io = (PerlIO *)(uintptr_t)goperl_pio(
+        f, GOPERL_PIO_FDOPEN, 0, (uint64_t)(int64_t)fd, mode,
+        strlen(mode) + 1);
+    if (!io) goperl_errno_from_interp(f);
+    return io;
+}
+#define PerlIO_fdopen(fd, mode) goperl_pio_fdopen(_gof, (fd), (mode))
+/* PerlIO_importFILE: a handle on the descriptor of a stdio stream, open
+ * for what mode says, or for what the descriptor is open for when mode is
+ * null or empty. What the stream has buffered for output is written first;
+ * from then on the handle is the way to the descriptor, and closing it
+ * closes the descriptor (the stream is not to be used afterwards, as with
+ * perl). */
+static PerlIO *goperl_pio_import(goperl_frame_t *f, FILE *fp, const char *mode)
+    __attribute__((unused));
+static PerlIO *goperl_pio_import(goperl_frame_t *f, FILE *fp, const char *mode) {
+    const int fd = fp ? fileno(fp) : -1;
+    if (fd < 0) {
+        errno = EBADF;
+        return 0;
+    }
+    if (!mode || !*mode) {
+        const int flags = fcntl(fd, F_GETFL);
+        if (flags < 0) return 0;
+        switch (flags & O_ACCMODE) {
+        case O_WRONLY: mode = (flags & O_APPEND) ? "a" : "w"; break;
+        case O_RDWR: mode = (flags & O_APPEND) ? "a+" : "r+"; break;
+        default: mode = "r"; break;
+        }
+    }
+    fflush(fp);
+    return goperl_pio_fdopen(f, fd, mode);
+}
+#define PerlIO_importFILE(fp, mode) goperl_pio_import(_gof, (fp), (mode))
 
 /* eval_sv: results delivered like call_sv (the guest packs them into a
  * mortal AV; the SDK pushes them onto the host stack model). */

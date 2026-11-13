@@ -5,6 +5,7 @@
 #include "XSUB.h"
 #include "patchlevel.h"
 
+#include <sys/socket.h>
 #include <unistd.h>
 
 /* The names of the value flags set on an SV, from the real flag word. */
@@ -788,6 +789,138 @@ XS(XS_PerlAPI_pio_stdio_write) {
         fflush(fp);
         PerlIO_releaseFILE(out, fp);
         XSRETURN_IV(n);
+    }
+}
+
+/* ---- descriptors, as the host's system calls see them ------------------------ */
+
+/* The descriptor of a handle, as PerlIO_fileno gives it to native code. */
+XS(XS_PerlAPI_fd_of) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    XSRETURN_IV((IV)PerlIO_fileno(IoIFP(sv_2io(ST(0)))));
+}
+
+/* What the host says about a descriptor: "closed", or its kind and mode,
+ * as in "pipe blocking" or "socket nonblocking". */
+XS(XS_PerlAPI_fd_state) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fd");
+    {
+        const int fd = (int)SvIV(ST(0));
+        struct stat st;
+        int flags;
+        const char *kind;
+        char out[64];
+        if (fstat(fd, &st) != 0 || (flags = fcntl(fd, F_GETFL)) < 0) {
+            ST(0) = sv_2mortal(newSVpvs("closed"));
+            XSRETURN(1);
+        }
+        kind = S_ISREG(st.st_mode)    ? "file"
+               : S_ISDIR(st.st_mode)  ? "directory"
+               : S_ISFIFO(st.st_mode) ? "pipe"
+               : S_ISSOCK(st.st_mode) ? "socket"
+               : S_ISCHR(st.st_mode)  ? "device"
+                                      : "other";
+        snprintf(out, sizeof out, "%s %s", kind,
+                 (flags & O_NONBLOCK) ? "nonblocking" : "blocking");
+        ST(0) = sv_2mortal(newSVpv(out, 0));
+        XSRETURN(1);
+    }
+}
+
+/* write(2) on a descriptor; the count, or undef with errno left for $!. */
+XS(XS_PerlAPI_fd_write) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fd, text");
+    {
+        STRLEN len;
+        const char *text = SvPV(ST(1), len);
+        const ssize_t n = write((int)SvIV(ST(0)), text, len);
+        if (n < 0) XSRETURN_UNDEF;
+        XSRETURN_IV((IV)n);
+    }
+}
+
+/* read(2) on a descriptor, once, of at most max bytes; what was read, or
+ * undef with errno left for $!. */
+XS(XS_PerlAPI_fd_read) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fd, max");
+    {
+        char buf[256];
+        size_t max = (size_t)SvUV(ST(1));
+        ssize_t n;
+        if (max > sizeof buf) max = sizeof buf;
+        n = read((int)SvIV(ST(0)), buf, max);
+        if (n < 0) XSRETURN_UNDEF;
+        ST(0) = sv_2mortal(newSVpvn(buf, (STRLEN)n));
+        XSRETURN(1);
+    }
+}
+
+/* Descriptors made by native code: the two ends of a pipe, or of a pair of
+ * connected sockets. */
+XS(XS_PerlAPI_fd_pair) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "kind");
+    {
+        int fds[2];
+        const char *kind = SvPV_nolen(ST(0));
+        const int rc = strEQ(kind, "pipe") ? pipe(fds)
+                                           : socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+        if (rc != 0) XSRETURN_EMPTY;
+        SP -= items;
+        EXTEND(SP, 2);
+        PUSHs(sv_2mortal(newSViv(fds[0])));
+        PUSHs(sv_2mortal(newSViv(fds[1])));
+        PUTBACK;
+        return;
+    }
+}
+
+/* close(2) on a descriptor. */
+XS(XS_PerlAPI_fd_close) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fd");
+    XSRETURN_IV((IV)close((int)SvIV(ST(0))));
+}
+
+/* A line read through a handle native code opens on a descriptor
+ * (PerlIO_fdopen); the handle is closed again, and the descriptor with it. */
+XS(XS_PerlAPI_fd_line) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "fd");
+    {
+        PerlIO *in = PerlIO_fdopen((int)SvIV(ST(0)), "r");
+        SV *line;
+        int c;
+        if (!in) XSRETURN_UNDEF;
+        line = sv_2mortal(newSVpvs(""));
+        while ((c = PerlIO_getc(in)) != EOF && c != '\n') sv_catpvf(line, "%c", c);
+        PerlIO_close(in);
+        ST(0) = line;
+        XSRETURN(1);
+    }
+}
+
+/* Writes through a handle imported from a stdio stream that native code
+ * opened on a descriptor of its own (PerlIO_importFILE), and closes it. */
+XS(XS_PerlAPI_fd_import_write) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fd, text");
+    {
+        FILE *fp = fdopen((int)SvIV(ST(0)), "w");
+        PerlIO *out;
+        STRLEN len;
+        const char *text = SvPV(ST(1), len);
+        SSize_t n;
+        if (!fp) XSRETURN_UNDEF;
+        out = PerlIO_importFILE(fp, 0);
+        if (!out) XSRETURN_UNDEF;
+        n = PerlIO_write(out, text, len);
+        PerlIO_close(out);
+        XSRETURN_IV((IV)n);
     }
 }
 
@@ -2169,5 +2302,13 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::look_without_magic", XS_PerlAPI_look_without_magic);
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
+    newXS_deffile("PerlAPI::fd_of", XS_PerlAPI_fd_of);
+    newXS_deffile("PerlAPI::fd_state", XS_PerlAPI_fd_state);
+    newXS_deffile("PerlAPI::fd_write", XS_PerlAPI_fd_write);
+    newXS_deffile("PerlAPI::fd_read", XS_PerlAPI_fd_read);
+    newXS_deffile("PerlAPI::fd_pair", XS_PerlAPI_fd_pair);
+    newXS_deffile("PerlAPI::fd_close", XS_PerlAPI_fd_close);
+    newXS_deffile("PerlAPI::fd_line", XS_PerlAPI_fd_line);
+    newXS_deffile("PerlAPI::fd_import_write", XS_PerlAPI_fd_import_write);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

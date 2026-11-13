@@ -150,3 +150,54 @@ for my $name ("child-out.txt", "child-own.txt") {
 		"child-own.txt: the child's own",
 	)
 }
+
+// A socket is the process's socket under the number the program sees, and a
+// terminal is a terminal to the program: what -t and POSIX::isatty say is
+// the host's answer for the descriptor.
+func TestSocketsAndTerminalsAreTheProcesss(t *testing.T) {
+	hostDescriptorsHere(t)
+	got := runPerlProcess(t, t.TempDir(), `
+use strict; use warnings;
+use Socket; use POSIX ();
+sub report { print @_, "\n" }
+sub kind { my $n = shift; -S "/dev/fd/$n" ? "a socket of the process's" : -e "/dev/fd/$n" ? "something else there" : "nothing there" }
+
+socket(my $listener, AF_INET, SOCK_STREAM, 0) or die "socket: $!";
+report("socket: ", fileno($listener), ", ", kind(fileno($listener)));
+bind($listener, pack_sockaddr_in(0, INADDR_LOOPBACK)) or die "bind: $!";
+listen($listener, 5) or die "listen: $!";
+socket(my $client, AF_INET, SOCK_STREAM, 0) or die "socket: $!";
+connect($client, getsockname($listener)) or die "connect: $!";
+accept(my $server, $listener) or die "accept: $!";
+report("client and accepted connection: ", fileno($client), " ", fileno($server), ", ", kind(fileno($server)));
+socketpair(my $a, my $b, AF_UNIX, SOCK_STREAM, 0) or die "socketpair: $!";
+report("socket pair: ", fileno($a), " ", fileno($b), ", ", kind(fileno($a)));
+close($server);
+report("after closing the accepted connection: ", kind(5));
+
+open(my $file, "<", $0) or die "open: $!";
+report("a file: ", (-t $file ? "a terminal" : "no terminal"), ", isatty ", (POSIX::isatty(fileno($file)) ? 1 : 0));
+if (open(my $pty, "+<", "/dev/ptmx")) {
+    report("a pseudo-terminal: ", (-t $pty ? "a terminal" : "no terminal"), ", isatty ", (POSIX::isatty(fileno($pty)) ? 1 : 0));
+} else {
+    report("no pseudo-terminal: $!");
+}
+`)
+	want := []string{
+		"socket: 3, a socket of the process's",
+		"client and accepted connection: 4 5, a socket of the process's",
+		"socket pair: 6 7, a socket of the process's",
+		"after closing the accepted connection: nothing there",
+		"a file: no terminal, isatty 0",
+	}
+	// Where this process can open a pseudo-terminal, the program can.
+	if pty, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0); err == nil {
+		pty.Close()
+		want = append(want, "a pseudo-terminal: a terminal, isatty 1")
+	} else {
+		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+		want = append(want, lines[len(lines)-1])
+		t.Logf("no pseudo-terminal on this system (%v): what a terminal is to the program is not tested", err)
+	}
+	wantOutput(t, got, want...)
+}
