@@ -100,10 +100,13 @@ report("after closing 20: ", (defined POSIX::dup2(20, 21) ? "still open" : "clos
 // A forked process starts with its parent's descriptors, under the same
 // numbers. Where it puts a file of its own under a number its parent still
 // uses, the parent's stays what it was; a command it then runs has the
-// child's file there. Its new descriptors have the lowest number that is
-// free for it, as in any process: after it closes one, standard output
-// included, the next file it opens has that number, whether or not the
-// parent still has its own descriptor there.
+// child's file there. After it closes its standard output, the next file it
+// opens is descriptor 1, whether or not the parent still has its own there.
+// Above the standard descriptors a new one is always the process's under
+// its number, which is what a native library is handed: the number of a
+// descriptor the parent still has is not given to the child for a file of
+// its own, and the parent that closed a connection its child still serves
+// accepts the next one under another number.
 func TestForkedProcessDescriptors(t *testing.T) {
 	hostDescriptorsHere(t)
 	dir := t.TempDir()
@@ -111,6 +114,12 @@ func TestForkedProcessDescriptors(t *testing.T) {
 use strict; use warnings;
 $| = 1;
 sub report { print @_, "\n" }
+# Whether the process has, under the number of a handle, the file the
+# handle is open on (/dev/fd names the descriptors of the process itself).
+sub same { my ($fh) = @_;
+           open(my $via, ">>", "/dev/fd/" . fileno($fh)) or return "not open in the process ($!)";
+           my @p = stat($via); my @h = stat($fh);
+           @p && @h && $p[0] == $h[0] && $p[1] == $h[1] ? "the process's" : "not the process's" }
 open(my $shared, "+>", "shared.txt") or die "open: $!";
 my $number = fileno($shared);
 pipe(my $r, my $w) or die "pipe: $!";
@@ -126,7 +135,7 @@ if (!$pid) {
     # a descriptor the parent still has
     close($shared);
     open(my $own, ">", "child-own.txt") or die "open: $!";
-    print $w "after closing it, the child's next file is ", (fileno($own) == $number ? "the number it closed" : "another number"), "\n";
+    print $w "after closing it, the child's next file is ", (fileno($own) == $number ? "the parent's number" : "another number"), ", ", same($own), "\n";
     print $own "the child's own\n";
     # standard output closed and opened again, as a program does that puts
     # a file in its place
@@ -145,6 +154,24 @@ syswrite($shared, "parent");
 seek($shared, 0, 0);
 report("the shared file: ", scalar(<$shared>));
 report("still the parent's standard output");
+# a server that forks for each connection: the parent closes what the child
+# serves and takes the next one
+pipe(my $kept_r, my $kept_w) or die "pipe: $!";
+my $served = fileno($kept_w);
+pipe(my $done_r, my $done_w) or die "pipe: $!";
+my $server = fork() // die "fork: $!";
+if (!$server) {
+    close($done_w);
+    my $end = <$done_r>;
+    print $kept_w "serves under ", (fileno($kept_w) == $served ? "the same number" : "another number"), ", ", same($kept_w), "\n";
+    exit 0;
+}
+close($kept_w);
+open(my $next, ">", "next.txt") or die "open: $!";
+report("the parent's next file is ", (fileno($next) == $served ? "the number its child serves" : "another number"), ", ", same($next));
+close($done_w);
+report("the child: ", scalar(<$kept_r>) =~ s/\n//r);
+waitpid($server, 0);
 for my $name ("child-out.txt", "child-own.txt", "child-again.txt") {
     open(my $in, "<", $name) or die "$name: $!";
     report("$name: ", join("|", map { chomp; $_ } <$in>));
@@ -152,11 +179,13 @@ for my $name ("child-out.txt", "child-own.txt", "child-again.txt") {
 `)
 	wantOutput(t, got,
 		"child sees the file as 3",
-		"after closing it, the child's next file is the number it closed",
+		"after closing it, the child's next file is another number, the process's",
 		"standard output closed and opened again is 1",
 		"child status: 0",
 		"the shared file: child,parent",
 		"still the parent's standard output",
+		"the parent's next file is another number, the process's",
+		"the child: serves under the same number, the process's",
 		"child-out.txt: from the child|from its command",
 		"child-own.txt: the child's own",
 		"child-again.txt: from the child again|from its second command",
