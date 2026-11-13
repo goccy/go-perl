@@ -6,6 +6,17 @@
 #include "XSUB.h"
 #include "patchlevel.h"
 
+/* The sizes config.h gives are numbers, as perl's are: a module compares
+ * them in the preprocessor (Compress::LZF: #if Size_t_size > 4). */
+#if !(Size_t_size >= 4 && SIZE_T_SIZE == Size_t_size && SHORTSIZE == 2 && \
+      INTSIZE == 4 && LONGSIZE >= 4 && LONGLONGSIZE == 8 && PTRSIZE >= 4 && \
+      DOUBLESIZE == 8 && IVSIZE == 8 && UVSIZE == 8 && NVSIZE == 8 && \
+      U8SIZE == 1 && U16SIZE == 2 && U32SIZE == 4 && I32SIZE == 4 && \
+      U64SIZE == 8 && I64SIZE == 8 && CHARBITS == 8 && BYTEORDER > 0 && \
+      MEM_ALIGNBYTES >= 4)
+#error "a size of config.h is not what it should be"
+#endif
+
 #include <sys/socket.h>
 #include <unistd.h>
 

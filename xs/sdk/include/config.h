@@ -171,8 +171,8 @@
 #define LONGLONGSIZE 8
 #define PTRSIZE __SIZEOF_POINTER__
 #define DOUBLESIZE 8
-#define SIZE_T_SIZE ((int)sizeof(size_t))
-#define Size_t_size ((int)sizeof(size_t))
+#define SIZE_T_SIZE __SIZEOF_SIZE_T__
+#define Size_t_size __SIZEOF_SIZE_T__
 #define SIZEOF_SHORT 2
 #define SIZEOF_INT 4
 #define SIZEOF_LONG_LONG 8
