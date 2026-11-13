@@ -463,6 +463,29 @@ print "a family no system has: ", (socket(my $x, 12345, $sock_stream, 0) ? "open
 	}
 }
 
+// The requests of ioctl that the interpreter answers and the items of
+// langinfo have the system's numbers too.
+func TestIoctlAndLanginfoNumbersAreTheSystems(t *testing.T) {
+	items := perlNumbers(t, `use I18N::Langinfo (); print "$_ ", I18N::Langinfo->can($_)->(), "\n" for qw(CODESET RADIXCHAR THOUSEP D_FMT T_FMT DAY_1 MON_1 ABDAY_1 YESEXPR NOEXPR AM_STR PM_STR CRNCYSTR)`)
+	compareWithHeaders(t, "I18N::Langinfo", []string{"langinfo.h"}, items, 12)
+	requests := headerNumbers(t, []string{"sys/ioctl.h"}, []string{"FIONREAD"})
+	out, status := hostPerl(t, "-e", `
+use I18N::Langinfo qw(langinfo CODESET RADIXCHAR);
+my ($fionread, $codeset, $radixchar) = @ARGV;
+pipe(my $r, my $w) or die "pipe: $!"; syswrite($w, "12345");
+my $n = pack("i", 0);
+print "ioctl by number: ", (ioctl($r, $fionread, $n) ? unpack("i", $n) . " bytes to read" : "failed: $!"), "\n";
+print "langinfo by number: the radix character is '", langinfo($radixchar), "', by name '", langinfo(RADIXCHAR), "'\n";
+print "the codeset by number and by name: ", (langinfo($codeset) eq langinfo(CODESET) && length langinfo(CODESET) ? "the same" : "differ"), "\n";
+`, strconv.FormatInt(requests["FIONREAD"], 10), strconv.FormatInt(items["CODESET"], 10), strconv.FormatInt(items["RADIXCHAR"], 10))
+	want := "ioctl by number: 5 bytes to read\n" +
+		"langinfo by number: the radix character is '.', by name '.'\n" +
+		"the codeset by number and by name: the same\n"
+	if status != 0 || out != want {
+		t.Errorf("status %d\n got: %q\nwant: %q", status, out, want)
+	}
+}
+
 // The numbers of signals are the system's: POSIX's constants, %Config's
 // list, a signal sent by number, the number in the status of a child a
 // signal ended, and the numbers POSIX's signal functions take.

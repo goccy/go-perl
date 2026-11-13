@@ -230,7 +230,7 @@ report("busy loop killed: ", outcome($busy));
 		"handler: signal=0 exit=3",
 		"ignored: still running=1",
 		"then killed: signal=9 exit=0",
-		"killed itself: signal=" + strconv.Itoa(int(syscall.SIGUSR1)) + " exit=0",
+		"killed itself: signal="+strconv.Itoa(int(syscall.SIGUSR1))+" exit=0",
 		"busy loop killed: signal=9 exit=0",
 	)
 }
@@ -248,7 +248,7 @@ for my $sig (qw(USR1 TERM KILL)) {
 }
 `)
 	wantLines(t, got,
-		"USR1 at once: signal=" + strconv.Itoa(int(syscall.SIGUSR1)) + " exit=0",
+		"USR1 at once: signal="+strconv.Itoa(int(syscall.SIGUSR1))+" exit=0",
 		"TERM at once: signal=15 exit=0",
 		"KILL at once: signal=9 exit=0",
 	)
@@ -374,7 +374,7 @@ report("USR2 from the child: handler ran=$got ", status());
 		"killed itself with TERM: signal=15 exit=0",
 		"killed itself with KILL: signal=9 exit=0",
 		"handled TERM: signal=0 exit=4",
-		"USR1 from outside: signal=" + strconv.Itoa(int(syscall.SIGUSR1)) + " exit=0",
+		"USR1 from outside: signal="+strconv.Itoa(int(syscall.SIGUSR1))+" exit=0",
 		"USR1 handled in the child: said=caught signal=0 exit=5",
 		"USR2 from the child: handler ran=1 signal=0 exit=0",
 	)
