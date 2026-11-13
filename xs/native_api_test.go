@@ -292,6 +292,30 @@ func TestNativeXSUBWithoutDXSARGS(t *testing.T) {
 	})
 }
 
+// A native call that ends because the interpreter died inside one of its
+// operations leaves no value behind: what the XSUB had made by then (its
+// mortals, the hash it was filling) goes when the die is caught, as after
+// a die in Perl code. The values the interpreter has are counted around
+// fifty such calls.
+func TestNativeCallEndedByADieLeavesNothingBehind(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	setup := `{ package Dies; use overload '""' => sub { die "no\n" }; }
+our $dies = bless {}, "Dies";
+sub growth { my ($code) = @_; $code->() for 1 .. 3; my $before = PerlAPI::live_values(); $code->() for 1 .. 50; PerlAPI::live_values() - $before }
+1`
+	if r, err := p.Eval(context.Background(), setup); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"a die in Perl code, for comparison", `growth(sub { eval { my $s = "$dies" } })`, "0"},
+		{"an XSUB that made nothing", `growth(sub { eval { PerlAPI::die_in_operation($dies, 0) } })`, "0"},
+		{"an XSUB that made mortal values", `growth(sub { eval { PerlAPI::die_in_operation($dies, 1) } })`, "0"},
+		{"an XSUB that used a mortal copy as a hash key", `growth(sub { eval { PerlAPI::die_in_operation($dies, 2) } })`, "0"},
+		{"the die is the value's own", `eval { PerlAPI::die_in_operation($dies, 2) }; $@`, "no\n"},
+	})
+}
+
 // A native module registered with an instance defines nothing in its
 // package until it is loaded, like an extension linked into the
 // interpreter; loading it installs its boot function then.

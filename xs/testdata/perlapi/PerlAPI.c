@@ -314,6 +314,41 @@ XS(XS_PerlAPI_lower_type) {
     croak("the XSUB went on after an API function died");
 }
 
+/* live_values(): how many SVs the interpreter has. */
+XS(XS_PerlAPI_live_values) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PL_sv_count));
+    XSRETURN(1);
+}
+
+/* die_in_operation(value, how): an operation on the value that dies when
+ * the value's stringification does, after the XSUB has made values of its
+ * own the way an XSUB does before it works: none (how 0), mortal ones (1),
+ * and a mortal copy of the value that is then used as a hash key, which is
+ * what List::MoreUtils' uniq does (2). */
+XS(XS_PerlAPI_die_in_operation) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "value, how");
+    {
+        const IV how = SvIV(ST(1));
+        if (how == 0) {
+            (void)SvPV_nolen(ST(0));
+        } else {
+            HV *hv = newHV();
+            SV *tmp = sv_newmortal();
+            sv_2mortal(newRV_noinc((SV *)hv));
+            if (how == 1) {
+                (void)SvPV_nolen(ST(0));
+            } else {
+                SvSetSV_nosteal(tmp, ST(0));
+                (void)hv_exists_ent(hv, tmp, 0);
+            }
+        }
+        croak("the XSUB went on after an operation died");
+    }
+}
+
 /* grok_number: the classification bits and, for an integer, the value. */
 XS(XS_PerlAPI_number_kind) {
     dXSARGS;
@@ -3517,6 +3552,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::localize", XS_PerlAPI_localize);
     newXS_deffile("PerlAPI::length_after_upgrade", XS_PerlAPI_length_after_upgrade);
     newXS_deffile("PerlAPI::lower_type", XS_PerlAPI_lower_type);
+    newXS_deffile("PerlAPI::live_values", XS_PerlAPI_live_values);
+    newXS_deffile("PerlAPI::die_in_operation", XS_PerlAPI_die_in_operation);
     newXS_deffile("PerlAPI::throw", XS_PerlAPI_throw);
     newXS_deffile("PerlAPI::bare_return", XS_PerlAPI_bare_return);
     newXS_deffile("PerlAPI::direct_then_croak", XS_PerlAPI_direct_then_croak);
