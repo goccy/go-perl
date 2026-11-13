@@ -294,7 +294,7 @@ func TestPollBitsAreTheSystems(t *testing.T) {
 	// Through a pipe: numbers written out, as a program that knows its
 	// system writes them, and IO::Poll's own.
 	out, status := hostPerl(t, "-e", `
-use IO::Poll qw(POLLIN POLLOUT POLLHUP POLLERR POLLNVAL);
+use IO::Poll qw(POLLIN POLLOUT POLLPRI POLLHUP POLLERR POLLNVAL POLLRDNORM POLLWRNORM);
 pipe(my $r, my $w) or die "pipe: $!";
 my @p = (fileno($w), 4, fileno($r), 1);
 my $n = IO::Poll::_poll(0, @p);
@@ -313,12 +313,23 @@ print "writer closed: $n ready; at its end ", (($p[1] & 0x11) ? "yes" : "no"), "
 @p = (987, 1);
 $n = IO::Poll::_poll(0, @p);
 print "not a descriptor: events $p[1]\n";
+# The events are the bits that were asked for: a loop that asks for
+# POLLRDNORM and POLLWRNORM gets those, not POLLIN and POLLOUT.
+pipe($r, $w) or die "pipe: $!"; syswrite($w, "x");
+@p = (fileno($r), POLLRDNORM, fileno($w), POLLWRNORM);
+$n = IO::Poll::_poll(1000, @p);
+print "asked for the normal bands: $n ready; ", ($p[1] == POLLRDNORM ? "POLLRDNORM" : $p[1]), " ", ($p[3] == POLLWRNORM ? "POLLWRNORM" : $p[3]), "\n";
+@p = (fileno($r), POLLIN | POLLRDNORM | POLLPRI);
+$n = IO::Poll::_poll(1000, @p);
+print "asked for both names of readable: ", ($p[1] == (POLLIN | POLLRDNORM) ? "both" : $p[1]), "\n";
 `)
 	want := "by number: 1 ready; writer events 4, reader events 0\n" +
 		"after a write: 2 ready; writer events 4, reader events 1\n" +
 		"IO::Poll: 2 ready; reader POLLIN, writer POLLOUT\n" +
 		"writer closed: 1 ready; at its end yes; other bits 0\n" +
-		"not a descriptor: events 32\n"
+		"not a descriptor: events 32\n" +
+		"asked for the normal bands: 2 ready; POLLRDNORM POLLWRNORM\n" +
+		"asked for both names of readable: both\n"
 	if status != 0 || out != want {
 		t.Errorf("status %d\n got: %q\nwant: %q", status, out, want)
 	}
