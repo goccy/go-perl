@@ -276,8 +276,16 @@ my $ok = eval {
 };
 report("blocking connect under an alarm: ", ($ok ? "returned" : "died: $@" =~ s/\n//r), " in ", (time - $start < 5 ? "time" : "too long"));
 `)
+	// What a second connect on the socket answers once the first has
+	// ended is the system's: Linux reports the end of the attempt it was
+	// told is in progress with success, once; macOS says the socket is
+	// connected.
+	again := "EISCONN"
+	if runtime.GOOS == "linux" {
+		again = "done"
+	}
 	wantLines(t, got,
-		"non-blocking connect: started, writable=1, SO_ERROR=0, again=EISCONN, peer port right",
+		"non-blocking connect: started, writable=1, SO_ERROR=0, again="+again+", peer port right",
 		"refused connect: ECONNREFUSED",
 		"connect with a timeout: failed in time",
 		"blocking connect under an alarm: died: alarm in time",
