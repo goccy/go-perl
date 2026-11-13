@@ -158,6 +158,17 @@ func TestNativeLoopIsInterruptedByASignalHandler(t *testing.T) {
 	})
 }
 
+// The key of a hash is any bytes: hv_store, hv_fetch, hv_delete and
+// hv_exists take it with its length, bytes that are 0 included.
+func TestNativeHashKeysAreBytes(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"integers as keys", `PerlAPI::by_number(1000)`, "1000:1000:500:500"},
+		{"one key", `PerlAPI::by_number(1)`, "1:1:1:1"},
+	})
+}
+
 // MULTICALL calls a block many times with $_ as the caller sets it, and
 // the caller reads what the block returned from the top of the stack.
 func TestNativeMulticall(t *testing.T) {

@@ -90,7 +90,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 17u
+#define GOPERL_XS_ABI 18u
 
 /* Signal actions of the process.
  *
@@ -2888,11 +2888,16 @@ static AV *goperl_av_make(goperl_frame_t *f, SSize_t n, SV **ary) {
                                         (uint64_t)(n * 4)));
 }
 
+/* A hash and the length of the key that goes with it (the key is any
+ * bytes, so its length crosses with it). */
+#define GOPERL_HV_KEYED(hv, klen) \
+    (((uint64_t)(uint32_t)(klen) << 32) | (uint32_t)GOPERL_TOK(hv))
 static SV **goperl_hv_fetch(goperl_frame_t *f, HV *hv, const char *key,
                             I32 klen, I32 lval) {
     int utf8 = klen < 0;
     if (utf8) klen = -klen;
-    uint64_t tok = goperl_do_op(f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_TOK(hv),
+    uint64_t tok = goperl_do_op(f, GOPERL_OP_HV_FETCH_KLEN,
+                                GOPERL_HV_KEYED(hv, klen),
                                 ((uint64_t)(utf8 ? 1 : 0) << 32) |
                                     (uint32_t)(lval ? 1 : 0),
                                 key, (uint64_t)(uint32_t)klen);
@@ -2928,7 +2933,8 @@ static SV **goperl_hv_store(goperl_frame_t *f, HV *hv, const char *key,
     /* Negative klen = UTF-8 key (real hv_store convention). */
     int utf8 = klen < 0;
     if (utf8) klen = -klen;
-    uint64_t tok = goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(hv),
+    uint64_t tok = goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN,
+                                GOPERL_HV_KEYED(hv, klen),
                                 ((uint64_t)(utf8 ? 1 : 0) << 32) |
                                     (uint32_t)GOPERL_TOK(sv),
                                 key, (uint64_t)(uint32_t)klen);
@@ -3100,13 +3106,15 @@ static HV **goperl_modglobal_ref(goperl_frame_t *f) {
         iv = goperl_do_op(
             f, GOPERL_OP_NEW_IV,
             (uint64_t)(uintptr_t)goperl_nvtime_fn, 0, 0, 0);
-        goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(*ref),
+        goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN,
+                     GOPERL_HV_KEYED(*ref, sizeof("Time::NVtime") - 1),
                      (uint32_t)iv, "Time::NVtime",
                      sizeof("Time::NVtime") - 1);
         iv = goperl_do_op(
             f, GOPERL_OP_NEW_IV,
             (uint64_t)(uintptr_t)goperl_u2time_fn, 0, 0, 0);
-        goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(*ref),
+        goperl_do_op(f, GOPERL_OP_HV_STORE_KLEN,
+                     GOPERL_HV_KEYED(*ref, sizeof("Time::U2time") - 1),
                      (uint32_t)iv, "Time::U2time",
                      sizeof("Time::U2time") - 1);
     }
@@ -5937,12 +5945,12 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
     }
     if (action & HV_FETCH_ISSTORE)
         return (void *)GOPERL_SV(goperl_do_op(
-            f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(hv),
+            f, GOPERL_OP_HV_STORE_KLEN, GOPERL_HV_KEYED(hv, klen),
             ((uint64_t)((kflags & HVhek_UTF8) ? 1 : 0) << 32) |
                 (uint32_t)GOPERL_TOK(val),
             key, (uint64_t)klen));
     return (void *)GOPERL_SV(goperl_do_op(
-        f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_TOK(hv),
+        f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_HV_KEYED(hv, klen),
         ((uint64_t)((kflags & HVhek_UTF8) ? 1 : 0) << 32) |
             (uint32_t)((action & HV_FETCH_LVALUE) ? 1 : 0),
         key, (uint64_t)klen));
@@ -6944,9 +6952,11 @@ typedef int opcode;
     ((U32)(uint32_t)goperl_op0(GOPERL_OP_GV_NAME, GOPERL_TOK(gv), 0))
 #define hv_clear(hv) ((void)goperl_op0(GOPERL_OP_HV_CLEAR, GOPERL_TOK(hv), 0))
 #define hv_delete(hv, key, klen, flags)                                    \
-    GOPERL_SV(goperl_ops(GOPERL_OP_HV_DELETE, GOPERL_TOK(hv),              \
-                         (uint64_t)(uint32_t)(flags), (key),               \
-                         (uint64_t)(klen)))
+    ({ const I32 goperl_hv_delete_klen_ = (I32)(klen);                     \
+       GOPERL_SV(goperl_ops(GOPERL_OP_HV_DELETE,                           \
+                            GOPERL_HV_KEYED(hv, goperl_hv_delete_klen_),   \
+                            (uint64_t)(uint32_t)(flags), (key),            \
+                            (uint64_t)goperl_hv_delete_klen_)); })
 #define Perl_debug_log PerlIO_stderr()
 #define do_sv_dump(level, fp, sv, nest, maxnest, dumpops, pvlim)           \
     goperl_perlio_printf((fp),                     \

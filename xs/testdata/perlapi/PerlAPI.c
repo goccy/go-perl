@@ -2472,6 +2472,32 @@ XS(XS_PerlAPI_spin) {
     }
 }
 
+/* by_number(n): keys a hash by the bytes of the integers 0 .. n-1 (bytes
+ * that are 0 among them), then looks every one up, deletes the odd ones
+ * and counts what is left: "stored:found:exist after:keys left". */
+XS(XS_PerlAPI_by_number) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        int n = (int)SvIV(ST(0));
+        HV *hv = (HV *)sv_2mortal((SV *)newHV());
+        int stored = 0, found = 0, exist = 0;
+        int i;
+        for (i = 0; i < n; i++)
+            if (hv_store(hv, (char *)&i, sizeof(i), newSViv(i), 0)) stored++;
+        for (i = 0; i < n; i++) {
+            SV **svp = hv_fetch(hv, (char *)&i, sizeof(i), 0);
+            if (svp && SvIV(*svp) == i) found++;
+        }
+        for (i = 1; i < n; i += 2) hv_delete(hv, (char *)&i, sizeof(i), G_DISCARD);
+        for (i = 0; i < n; i++)
+            if (hv_exists(hv, (char *)&i, sizeof(i))) exist++;
+        ST(0) = sv_2mortal(newSVpvf("%d:%d:%d:%d", stored, found, exist,
+                                    (int)HvUSEDKEYS(hv)));
+        XSRETURN(1);
+    }
+}
+
 /* first_index(code, values...): the index of the first value for which
  * the code is true with the value in $_, by MULTICALL, as the list
  * utilities do it. */
@@ -2900,6 +2926,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::take_buffer", XS_PerlAPI_take_buffer);
     newXS_deffile("PerlAPI::const_ops", XS_PerlAPI_const_ops);
     newXS_deffile("PerlAPI::spin", XS_PerlAPI_spin);
+    newXS_deffile("PerlAPI::by_number", XS_PerlAPI_by_number);
     newXS_deffile("PerlAPI::first_index", XS_PerlAPI_first_index);
     newXS_deffile("PerlAPI::category_warning", XS_PerlAPI_category_warning);
     newXS_deffile("PerlAPI::evaluated_twice", XS_PerlAPI_evaluated_twice);
