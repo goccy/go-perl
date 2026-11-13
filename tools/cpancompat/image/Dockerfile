@@ -5,7 +5,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl patch pkg-config unzip bzip2 xz-utils \
+      build-essential ca-certificates curl git patch pkg-config unzip bzip2 xz-utils \
       zlib1g-dev libssl-dev libexpat1-dev libxml2-dev libyaml-dev libsqlite3-dev \
       libdb-dev libgdbm-dev libgmp-dev libmpfr-dev libpng-dev libjpeg-dev \
  && rm -rf /var/lib/apt/lists/*

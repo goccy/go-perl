@@ -24,6 +24,9 @@ ln -s $G/proj/local/xs/.sdk $G/fakearchlib/CORE
 # directory is what %Config has to name, because it is the one in @INC.
 stdlib=$($G/bin/perl -e 'require strict; my $p = $INC{"strict.pm"}; $p =~ s{/strict\.pm\z}{}; print $p')
 test -f "$stdlib/strict.pm"
+# The SDK has a config.h, so the Makefile ExtUtils::MakeMaker writes depends
+# on Config.pm in the architecture library.
+ln -s "$stdlib/Config.pm" $G/fakearchlib/Config.pm
 
 # The compiler %Config describes is this machine's, in every key that names
 # it: build scripts choose flags by the compiler's identity.
