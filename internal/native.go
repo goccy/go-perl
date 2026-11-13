@@ -7,6 +7,7 @@ package internal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	wasm2go "github.com/goccy/perlwasm2go"
@@ -206,6 +207,9 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 // XSHelperOp performs one SV micro-operation inside the guest. It is the
 // primitive the native SDK vtable is built from; see perl.cc perl_xs_helper
 // for the opcode table.
+//
+// The operation may end in a non-local exit of the interpreter instead of a
+// result (ErrGuestJump): see guestJump.
 func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
@@ -216,6 +220,9 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_24)
 	if err != nil {
 		return 0, err
+	}
+	if p.parkGuestJump() {
+		return 0, ErrGuestJump
 	}
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
@@ -294,6 +301,71 @@ func (p *Perl) DispatcherSet() bool {
 	return p.dispatcherSet
 }
 
+// ErrGuestJump is the result of an operation that the interpreter left by
+// a non-local exit: it died (or exited) inside the operation, and the place
+// that catches that is further out than the host code that asked for the
+// operation.
+var ErrGuestJump = errors.New("the interpreter is leaving the operation by a non-local exit")
+
+// guestJump is a non-local exit of the interpreter (the longjmp of a die
+// or an exit) on its way out through host code.
+//
+// The interpreter calls host code (a native XSUB, a keyword plugin, a
+// magic hook), and that code asks the interpreter for operations, each a
+// call into the guest of its own. When the interpreter dies inside such an
+// operation and nothing inside the operation catches it, the jump has to
+// get to a catch point of an activation of the guest that is below the
+// host code on the stack. A jump in the guest is an exception the module
+// keeps as pending while every function on the way returns; the operation
+// therefore returns to the host with the exception still pending, and the
+// guest would go on unwinding only when the host code has returned as
+// well.
+//
+// The host code must not go on as if the operation had answered: on perl
+// the jump would have passed through its frames. So the operation reports
+// ErrGuestJump, the native code is unwound to its entry, and the jump goes
+// on when the callback that ran it returns to the guest. Until then the
+// exception is kept here, off the module: while it is pending there, no
+// call into the guest does anything, and the native code that is being
+// unwound still makes some (it leaves its scopes, frees what it holds).
+//
+// depth is the callback activation the jump is to resume from: the one
+// that was running when it was parked. It cannot be derived: a callback
+// that the unwinding itself causes (a destructor) is deeper and ends
+// first.
+type guestJump struct {
+	parked bool
+	depth  int
+	tag    uint32
+	vals   [1]uint64
+}
+
+// parkGuestJump takes a pending exception of the guest off the module and
+// keeps it for resumeGuestJump; it reports whether there was one. Outside
+// of a callback there is nothing to resume it for, and it is left alone.
+func (p *Perl) parkGuestJump() bool {
+	g := p.m.g
+	if g.ExcPending == 0 || p.callbackDepth == 0 {
+		return false
+	}
+	p.jump = guestJump{parked: true, depth: p.callbackDepth, tag: g.ExcTag, vals: g.ExcVals}
+	g.ExcPending = 0
+	return true
+}
+
+// resumeGuestJump puts a parked exception back on the module when the
+// callback activation it was parked in returns to the guest, which then
+// goes on unwinding.
+func (p *Perl) resumeGuestJump() {
+	if !p.jump.parked || p.jump.depth != p.callbackDepth {
+		return
+	}
+	g := p.m.g
+	g.ExcTag, g.ExcVals = p.jump.tag, p.jump.vals
+	g.ExcPending = 1
+	p.jump = guestJump{}
+}
+
 // dispatcher is the per-instance CallbackHandler behind every guest->host
 // call. Reserved (negative) method ids route to the native-XS hook surface;
 // everything else is the Perl->Go function bridge, which the public package
@@ -301,6 +373,15 @@ func (p *Perl) DispatcherSet() bool {
 type dispatcher struct{ p *Perl }
 
 func (d dispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
+	d.p.callbackDepth++
+	defer func() {
+		d.p.resumeGuestJump()
+		d.p.callbackDepth--
+	}()
+	return d.handle(methodID, req)
+}
+
+func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 	if methodID == nativeXSMethodID {
 		d.p.hookMu.RLock()
 		native := d.p.nativeXS

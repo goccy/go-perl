@@ -124,6 +124,13 @@ type Perl struct {
 	// memory is no such mapping.
 	image *memoryImage
 
+	// callbackDepth counts the callbacks of the guest that are running (one
+	// inside the other), and jump is a non-local exit of the guest that
+	// one of them has to let through when it returns: see guestJump. Both
+	// belong to the goroutine that runs the interpreter.
+	callbackDepth int
+	jump          guestJump
+
 	// UserHandler receives every callback whose method id is not one of the
 	// reserved hook ids: the Perl->Go function bridge. The public package
 	// sets it once at construction, before any dispatcher registration.

@@ -47,7 +47,7 @@ func buildDemo(t *testing.T) string {
 
 // newHostPerl builds an instance on the host filesystem (acceptance dists,
 // their vendored trees, and test files live on disk).
-func newHostPerl(t *testing.T) *perl.Perl {
+func newHostPerl(t testing.TB) *perl.Perl {
 	t.Helper()
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {

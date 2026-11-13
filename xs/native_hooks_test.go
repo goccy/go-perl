@@ -96,3 +96,50 @@ func TestNativeCallAtExit(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// A module runs the pp function of an operator for an op it made itself
+// (`BINOP myop; ... PL_op = (OP *)&myop; PL_ppaddr[myop.op_type](aTHX)`) and
+// gets the interpreter's semantics of the operator: the assigning forms
+// store into the left operand, an overloaded operator is the class's, and a
+// logical operator leaves the value it chose on the stack.
+func TestNativePPFunctionForAnOpOfTheModulesOwn(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"+=", `my $t = 40; PerlAPI::pp_on_own_op($t, 2, 0); $t`, "42"},
+		{".=", `my $t = "ab"; PerlAPI::pp_on_own_op($t, "cd", 1); $t`, "abcd"},
+		{"||= of a false value", `my $t = 0; PerlAPI::pp_on_own_op($t, "default", 2); $t`, "default"},
+		{"||= of a true value", `my $t = "set"; PerlAPI::pp_on_own_op($t, "default", 2); $t`, "set"},
+		{"an overloaded +", `{ package Num; use overload "+" => sub { Num->new($_[0]{v} + (ref $_[1] ? $_[1]{v} : $_[1])) }, q("") => sub { "Num(" . $_[0]{v} . ")" }; sub new { bless { v => $_[1] }, $_[0] } } my $t = Num->new(40); PerlAPI::pp_on_own_op($t, 2, 0); "$t"`, "Num(42)"},
+		{"many times over", `my $t = 0; PerlAPI::pp_on_own_op($t, $_, 0) for 1 .. 100; $t`, "5050"},
+	})
+}
+
+// Names of the perl API that are other names of it: SAVEDESTRUCTOR (a
+// destructor that takes its argument alone), hv_common_key_len, the old
+// gv_HVadd and gv_AVadd, AvREAL and AvREIFY, IS_PADCONST and IS_PADGV,
+// sv_usepvn_flags.
+func TestNativeOtherNames(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"each does what the name it stands for does", `my %h; my $r = PerlAPI::other_names(\%h, "main::made_on_demand"); join "|", $r, scalar(keys %h), (defined *main::made_on_demand{HASH} ? "hash" : "no hash")`,
+			"destructor 3,fetched value,exists 10,deleted 1,glob 11,array 10,pad 11,string handed over|0|hash"},
+	})
+}
+
+// scan_version reads a version out of a text, the interpreter's or the
+// module's own; newGVgen makes globs under generated names; Drand01 is the
+// generator rand() uses, with its seed and the flag that says it is seeded;
+// sv_cmp_locale compares; PL_sv_count counts.
+func TestNativeVersionsGlobsAndRandomNumbers(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"scan_version", `PerlAPI::scan_a_version("1.2.3;the rest")`, "1.2.3|;the rest|5"},
+		{"scan_version of what is no version", `eval { PerlAPI::scan_a_version("1.2.3 and more") }; $@ =~ /^Invalid version format/ ? "refused" : "taken: $@"`, "refused"},
+		{"scan_version of a decimal version", `PerlAPI::scan_a_version("0.42;")`, "0.42|;|4"},
+		{"newGVgen", `PerlAPI::generated_globs("Some::Pkg")`, "111,Some::Pkg"},
+		{"Drand01 is rand's generator", `srand(7); my @want = (rand(), rand(), rand()); srand(7); my @got = PerlAPI::random_numbers(3); join ",", (grep { $got[$_] == $want[$_] } 0 .. 2), @got[3 .. 5]`, "0,1,2,1,-1,1"},
+	})
+}

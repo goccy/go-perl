@@ -14,7 +14,7 @@ import (
 // buildPerlAPI compiles testdata/perlapi/PerlAPI.c against the SDK headers.
 // Undefined symbols are refused at link time, so a function the headers
 // declare without providing fails here and not when the module is loaded.
-func buildPerlAPI(t *testing.T) string {
+func buildPerlAPI(t testing.TB) string {
 	t.Helper()
 	cc, err := exec.LookPath("cc")
 	if err != nil {

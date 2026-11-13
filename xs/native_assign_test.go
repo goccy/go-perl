@@ -37,6 +37,53 @@ func TestNativeFieldAssignments(t *testing.T) {
 	})
 }
 
+// AvFILLp, LvTYPE and LvTARG are lvalues of the perl API, and a store into a
+// slot of an array beyond its last element reaches the array: code that
+// knows how many elements it will make gives the array room, stores every
+// slot through AvARRAY and sets AvFILLp, and code that has taken the
+// elements out sets AvFILLp to -1.
+func TestNativeArrayAndLvalueFieldAssignments(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"an array filled by its slots", `my $a = PerlAPI::filled_by_slots(5); join ",", scalar(@$a), @$a`, "5,0,10,20,30,40"},
+		{"a large one", `my $a = PerlAPI::filled_by_slots(3000); my $sum = 0; $sum += $_ for @$a; join ",", scalar(@$a), $sum, $a->[2999]`, "3000,44985000,29990"},
+		{"and one emptied through AvFILLp", `my $a = PerlAPI::filled_by_slots(-7); push @$a, "next"; join ",", scalar(@$a), @$a`, "1,next"},
+		{"LvTYPE and LvTARG", `PerlAPI::lvalue_fields()`, "~,the target"},
+		{"PL_op in an XSUB is the call", `PerlAPI::calling_op()`, "entersub,its own pp"},
+	})
+}
+
+// The buffer slot of an SV holds any pointer a module puts there: a module
+// keeps a structure it allocated behind an SV that is no string
+// (`SvPVX(sv) = ptr`, `SvPV_set(sv, ptr)`) and reads the address back later,
+// from a call of its own, after the SV has been through a hash, and in a
+// copy of the interpreter.
+func TestNativeStructureBehindAnSV(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"SvPVX as an lvalue", `my $kept = PerlAPI::keep_pair(21, 0); PerlAPI::kept_pair($kept)`, "21,42,no string,0"},
+		{"SvPV_set", `my $kept = PerlAPI::keep_pair(4, 1); PerlAPI::kept_pair($kept)`, "4,8,no string,0"},
+		{"many, read back out of a hash", `my %h = map { ("k$_" => PerlAPI::keep_pair($_, 0)) } 1 .. 300; my $bad = 0; for (1 .. 300) { $bad++ unless PerlAPI::kept_pair($h{"k$_"}) eq join(",", $_, 2 * $_, "no string", 0) } $bad`, "0"},
+		{"emptied", `my $kept = PerlAPI::keep_pair(1, 0); PerlAPI::release_pair($kept)`, "empty"},
+		{"handed over with the room of the buffer", `my $kept = PerlAPI::keep_pair(3, 2); PerlAPI::kept_pair($kept)`, "3,6,no string,16"},
+		{"and the SVs go without the interpreter freeing the memory", `{ my @gone = map { PerlAPI::keep_pair($_, 2) } 1 .. 200; } my @fresh = map { "string $_" x 3 } 1 .. 200; my $kept = PerlAPI::keep_pair(9, 2); join ",", scalar(@fresh), PerlAPI::kept_pair($kept)`, "200,9,18,no string,16"},
+		{"an SV at the address of one that is gone", `{ my $gone = PerlAPI::keep_pair(5, 0); PerlAPI::release_pair($gone) } my $s = "text"; my $kept = PerlAPI::keep_pair(6, 0); "$s," . PerlAPI::kept_pair($kept)`, "text,6,12,no string,0"},
+	})
+	if r, err := p.Eval(context.Background(), `our $across = PerlAPI::keep_pair(7, 0); 1`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	clone, err := p.Clone()
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	defer clone.Close()
+	runEvalCases(t, clone, []evalCase{
+		{"in a copy of the interpreter", `PerlAPI::kept_pair($main::across)`, "7,14,no string,0"},
+	})
+}
+
 // A warning of a category is given the way the interpreter gives its own:
 // Perl_warner always, Perl_ck_warner where the category is enabled,
 // Perl_ck_warner_d unless it is disabled, and as an exception where the

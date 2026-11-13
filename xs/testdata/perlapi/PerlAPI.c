@@ -413,6 +413,371 @@ XS(XS_PerlAPI_direct_then_croak) {
     croak("after the direct call");
 }
 
+/* ---- names of the API that stand for other names --------------------------------- */
+
+static int plain_destructor_runs;
+static void plain_destructor(void *arg) { plain_destructor_runs += *(int *)arg; }
+
+/* other_names(hv, globname): a destructor without an interpreter argument,
+ * the hash calls by key and length, the slots of a glob made on demand,
+ * what an array and a pad value are, and a buffer handed to an SV. The
+ * answers are joined with commas. */
+XS(XS_PerlAPI_other_names) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "hv, globname");
+    {
+        HV *const hv = (HV *)SvRV(ST(0));
+        GV *const gv = gv_fetchpv(SvPV_nolen(ST(1)), GV_ADD, SVt_PVGV);
+        SV *const out = sv_2mortal(newSVpvs(""));
+        AV *const av = (AV *)sv_2mortal((SV *)newAV());
+        SV *const constant = sv_2mortal(newSViv(1));
+        SV *const taken = sv_newmortal();
+        SV **svp;
+        char *buf;
+        int by = 3;
+
+        plain_destructor_runs = 0;
+        ENTER;
+        SAVEDESTRUCTOR(plain_destructor, &by);
+        LEAVE;
+        sv_catpvf(out, "destructor %d", plain_destructor_runs);
+
+        (void)hv_common_key_len(hv, "stored", 6, HV_FETCH_ISSTORE | HV_FETCH_JUST_SV, newSVpvs("value"), 0);
+        svp = (SV **)hv_common_key_len(hv, "stored", 6, HV_FETCH_JUST_SV, NULL, 0);
+        sv_catpvf(out, ",fetched %s", svp ? SvPV_nolen((SV *)svp) : "nothing");
+        sv_catpvf(out, ",exists %d%d",
+                  hv_common_key_len(hv, "stored", 6, HV_FETCH_ISEXISTS, NULL, 0) ? 1 : 0,
+                  hv_common_key_len(hv, "absent", 6, HV_FETCH_ISEXISTS, NULL, 0) ? 1 : 0);
+        (void)hv_common_key_len(hv, "stored", 6, HV_DELETE | G_DISCARD, NULL, 0);
+        sv_catpvf(out, ",deleted %d", hv_exists(hv, "stored", 6) ? 0 : 1);
+
+        sv_catpvf(out, ",glob %d%d", gv_HVadd(gv) == gv && GvHV(gv) ? 1 : 0,
+                  gv_AVadd(gv) == gv && GvAV(gv) ? 1 : 0);
+
+        SvREADONLY_on(constant);
+        sv_catpvf(out, ",array %d%d,pad %d%d", AvREAL(av) ? 1 : 0, AvREIFY(av) ? 1 : 0,
+                  IS_PADCONST(constant) ? 1 : 0, IS_PADGV((SV *)gv) ? 1 : 0);
+
+        Newx(buf, 16, char);
+        strcpy(buf, "handed over");
+        sv_usepvn_flags(taken, buf, 11, SV_SMAGIC);
+        sv_catpvf(out, ",string %" SVf, SVfARG(taken));
+
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* ---- versions, globs without a name, random numbers ------------------------------ */
+
+/* scan_a_version(text): what scan_version makes of the text: the version as
+ * it was written, and what follows it in the text. */
+XS(XS_PerlAPI_scan_a_version) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "text");
+    {
+        const char *const text = SvPV_nolen(ST(0));
+        char own[64];
+        SV *const from_sv = sv_newmortal();
+        SV *const from_own = sv_newmortal();
+        const char *end = scan_version(text, from_sv, FALSE);
+        SV **original = SvROK(from_sv) ? hv_fetchs((HV *)SvRV(from_sv), "original", 0) : NULL;
+        SV *const out = sv_2mortal(newSVpvf("%s|%s", original ? SvPV_nolen(*original) : "no version", end));
+        /* and from a buffer of the module's own */
+        strncpy(own, text, sizeof own - 1);
+        own[sizeof own - 1] = 0;
+        end = scan_version(own, from_own, FALSE);
+        sv_catpvf(out, "|%d", (int)(end - own));
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* generated_globs(package): two globs made by newGVgen: whether each is a
+ * glob of the package under a generated name, and whether they differ. */
+XS(XS_PerlAPI_generated_globs) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "package");
+    {
+        GV *const a = newGVgen(SvPV_nolen(ST(0)));
+        GV *const b = newGVgen(SvPV_nolen(ST(0)));
+        ST(0) = sv_2mortal(newSVpvf("%d%d%d,%s", isGV(a) ? 1 : 0, strnEQ(GvNAME(a), "_GEN_", 5) ? 1 : 0,
+                                    a != b && strNE(GvNAME(a), GvNAME(b)) ? 1 : 0, HvNAME(GvSTASH(a))));
+        XSRETURN(1);
+    }
+}
+
+/* random_numbers(n): the next n numbers of the generator rand() uses, after
+ * seeding it the way pp_rand does when nobody has; then whether it counts
+ * as seeded, and a comparison of two strings in the locale. */
+XS(XS_PerlAPI_random_numbers) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        IV i;
+        SP -= items;
+        if (!PL_srand_called) {
+            (void)seedDrand01((Rand_seed_t)seed());
+            PL_srand_called = TRUE;
+        }
+        EXTEND(SP, n + 3);
+        for (i = 0; i < n; i++) mPUSHn(Drand01());
+        mPUSHi(PL_srand_called ? 1 : 0);
+        mPUSHi(sv_cmp_locale(sv_2mortal(newSVpvs("a")), sv_2mortal(newSVpvs("b"))));
+        mPUSHi(PL_sv_count > 0 ? 1 : 0);
+        PUTBACK;
+        return;
+    }
+}
+
+/* ---- a pp function run for an op of the module's own ---------------------------- */
+
+/* pp_on_own_op(target, value, how): does `target += value` (how 0),
+ * `target .= value` (1) or `target ||= value` (2) by running the pp function
+ * of the operator for an op it builds on its own stack, the way a module
+ * gets the interpreter's own semantics for an operator (overloading
+ * included) without having an op tree. */
+XS(XS_PerlAPI_pp_on_own_op) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "target, value, how");
+    {
+        static const int types[] = {OP_ADD, OP_CONCAT, OP_OR};
+        SV *const target = ST(0);
+        SV *const value = ST(1);
+        const int how = (int)SvIV(ST(2));
+        OP *oldop;
+        BINOP myop;
+        if (how < 0 || how > 2) croak("pp_on_own_op: unknown operator %d", how);
+        Zero(&myop, 1, BINOP);
+        myop.op_flags = OPf_STACKED;
+        myop.op_type = types[how];
+        ENTER;
+        SAVETMPS;
+        PUSHMARK(SP);
+        if (how == 2) {
+            XPUSHs(value);
+            XPUSHs(target);
+        } else {
+            XPUSHs(target);
+            XPUSHs(value);
+        }
+        PUTBACK;
+        oldop = PL_op;
+        PL_op = (OP *)&myop;
+        PL_ppaddr[PL_op->op_type](aTHX);
+        PL_op = oldop;
+        if (how == 2) {
+            SPAGAIN;
+            sv_setsv(target, TOPs);
+            SvSETMAGIC(target);
+        }
+        POPMARK;
+        FREETMPS;
+        LEAVE;
+        XSRETURN_EMPTY;
+    }
+}
+
+/* ---- the op that called an XSUB ---------------------------------------------------- */
+
+/* calling_op(): the name of PL_op as the XSUB finds it, and whether its pp
+ * function is the interpreter's for its type. */
+XS(XS_PerlAPI_calling_op) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("%s,%s", PL_op ? OP_NAME(PL_op) : "none",
+                                PL_op && PL_op->op_ppaddr == PL_ppaddr[PL_op->op_type] ? "its own pp" : "another pp"));
+    XSRETURN(1);
+}
+
+/* ---- an array filled by its slots, an lvalue scalar built by hand ---------------- */
+
+/* filled_by_slots(n): an array of n numbers made the way code makes one it
+ * knows the size of: room for n, every slot stored through AvARRAY, then
+ * AvFILLp. With n < 0, an array of -n numbers is made that way and then
+ * emptied by releasing the elements and setting AvFILLp to -1. */
+XS(XS_PerlAPI_filled_by_slots) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV want = SvIV(ST(0));
+        const SSize_t n = (SSize_t)(want < 0 ? -want : want);
+        AV *const av = newAV();
+        SSize_t i;
+        av_extend(av, n - 1);
+        for (i = 0; i < n; i++) AvARRAY(av)[i] = newSViv((IV)i * 10);
+        AvFILLp(av) = n - 1;
+        if (want < 0) {
+            SV **const body = AvARRAY(av);
+            for (i = 0; i < n; i++) {
+                SvREFCNT_dec(body[i]);
+                body[i] = NULL;
+            }
+            AvFILLp(av) = -1;
+        }
+        ST(0) = sv_2mortal(newRV_noinc((SV *)av));
+        XSRETURN(1);
+    }
+}
+
+/* lvalue_fields(): an lvalue scalar (PVLV) given its type and its target
+ * by assignment, as code that builds one for its own magic does; what the
+ * two fields hold afterwards. */
+XS(XS_PerlAPI_lvalue_fields) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        SV *const sv = sv_newmortal();
+        SV *const target = sv_2mortal(newSVpvs("target"));
+        sv_upgrade(sv, SVt_PVLV);
+        LvTYPE(sv) = '~';
+        LvTARG(sv) = SvREFCNT_inc(target);
+        ST(0) = sv_2mortal(newSVpvf("%c,%s", LvTYPE(sv), LvTARG(sv) == target ? "the target" : "something else"));
+        XSRETURN(1);
+    }
+}
+
+/* ---- what the accessors cost -------------------------------------------------- */
+
+/* accessor_loop(sv, n, how): evaluates one accessor of sv n times and
+ * returns a sum of what it read (BenchmarkNativeAccessors). */
+XS(XS_PerlAPI_accessor_loop) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "sv, n, how");
+    {
+        SV *const sv = ST(0);
+        const IV n = SvIV(ST(1));
+        const int how = (int)SvIV(ST(2));
+        UV sum = 0;
+        IV i;
+        switch (how) {
+        case 0:
+            for (i = 0; i < n; i++) sum += (unsigned char)SvPVX_const(sv)[0];
+            break;
+        case 1:
+            for (i = 0; i < n; i++) sum += (unsigned char)SvPVX(sv)[0];
+            break;
+        case 2:
+            for (i = 0; i < n; i++) sum += (UV)SvLEN(sv);
+            break;
+        case 3:
+            for (i = 0; i < n; i++) sum += (UV)SvCUR(sv);
+            break;
+        case 4:
+            for (i = 0; i < n; i++) sum += (UV)SvIVX(sv);
+            break;
+        case 5:
+            for (i = 0; i < n; i++) sum += (UV)SvIV(sv);
+            break;
+        default:
+            croak("accessor_loop: unknown accessor %d", how);
+        }
+        ST(0) = sv_2mortal(newSVuv(sum));
+        XSRETURN(1);
+    }
+}
+
+/* array_loop(av, rounds, how): looks at every element of the array, rounds
+ * times over, and returns how many slots were filled: with av_fetch (how
+ * 0), with AvARRAY(av)[i] written out for every element (how 1), and with
+ * the body taken once per round, `SV **body = AvARRAY(av)` (how 2). */
+XS(XS_PerlAPI_array_loop) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "av, rounds, how");
+    {
+        AV *const av = (AV *)SvRV(ST(0));
+        const IV rounds = SvIV(ST(1));
+        const int how = (int)SvIV(ST(2));
+        const SSize_t len = av_len(av) + 1;
+        UV filled = 0;
+        IV r;
+        SSize_t i;
+        for (r = 0; r < rounds; r++) {
+            if (how == 0) {
+                for (i = 0; i < len; i++) {
+                    SV **const svp = av_fetch(av, i, 0);
+                    if (svp && *svp) filled++;
+                }
+            } else if (how == 1) {
+                for (i = 0; i < len; i++)
+                    if (AvARRAY(av)[i]) filled++;
+            } else {
+                SV **const body = AvARRAY(av);
+                for (i = 0; i < len; i++)
+                    if (body[i]) filled++;
+            }
+        }
+        ST(0) = sv_2mortal(newSVuv(filled));
+        XSRETURN(1);
+    }
+}
+
+/* ---- a structure of the module's own behind an SV --------------------------- */
+
+struct kept_pair {
+    IV first;
+    IV second;
+};
+
+/* keep_pair(n, how): an SV whose buffer slot holds the address of a
+ * structure the module allocated, stored with SvPVX as an lvalue (how 0) or
+ * with SvPV_set (how 1): the SV is no string and owns no buffer. With how 2
+ * the SV is also given the size of the structure as the room of its
+ * buffer, which hands the memory over to it. */
+XS(XS_PerlAPI_keep_pair) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "n, how");
+    {
+        struct kept_pair *pair;
+        SV *const sv = newSV(0);
+        Newx(pair, 1, struct kept_pair);
+        pair->first = SvIV(ST(0));
+        pair->second = 2 * pair->first;
+        sv_upgrade(sv, SVt_PV);
+        if (SvIV(ST(1)) == 1) {
+            SvPV_set(sv, (char *)pair);
+        } else {
+            SvPVX(sv) = (char *)pair;
+            if (SvIV(ST(1)) == 2) SvLEN(sv) = sizeof(struct kept_pair);
+        }
+        ST(0) = sv_2mortal(newRV_noinc(sv));
+        XSRETURN(1);
+    }
+}
+
+/* kept_pair(ref): what the structure behind the SV holds, whether the SV
+ * counts as a string, and the room it says its buffer has. */
+XS(XS_PerlAPI_kept_pair) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        SV *const sv = SvRV(ST(0));
+        const struct kept_pair *const pair = (const struct kept_pair *)SvPVX(sv);
+        const struct kept_pair *const again = (const struct kept_pair *)SvPVX_const(sv);
+        if (!pair || pair != again)
+            ST(0) = sv_2mortal(newSVpvs("lost"));
+        else
+            ST(0) = sv_2mortal(newSVpvf("%" IVdf ",%" IVdf ",%s,%d", pair->first, pair->second,
+                                        SvPOK(sv) ? "string" : "no string", (int)SvLEN(sv)));
+        XSRETURN(1);
+    }
+}
+
+/* release_pair(ref): frees the structure and empties the slot, as a module
+ * does before the SV goes; says what the slot holds afterwards. */
+XS(XS_PerlAPI_release_pair) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        SV *const sv = SvRV(ST(0));
+        Safefree(SvPVX(sv));
+        SvPVX(sv) = NULL;
+        ST(0) = sv_2mortal(newSVpv(SvPVX(sv) ? "still set" : "empty", 0));
+        XSRETURN(1);
+    }
+}
+
 /* ---- integers and pointers at the native width ---------------------------- */
 
 /* A heap pointer kept in an SV by plain casts, as XS code written for a perl
@@ -566,7 +931,50 @@ XS(XS_PerlAPI_read_host_descriptor) {
     }
 }
 
+/* ---- a message that names the caller's line ---------------------------------- */
+
+/* croak_at_caller(msg): dies with msg as code of the sub that called this
+ * one would: PL_curcop is pointed at the statement that called that sub,
+ * and the interpreter appends its file and line. */
+XS(XS_PerlAPI_croak_at_caller) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "msg");
+    {
+        const PERL_CONTEXT *const cx = caller_cx(0, NULL);
+        if (cx) PL_curcop = cx->blk_oldcop;
+        croak_sv(ST(0));
+    }
+}
+
+/* ---- an exception caught and thrown again ------------------------------------ */
+
+static int native_went_on_count; /* defined with read_then_mark, below */
+
+/* try_then_rethrow(code): calls code inside XCPT_TRY, and throws what it
+ * caught again after counting that it did (native_went_on). */
+XS(XS_PerlAPI_try_then_rethrow) {
+    dXSARGS;
+    dXCPT;
+    if (items != 1) croak_xs_usage(cv, "code");
+    XCPT_TRY_START {
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(ST(0), G_DISCARD | G_NOARGS);
+    } XCPT_TRY_END
+    XCPT_CATCH {
+        native_went_on_count++;
+        XCPT_RETHROW;
+    }
+    XSRETURN_EMPTY;
+}
+
 /* ---- an interpreter death inside a direct accessor ------------------------- */
+
+/* How often native code went on after a call that can die (read_then_mark
+ * after reading, the counted_block keyword after parsing), counted in this
+ * module's own memory: what the native code did, whatever the interpreter
+ * made of the operations it asked for afterwards. */
+static int native_went_on_count;
 
 /* Reads the argument as an integer (or, for how == 1, as a string) and then
  * records that it went on: when reading dies, it must not. */
@@ -582,8 +990,21 @@ XS(XS_PerlAPI_read_then_mark) {
         } else {
             (void)SvIV(ST(0));
         }
+        native_went_on_count++;
         sv_setiv(mark, 1);
         XSRETURN_EMPTY;
+    }
+}
+
+/* native_went_on(): how often native code went on since the last call. */
+XS(XS_PerlAPI_native_went_on) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        const int n = native_went_on_count;
+        native_went_on_count = 0;
+        ST(0) = sv_2mortal(newSViv(n));
+        XSRETURN(1);
     }
 }
 
@@ -2807,9 +3228,18 @@ XS(XS_PerlAPI_look_without_magic) {
  *   hello_into_y;  declares $y and gives its pad slot the value "Hello" at
  *                  compile time, reached through PAD_SVl
  *
- * and one that takes a block:
+ * and two that take a block:
  *
- *   in_block { ... }  is the block, parsed with parse_block
+ *   in_block { ... }       is the block, parsed with parse_block
+ *   counted_block { ... }  is the same, and counts that the module went on
+ *                          after the block was parsed (native_went_on)
+ *
+ * and one that declares a variable twice, as the parameters of a signature
+ * are declared:
+ *
+ *   twice_z;  declares $z two times with PL_parser->in_my set to
+ *             KEY_sigvar, which is what the interpreter names the
+ *             declaration by when it warns that the second masks the first
  */
 static Perl_keyword_plugin_t perlapi_next_keyword_plugin;
 
@@ -2834,6 +3264,23 @@ static int perlapi_keyword_plugin(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
     if (kwlen == 8 && strnEQ(kw, "in_block", 8)) {
         lex_read_space(0);
         *op_ptr = parse_block(0);
+        return KEYWORD_PLUGIN_STMT;
+    }
+    if (kwlen == 13 && strnEQ(kw, "counted_block", 13)) {
+        lex_read_space(0);
+        *op_ptr = parse_block(0);
+        native_went_on_count++;
+        return KEYWORD_PLUGIN_STMT;
+    }
+    if (kwlen == 7 && strnEQ(kw, "twice_z", 7)) {
+        ENTER;
+        SAVEI16(PL_parser->in_my);
+        PL_parser->in_my = KEY_sigvar;
+        pad_add_name_pvn("$z", 2, 0, NULL, NULL);
+        pad_add_name_pvn("$z", 2, 0, NULL, NULL);
+        LEAVE;
+        intro_my();
+        *op_ptr = newOP(OP_NULL, 0);
         return KEYWORD_PLUGIN_STMT;
     }
     return (*perlapi_next_keyword_plugin)(aTHX_ kw, kwlen, op_ptr);
@@ -2918,6 +3365,19 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::number_kind", XS_PerlAPI_number_kind);
     newXS_deffile("PerlAPI::rethrow_errsv", XS_PerlAPI_rethrow_errsv);
     newXS_deffile("PerlAPI::pointer_roundtrip", XS_PerlAPI_pointer_roundtrip);
+    newXS_deffile("PerlAPI::other_names", XS_PerlAPI_other_names);
+    newXS_deffile("PerlAPI::scan_a_version", XS_PerlAPI_scan_a_version);
+    newXS_deffile("PerlAPI::generated_globs", XS_PerlAPI_generated_globs);
+    newXS_deffile("PerlAPI::random_numbers", XS_PerlAPI_random_numbers);
+    newXS_deffile("PerlAPI::pp_on_own_op", XS_PerlAPI_pp_on_own_op);
+    newXS_deffile("PerlAPI::calling_op", XS_PerlAPI_calling_op);
+    newXS_deffile("PerlAPI::filled_by_slots", XS_PerlAPI_filled_by_slots);
+    newXS_deffile("PerlAPI::lvalue_fields", XS_PerlAPI_lvalue_fields);
+    newXS_deffile("PerlAPI::accessor_loop", XS_PerlAPI_accessor_loop);
+    newXS_deffile("PerlAPI::array_loop", XS_PerlAPI_array_loop);
+    newXS_deffile("PerlAPI::keep_pair", XS_PerlAPI_keep_pair);
+    newXS_deffile("PerlAPI::kept_pair", XS_PerlAPI_kept_pair);
+    newXS_deffile("PerlAPI::release_pair", XS_PerlAPI_release_pair);
     newXS_deffile("PerlAPI::wide_values", XS_PerlAPI_wide_values);
     newXS_deffile("PerlAPI::wide_made", XS_PerlAPI_wide_made);
     newXS_deffile("PerlAPI::read_host_descriptor", XS_PerlAPI_read_host_descriptor);
@@ -2926,6 +3386,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::sealed_new", XS_PerlAPI_sealed_new);
     newXS_deffile("PerlAPI::sealed_add", XS_PerlAPI_sealed_add);
     newXS_deffile("PerlAPI::read_then_mark", XS_PerlAPI_read_then_mark);
+    newXS_deffile("PerlAPI::croak_at_caller", XS_PerlAPI_croak_at_caller);
+    newXS_deffile("PerlAPI::try_then_rethrow", XS_PerlAPI_try_then_rethrow);
+    newXS_deffile("PerlAPI::native_went_on", XS_PerlAPI_native_went_on);
     newXS_deffile("PerlAPI::increment_all", XS_PerlAPI_increment_all);
     newXS_deffile("PerlAPI::late_store", XS_PerlAPI_late_store);
     newXS_deffile("PerlAPI::nv_slot_bits", XS_PerlAPI_nv_slot_bits);

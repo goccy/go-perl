@@ -33,6 +33,7 @@ package xs
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,10 +51,15 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 19
+const abiVersion = 20
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
+
+// failedJump is the frame's failed value when the interpreter left an
+// operation by a non-local exit (GOPERL_FAILED_JUMP in the SDK): the native
+// call ends, and the interpreter goes on unwinding when it has returned.
+const failedJump = 3
 
 // failedThrown is the frame's failed value after croak_sv
 // (GOPERL_FAILED_THROWN in the SDK), and respThrow the dispatch response
@@ -206,6 +212,8 @@ type cAPI struct {
 	hostFd uintptr
 	// v14: `CvXSUB(cv) = fn`.
 	cvSetXsub uintptr
+	// v20: a pointer of the module's own in the buffer slot of an SV.
+	pvHost uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -270,6 +278,13 @@ type state struct {
 	// per-CV storage: CvXSUBANY slots (8 bytes of C heap each, written by
 	// the module through the vtable) and the native fn behind each CV.
 	cvAny map[uint64]uintptr
+	// pvHost holds, per SV, the pointer a module put in the SV's
+	// string-buffer slot when it is not one into the interpreter's memory
+	// and the room the module says the buffer has (two words of C heap
+	// each; the interpreter's slot holds GOPERL_PV_HOST). An entry outlives
+	// its SV and counts again only for an SV at the same address that is
+	// given such a pointer, which overwrites it.
+	pvHost map[uint64]uintptr
 
 	// sharedRaw is this instance's C shared-state block (goperl_shared_t):
 	// scope bookkeeping, save stacks, and mirrors, aliased by every loaded
@@ -339,6 +354,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		fns:           append([]uintptr(nil), s.fns...),
 		fnNames:       append([][]byte(nil), s.fnNames...),
 		cvAny:         make(map[uint64]uintptr, len(s.cvAny)),
+		pvHost:        make(map[uint64]uintptr, len(s.pvHost)),
 		perlioFuncs:   make(map[uint32]uintptr, len(s.perlioFuncs)),
 		perlioNextID:  s.perlioNextID,
 		cvFn:          make(map[uint64]uintptr, len(s.cvFn)),
@@ -361,6 +377,11 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		own := cMalloc(8)
 		cMemcpy(own, slot, 8)
 		cs.cvAny[cv] = own
+	}
+	for sv, slot := range s.pvHost {
+		own := cMalloc(pvHostSize)
+		cMemcpy(own, slot, pvHostSize)
+		cs.pvHost[sv] = own
 	}
 	for sv, rec := range s.magicBySV {
 		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head, from, to), anchorObj: rec.anchorObj, anchorID: rec.anchorID}
@@ -1473,6 +1494,27 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 	}
 }
 
+// pvHostSize is the size of what is kept for an SV whose buffer slot holds
+// a pointer of the module's own: the pointer and the buffer's room.
+const pvHostSize = 16
+
+// pvHostSlot returns the storage of what is kept for sv's buffer slot,
+// making it when asked to; 0 when sv has none.
+func (s *state) pvHostSlot(sv uint64, create bool) uintptr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot, ok := s.pvHost[sv]
+	if !ok && create {
+		slot = cMalloc(pvHostSize)
+		pokeBytes(slot, make([]byte, pvHostSize))
+		if s.pvHost == nil {
+			s.pvHost = map[uint64]uintptr{}
+		}
+		s.pvHost[sv] = slot
+	}
+	return slot
+}
+
 func (s *state) cvAnySlot(cv uint64) uintptr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1574,6 +1616,16 @@ func buildVtable() {
 		if xsTrace {
 			fmt.Fprintf(os.Stderr, "[xsop] op=%d a=%#x b=%#x slen=%d -> %#x\n", op, a, b, sLen, v)
 		}
+		if errors.Is(err, internal.ErrGuestJump) {
+			// The interpreter died inside the operation and is unwinding
+			// to a catch point of its own: the native call ends here (the
+			// SDK jumps to its entry), and says nothing of its own.
+			if f.failed == 0 {
+				f.failed = failedJump
+				f.err[0] = 0
+			}
+			return 0
+		}
 		if err != nil {
 			// Loud on purpose: native code cannot be unwound from here, so
 			// it continues with a zero result; the operator must see why.
@@ -1593,6 +1645,13 @@ func buildVtable() {
 			return ^uintptr(0) // -1: the handle has no descriptor of the host
 		}
 		return host
+	})
+	vtable.pvHost = purego.NewCallback(func(fr, sv uintptr, create int32) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		return stateFor(f.p).pvHostSlot(uint64(sv), create != 0)
 	})
 	vtable.cvSetXsub = purego.NewCallback(func(fr, cv, fn uintptr) uintptr {
 		f := lookupFrame(fr)

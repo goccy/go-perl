@@ -16,7 +16,7 @@ import (
 )
 
 // perlAPIInstance loads the PerlAPI fixture into p and makes it usable.
-func perlAPIInstance(t *testing.T, p *perl.Perl) {
+func perlAPIInstance(t testing.TB, p *perl.Perl) {
 	t.Helper()
 	so := buildPerlAPI(t)
 	loadXSModule(t, p, "PerlAPI", so)
@@ -230,8 +230,36 @@ func TestNativeByteStrings(t *testing.T) {
 	})
 }
 
+// PL_curcop is an lvalue of the perl API whose store reaches the
+// interpreter: a module that points it at the statement its caller was
+// called from dies with a message that names that line.
+func TestNativeCurrentStatementAssignment(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a message at the caller's line", `eval qq{#line 100 "probe"\nsub thrower { PerlAPI::croak_at_caller("from the callee") }\n\n\neval { thrower() };\n\$\@}`, "from the callee at probe line 103.\n"},
+		{"the statements after it are counted from where they are", `eval qq{#line 200 "probe"\nsub thrower2 { PerlAPI::croak_at_caller("again") }\neval { thrower2() };\nmy \$first = \$\@;\neval { die "plain" };\n\$first . \$\@}`, "again at probe line 201.\nplain at probe line 203.\n"},
+	})
+}
+
+// XCPT_RETHROW throws what XCPT_TRY caught: the same exception object, and a
+// message of any length whole.
+func TestNativeRethrowOfACaughtException(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"an object", `PerlAPI::native_went_on(); my $thrown = { code => 7 }; eval { PerlAPI::try_then_rethrow(sub { die $thrown }) }; join ",", ($@ == $thrown ? "the same object" : "another: $@"), $@->{code}, PerlAPI::native_went_on()`, "the same object,7,1"},
+		{"a long message", `my $text = join " ", map { "part $_" } 1 .. 300; eval { PerlAPI::try_then_rethrow(sub { die "$text\n" }) }; join ",", ($@ eq "$text\n" ? "whole" : "cut to " . length $@), PerlAPI::native_went_on()`, "whole,1"},
+		{"a croak of native code", `eval { PerlAPI::try_then_rethrow(sub { PerlAPI::croak_at_caller("from below\n") }) }; join ",", $@ =~ /^from below$/ ? "the message" : "other: $@", PerlAPI::native_went_on()`, "the message,1"},
+		{"nothing thrown", `PerlAPI::try_then_rethrow(sub { 1 }); PerlAPI::native_went_on()`, "0"},
+	})
+}
+
 // When the interpreter dies inside SvIV or SvPV (an overloaded conversion
-// that throws), the XSUB ends there, as it does for every other API call.
+// that throws, a tied variable whose FETCH dies), the XSUB ends there, as it
+// does for every other API call: the native code does not go on, whether the
+// die is caught by an eval around the call or by one further out, and the
+// value that was thrown is the one that is caught.
 func TestNativeDirectAccessorUnwinds(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
@@ -244,6 +272,12 @@ package main; our $thrower = bless [], "Thrower"; 1;`
 		{"SvIV", `eval { PerlAPI::read_then_mark($thrower, 0) }; "$@" . $PerlAPI::went_on`, "no number\n0"},
 		{"SvPV", `eval { PerlAPI::read_then_mark($thrower, 1) }; "$@" . $PerlAPI::went_on`, "no string\n0"},
 		{"a value that converts", `PerlAPI::read_then_mark(5, 0); $PerlAPI::went_on`, "1"},
+		{"the native code after SvIV", `PerlAPI::native_went_on(); eval { PerlAPI::read_then_mark($thrower, 0) }; PerlAPI::native_went_on()`, "0"},
+		{"the native code after SvPV", `eval { PerlAPI::read_then_mark($thrower, 1) }; PerlAPI::native_went_on()`, "0"},
+		{"the native code after a value that converts", `PerlAPI::read_then_mark(5, 0); PerlAPI::native_went_on()`, "1"},
+		{"a tied variable whose FETCH dies", `{ package DiesOnFetch; sub TIESCALAR { bless [], shift } sub FETCH { die { code => 42 } } } tie my $t, "DiesOnFetch"; my $r = eval { PerlAPI::read_then_mark($t, 0); 1 }; join ",", defined $r ? "returned" : "died", ref $@, $@->{code}, PerlAPI::native_went_on()`, "died,HASH,42,0"},
+		{"caught further out, through a sub", `sub through { PerlAPI::read_then_mark($thrower, 0); "returned" } my $r = eval { through() }; join ",", $r // "died", $@ =~ /^no number/ ? "the die" : "other: $@", PerlAPI::native_went_on()`, "died,the die,0"},
+		{"the interpreter goes on afterwards", `my $n = 0; for (1 .. 50) { eval { PerlAPI::read_then_mark($thrower, $_ % 2) }; $n++ if $@ } PerlAPI::read_then_mark(1, 0); "$n," . PerlAPI::native_went_on()`, "50,1"},
 	})
 }
 

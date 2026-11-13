@@ -126,5 +126,8 @@ func TestNativeKeywordDeclaresALexical(t *testing.T) {
 		{"a block parsed by the module", `eval q{ my $r = 0; in_block { $r = 5 } $r } // "died: $@"`, "5"},
 		{"a block that does not parse is a syntax error", `eval q{ my $r = 0; in_block { $r = } $r } // ($@ =~ /syntax error/ ? "syntax error" : "died: $@")`, "syntax error"},
 		{"and the next compilation is not affected", `eval q{ my $r = 0; in_block { $r = 6 } $r } // "died: $@"`, "6"},
+		{"the module does not go on after a block that does not parse", `PerlAPI::native_went_on(); my $r = eval q{ counted_block { 1 + } 1 }; join ",", defined $r ? "compiled" : "syntax error", PerlAPI::native_went_on()`, "syntax error,0"},
+		{"and goes on after one that does", `my $r = eval q{ my $v = 0; counted_block { $v = 7 } $v }; join ",", $r // "died: $@", PerlAPI::native_went_on()`, "7,1"},
+		{"a field of the parser the module set is the interpreter's at once", `my @w; local $SIG{__WARN__} = sub { push @w, $_[0] }; eval q{ use warnings; twice_z; 1 } // die $@; join "|", map { /^("\w+" variable \$z masks earlier declaration)/ ? $1 : $_ } @w`, `"my" variable $z masks earlier declaration`},
 	})
 }

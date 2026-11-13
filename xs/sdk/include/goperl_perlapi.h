@@ -104,6 +104,100 @@ enum {
     GOPERL_SVCALL_UNI_DISPLAY = 53
 };
 
+/* ---- globs without a name, random numbers, comparison in the locale ---------- */
+
+/* newGVgen: a new glob under a name nobody has, in the package (CALL 18). */
+#define newGVgen_flags(pack, flags)                                         \
+    ({ const char *const goperl_newGVgen_pack_ = (pack);                    \
+       (GV *)GOPERL_SV(goperl_ops(GOPERL_OP_CALL, (uint64_t)18 << 32,       \
+                                  (uint64_t)(uint32_t)(flags),              \
+                                  goperl_newGVgen_pack_,                    \
+                                  strlen(goperl_newGVgen_pack_))); })
+#define newGVgen(pack) newGVgen_flags((pack), 0)
+/* The random numbers of the interpreter (CALL 19): Drand01 is the next one
+ * of the generator rand() uses, seedDrand01 seeds it, seed() is what srand
+ * without an argument seeds it with, and PL_srand_called says whether it
+ * has been seeded. */
+typedef U32 Rand_seed_t;
+static NV goperl_drand01(goperl_frame_t *f) __attribute__((unused));
+static NV goperl_drand01(goperl_frame_t *f) {
+    const uint64_t bits = goperl_do_op(f, GOPERL_OP_CALL, (uint64_t)19 << 32, 0, 0, 0);
+    double d;
+    memcpy(&d, &bits, sizeof d);
+    return (NV)d;
+}
+#define Drand01() goperl_drand01(_gof)
+#define seedDrand01(x) \
+    ((void)goperl_op0(GOPERL_OP_CALL, (uint64_t)19 << 32, ((uint64_t)(Rand_seed_t)(x) << 2) | 1))
+#define seed() ((UV)goperl_op0(GOPERL_OP_CALL, (uint64_t)19 << 32, 2))
+#define Perl_seed(ctx) seed()
+#define GOPERL_PL_SRAND_CALLED 78
+#define GOPERL_PL_SV_COUNT 79
+#define GOPERL_PL_SIG_PENDING 80
+#define PL_srand_called (*goperl_plint_ref(_gof, GOPERL_PL_SRAND_CALLED))
+/* How many SVs the interpreter has, and whether signals wait to be
+ * delivered: read only. */
+#define PL_sv_count ((IV)GOPERL_PLVAR(GOPERL_PL_SV_COUNT))
+#define PL_sig_pending ((int)GOPERL_PLVAR(GOPERL_PL_SIG_PENDING))
+/* sv_cmp by the rules of the locale in effect (SV_CALL 60). */
+#define sv_cmp_locale_flags(a, b, flags) \
+    ((I32)(int64_t)GOPERL_SVCALL(60, a, GOPERL_SV_PAIR(flags, b)))
+#define sv_cmp_locale(a, b) sv_cmp_locale_flags((a), (b), SV_GMAGIC)
+/* as a function, for code that hands it to sortsv */
+static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) __attribute__((unused));
+#define Perl_sv_cmp_locale goperl_sv_cmp_locale_fn
+
+/* ---- names that are other names -------------------------------------------- */
+
+/* The errors of the compilation in progress, by the name it had before
+ * the parser was a structure. */
+#define PL_error_count (PL_parser->error_count)
+
+/* hv_common_key_len is hv_common for a key given as a string, whose length
+ * is negative when the key is UTF-8 (hv_fetch's convention). */
+#define hv_common_key_len(hv, key, klen_i32, action, val, hash)            \
+    ({ const I32 goperl_hckl_len_ = (I32)(klen_i32);                        \
+       hv_common((hv), NULL, (key),                                         \
+                 (STRLEN)(goperl_hckl_len_ < 0 ? -goperl_hckl_len_          \
+                                               : goperl_hckl_len_),         \
+                 (goperl_hckl_len_ < 0 ? HVhek_UTF8 : 0), (action), (val),  \
+                 (hash)); })
+#define Perl_hv_common_key_len(ctx, hv, key, klen, action, val, hash) \
+    hv_common_key_len((hv), (key), (klen), (action), (val), (hash))
+/* The slots of a glob made on demand, by their old names: each returns the
+ * glob. */
+#define gv_SVadd(gv) ({ GV *const goperl_gva_ = (GV *)(gv); (void)GvSVn(goperl_gva_); goperl_gva_; })
+#define gv_AVadd(gv) ({ GV *const goperl_gva_ = (GV *)(gv); (void)GvAVn(goperl_gva_); goperl_gva_; })
+#define gv_HVadd(gv) ({ GV *const goperl_gva_ = (GV *)(gv); (void)GvHVn(goperl_gva_); goperl_gva_; })
+#define gv_IOadd(gv) ({ GV *const goperl_gva_ = (GV *)(gv); (void)GvIOn(goperl_gva_); goperl_gva_; })
+/* hv_magic is sv_magic on a hash. */
+#define hv_magic(hv, gv, how) sv_magic((SV *)(hv), (SV *)(gv), (how), NULL, 0)
+/* Whether an array owns its elements, and whether it has yet to take them
+ * over (@_). */
+#define AvREAL(av) ((SvFLAGS(av) & SVpav_REAL) != 0)
+#define AvREIFY(av) ((SvFLAGS(av) & SVpav_REIFY) != 0)
+/* What is in a pad slot: a glob, or a constant. */
+#define IS_PADGV(v) ((v) && isGV(v))
+#define IS_PADCONST(v) \
+    ((v) && (SvREADONLY(v) || (SvIsCOW(v) && !SvLEN(v))))
+/* The mortals of native code are the interpreter's, which makes room for
+ * each as it comes; the C stack of native code is the host's. */
+#define EXTEND_MORTAL(n) NOOP
+#define PERL_STACK_OVERFLOW_CHECK() NOOP
+#define dXSUB_SYS dNOOP
+#define STRUCT_OFFSET(s, m) offsetof(s, m)
+#define MAXARG (PL_op->op_private & OPpARG4_MASK)
+#define kUNOP cUNOPx(kid)
+#define Perl_mfree(ctx, p) goperl_safefree((void *)(p))
+/* sv_usepvn_flags: the buffer becomes the SV's string, with set magic when
+ * asked for. */
+#define sv_usepvn_flags(sv, p, len, flags)                              \
+    ({ GOPERL_ONCE(goperl_sv_usepvn_flags_sv_, sv);                      \
+       const U32 goperl_sv_usepvn_flags_f_ = (U32)(flags);               \
+       sv_usepvn(goperl_sv_usepvn_flags_sv_, (p), (len));                \
+       if (goperl_sv_usepvn_flags_f_ & SV_SMAGIC)                        \
+           SvSETMAGIC(goperl_sv_usepvn_flags_sv_); })
+
 /* GV_CALL selectors: the ones below FIRST_CV take a glob, the rest a CV. */
 enum {
     GOPERL_GVCALL_SVN = 0,
@@ -136,6 +230,40 @@ enum {
  * GOPERL_LV_IV), and the store of one. 0, 2, 3 and 4 are GOPERL_SVSLOT_RV,
  * _IV, _UV and _NV; 2, 3 and 5 name the hash, the array and the scalar of
  * a glob for GV_PTR. */
+/* Stores a pointer in the buffer slot of an SV: one into the interpreter's
+ * memory as its address there, any other with the loader. */
+static void goperl_sv_pvx_store(goperl_frame_t *f, uint64_t tok, const void *p) {
+    uint64_t g = goperl_guest_addr(f, p);
+    if (p && !g) {
+        void **kept = f->api->pv_host(f, tok, 1);
+        if (!kept) goperl_croakf(f, "out of memory for the buffer slot of an SV");
+        kept[0] = (void *)p;
+        kept[1] = 0;
+        g = GOPERL_PV_HOST;
+    }
+    goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                 ((uint64_t)5 /* GOPERL_SVSLOT_PV */ << 32) | (uint32_t)tok, g,
+                 0, 0);
+}
+/* SvLEN, read and stored: the interpreter's, except for an SV whose buffer
+ * slot holds a pointer of this process's (see GOPERL_PV_HOST). Only an SV
+ * the interpreter has no length for can be one. */
+static uint64_t goperl_sv_len_load(goperl_frame_t *f, uint64_t tok) {
+    const uint64_t len = goperl_do_op(f, GOPERL_OP_SV_LEN_BUF, tok, 0, 0, 0);
+    if (len) return len;
+    void **kept = goperl_pv_host_of(f, tok);
+    return kept ? (uint64_t)(uintptr_t)kept[1] : 0;
+}
+static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
+    void **kept = goperl_pv_host_of(f, tok);
+    if (kept) {
+        kept[1] = (void *)(uintptr_t)len;
+        return;
+    }
+    goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                 ((uint64_t)6 /* GOPERL_SVSLOT_LEN */ << 32) | (uint32_t)tok, len,
+                 0, 0);
+}
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     switch (field) {
     case GOPERL_LV_IV:
@@ -164,7 +292,13 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
     case GOPERL_LV_PVX:
         return (uint64_t)(uintptr_t)goperl_sv_pvx(f, (SV *)(uintptr_t)tok);
     case GOPERL_LV_LEN:
-        return goperl_do_op(f, GOPERL_OP_SV_LEN_BUF, tok, 0, 0, 0);
+        return goperl_sv_len_load(f, tok);
+    case GOPERL_LV_AVFILLP: /* FIELD 6 */
+        return goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)6 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_LVTYPE: /* FIELD 9 */
+        return goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)9 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_LVTARG: /* FIELD 10 */
+        return goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)10 << 32) | (uint32_t)tok, 0, 0, 0);
     case GOPERL_LV_CVOUTSIDE:
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CV_OUTSIDE << 32) | (uint32_t)tok,
@@ -217,25 +351,22 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
                      ((uint64_t)GOPERL_GVCALL_SV_SET << 32) | (uint32_t)tok,
                      (uint32_t)val, 0, 0);
         break;
-    case GOPERL_LV_PVX: {
-        /* The buffer of a string is interpreter memory. A pointer into this
-         * process's own memory cannot be one: the interpreter could not
-         * read it. Code stores such a pointer as a note for itself (the
-         * name of a source file in the slot of a sub, which the
-         * interpreter records by itself), and the SV keeps the buffer it
-         * has. */
-        const void *p = (const void *)(uintptr_t)val;
-        const uint64_t g = goperl_guest_addr(f, p);
-        if (p && !g) break;
-        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
-                     ((uint64_t)GOPERL_SVSLOT_PV << 32) | (uint32_t)tok, g, 0,
-                     0);
+    case GOPERL_LV_PVX:
+        goperl_sv_pvx_store(f, tok, (const void *)(uintptr_t)val);
         break;
-    }
     case GOPERL_LV_LEN:
-        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
-                     ((uint64_t)GOPERL_SVSLOT_LEN << 32) | (uint32_t)tok, val,
-                     0, 0);
+        goperl_sv_len_store(f, tok, val);
+        break;
+    case GOPERL_LV_AVFILLP: /* FIELD 7 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)7 << 32) | (uint32_t)tok, val, 0, 0);
+        break;
+    case GOPERL_LV_LVTYPE: /* FIELD 18 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)18 << 32) | (uint32_t)tok,
+                     (uint64_t)(unsigned char)val, 0, 0);
+        break;
+    case GOPERL_LV_LVTARG: /* FIELD 19 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)19 << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
         break;
     case GOPERL_LV_REFCNT: /* FIELD 0: the count itself, nothing is freed */
         goperl_xs_op(f, GOPERL_OP_FIELD, (uint32_t)tok, (uint32_t)val, 0, 0);
@@ -922,19 +1053,20 @@ static void goperl_sv_nv_set(goperl_frame_t *f, SV *sv, NV v) {
                  cvt.u, 0, 0);
 }
 #define SvNV_set(sv, v) goperl_sv_nv_set(_gof, (SV *)(sv), (NV)(v))
-#define SvLEN_set(sv, n) GOPERL_SLOT_SET(GOPERL_SVSLOT_LEN, sv, (STRLEN)(n))
-/* The string buffer of an SV is interpreter memory, so the only pointer a
- * module can store there is one the interpreter handed out (SvPVX, SvGROW)
- * or NULL. */
-static void goperl_sv_pv_set(goperl_frame_t *f, SV *sv, const char *p) {
-    const uint64_t g = goperl_guest_addr(f, p);
-    if (p && !g)
-        goperl_croakf(f, "SvPV_set: the buffer is not interpreter memory");
-    goperl_do_op(f, GOPERL_OP_SV_SLOT_SET,
-                 ((uint64_t)GOPERL_SVSLOT_PV << 32) | (uint32_t)GOPERL_TOK(sv), g,
-                 0, 0);
-}
-#define SvPV_set(sv, p) goperl_sv_pv_set(_gof, (SV *)(sv), (const char *)(p))
+#define SvLEN_set(sv, n)                                            \
+    ({ GOPERL_ONCE(goperl_SvLEN_set_sv_, sv);                        \
+       const uint64_t goperl_SvLEN_set_n_ = (uint64_t)(STRLEN)(n);   \
+       goperl_flush(_gof);                                          \
+       goperl_sv_len_store(_gof, GOPERL_TOK(goperl_SvLEN_set_sv_),   \
+                           goperl_SvLEN_set_n_); })
+/* The string buffer of an SV is interpreter memory: a buffer the
+ * interpreter handed out (SvPVX, SvGROW) or NULL. Any other pointer is one
+ * the module keeps in the slot for itself (see GOPERL_PV_HOST). */
+#define SvPV_set(sv, p)                                            \
+    ({ GOPERL_ONCE(goperl_SvPV_set_sv_, sv);                       \
+       goperl_flush(_gof);                                         \
+       goperl_sv_pvx_store(_gof, GOPERL_TOK(goperl_SvPV_set_sv_),  \
+                           (const void *)(p)); })
 #define SvPV_shrink_to_cur(sv) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_SHRINK_TO_CUR, sv, 0))
 #define SvPVCLEAR(sv) sv_setpvs((sv), "")
@@ -1531,6 +1663,7 @@ static const char *const goperl_phase_names_v[] __attribute__((unused)) = {
 
 /* The interpreter's message strings (perl.h). */
 #define PL_no_modify "Modification of a read-only value attempted"
+#define PL_no_func "The %s function is unimplemented"
 #define PL_memory_wrap "panic: memory wrap"
 #define PL_no_mem "Out of memory!\n"
 #define PL_no_usym "Can't use an undefined value as %s reference"
@@ -2131,8 +2264,13 @@ enum {
 #define SvREFCNT(sv) \
     (*(U32 *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_REFCNT, GOPERL_LV_AT))
 
-#define LvTYPE(sv) ((char)GOPERL_FIELD(GOPERL_FIELD_LV_TYPE, sv, 0))
-#define LvTARG(sv) GOPERL_SV(GOPERL_FIELD(GOPERL_FIELD_LV_TARG, sv, 0))
+/* The type and the target of an lvalue scalar are lvalues
+ * (`LvTYPE(sv) = '~'; LvTARG(sv) = SvREFCNT_inc(sv);`). The slot holds
+ * eight bytes, of which the type is the first. */
+#define LvTYPE(sv) \
+    (*(char *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTYPE, GOPERL_LV_AT))
+#define LvTARG(sv) \
+    (*(SV **)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTARG, GOPERL_LV_AT))
 #define SvSHARED_HASH(sv) ((U32)GOPERL_FIELD(GOPERL_FIELD_SHARED_HASH, sv, 0))
 #define SvIS_FREED(sv) (GOPERL_FIELD(GOPERL_FIELD_IS_FREED, sv, 0) != 0)
 #define HvRITER_get(hv) ((I32)(int64_t)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER, hv, 0))
@@ -2170,7 +2308,7 @@ static U32 goperl_op_class(const OP *o) {
         /* the class its pp function was registered with */
         const goperl_hooks_t *h = goperl_hooks_v;
         for (int32_t i = 0; h && i < h->xop_n; i++)
-            if (h->xops[i].pp == o->op_ppaddr) return h->xops[i].xop->xop_class;
+            if (h->xops[i].pp == o->op_ppaddr) return XopENTRY(h->xops[i].xop, xop_class);
     }
     if (o->gop_class && (size_t)(o->gop_class - 1) < sizeof(by_class) / sizeof(by_class[0]))
         return by_class[o->gop_class - 1];
@@ -3133,5 +3271,9 @@ static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g) {
 /* A pad name in a message: %" PNf " with PNfARG(pn). */
 #define PNf UTF8f
 #define PNfARG(pn) (int)1, (UV)PadnameLEN(pn), (void *)PadnamePV(pn)
+
+static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) {
+    return sv_cmp_locale(a, b);
+}
 
 #endif /* GOPERL_XS_SDK_PERLAPI_H */
