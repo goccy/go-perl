@@ -136,7 +136,7 @@ func TestSocketPairOfEveryKind(t *testing.T) {
 	skipWithoutUnixSockets(t)
 	got := runForkScript(t, `
 use Socket qw(AF_UNIX AF_INET SOCK_STREAM SOCK_DGRAM SOCK_RAW PF_UNSPEC SOL_SOCKET SO_TYPE);
-use Errno qw(EOPNOTSUPP EPROTONOSUPPORT);
+use Errno qw(EOPNOTSUPP ENOTSUP EPROTONOSUPPORT);
 for my $kind ([stream => SOCK_STREAM], [datagram => SOCK_DGRAM]) {
     my ($name, $type) = @$kind;
     socketpair(my $a, my $b, AF_UNIX, $type, PF_UNSPEC) or die "socketpair($name): $!";
@@ -151,13 +151,13 @@ for my $kind ([stream => SOCK_STREAM], [datagram => SOCK_DGRAM]) {
     waitpid($pid, 0);
     report("$name pair $is: read '$data', then '$reply'");
 }
-report("pair of IPv4 sockets: ", (socketpair(my $a, my $b, AF_INET, SOCK_STREAM, 0) ? "made" : $! == EOPNOTSUPP ? "EOPNOTSUPP" : "$!"));
+report("pair of IPv4 sockets: ", (socketpair(my $a, my $b, AF_INET, SOCK_STREAM, 0) ? "made" : ($! == EOPNOTSUPP || $! == ENOTSUP) ? "not supported" : "$!"));
 report("pair of raw sockets: ", (socketpair(my $c, my $d, AF_UNIX, SOCK_RAW, 0) ? "made" : $! == EPROTONOSUPPORT ? "EPROTONOSUPPORT" : "$!"));
 `)
 	wantLines(t, got,
 		"stream pair of that type: read 'firstsecond', then 'from the child'",
 		"datagram pair of that type: read 'first', then 'from the child'",
-		"pair of IPv4 sockets: EOPNOTSUPP",
+		"pair of IPv4 sockets: not supported",
 		"pair of raw sockets: EPROTONOSUPPORT",
 	)
 }

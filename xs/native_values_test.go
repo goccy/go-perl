@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
@@ -162,6 +163,39 @@ func TestNativeErrnoIsDollarBang(t *testing.T) {
 		{"ERANGE", `$! = 0; PerlAPI::leave_errno("ERANGE"); $!{ERANGE} ? "ERANGE" : "other: " . ($! + 0)`, "ERANGE"},
 		{"errno cleared", `$! = Errno::EPERM(); PerlAPI::leave_errno("zero"); $! + 0`, "0"},
 		{"errno not touched", `$! = Errno::EPERM(); PerlAPI::leave_errno("nothing"); $!{EPERM} ? "EPERM" : "other: " . ($! + 0)`, "EPERM"},
+		// an error only the host's system has is an I/O error to a program
+		// that sees the interpreter's own numbers
+		{"an error the interpreter has no name for", `$! = 0; PerlAPI::leave_errno("EHOSTDOWN"); $!{EIO} ? "EIO" : "other: " . ($! + 0)`, "EIO"},
+	})
+}
+
+// For a program that is the host process, the numbers of errors are the
+// system's on both sides: what native code leaves in errno is that number
+// in $!, a number the program assigns to $! is the one native code reads
+// from it, and a number native code assigns to $! is the one the program
+// reads.
+func TestNativeErrnoOfTheHostProcess(t *testing.T) {
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, HostProcess: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
+	perlAPIInstance(t, p)
+	if r, err := p.Eval(context.Background(), `use Errno (); 1;`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	number := func(e syscall.Errno) string { return strconv.Itoa(int(e)) }
+	runEvalCases(t, p, []evalCase{
+		{"left in errno", `$! = 0; PerlAPI::leave_errno("ENOENT"); ($!{ENOENT} ? "ENOENT " : "other ") . ($! + 0)`, "ENOENT " + number(syscall.ENOENT)},
+		{"left in errno, another", `$! = 0; PerlAPI::leave_errno("ERANGE"); ($!{ERANGE} ? "ERANGE " : "other ") . ($! + 0)`, "ERANGE " + number(syscall.ERANGE)},
+		{"assigned by the program, read by native code", `$! = ` + number(syscall.EACCES) + `; join " ", PerlAPI::errno_of_the_program()`, "EACCES " + number(syscall.EACCES)},
+		{"assigned by name, read by native code", `$! = Errno::ENOENT(); join " ", PerlAPI::errno_of_the_program()`, "ENOENT " + number(syscall.ENOENT)},
+		{"an error the interpreter's C library has no name for", `$! = 0; PerlAPI::leave_errno("EHOSTDOWN"); ($!{EHOSTDOWN} ? "EHOSTDOWN " : "other ") . ($! + 0)`, "EHOSTDOWN " + number(syscall.EHOSTDOWN)},
+		{"assigned by native code, read by the program", `$! = 0; PerlAPI::errno_of_the_program(); ($!{ERANGE} ? "ERANGE " : "other ") . ($! + 0)`, "ERANGE " + number(syscall.ERANGE)},
 	})
 }
 

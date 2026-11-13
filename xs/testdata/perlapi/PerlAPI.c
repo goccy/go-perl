@@ -1035,6 +1035,9 @@ XS(XS_PerlAPI_leave_errno) {
         if (strEQ(how, "ENOENT")) errno = ENOENT;
         else if (strEQ(how, "EINVAL")) errno = EINVAL;
         else if (strEQ(how, "ERANGE")) errno = ERANGE;
+#ifdef EHOSTDOWN
+        else if (strEQ(how, "EHOSTDOWN")) errno = EHOSTDOWN;
+#endif
         else if (strEQ(how, "zero")) errno = 0;
         {
             SV *noise = sv_2mortal(newSVpvs("calls into the interpreter"));
@@ -1042,6 +1045,25 @@ XS(XS_PerlAPI_leave_errno) {
             ST(0) = sv_2mortal(newSViv((IV)SvCUR(noise)));
         }
         XSRETURN(1);
+    }
+}
+
+/* What native code finds in $! when the program assigned an error number to
+ * it: the name the number has in this system's <errno.h>, and the number.
+ * Then it assigns ERANGE to $!, as a number of that header. */
+XS(XS_PerlAPI_errno_of_the_program) {
+    dXSARGS;
+    if (items != 0) croak_xs_usage(cv, "");
+    {
+        SV *bang = get_sv("!", 0);
+        IV seen = SvIV(bang);
+        SP -= items;
+        EXTEND(SP, 2);
+        mPUSHs(newSVpv(seen == EACCES ? "EACCES" : seen == ENOENT ? "ENOENT" : "another", 0));
+        mPUSHi(seen);
+        sv_setiv_mg(bang, ERANGE);
+        PUTBACK;
+        return;
     }
 }
 
@@ -2102,6 +2124,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::method_twice", XS_PerlAPI_method_twice);
     newXS_deffile("PerlAPI::with_topic", XS_PerlAPI_with_topic);
     newXS_deffile("PerlAPI::leave_errno", XS_PerlAPI_leave_errno);
+    newXS_deffile("PerlAPI::errno_of_the_program", XS_PerlAPI_errno_of_the_program);
     newXS_deffile("PerlAPI::set_from_pointer", XS_PerlAPI_set_from_pointer);
     newXS_deffile("PerlAPI::callback_then_mark", XS_PerlAPI_callback_then_mark);
     newXS_deffile("PerlAPI::weak_count", XS_PerlAPI_weak_count);

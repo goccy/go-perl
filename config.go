@@ -131,13 +131,23 @@ type Config struct {
 	//     program finds them;
 	//   - the program may listen for network connections (bind, listen);
 	//   - local time is the host's when the program names no time zone (the
-	//     TZ variable is not set).
+	//     TZ variable is not set);
+	//   - the numbers the program sees are the host operating system's
+	//     (darwin and linux): the error numbers ($!, %!, Errno, POSIX, the
+	//     exit status of a die), the signal numbers (%Config, POSIX, kill by
+	//     number, the signal in $?), the flags of open and fcntl, the bits
+	//     of poll, and the numbers of sockets (address families, types,
+	//     levels, options, message flags, the flags and errors of
+	//     getaddrinfo), as constants, as arguments and as results. Native
+	//     code the program loads has the same numbers.
 	//
 	// When false (the default) the program is an isolated process: pid 42,
 	// parent 1, user and group 0, empty user and group databases, kill
 	// reaches only the processes the program started, binding a socket
-	// to a local address fails with EACCES, and local time is UTC unless
-	// the program sets TZ. A pseudo-process forked from the program has the same user
+	// to a local address fails with EACCES, local time is UTC unless
+	// the program sets TZ, and the numbers of errors, signals and flags
+	// are those of the interpreter's own C library, the same on every
+	// host. A pseudo-process forked from the program has the same user
 	// and group but is never the host process: its pid is its own, a
 	// signal ends only that pseudo-process, it may form a process group or
 	// a session of its own, and the host process does not follow its

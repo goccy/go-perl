@@ -759,7 +759,9 @@ static inline __attribute__((unused)) void goperl_api_cv_set_xsub(
 }
 /* The interpreter's number for a host errno value. Its C library has a
  * number for every POSIX name; a host value it has no name for (a few are
- * specific to one system) is reported as EIO. */
+ * specific to one system) is carried marked: the bit 0x4000 over the
+ * host's number, which a program that sees the host's numbers gets back as
+ * that number and any other program as EIO. */
 static int goperl_errno_guest(int e) __attribute__((unused));
 static int goperl_errno_guest(int e) {
     if (e == 0) return 0;
@@ -991,11 +993,14 @@ static int goperl_errno_guest(int e) {
 #ifdef ENOTCAPABLE
     if (e == ENOTCAPABLE) return 76;
 #endif
+    if (e > 0 && e < 0x4000) return 0x4000 | e;
     return 29; /* EIO */
 }
 /* The host's errno value for a number of the interpreter's. */
 static int goperl_errno_host(int e) __attribute__((unused));
 static int goperl_errno_host(int e) {
+    /* an error of the host's that the interpreter carries marked */
+    if (e >= 0x4000 && e < 0x8000) return e - 0x4000;
     switch (e) {
     case 0: return 0;
 #ifdef E2BIG

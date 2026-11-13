@@ -117,6 +117,13 @@ func runCommandLine(argv []string, projects bool) (status int, err error) {
 	}
 	project := projects && !cmd.switches && cmd.action == actionRun && cmd.prog.File != "" &&
 		envValue(env, "GPERL_PERL_PRELOAD") == ""
+	if project {
+		// A program file that is not there is no project: perl says that
+		// it cannot open it, and ends with the status of that error.
+		if st, err := os.Stat(cmd.prog.File); err != nil || st.IsDir() {
+			project = false
+		}
+	}
 	return endOfProcess(runPerlCommand(cmd, perlRunOpts{project: project}))
 }
 
