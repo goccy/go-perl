@@ -1882,6 +1882,41 @@ XS(XS_PerlAPI_view_attach) {
     XSRETURN(0);
 }
 
+/* Magic whose mg_obj the module sets itself after sv_magicext and gives up
+ * in its own svt_free, the way Data::Buffer::Shared pins the handle a view
+ * aliases: sv_magicext took no reference, so the magic is not
+ * MGf_REFCOUNTED and mg_free must not give one up. */
+static int perlapi_pin_free(pTHX_ SV *sv, MAGIC *mg) {
+    PERL_UNUSED_ARG(sv);
+    if (mg->mg_obj) SvREFCNT_dec(mg->mg_obj);
+    return 0;
+}
+static MGVTBL perlapi_pin_vtbl = {0, 0, 0, 0, perlapi_pin_free, 0, 0, 0};
+
+XS(XS_PerlAPI_pin_attach) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "holder, obj");
+    {
+        MAGIC *mg = sv_magicext(ST(0), NULL, PERL_MAGIC_ext, &perlapi_pin_vtbl, NULL, 0);
+        mg->mg_obj = SvREFCNT_inc_simple_NN(ST(1));
+        XSRETURN(0);
+    }
+}
+
+/* Whether the magic of a vtable on a holder holds a reference on its
+ * mg_obj that mg_free gives up: "pin" or "view". */
+XS(XS_PerlAPI_magic_refcounted) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "holder, which");
+    {
+        MAGIC *mg = mg_findext(ST(0), PERL_MAGIC_ext,
+                               strEQ(SvPV_nolen(ST(1)), "pin") ? &perlapi_pin_vtbl : &perlapi_view_vtbl);
+        if (!mg) XSRETURN_UNDEF;
+        ST(0) = boolSV(mg->mg_flags & MGf_REFCOUNTED);
+        XSRETURN(1);
+    }
+}
+
 /* The first n bytes at the place the magic points to. */
 XS(XS_PerlAPI_view_read) {
     dXSARGS;
@@ -3626,6 +3661,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::formatted", XS_PerlAPI_formatted);
     newXS_deffile("PerlAPI::view_attach", XS_PerlAPI_view_attach);
     newXS_deffile("PerlAPI::view_read", XS_PerlAPI_view_read);
+    newXS_deffile("PerlAPI::pin_attach", XS_PerlAPI_pin_attach);
+    newXS_deffile("PerlAPI::magic_refcounted", XS_PerlAPI_magic_refcounted);
     newXS_deffile("PerlAPI::process_id", XS_PerlAPI_process_id);
     newXS_deffile("PerlAPI::discard_string", XS_PerlAPI_discard_string);
     newXS_deffile("PerlAPI::resize_buffer", XS_PerlAPI_resize_buffer);

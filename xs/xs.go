@@ -1024,7 +1024,9 @@ const (
 	vtblOffCopy  = 40
 	vtblOffLocal = 56
 	mgfLocal     = 0x20 // MGf_LOCAL
-	hefSVKey     = -2   // HEf_SVKEY: the name of a MAGIC is an SV
+	// MGf_REFCOUNTED: the MAGIC holds a reference on its mg_obj.
+	mgfRefcounted = 0x02
+	hefSVKey      = -2 // HEf_SVKEY: the name of a MAGIC is an SV
 )
 
 // magicShares counts, for every MAGIC that was copied to another instance
@@ -1106,10 +1108,14 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 			return 0
 		}
 	}
+	takesObj := magicTakesObj(sv, obj, how)
 	var buf [mgAllocSize]byte
 	binary.LittleEndian.PutUint64(buf[mgOffMore:], uint64(oldHead))
 	binary.LittleEndian.PutUint64(buf[mgOffVirtual:], uint64(vtbl))
 	buf[mgOffType] = byte(how)
+	if takesObj {
+		buf[mgOffFlags] = mgfRefcounted
+	}
 	binary.LittleEndian.PutUint32(buf[mgOffLen:], uint32(mgLen))
 	binary.LittleEndian.PutUint64(buf[mgOffObj:], obj)
 	binary.LittleEndian.PutUint64(buf[mgOffPtr:], uint64(mgPtr))
@@ -1167,7 +1173,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		s.mu.Lock()
 		rec.head = mg
 		s.mu.Unlock()
-		if obj != 0 {
+		if takesObj {
 			// Real sv_magicext takes a reference on obj for every entry;
 			// the anchor only covers the first, so hold this one manually.
 			if _, err := s.p.XSHelperOp(opRefcntInc, obj, 0, ""); err != nil {
@@ -1455,7 +1461,6 @@ func (s *state) magicFreed(id uint32) {
 	for mg := rec.head; mg != 0; {
 		node := copyIn(mg, mgAllocSize)
 		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
-		obj := binary.LittleEndian.Uint64(node[mgOffObj:])
 		if xsTrace {
 			s.mu.Lock()
 			slot, hasAny := s.cvAny[rec.svTok]
@@ -1467,21 +1472,49 @@ func (s *state) magicFreed(id uint32) {
 			vtblp := binary.LittleEndian.Uint64(node[mgOffVirtual:])
 			fmt.Fprintf(os.Stderr, "[magicFreed] sv=%#x mg=%#x vtbl=%#x any=%#x\n", rec.svTok, mg, vtblp, val)
 		}
-		mgLen := int32(binary.LittleEndian.Uint32(node[mgOffLen:]))
-		mgPtr := uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:]))
 		if lastMagicHolder(node) {
 			s.callSvtFree(rec.svTok, mg)
+			// What svt_free left in the MAGIC is what is given up.
+			node = copyIn(mg, mgAllocSize)
 		}
-		// Every entry beyond the anchor's held one manually retained obj.
-		if obj != 0 && obj != rec.anchorObj {
-			_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
-		} else if obj != 0 && obj == rec.anchorObj {
-			rec.anchorObj = 0 // the anchor releases its own reference
-		}
-		s.releaseMagicName(mgLen, mgPtr)
+		s.releaseMagicObj(rec, node)
+		s.releaseMagicName(int32(binary.LittleEndian.Uint32(node[mgOffLen:])),
+			uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])))
 		cFree(mg)
 		mg = next
 	}
+}
+
+// magicTakesObj reports whether sv_magicext takes a reference on obj for a
+// MAGIC of type how on sv, as perl's does (and marks the MAGIC
+// MGf_REFCOUNTED): not for no obj, not for the variable itself, nor for
+// the types whose obj is the variable's own container.
+func magicTakesObj(sv, obj uint64, how int32) bool {
+	if obj == 0 || obj == sv {
+		return false
+	}
+	switch how {
+	case '#', 'D', 'd', ':': // arylen, regdata, regdatum, symtab
+		return false
+	}
+	return true
+}
+
+// releaseMagicObj gives up the reference a MAGIC holds on its mg_obj, as
+// mg_free does: only a MAGIC that took one (MGf_REFCOUNTED) holds one —
+// a module that sets mg_obj itself gives its reference up in its own
+// svt_free. The reference of the first MAGIC of a variable is held by the
+// guest's anchor, which gives it up itself.
+func (s *state) releaseMagicObj(rec *magicRec, node []byte) {
+	obj := binary.LittleEndian.Uint64(node[mgOffObj:])
+	if obj == 0 || node[mgOffFlags]&mgfRefcounted == 0 {
+		return
+	}
+	if obj == rec.anchorObj {
+		rec.anchorObj = 0
+		return
+	}
+	_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
 }
 
 // releaseMagicName gives up what a MAGIC holds as its name: the copy
@@ -1513,16 +1546,13 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 		typ := node[mgOffType]
 		nodeVtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
 		if typ == byte(how) && (vtbl == 0 || nodeVtbl == vtbl) {
-			obj := binary.LittleEndian.Uint64(node[mgOffObj:])
-			mgLen := int32(binary.LittleEndian.Uint32(node[mgOffLen:]))
-			mgPtr := uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:]))
 			if lastMagicHolder(node) {
 				s.callSvtFree(sv, mg)
+				node = copyIn(mg, mgAllocSize)
 			}
-			if obj != 0 && obj != rec.anchorObj {
-				_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
-			}
-			s.releaseMagicName(mgLen, mgPtr)
+			s.releaseMagicObj(rec, node)
+			s.releaseMagicName(int32(binary.LittleEndian.Uint32(node[mgOffLen:])),
+				uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])))
 			if prev == 0 {
 				rec.head = next
 			} else {

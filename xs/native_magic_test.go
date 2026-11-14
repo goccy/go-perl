@@ -145,3 +145,21 @@ func TestNativeUvarMagic(t *testing.T) {
 		{"another hash is left alone", `my %h; my %other = (alias => 1); PerlAPI::uvar_hash(\%h); PerlAPI::uvar_calls(); my $x = $other{alias}; PerlAPI::uvar_calls()`, "0"},
 	})
 }
+
+// A magic holds a reference on its mg_obj only when sv_magicext took one
+// (MGf_REFCOUNTED), and that is the reference given up with the magic. A
+// module that sets mg_obj itself after sv_magicext gives its reference up
+// in its own svt_free: freeing the variable gives up nothing else, whether
+// that magic is the variable's first or comes after another.
+func TestNativeMagicHoldsOnlyTheReferenceItTook(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const prelude = `my @w; local $SIG{__WARN__} = sub { push @w, @_ }; our ($pinned, $viewed) = ("p", "v" x 8); my ($p0, $v0) = (Internals::SvREFCNT($pinned), Internals::SvREFCNT($viewed)); `
+	const tail = `join ",", Internals::SvREFCNT($pinned) - $p0, Internals::SvREFCNT($viewed) - $v0, scalar(@w), @w`
+	runEvalCases(t, p, []evalCase{
+		{"the flag", prelude + `my $h = "h"; PerlAPI::view_attach($h, $viewed); PerlAPI::pin_attach($h, $pinned); join ",", map { PerlAPI::magic_refcounted($h, $_) ? "counted" : "not counted" } qw(view pin)`, "counted,not counted"},
+		{"set by the module, alone", prelude + `{ my $h = "h"; PerlAPI::pin_attach($h, $pinned); push @w, "held " . (Internals::SvREFCNT($pinned) - $p0) } ` + tail, "0,0,1,held 1"},
+		{"set by the module, after a magic that took one", prelude + `{ my $h = "h"; PerlAPI::view_attach($h, $viewed); PerlAPI::pin_attach($h, $pinned) } ` + tail, "0,0,0"},
+		{"taken by sv_magicext, after the module's", prelude + `{ my $h = "h"; PerlAPI::pin_attach($h, $pinned); PerlAPI::view_attach($h, $viewed) } ` + tail, "0,0,0"},
+	})
+}
