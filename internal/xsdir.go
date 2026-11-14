@@ -27,7 +27,9 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 // meaningful to the instance that obtained them.
 type XSDynamicLoader struct {
 	// Open loads the native XS module at path and returns its token.
-	Open func(p *Perl, path string) (lib uint64, err error)
+	// flags are DynaLoader's dl_load_file flags (0x01: the library's
+	// symbols are global).
+	Open func(p *Perl, path string, flags int) (lib uint64, err error)
 	// Symbol resolves name in a loaded module.
 	Symbol func(p *Perl, lib uint64, name string) (sym uint64, err error)
 	// Install binds the function behind sym as the Perl sub name.

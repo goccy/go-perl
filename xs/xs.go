@@ -538,7 +538,7 @@ func load(p *internal.Perl, module, path string) error {
 	if err != nil {
 		return err
 	}
-	lib, err := s.open(path)
+	lib, err := s.open(path, false)
 	if err != nil {
 		return err
 	}
@@ -567,8 +567,11 @@ func loaderState(p *internal.Perl) (*state, error) {
 }
 
 // open dlopens a native XS module built against the SDK, injects the
-// vtable, and picks up the SDK entry points the module carries.
-func (s *state) open(path string) (lib uintptr, err error) {
+// vtable, and picks up the SDK entry points the module carries. global
+// makes the library's symbols available to the libraries loaded after it
+// (RTLD_GLOBAL), as DynaLoader's dl_load_file does when a module's
+// dl_load_flags ask for it; otherwise they stay the library's own.
+func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	p := s.p
 	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
 		return 0, err
@@ -603,7 +606,11 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	}
 	vtableOnce.Do(buildVtable)
 
-	lib, err = purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	mode := purego.RTLD_NOW | purego.RTLD_LOCAL
+	if global {
+		mode = purego.RTLD_NOW | purego.RTLD_GLOBAL
+	}
+	lib, err = purego.Dlopen(path, mode)
 	if err != nil {
 		return 0, fmt.Errorf("dlopen %s: %w", path, err)
 	}
@@ -658,6 +665,10 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	return lib, nil
 }
 
+// dlGlobalSymbols is the bit of dl_load_file's flags that makes a library's
+// symbols global (perl's dl_dlopen.xs: RTLD_GLOBAL).
+const dlGlobalSymbols = 0x01
+
 // plainLibraryError is the failure of open for a shared library that is
 // not a native XS module: it has none of the SDK's entry points. The
 // library is loaded all the same (lib of open's result).
@@ -677,13 +688,17 @@ func (e *plainLibraryError) Unwrap() error { return e.err }
 // dl_load_file is, it loads any shared library, not only a native module:
 // code that looks for a C library's functions through DynaLoader
 // (FFI::CheckLib, for one) loads the library to find its symbols. Only a
-// module is initialized for the SDK.
-func openLibrary(p *internal.Perl, path string) (uint64, error) {
+// module is initialized for the SDK. flags are dl_load_file's: with bit
+// 0x01 (a module's dl_load_flags returning it) the library's symbols are
+// global, so that the modules loaded after it link against it — XS::Loader
+// loads every module that way, and a module built on another one's library
+// (Test::Catch on XS::libcatch) needs it.
+func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 	s, err := loaderState(p)
 	if err != nil {
 		return 0, err
 	}
-	lib, err := s.open(path)
+	lib, err := s.open(path, flags&dlGlobalSymbols != 0)
 	var plain *plainLibraryError
 	if errors.As(err, &plain) {
 		err = nil
