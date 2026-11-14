@@ -1399,8 +1399,8 @@ static __attribute__((unused)) void goperl_defer_error(goperl_frame_t *f, SV *er
 }
 #define defer_error(err) goperl_defer_error(_gof, (SV *)(err))
 #define qerror(err) goperl_defer_error(_gof, (SV *)(err))
-#define Perl_defer_error goperl_defer_error
-#define Perl_qerror goperl_defer_error
+#define Perl_defer_error(...) goperl_defer_error(_gof, __VA_ARGS__)
+#define Perl_qerror(...) goperl_defer_error(_gof, __VA_ARGS__)
 
 /* PL_multideref_pc is the item of a multideref's auxiliary data being run,
  * which native code running a multideref op of its own keeps up to date
@@ -1560,8 +1560,8 @@ static __attribute__((unused)) void goperl_filter_del(goperl_frame_t *f, filter_
 }
 #define filter_add(fn, datasv) goperl_filter_add(_gof, (filter_t)(fn), (SV *)(datasv))
 #define filter_del(fn) goperl_filter_del(_gof, (filter_t)(fn))
-#define Perl_filter_add goperl_filter_add
-#define Perl_filter_del goperl_filter_del
+#define Perl_filter_add(...) goperl_filter_add(_gof, __VA_ARGS__)
+#define Perl_filter_del(...) goperl_filter_del(_gof, __VA_ARGS__)
 /* The next filter fills the buffer: the interpreter's filter_read. (A
  * module with a filter_read of its own, as Devel::Declare's copy of toke.c
  * has, gets the interpreter's for filter_read all the same, as it does on
@@ -1602,7 +1602,7 @@ static __attribute__((unused)) char *goperl_sv_gets(goperl_frame_t *f, SV *sv, P
     return SvPVX(sv);
 }
 #define sv_gets(sv, fp, append) goperl_sv_gets(_gof, (SV *)(sv), (PerlIO *)(fp), (I32)(append))
-#define Perl_sv_gets goperl_sv_gets
+#define Perl_sv_gets(...) goperl_sv_gets(_gof, __VA_ARGS__)
 
 /* The run loop, PL_runops: the interpreter's own (which runs from PL_op
  * when native code calls it), or one of native code. */
@@ -1654,7 +1654,7 @@ static __attribute__((unused)) void goperl_blockhook_register(goperl_frame_t *f,
     t->bhk_told[t->nbhk] = hk->bhk_flags;
     t->nbhk++;
 }
-#define Perl_blockhook_register goperl_blockhook_register
+#define Perl_blockhook_register(...) goperl_blockhook_register(_gof, __VA_ARGS__)
 #define blockhook_register(hk) goperl_blockhook_register(_gof, (hk))
 /* A hook enabled or disabled after it was registered (BhkDISABLE) is
  * called by the interpreter as it is now. */
@@ -1678,14 +1678,14 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const uint32_t *req,
         if (reqlen < 20) goperl_croakf(f, "host call: short filter request");
         const filter_t fn = (filter_t)goperl_fn_of(f, req[1]);
         goperl_flush(f);
-        resp[0] = (uint32_t)fn(f, (int)(int32_t)req[2], GOPERL_SV(req[3]), (int)(int32_t)req[4]);
+        resp[0] = (uint32_t)fn((int)(int32_t)req[2], GOPERL_SV(req[3]), (int)(int32_t)req[4]);
         return 4;
     }
     case GOPERL_HOST_RUNOPS: { /* [id] */
         if (reqlen < 8) goperl_croakf(f, "host call: short run loop request");
         const runops_proc_t fn = (runops_proc_t)goperl_fn_of(f, req[1]);
         goperl_flush(f);
-        fn(f);
+        fn();
         return 0;
     }
     case GOPERL_HOST_BHK: { /* [id][which][arg] -> [op] */
@@ -1697,19 +1697,19 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const uint32_t *req,
         goperl_flush(f);
         switch (req[2]) {
         case 0:
-            if (BhkENTRY(hk, bhk_start)) hk->bhk_start(f, (int)(int32_t)req[3]);
+            if (BhkENTRY(hk, bhk_start)) hk->bhk_start((int)(int32_t)req[3]);
             break;
         case 1:
         case 2:
             o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
-            if (req[2] == 1 && BhkENTRY(hk, bhk_pre_end)) hk->bhk_pre_end(f, &o);
-            if (req[2] == 2 && BhkENTRY(hk, bhk_post_end)) hk->bhk_post_end(f, &o);
+            if (req[2] == 1 && BhkENTRY(hk, bhk_pre_end)) hk->bhk_pre_end(&o);
+            if (req[2] == 2 && BhkENTRY(hk, bhk_post_end)) hk->bhk_post_end(&o);
             if (o && !o->gop)
                 goperl_croakf(f, "a block hook returned an op that is not the interpreter's");
             break;
         case 3:
             o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
-            if (BhkENTRY(hk, bhk_eval)) hk->bhk_eval(f, o);
+            if (BhkENTRY(hk, bhk_eval)) hk->bhk_eval(o);
             break;
         default:
             goperl_croakf(f, "host call: unknown block hook %u", (unsigned)req[2]);
@@ -1766,7 +1766,7 @@ static __attribute__((unused)) bool goperl_sv_cat_decode(goperl_frame_t *f, SV *
 }
 #define sv_cat_decode(dsv, enc, ssv, offset, tstr, tlen) \
     goperl_sv_cat_decode(_gof, (SV *)(dsv), (SV *)(enc), (SV *)(ssv), (offset), (char *)(tstr), (int)(tlen))
-#define Perl_sv_cat_decode goperl_sv_cat_decode
+#define Perl_sv_cat_decode(...) goperl_sv_cat_decode(_gof, __VA_ARGS__)
 /* The encoding of the program's text: gone from perl (the encoding pragma
  * no longer sets it), as perl.h says outside the core. */
 #define PL_encoding ((SV *)NULL)

@@ -3,21 +3,19 @@
  * by hand).
  *
  * Perl names every public function of its API Perl_<name> as well; code
- * calls it so with the interpreter as the first argument, Perl_av_push(aTHX_
- * av, sv), or none for a function that takes none. A long name is a
- * function with perl's prototype over the short name the SDK provides,
- * inline only: a module that has a copy of the function of its own (a copy
- * of perl's source) defines it in the same unit, and its definition is the
- * one compiled. Where no such function can be written (a variable argument
- * list), the long name is a macro over the short name, with the
- * interpreter argument left out: aTHX_ is one argument of the call before
- * it is expanded, and the interpreter is the SDK's current frame. */
+ * calls it so, Perl_av_push(aTHX_ av, sv), where aTHX_ is nothing in a perl
+ * without MULTIPLICITY, as this one is. A long name is a function with
+ * perl's prototype over the short name the SDK provides, inline only: a
+ * module that has a copy of the function of its own (a copy of perl's
+ * source) defines it in the same unit, and its definition is the one
+ * compiled. Where no such function can be written (a variable argument
+ * list), the long name is a macro over the short name. */
 #ifndef GOPERL_XS_SDK_LONGNAMES_H
 #define GOPERL_XS_SDK_LONGNAMES_H
 /* the inline functions call the SDK's static ones */
 #pragma GCC system_header
 
-#define GOPERL_THX_DROP(ctx, ...) __VA_ARGS__
+#define GOPERL_THX_DROP(...) __VA_ARGS__
 /* the arguments are expanded before the short name's macro takes them */
 #define GOPERL_LONG_CALL(f, ...) f(__VA_ARGS__)
 

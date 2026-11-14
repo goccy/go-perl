@@ -12,9 +12,10 @@
 // call here, this loader invokes the native function, and every SV operation
 // the native code performs travels back through the instance's XS helper.
 //
-// v3 speaks the SDK's pTHX model: every XSUB has perl's real signature
-// (void xsub(pTHX_ CV* cv), where pTHX is the call frame), the frame carries
-// a real perl stack (base/sp/marks over SV tokens), and the loader
+// The SDK is a perl built without MULTIPLICITY: an XSUB has perl's
+// signature there (void xsub(CV* cv)) and works on the frame the loader's
+// entry makes current, which carries a real perl stack (base/sp/marks over
+// SV tokens), and the loader
 // additionally maintains per-CV storage (CvXSUBANY/alias dispatch) and
 // host-side MAGIC mirror chains whose lifetime the guest anchors.
 //
@@ -52,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 23
+const abiVersion = 24
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -846,15 +847,14 @@ func (s *state) dispatch(req []byte) []byte {
 	s.mu.Lock()
 	inv, epi := s.xsInvoke, s.xsEpilogue
 	s.mu.Unlock()
-	prevThread, prevInterrupt, entered := s.enterNative()
-	if inv != 0 {
-		// The SDK's entry makes the frame current before the XSUB's first
-		// statement. A module built before the SDK had the entry is
-		// called directly: its XSUBs open their activation themselves.
-		purego.SyscallN(inv, fp, fn, uintptr(cvTok))
-	} else {
-		purego.SyscallN(fn, fp, uintptr(cvTok))
+	if inv == 0 {
+		return fail("native XS dispatch: no native module provides the entry point")
 	}
+	prevThread, prevInterrupt, entered := s.enterNative()
+	// The SDK's entry makes the frame current before the XSUB's first
+	// statement: an XSUB takes no context argument, as in perl without
+	// MULTIPLICITY, and works on the current frame.
+	purego.SyscallN(inv, fp, fn, uintptr(cvTok))
 	// Close any activation levels the XSUB left open (xsubpp PPCODE exits
 	// with a bare return, skipping XSRETURN's leave).
 	if epi != 0 {
@@ -1321,7 +1321,7 @@ func (s *state) magicChainHead(sv uint64) uintptr {
 	return 0
 }
 
-// callSvtHook invokes a node's vtbl entry at vtblOff — int (*)(pTHX_ SV*,
+// callSvtHook invokes a node's vtbl entry at vtblOff — int (*)(SV*,
 // MAGIC*), the shared shape of svt_set and svt_free — if present.
 func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) {
 	node := copyIn(mg, mgSize)
@@ -1334,19 +1334,18 @@ func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) {
 	if fn == 0 {
 		return
 	}
-	f, fp := s.bootFrame()
 	s.mu.Lock()
 	invoke := s.svtInvoke
 	s.mu.Unlock()
+	if invoke == 0 {
+		return
+	}
+	f, fp := s.bootFrame()
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
-	if invoke != 0 {
-		// The SDK-side entry installs the current frame and a croak guard
-		// before running the hook; interpreter macros inside it need both.
-		purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
-	} else {
-		purego.SyscallN(fn, fp, uintptr(sv), mg)
-	}
+	// The SDK-side entry installs the current frame and a croak guard
+	// before running the hook; interpreter macros inside it need both.
+	purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	_ = f

@@ -2729,8 +2729,8 @@ static IV PerlAPI_adds_seen;
  * frame lies where that one was.) */
 static IV PerlAPI_adds_with_foreign_marks;
 static OP *PerlAPI_pp_add_more(pTHX) {
-    if (goperl_markstack_owner_v != aTHX ||
-        goperl_markstack_ptr_v != aTHX->marks + aTHX->markidx)
+    if (goperl_markstack_owner_v != _gof ||
+        goperl_markstack_ptr_v != _gof->marks + _gof->markidx)
         PerlAPI_adds_with_foreign_marks++;
     dSP;
     SV *right = POPs;
@@ -4862,6 +4862,42 @@ XS(XS_PerlAPI_any_true) {
     }
 }
 
+/* Code written for perl with and without MULTIPLICITY, as SWIG's wrappers
+ * are: what it declares for a perl without it has no context argument. A
+ * comparator for qsort, which has none either way, uses the API. */
+#ifndef MULTIPLICITY
+void XS_PerlAPI_sorted_ivs(CV *cv);
+static void PerlAPI_put_sorted(SV **v, I32 n);
+#endif
+static int PerlAPI_cmp_iv(const void *a, const void *b) {
+    const IV x = SvIV(*(SV *const *)a), y = SvIV(*(SV *const *)b);
+    return x < y ? -1 : x > y;
+}
+static void PerlAPI_put_sorted(pTHX_ SV **v, I32 n) {
+    qsort(v, (size_t)n, sizeof(SV *), PerlAPI_cmp_iv);
+}
+/* sorted_ivs(list): the list in numeric order. */
+XS(XS_PerlAPI_sorted_ivs) {
+    dXSARGS;
+    SV **v = (SV **)malloc(sizeof(SV *) * (size_t)(items ? items : 1));
+    I32 i;
+    for (i = 0; i < items; i++) v[i] = ST(i);
+    PerlAPI_put_sorted(aTHX_ v, items);
+    for (i = 0; i < items; i++) ST(i) = v[i];
+    free(v);
+    XSRETURN(items);
+}
+/* same_interp(): whether the interpreter (PERL_GET_CONTEXT) is the one the
+ * first call saw. */
+static PerlInterpreter *PerlAPI_first_interp;
+XS(XS_PerlAPI_same_interp) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!PerlAPI_first_interp) PerlAPI_first_interp = PERL_GET_CONTEXT;
+    ST(0) = boolSV(PerlAPI_first_interp && PerlAPI_first_interp == PERL_GET_CONTEXT);
+    XSRETURN(1);
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -5040,6 +5076,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::constant_calls", XS_PerlAPI_constant_calls);
     newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);
     newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
+    newXS_deffile("PerlAPI::sorted_ivs", XS_PerlAPI_sorted_ivs);
+    newXS_deffile("PerlAPI::same_interp", XS_PerlAPI_same_interp);
     newXS_deffile("PerlAPI::destructor_found", XS_PerlAPI_destructor_found);
     newXS_deffile("PerlAPI::show", XS_PerlAPI_show);
     newXS_deffile("PerlAPI::observe", XS_PerlAPI_observe);

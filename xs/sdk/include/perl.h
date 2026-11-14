@@ -12,9 +12,10 @@
  * v3 models enough of the interpreter surface for stack-driven, MAGIC-using,
  * pp-poking XS (the Text::Xslate class of module):
  *
- *   - pTHX plumbing: `pTHX` expands to the call frame, so every function
- *     that threads perl context (`pTHX_` / `aTHX_`) carries the frame.
- *     XSUBs have perl's real signature: void xsub(pTHX_ CV* cv).
+ *   - Context: as in perl built without MULTIPLICITY, pTHX is void and
+ *     aTHX nothing; what a native call works on is its frame, which the
+ *     loader's entries make current (goperl_cur_frame_v, per thread).
+ *     XSUBs have perl's signature there: void xsub(CV* cv).
  *   - The perl argument stack is UNIFIED with the frame: PL_stack_base /
  *     PL_stack_sp / marks live host-side (SV tokens widened to 64-bit), and
  *     guest operations exchange explicit token lists. dSP/PUSHMARK/PUTBACK/
@@ -98,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 23u
+#define GOPERL_XS_ABI 24u
 
 /* Signal actions of the process.
  *
@@ -393,44 +394,38 @@ enum {
 struct goperl_frame;
 typedef struct goperl_frame goperl_frame_t;
 
-/* pTHX: perl context threading. The "interpreter" is the live call frame. */
-/* The current activation frame lives in the goperl_cur_frame_v global,
- * maintained at every entry/exit point (dXSARGS, xs_leave, the pp-hook and
- * destructor invokers). `_gof` — the name every SDK macro reads — is an
- * alias for it, so interpreter macros work in ANY function, with or without
- * a pTHX parameter (real XS is full of THX-less helpers: Moose's
- * mop_get_code_info and friends). pTHX still declares the ABI parameter the
- * loader passes, but it is vestigial — always equal to the global while the
- * XSUB runs. */
-#define pTHX goperl_frame_t *goperl_frame_arg __attribute__((unused))
-#define pTHX_ goperl_frame_t *goperl_frame_arg __attribute__((unused)),
-#define aTHX goperl_cur_frame_v
-#define aTHX_ goperl_cur_frame_v,
+/* The interpreter's context is that of a perl built without MULTIPLICITY,
+ * as perl's default build is: functions take no context argument (pTHX is
+ * void, aTHX is nothing), and a module compiles as it does against such a
+ * perl, also where it picks its declarations by MULTIPLICITY or
+ * PERL_IMPLICIT_CONTEXT (SWIG's wrappers, qsort comparators).
+ *
+ * What a native call works on is its frame, which the loader's entry
+ * points make current before they call a module's function: the current
+ * frame lives in goperl_cur_frame_v (per thread), maintained at every entry
+ * and exit, and `_gof`, the name every SDK macro reads, is an alias for it.
+ * So the interpreter's macros work in any function, as they do in perl
+ * without MULTIPLICITY. */
+#define pTHX void
+#define pTHX_
+#define aTHX
+#define aTHX_
+#define dTHX dNOOP
+#define dTHXa(a) dNOOP
+#define aTHXa(a) NOOP
 #define _gof goperl_cur_frame_v
-/* dTHX binds goperl_frame_arg locally, so a following dXSARGS re-parses
- * the CURRENT activation (DBI's dbixst_bounce_method re-enters the
- * caller's frame after restoring its mark) instead of doing XSUB-entry
- * bookkeeping — dXSARGS skips entry work when arg == current. */
-#define dTHX \
-    goperl_frame_t *const goperl_frame_arg __attribute__((unused)) = \
-        goperl_cur_frame_v
-/* A function that has neither the parameter nor a dTHX may still say
- * dXSARGS: perl without PERL_NO_GET_CONTEXT finds its interpreter from
- * anywhere, and code is written for that — Inline::C's Inline_Stack_Vars is
- * dXSARGS in a plain C function its XSUB wrapper calls. At file scope the
- * name therefore stands for "no frame was handed over" (an object of a type
- * of its own, which the parameter and dTHX shadow), and GOPERL_FRAME_HERE
- * is the frame handed over where there is one and the current frame
- * elsewhere — where dXSARGS re-parses the current activation, as it does
- * after dTHX. */
-struct goperl_no_frame_arg {
-    char unused;
-};
-static const struct goperl_no_frame_arg goperl_frame_arg __attribute__((unused)) = {0};
-#define pTHX_1 2
-#define pTHX_2 3
-#define pTHX_3 4
-#define pTHX_4 5
+#define pTHX_1 1
+#define pTHX_2 2
+#define pTHX_3 3
+#define pTHX_4 4
+#define pTHX_5 5
+#define pTHX_6 6
+#define pTHX_7 7
+#define pTHX_8 8
+#define pTHX_9 9
+#define pTHX_10 10
+#define pTHX_11 11
+#define pTHX_12 12
 /* Format checking is off: SVf is a custom marker the compiler must not
  * try to type-check. */
 #define __attribute__format__(x, y, z)
@@ -2350,7 +2345,7 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         }
     }
     if (goperl_missing)
-        Perl_ck_warner(f, WARN_MISSING, "Missing argument in %s",
+        Perl_ck_warner(WARN_MISSING, "Missing argument in %s",
                        goperl_op_desc_now(f));
 }
 static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
@@ -2481,10 +2476,9 @@ static const char *Perl_form_nocontext(const char *fmt, ...) {
     return buf;
 }
 
-/* croak() and warn() (no context arg) are variadic macros over the local
- * frame. Perl_croak/Perl_warn/Perl_warner are called with aTHX_ — which now
- * expands to a real argument — so they must be actual variadic FUNCTIONS
- * taking pTHX_ (a macro would glue `aTHX_ fmt` into one argument). */
+/* croak() and warn() are variadic macros over the current frame;
+ * Perl_croak, Perl_warn and Perl_warner are variadic functions with perl's
+ * prototypes. */
 #define croak(...) goperl_croakf(goperl_cur_frame_v, __VA_ARGS__)
 static void Perl_croak(pTHX_ const char *fmt, ...)
     __attribute__((noreturn, unused));
@@ -3770,7 +3764,7 @@ static void goperl_sortsv_flags(goperl_frame_t *f, SV **array, size_t n,
             const size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
             size_t i = lo, j = mid, k = lo;
             while (i < mid && j < hi) {
-                I32 c = cmp(f, from[i], from[j]);
+                I32 c = cmp(from[i], from[j]);
                 if (desc) c = -c;
                 to[k++] = c <= 0 ? from[i++] : from[j++];
             }
@@ -3934,7 +3928,8 @@ static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
 #define STATIC static
 #define STATIC_INLINE static inline
 #define NOOP ((void)0)
-#define dNOOP ((void)0)
+/* a declaration, as perl's: it may come before other declarations */
+#define dNOOP struct Perl___notused_struct
 #define dVAR dNOOP
 /* Where native code that runs long lets the interpreter deliver what is
  * pending: the handler of a signal, an interruption of the program. */
@@ -4384,23 +4379,6 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
     if (f && f->jb == (void *)jb) goperl_xs_leave(f);
 }
 
-#ifdef __cplusplus
-/* Overloads need C++ linkage, and the header is usually included inside
- * extern "C". */
-extern "C++" {
-static inline goperl_frame_t *goperl_frame_handed(goperl_frame_t *frame) { return frame; }
-static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
-    return goperl_cur_frame_v;
-}
-}
-#define GOPERL_FRAME_HERE goperl_frame_handed(goperl_frame_arg)
-#else
-#define GOPERL_FRAME_HERE                                  \
-    _Generic((goperl_frame_arg),                           \
-        goperl_frame_t *: (goperl_frame_arg),              \
-        default: goperl_cur_frame_v)
-#endif
-
 /* Opens an activation on the frame: the frame becomes current, what the
  * previous activation had in it is parked on the host save-stack, and the
  * catch point of croak is the buffer declared here. */
@@ -4434,26 +4412,20 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
         }                                                  \
     }
 
-/* An XSUB the loader called through its entry (__goperl_xs_invoke) takes
- * the activation the entry opened: the frame is current and croak has its
- * catch point there. Every other dXSARGS opens an activation of its own:
- * an XSUB called by C pointer from another on the same frame (the frame's
- * catch point is then no longer the entry's), a module's own function, an
- * XSUB of a module the loader calls directly. */
+/* dXSARGS works on the current frame. An XSUB the loader called through
+ * its entry (__goperl_xs_invoke) takes the activation the entry opened:
+ * croak has its catch point there. Every other dXSARGS opens an activation
+ * of its own on the frame: an XSUB called by C pointer from another (DBI's
+ * dispatch), a module's own function (Inline::C's Inline_Stack_Vars). */
 #define dXSARGS                                            \
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave))); \
     {                                                      \
-        goperl_frame_t *const goperl_frame_here = GOPERL_FRAME_HERE; \
-        /* current-frame FIRST: the shared-state macros below resolve  \
-         * through it, and on a fresh thread the slot starts NULL */   \
-        goperl_frame_t *goperl_prev_cur = goperl_cur_frame_v;          \
-        goperl_frame_enter(goperl_frame_here);             \
-        if (goperl_frame_here == goperl_prev_cur &&        \
-            goperl_frame_here->entry_jb &&                 \
+        goperl_frame_t *const goperl_frame_here = goperl_cur_frame_v; \
+        if (goperl_frame_here->entry_jb &&                 \
             goperl_frame_here->entry_jb == goperl_frame_here->jb) \
             goperl_frame_here->entry_jb = 0;               \
         else                                               \
-            GOPERL_XS_OPEN(goperl_frame_here, goperl_prev_cur) \
+            GOPERL_XS_OPEN(goperl_frame_here, goperl_frame_here) \
     }                                                      \
     dSP;                                                   \
     dAXMARK;                                               \
@@ -4589,8 +4561,7 @@ static CV *goperl_newXS(goperl_frame_t *f, const char *name,
 #define XS_VERSION_BOOTCHECK dNOOP
 #define dXSBOOTARGSXSAPIVERCHK dXSARGS
 #define dXSBOOTARGSAPIVERCHK dXSARGS
-/* Called as Perl_xs_boot_epilog(aTHX_ ax): aTHX_ folds into the single
- * macro argument, so this must swallow whatever it gets. It is the boot
+/* Called as Perl_xs_boot_epilog(aTHX_ ax). It is the boot
  * XSUB's RETURN path (modern xsubpp emits it instead of XSRETURN_YES), so
  * it must do what XSRETURN does — set the return value and, crucially,
  * run the frame-exit bookkeeping; skipping that leaks the native nesting
@@ -5612,7 +5583,7 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
     if (d.used == GOPERL_DTOR_PLAIN)
         ((void (*)(void *))(void (*)(void))d.fn)(d.arg);
     else
-        d.fn(f, d.arg);
+        d.fn(d.arg);
     /* what the destructor stored (PAD_SVl(ix) = NULL) is the interpreter's
      * before it goes on with the scope */
     goperl_flush(f);
@@ -5633,7 +5604,7 @@ __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
     goperl_frame_enter(f);
     GOPERL_XS_OPEN(f, prev_cur)
     f->entry_jb = (void *)&_gof_jb;
-    fn(f, (CV *)(uintptr_t)cv);
+    fn((CV *)(uintptr_t)cv);
 }
 
 /* Loader entry: close any activation levels an XSUB left open. xsubpp's
@@ -5674,7 +5645,7 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
         goperl_cur_frame_v = prev_frame;
         return 0;
     }
-    fn(f, (SV *)(uintptr_t)sv, (MAGIC *)mg);
+    fn((SV *)(uintptr_t)sv, (MAGIC *)mg);
     goperl_flush(f);
     f->jb = prev_jb;
     goperl_cur_frame_v = prev_frame;
@@ -5820,7 +5791,7 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     }
     goperl_pp_seen_capture(f);
     f->plop = goperl_op_describe(f, f->hook_op_tok, GOPERL_OPDUMP_SUBTREE);
-    OP *next = fn(f);
+    OP *next = fn();
     uint64_t tok = next ? next->gop : 0;
     goperl_hostsave_settle(f, f->hostsave_base, __builtin_frame_address(0));
     if (!f->st_stale) f->pp_state = goperl_pp_state_build(f, &f->pp_state_len);
@@ -6602,25 +6573,33 @@ static const char *goperl_sv_reftype(goperl_frame_t *f, SV *sv, int ob) {
 #define Perl_modf(x, y) modf((x), (y))
 #define Perl_strtod(s, e) strtod((s), (e))
 
-/* MY_CXT: per-interpreter module state. One interpreter per process here,
- * so it collapses to one static struct. pTHX_ is NON-empty in this SDK, so
- * pMY_CXT must be a real (ignored) parameter for `(pTHX_ pMY_CXT)`
- * signatures to stay valid C. */
-#define PERL_GET_CONTEXT goperl_cur_frame_v
+/* The interpreter as perl names it (PL_curinterp, PERL_GET_CONTEXT): the
+ * instance the current native call is in, a pointer nothing reads through
+ * (NULL on a thread no native call of the interpreter's is on). */
+static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    return f ? (PerlInterpreter *)f->inst : (PerlInterpreter *)0;
+}
+#define PERL_GET_CONTEXT goperl_interp_cur()
+#define PL_curinterp goperl_interp_cur()
+
+/* MY_CXT: module state, as perl without MULTIPLICITY keeps it: one static
+ * struct, and no context argument (pMY_CXT is void). */
 #define START_MY_CXT static my_cxt_t goperl_my_cxt_v;
 #define MY_CXT goperl_my_cxt_v
-#define dMY_CXT \
-    struct goperl_dmycxt_s *goperl_dmycxt_unused __attribute__((unused)) = 0
-#define dMY_CXT_SV dMY_CXT
+#define dMY_CXT dNOOP
+#define dMY_CXT_SV dNOOP
+#define dMY_CXT_INTERP(interp) dNOOP
 #define MY_CXT_INIT \
     memset(&goperl_my_cxt_v, 0, sizeof goperl_my_cxt_v)
+#define MY_CXT_INIT_INTERP(interp) MY_CXT_INIT
 #define MY_CXT_CLONE MY_CXT_INIT
-#define pMY_CXT my_cxt_t *goperl_mycxt_unused __attribute__((unused))
-#define pMY_CXT_ pMY_CXT,
-#define _pMY_CXT , pMY_CXT
-#define aMY_CXT (&goperl_my_cxt_v)
-#define aMY_CXT_ aMY_CXT,
-#define _aMY_CXT , aMY_CXT
+#define pMY_CXT void
+#define pMY_CXT_
+#define _pMY_CXT
+#define aMY_CXT
+#define aMY_CXT_
+#define _aMY_CXT
 #define MY_CXT_KEY "goperl::_guts" XS_VERSION
 
 /* HePV is defined with the HE-shadow machinery below. */
@@ -6922,7 +6901,6 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
 #define Nullcv ((CV *)0)
 #define Nullgv ((GV *)0)
 #define Nullch ((char *)0)
-#define PERL_GET_THX goperl_cur_frame_v
 #define dTHR dNOOP
 /* The taint checks are the interpreter's: it dies (or, under -t, warns)
  * when tainted data is in use, naming the operation. */
@@ -7620,9 +7598,7 @@ static void goperl_load_module(goperl_frame_t *f, U32 flags, SV *name,
     snprintf(buf, sizeof buf, "require %.*s", (int)len, p ? p : "");
     goperl_do_op(f, GOPERL_OP_EVAL_PV, 1, 0, buf, strlen(buf));
 }
-/* Real functions, not macros: `Perl_load_module(aTHX_ flags, ...)` puts
- * aTHX_ inside the FIRST macro argument (commas from expansions come too
- * late for argument splitting), so only a function absorbs it correctly. */
+/* Functions with perl's prototypes: the module names are variadic. */
 static void Perl_load_module(pTHX_ U32 flags, SV *name, SV *ver, ...)
     __attribute__((unused));
 static void Perl_load_module(pTHX_ U32 flags, SV *name, SV *ver, ...) {
@@ -7729,10 +7705,6 @@ typedef U16 OPCODE;
 #define do_sv_dump(level, fp, sv, nest, maxnest, dumpops, pvlim)           \
     goperl_perlio_printf((fp),                     \
                          "<sv dump unavailable in the go-perl XS SDK>\n")
-/* dTHXa: the context arg is a real-perl interpreter pointer; here context
- * is the innermost live native frame, and the arg is NOT evaluated (its
- * type may not even exist without MULTIPLICITY). */
-#define dTHXa(a) dTHX
 
 /* grok_number (numeric.c): classifies a decimal number, with the integer
  * limits of the interpreter (UV_MAX above). The radix is '.': the
@@ -8116,10 +8088,6 @@ static int goperl_is_utf8_string(const U8 *s, STRLEN len) {
     return 1;
 }
 #define is_utf8_string(s, len) goperl_is_utf8_string((s), (len))
-
-/* MY_CXT lives in the v5 section above: unlike real perl without ithreads,
- * pTHX_ is NON-empty here, so pMY_CXT must be a real (ignored) parameter —
- * `void` would make `(pTHX_ pMY_CXT)` signatures invalid C. */
 
 /* Thread-clone stubs: go-perl builds without ithreads, so CLONE hooks are
  * never invoked; these only need to compile (CLONE_PARAMS is defined above
@@ -8997,8 +8965,8 @@ static OP *goperl_block_end(goperl_frame_t *f, I32 floor, OP *seq) {
 }
 #define block_start(full) goperl_block_start(_gof, (full))
 #define block_end(floor, seq) goperl_block_end(_gof, (floor), (OP *)(seq))
-#define Perl_block_start goperl_block_start
-#define Perl_block_end goperl_block_end
+#define Perl_block_start(...) goperl_block_start(_gof, __VA_ARGS__)
+#define Perl_block_end(...) goperl_block_end(_gof, __VA_ARGS__)
 
 enum {
     GOPERL_PAD_ALLOC = 0,
@@ -9029,7 +8997,7 @@ static PADOFFSET goperl_pad_findmy_pvn(goperl_frame_t *f, const char *name,
                                    name, (uint64_t)len);
 }
 #define pad_alloc(optype, tmptype) goperl_pad_alloc(_gof, (optype), (tmptype))
-#define Perl_pad_alloc goperl_pad_alloc
+#define Perl_pad_alloc(...) goperl_pad_alloc(_gof, __VA_ARGS__)
 #define pad_add_name_pvn(name, len, flags, typestash, ourstash) \
     goperl_pad_add_name_pvn(_gof, (name), (len), (flags), (typestash), (ourstash))
 #define pad_findmy_pvn(name, len, flags) \
@@ -9039,7 +9007,7 @@ static PADOFFSET goperl_pad_findmy_pvn(goperl_frame_t *f, const char *name,
 static U32 goperl_intro_my(goperl_frame_t *f) {
     return (U32)goperl_do_op(f, GOPERL_OP_PAD, GOPERL_PAD_INTRO_MY, 0, 0, 0);
 }
-#define Perl_intro_my goperl_intro_my
+#define Perl_intro_my() goperl_intro_my(_gof)
 #define padadd_NO_DUP_CHECK 0x04
 #define padadd_STATE 0x02
 
@@ -9168,7 +9136,7 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
         memcpy(wbuf, word, wordlen);
         wbuf[wordlen] = 0;
         OP *op = 0;
-        int ret = goperl_kw_head_v(f, wbuf, wordlen, &op);
+        int ret = goperl_kw_head_v(wbuf, wordlen, &op);
         if (ret != KEYWORD_PLUGIN_DECLINE) {
             goperl_optree_flush(f);
             goperl_parser_push(f);
@@ -9184,7 +9152,7 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
         if (wordlen >= sizeof(wbuf)) goperl_croakf(f, "operator too long");
         memcpy(wbuf, word, wordlen);
         wbuf[wordlen] = 0;
-        if (goperl_infix_head_v(f, wbuf, wordlen, &inf) != 0)
+        if (goperl_infix_head_v(wbuf, wordlen, &inf) != 0)
             goperl_croakf(f,
                           "custom infix operator '%s' is not supported by "
                           "the go-perl XS SDK yet",
@@ -9383,7 +9351,7 @@ static void goperl_wrap_newop_hook(goperl_frame_t *f, Optype opcode,
 }
 #define wrap_op_checker(opcode, hook, previous_p) \
     goperl_wrap_newop_hook(_gof, (opcode), (hook), (previous_p))
-#define Perl_wrap_op_checker goperl_wrap_newop_hook
+#define Perl_wrap_op_checker(...) goperl_wrap_newop_hook(_gof, __VA_ARGS__)
 
 static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg)
     __attribute__((unused));
@@ -9405,7 +9373,7 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
                  0, 0);
 }
 #define call_atexit(fn, arg) goperl_call_atexit(_gof, (fn), (arg))
-#define Perl_call_atexit goperl_call_atexit
+#define Perl_call_atexit(...) goperl_call_atexit(_gof, __VA_ARGS__)
 #define perl_atexit(fn, arg) call_atexit((fn), (arg))
 
 static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const uint32_t *req,
@@ -9437,7 +9405,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         if (reqlen < 12 || req[1] >= OP_max || !h)
             goperl_croakf(f, "host call: no op checker for the request");
         OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_SUBTREE);
-        OP *r = h->newop[req[1]](f, o);
+        OP *r = h->newop[req[1]](o);
         if (r && !r->gop)
             goperl_croakf(f, "an op checker returned an op that is not the "
                              "interpreter's");
@@ -9450,7 +9418,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         if (reqlen < 12 || req[1] > 1 || !h)
             goperl_croakf(f, "host call: no peephole hook for the request");
         OP *o = req[2] ? goperl_op_shadow_reach(f, req[2]) : 0;
-        h->peep[req[1]](f, o);
+        h->peep[req[1]](o);
         goperl_optree_flush(f);
         break;
     }
@@ -9467,7 +9435,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
             if (__atomic_sub_fetch(a.holders, 1, __ATOMIC_ACQ_REL) > 0) break;
             free(a.holders);
         }
-        if (a.fn) a.fn(f, a.arg);
+        if (a.fn) a.fn(a.arg);
         break;
     }
     case GOPERL_HOST_CALLCK: {
@@ -9475,7 +9443,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         if (reqlen < 20 || !c || req[1] == 0 || (int32_t)req[1] > c->n)
             goperl_croakf(f, "host call: no call checker for the request");
         OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_SUBTREE);
-        OP *r = c->fns[req[1] - 1](f, o, (GV *)GOPERL_SV(req[3]), GOPERL_SV(req[4]));
+        OP *r = c->fns[req[1] - 1](o, (GV *)GOPERL_SV(req[3]), GOPERL_SV(req[4]));
         if (r && !r->gop)
             goperl_croakf(f, "a call checker returned an op that is not the "
                              "interpreter's");
@@ -9497,13 +9465,13 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
             if (!v) continue;
             switch (req[1]) {
             case GOPERL_MGHOOK_GET:
-                if (v->svt_get) result = (uint32_t)v->svt_get(f, sv, mg);
+                if (v->svt_get) result = (uint32_t)v->svt_get(sv, mg);
                 break;
             case GOPERL_MGHOOK_LEN:
-                if (v->svt_len) result = v->svt_len(f, sv, mg);
+                if (v->svt_len) result = v->svt_len(sv, mg);
                 break;
             case GOPERL_MGHOOK_CLEAR:
-                if (v->svt_clear) result = (uint32_t)v->svt_clear(f, sv, mg);
+                if (v->svt_clear) result = (uint32_t)v->svt_clear(sv, mg);
                 break;
             case GOPERL_MGHOOK_COPY:
                 if (v->svt_copy && (mg->mg_flags & MGf_COPY)) {
@@ -9513,7 +9481,7 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
                         namlen == HEf_SVKEY
                             ? (const char *)GOPERL_SV(req[4])
                             : (req[4] ? (const char *)goperl_guest_mem(f, req[4]) : 0);
-                    result = (uint32_t)v->svt_copy(f, sv, mg, GOPERL_SV(req[3]), name, namlen);
+                    result = (uint32_t)v->svt_copy(sv, mg, GOPERL_SV(req[3]), name, namlen);
                 }
                 break;
             default:
@@ -9540,11 +9508,11 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         mg->mg_obj = GOPERL_SV(req[4]);
         if (is_hash) {
             /* the kind of access goes in, the key is in mg_obj */
-            if (uf->uf_val) r = uf->uf_val(f, (IV)(int32_t)req[2], sv);
+            if (uf->uf_val) r = uf->uf_val((IV)(int32_t)req[2], sv);
         } else if (req[1]) {
-            if (uf->uf_set) r = uf->uf_set(f, uf->uf_index, sv);
+            if (uf->uf_set) r = uf->uf_set(uf->uf_index, sv);
         } else {
-            if (uf->uf_val) r = uf->uf_val(f, uf->uf_index, sv);
+            if (uf->uf_val) r = uf->uf_val(uf->uf_index, sv);
         }
         resp[0] = (uint32_t)GOPERL_TOK(mg->mg_obj);
         resp[1] = (uint32_t)r;
@@ -9624,7 +9592,7 @@ static void goperl_custom_op_register(goperl_frame_t *f, Perl_ppaddr_t pp,
     h->xops[h->xop_n].number = number;
     h->xop_n++;
 }
-#define Perl_custom_op_register goperl_custom_op_register
+#define Perl_custom_op_register(...) goperl_custom_op_register(_gof, __VA_ARGS__)
 #define custom_op_register(pp, xop) \
     goperl_custom_op_register(_gof, (pp), (xop))
 /* The description an op of type OP_CUSTOM was registered with, found by the
@@ -9640,7 +9608,7 @@ static const XOP *goperl_custom_op_xop(goperl_frame_t *f, const OP *o) {
         if (h->xops[i].pp == o->op_ppaddr) return h->xops[i].xop;
     return &goperl_xop_null;
 }
-#define Perl_custom_op_xop goperl_custom_op_xop
+#define Perl_custom_op_xop(...) goperl_custom_op_xop(_gof, __VA_ARGS__)
 #define custom_op_xop(o) goperl_custom_op_xop(_gof, (o))
 
 /* ---- character classification via the guest ----------------------------- */
@@ -10346,10 +10314,9 @@ __goperl_shared_release(void *raw) {
     }
 }
 
-/* The interpreter a function of the API is called with: the current frame
- * (perl's get_context, which dTHX and PERL_GET_THX go through). */
+/* perl's get_context: the interpreter of the current native call. */
 #ifndef Perl_get_context
-#define Perl_get_context() ((void *)goperl_cur_frame_v)
+#define Perl_get_context() ((void *)goperl_interp_cur())
 #endif
 #include "goperl_longnames.h"
 

@@ -41,6 +41,20 @@ func TestNativeModuleSetsASignalAside(t *testing.T) {
 	}
 }
 
+// A module compiles and runs as against perl built without MULTIPLICITY,
+// as perl's default build is: what it declares for such a perl has no
+// context argument (an XSUB, a function of its own), and a function
+// called with none (a comparator qsort calls) uses the API. The
+// interpreter as PERL_GET_CONTEXT names it is the same from call to call.
+func TestNativeCodeWithoutContextArgument(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"sorted by a comparator that uses the API", `join ",", PerlAPI::sorted_ivs(10, 3, "7", -2, 5)`, "-2,3,5,7,10"},
+		{"the interpreter", `join ",", PerlAPI::same_interp(), PerlAPI::same_interp()`, "1,1"},
+	})
+}
+
 // A callback a module makes without G_EVAL leaves $@ as it was when the
 // code it called returns normally: only a call that asks for G_EVAL
 // empties it.

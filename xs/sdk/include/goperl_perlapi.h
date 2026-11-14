@@ -954,7 +954,6 @@ static inline UV goperl_cast_uv(NV f) {
 #define PERL_SET_CONTEXT(i) NOOP
 #define PERL_SET_THX(i) NOOP
 #define PERL_GET_INTERP PERL_GET_CONTEXT
-#define my_perl goperl_cur_frame_v
 #define dSAVEDERRNO int goperl_saved_errno
 #define dSAVE_ERRNO int goperl_saved_errno = errno
 #define SAVE_ERRNO (goperl_saved_errno = errno)
@@ -2472,9 +2471,9 @@ static Size_t goperl_strlcpy(char *dst, const char *src, Size_t size) {
 #define warn_nocontext warn
 #define Perl_warn_nocontext warn
 #define Perl_die Perl_croak
-#define Perl_newSVpvf goperl_newSVpvf
-#define Perl_sv_setpvf goperl_sv_setpvf
-#define Perl_sv_catpvf goperl_sv_catpvf
+#define Perl_newSVpvf(...) goperl_newSVpvf(_gof, __VA_ARGS__)
+#define Perl_sv_setpvf(...) goperl_sv_setpvf(_gof, __VA_ARGS__)
+#define Perl_sv_catpvf(...) goperl_sv_catpvf(_gof, __VA_ARGS__)
 #define warner(cat, ...) Perl_warner(aTHX_(cat), __VA_ARGS__)
 
 /* The fields of a hash key (hv.h); the flags byte follows the key's NUL. */
@@ -2674,7 +2673,7 @@ static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
                         ((uint64_t)GOPERL_CALL_NEW_WARNINGS << 32) | old,
                         (uint64_t)size, bits, (uint64_t)size));
 }
-#define Perl_new_warnings_bitfield goperl_new_warnings_bitfield
+#define Perl_new_warnings_bitfield(...) goperl_new_warnings_bitfield(_gof, __VA_ARGS__)
 #define new_warnings_bitfield(buffer, bits, size) \
     goperl_new_warnings_bitfield(_gof, (buffer), (bits), (size))
 
@@ -2718,7 +2717,7 @@ static void goperl_dounwind(goperl_frame_t *f, I32 cxix) {
     f->st_stale = f->pp_frame;
 }
 #define dounwind(cxix) goperl_dounwind(_gof, (cxix))
-#define Perl_dounwind goperl_dounwind
+#define Perl_dounwind(...) goperl_dounwind(_gof, __VA_ARGS__)
 #define cxstack_max \
     ((I32)(int64_t)goperl_op0(GOPERL_OP_CX, (uint64_t)GOPERL_CX_MAX << 32, 0))
 #define CX_CUR() (&cxstack[cxstack_ix])
@@ -3822,7 +3821,7 @@ static int goperl_bytes_cmp_utf8(goperl_frame_t *f, const U8 *b, STRLEN blen, co
                     if ((c1 & 0xc0) == 0x80) {
                         c = (U8)(((c & 0x03) << 6) | (c1 & 0x3f));
                     } else {
-                        Perl_ck_warner_d(f, WARN_UTF8,
+                        Perl_ck_warner_d(WARN_UTF8,
                             "Malformed UTF-8 character: \\x%02x\\x%02x (unexpected "
                             "non-continuation byte 0x%02x, immediately after start "
                             "byte 0x%02x; need 2 bytes, got 1)%s%s",
@@ -3830,7 +3829,7 @@ static int goperl_bytes_cmp_utf8(goperl_frame_t *f, const U8 *b, STRLEN blen, co
                         return -2;
                     }
                 } else {
-                    Perl_ck_warner_d(f, WARN_UTF8,
+                    Perl_ck_warner_d(WARN_UTF8,
                         "Malformed UTF-8 character (unexpected end of string)%s%s",
                         PL_op ? " in " : "", PL_op ? OP_DESC(PL_op) : "");
                     return -2;

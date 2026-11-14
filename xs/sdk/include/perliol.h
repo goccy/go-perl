@@ -253,29 +253,29 @@ __attribute__((weak)) PerlIO_funcs goperl_tail_funcs_v = {
 
 /* PerlIO_* dispatchers used by hook bodies (dispatch through the tab). */
 static SSize_t PerlIO_read(PerlIO *f, void *vbuf, Size_t count) {
-    return PerlIOBase(f)->tab->Read(goperl_cur_frame_v, f, vbuf, count);
+    return PerlIOBase(f)->tab->Read(aTHX_ f, vbuf, count);
 }
 static IV PerlIO_fill(PerlIO *f) {
-    return PerlIOBase(f)->tab->Fill(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Fill(aTHX_ f);
 }
 static IV PerlIO_eof(PerlIO *f) {
-    return PerlIOBase(f)->tab->Eof(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Eof(aTHX_ f);
 }
 static IV PerlIO_error(PerlIO *f) {
-    return PerlIOBase(f)->tab->Error(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Error(aTHX_ f);
 }
 static IV PerlIO_flush(PerlIO *f) {
     if (!PerlIOValid(f)) return 0;
-    return PerlIOBase(f)->tab->Flush(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Flush(aTHX_ f);
 }
 static STDCHAR *PerlIO_get_ptr(PerlIO *f) {
-    return PerlIOBase(f)->tab->Get_ptr(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Get_ptr(aTHX_ f);
 }
 static SSize_t PerlIO_get_cnt(PerlIO *f) {
-    return PerlIOBase(f)->tab->Get_cnt(goperl_cur_frame_v, f);
+    return PerlIOBase(f)->tab->Get_cnt(aTHX_ f);
 }
 static void PerlIO_set_ptrcnt(PerlIO *f, STDCHAR *ptr, SSize_t cnt) {
-    PerlIOBase(f)->tab->Set_ptrcnt(goperl_cur_frame_v, f, ptr, cnt);
+    PerlIOBase(f)->tab->Set_ptrcnt(aTHX_ f, ptr, cnt);
 }
 static STDCHAR *PerlIO_get_base(PerlIO *f) {
     PerlIOBuf *b = PerlIOSelf(f, PerlIOBuf);
@@ -485,7 +485,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
         }
         PerlIO *hf = &sh->fslot;
         U32 before = PerlIOBase(hf)->flags;
-        IV code = tab->Pushed(f, hf, mode, (SV *)(uintptr_t)argtok, tab);
+        IV code = tab->Pushed(hf, mode, (SV *)(uintptr_t)argtok, tab);
         U32 after = PerlIOBase(hf)->flags;
         if (code != 0) goperl_croakf(f, "layer '%s' Pushed failed", tab->name);
         uint32_t setf = after & ~before, clrf = before & ~after;
@@ -512,7 +512,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
         /* mirror the guest's sticky flags, minus buffer state */
         PerlIOBase(hf)->flags =
             (gflags & ~(U32)(PERLIO_F_RDBUF | PERLIO_F_WRBUF));
-        IV code = tab->Fill(f, hf);
+        IV code = tab->Fill(hf);
         uint32_t status = code == 0 ? 0 : 1;
         uint32_t ptrOff = (uint32_t)(b->ptr - b->buf);
         uint32_t endOff = (uint32_t)(b->end - b->buf);
