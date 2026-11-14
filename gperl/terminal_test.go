@@ -4,6 +4,7 @@ package gperl_test
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,17 +15,20 @@ import (
 // returns the handle of the master side and the path of the terminal, or
 // nothing where the system has none to give. from_master returns the next
 // line that arrives at the master side, or what has arrived of it after
-// ten seconds.
-const ptyPrelude = `
+// ten seconds. The system is the one the test runs on, not $^O, which is
+// the interpreter's own name for its system unless a configuration overlay
+// gives it the host's.
+var ptyPrelude = `
 use POSIX ();
-my %REQUEST = $^O eq 'linux'
+my $LINUX = '` + runtime.GOOS + `' eq 'linux';
+my %REQUEST = $LINUX
     ? (unlock => 0x40045431, number => 0x80045430, get_size => 0x5413, set_size => 0x5414,
        take => 0x540E, leave => 0x5422)
     : (grant => 0x20007454, unlock => 0x20007452, name => 0x40807453, get_size => 0x40087468,
        set_size => 0x80087467, take => 0x20007461, leave => 0x20007471);
 sub open_pty {
     open(my $master, '+<', '/dev/ptmx') or return;
-    if ($^O eq 'linux') {
+    if ($LINUX) {
         my $unlocked = pack('i', 0);
         ioctl($master, $REQUEST{unlock}, $unlocked) or die "unlock: $!";
         my $number = pack('I', 0);
