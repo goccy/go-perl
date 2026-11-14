@@ -4938,13 +4938,15 @@ XS(XS_PerlAPI_utf8_chars) {
 }
 
 /* same_interp(): whether the interpreter (PERL_GET_CONTEXT) is the one the
- * first call saw. */
+ * first call saw, and the context PERL_GET_THX gives none, as in a perl
+ * without MULTIPLICITY. */
 static PerlInterpreter *PerlAPI_first_interp;
 XS(XS_PerlAPI_same_interp) {
     dXSARGS;
     PERL_UNUSED_VAR(items);
     if (!PerlAPI_first_interp) PerlAPI_first_interp = PERL_GET_CONTEXT;
-    ST(0) = boolSV(PerlAPI_first_interp && PerlAPI_first_interp == PERL_GET_CONTEXT);
+    ST(0) = boolSV(PerlAPI_first_interp && PerlAPI_first_interp == PERL_GET_CONTEXT &&
+                   PERL_GET_THX == NULL);
     XSRETURN(1);
 }
 

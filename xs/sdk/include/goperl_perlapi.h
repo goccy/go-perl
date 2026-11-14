@@ -953,6 +953,9 @@ static inline UV goperl_cast_uv(NV f) {
 #define dTHXoa(x) dTHXa(x)
 #define PERL_SET_CONTEXT(i) NOOP
 #define PERL_SET_THX(i) NOOP
+/* perl without MULTIPLICITY has no context to get (DBI prints it, and
+ * Net::DNS::Native compares the one it kept with it) */
+#define PERL_GET_THX ((void *)NULL)
 #define PERL_GET_INTERP PERL_GET_CONTEXT
 #define dSAVEDERRNO int goperl_saved_errno
 #define dSAVE_ERRNO int goperl_saved_errno = errno
