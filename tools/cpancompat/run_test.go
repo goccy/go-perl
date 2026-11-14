@@ -133,6 +133,23 @@ func TestRecordStuckBlocksEachByWhatItWaitedFor(t *testing.T) {
 	}
 }
 
+func TestSettleNamesEachBlockingDistributionOnce(t *testing.T) {
+	// Two unmet modules come from one distribution that is not installed.
+	r, n := blockingRunner(t, "Runtime")
+	r.byModule = map[string]string{"Runtime::Module": "Runtime", "Runtime::Other": "Runtime"}
+	res := &result{Dist: "Dependent", Outcome: outcomeUnmet, Unmet: []unmetRequirement{
+		{Module: "Runtime::Module", Wanted: "0"},
+		{Module: "Runtime::Other", Wanted: "0"},
+	}}
+	n.attempts = 1
+	if err := r.settle(n, res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != outcomeBlocked || !reflect.DeepEqual(res.BlockedBy, []string{"Runtime"}) {
+		t.Errorf("settled as %s by %v; want blocked by Runtime once", res.Outcome, res.BlockedBy)
+	}
+}
+
 func TestSettlePutsConfigureFailureDownToMissingNeeds(t *testing.T) {
 	r, n := blockingRunner(t, "Runtime")
 	res := &result{Dist: "Dependent", Outcome: outcomeConfigureFailed}

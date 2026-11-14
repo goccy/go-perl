@@ -626,7 +626,8 @@ func (r *runner) settle(n *node, res *result) error {
 	if res.Outcome == outcomeUnmet && n.attempts < maxAttempts {
 		wait := map[string]bool{}
 		final := false
-		var blocked []string
+		// By distribution: several unmet modules can come from one.
+		blocked := map[string]bool{}
 		for _, u := range res.Unmet {
 			provider, known := r.byModule[u.Module]
 			if !known || provider == n.d.Dist {
@@ -647,7 +648,7 @@ func (r *runner) settle(n *node, res *result) error {
 				// Finished already: it is not installed, or what it
 				// installs does not meet the requirement.
 				if !m.res.Installed {
-					blocked = append(blocked, provider)
+					blocked[provider] = true
 				}
 				final = true
 				continue
@@ -662,9 +663,12 @@ func (r *runner) settle(n *node, res *result) error {
 			return nil
 		}
 		if len(blocked) > 0 {
-			sort.Strings(blocked)
 			res.Outcome = outcomeBlocked
-			res.BlockedBy = blocked
+			res.BlockedBy = nil
+			for provider := range blocked {
+				res.BlockedBy = append(res.BlockedBy, provider)
+			}
+			sort.Strings(res.BlockedBy)
 		}
 	}
 	return r.record(n, res)
