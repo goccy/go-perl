@@ -4383,6 +4383,112 @@ XS(XS_PerlAPI_statcache) {
     }
 }
 
+/* filter_double(): a source filter of native code on the file being
+ * compiled: every "21" in the lines it reads becomes "42"; it knows itself
+ * by the function its data has (IoANY), and takes itself off at the end of
+ * the file. */
+static I32 goperl_filter_double(pTHX_ int idx, SV *buf, int maxlen) {
+    const STRLEN from = SvCUR(buf);
+    const I32 n = FILTER_READ(idx + 1, buf, maxlen);
+    if (n <= 0) {
+        SV *data = FILTER_DATA(idx);
+        if (data && IoANY(data) == FPTR2DPTR(void *, goperl_filter_double))
+            filter_del(goperl_filter_double);
+        return n;
+    }
+    {
+        char *p = SvPVX(buf);
+        STRLEN i;
+        for (i = from; i + 1 < SvCUR(buf); i++)
+            if (p[i] == '2' && p[i + 1] == '1') {
+                p[i] = '4';
+                p[i + 1] = '2';
+            }
+    }
+    return n;
+}
+XS(XS_PerlAPI_filter_double) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    filter_add(goperl_filter_double, NULL);
+    XSRETURN_EMPTY;
+}
+
+/* install_kw_parser(): a keyword plugin that looks at the parser: for
+ * goperl_tok, whether the word is in PL_tokenbuf (the constant 1 or 0);
+ * goperl_drop discards the rest of the buffer (lex_unstuff) and is the
+ * constant 7. */
+static int (*goperl_next_kw2)(pTHX_ char *, STRLEN, OP **);
+static int goperl_kw_parser(pTHX_ char *kw, STRLEN len, OP **op_ptr) {
+    if (len == 10 && memcmp(kw, "goperl_tok", 10) == 0) {
+        *op_ptr = newSVOP(OP_CONST, 0, newSViv(strEQ(PL_parser->tokenbuf, "goperl_tok")));
+        return KEYWORD_PLUGIN_EXPR;
+    }
+    if (len == 11 && memcmp(kw, "goperl_drop", 11) == 0) {
+        /* the rest goes, the end of the statement comes back */
+        lex_unstuff(PL_parser->bufend);
+        lex_stuff_pvn(";", 1, 0);
+        *op_ptr = newSVOP(OP_CONST, 0, newSViv(7));
+        return KEYWORD_PLUGIN_EXPR;
+    }
+    return goperl_next_kw2(aTHX_ kw, len, op_ptr);
+}
+XS(XS_PerlAPI_install_kw_parser) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!goperl_next_kw2) {
+        goperl_next_kw2 = PL_keyword_plugin;
+        PL_keyword_plugin = goperl_kw_parser;
+    }
+    XSRETURN_EMPTY;
+}
+
+/* runloop(on): with on, PL_runops becomes a run loop of native code that
+ * counts the ops it runs (as Devel::Cover's does); without, the loop it
+ * replaced is put back. Answers the count. */
+static runops_proc_t goperl_runops_was;
+static IV goperl_runops_count;
+static int goperl_runops_counting(pTHX) {
+    while ((PL_op = PL_op->op_ppaddr(aTHX))) {
+        goperl_runops_count++;
+        PERL_ASYNC_CHECK();
+    }
+    TAINT_NOT;
+    return 0;
+}
+XS(XS_PerlAPI_runloop) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "on");
+    if (SvTRUE(ST(0))) {
+        goperl_runops_was = PL_runops;
+        goperl_runops_count = 0;
+        PL_runops = goperl_runops_counting;
+    } else {
+        PL_runops = goperl_runops_was;
+    }
+    ST(0) = sv_2mortal(newSViv(goperl_runops_count));
+    XSRETURN(1);
+}
+
+/* block_starts(): a block hook counts the blocks compiled from here on
+ * (registered at the first call); answers the count. */
+static BHK goperl_bhk;
+static IV goperl_bhk_starts;
+static void goperl_bhk_start(pTHX_ int full) {
+    PERL_UNUSED_ARG(full);
+    goperl_bhk_starts++;
+}
+XS(XS_PerlAPI_block_starts) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!BhkFLAGS(&goperl_bhk)) {
+        BhkENTRY_set(&goperl_bhk, bhk_start, goperl_bhk_start);
+        Perl_blockhook_register(aTHX_ &goperl_bhk);
+    }
+    ST(0) = sv_2mortal(newSViv(goperl_bhk_starts));
+    XSRETURN(1);
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -4620,5 +4726,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::install_kw42", XS_PerlAPI_install_kw42);
     newXS_deffile("PerlAPI::signal_names", XS_PerlAPI_signal_names);
     newXS_deffile("PerlAPI::statcache", XS_PerlAPI_statcache);
+    newXS_deffile("PerlAPI::filter_double", XS_PerlAPI_filter_double);
+    newXS_deffile("PerlAPI::install_kw_parser", XS_PerlAPI_install_kw_parser);
+    newXS_deffile("PerlAPI::runloop", XS_PerlAPI_runloop);
+    newXS_deffile("PerlAPI::block_starts", XS_PerlAPI_block_starts);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

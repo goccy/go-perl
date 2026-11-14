@@ -97,7 +97,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define GOPERL_XS_ABI 21u
+#define GOPERL_XS_ABI 22u
 
 /* Signal actions of the process.
  *
@@ -1474,6 +1474,8 @@ typedef struct goperl_shared {
                      * structures (goperl_compiler.h). New fields go last: a
                      * module built before them leaves them alone. */
     void *statcache; /* goperl_statcache_t: PL_statcache (goperl_compiler.h) */
+    void *fntab; /* goperl_fntab_t: functions of native code the interpreter
+                  * runs as its own, by id (goperl_compiler.h) */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -3451,6 +3453,7 @@ static void goperl_plshadow_flush(goperl_frame_t *f) {
 
 static void goperl_ppaddr_sync(goperl_frame_t *f);
 static void goperl_hooks_sync(goperl_frame_t *f);
+static void goperl_bhk_sync(goperl_frame_t *f);
 
 #define goperl_hints_slot_v (GOPERL_SHARED->hints_slot)
 #define goperl_hints_base_v (GOPERL_SHARED->hints_base)
@@ -3489,6 +3492,7 @@ static void goperl_flush(goperl_frame_t *f) {
     goperl_pads_flush(f);
     goperl_ppaddr_sync(f);
     goperl_hooks_sync(f);
+    goperl_bhk_sync(f);
 }
 
 /* Take a writable reference to an interpreter variable. The slot of a
@@ -5267,8 +5271,10 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
         /* real guest op under execution: run the true pp for `type`, on
          * the stack as this function leaves it */
         goperl_pp_stack_push(_gof);
+        /* the op is PL_op while its pp runs (it is already, unless a run
+         * loop of native code made it PL_op) */
         uint64_t next = goperl_do_op(_gof, GOPERL_OP_RUN_ORIGINAL,
-                                     (uint64_t)(uint32_t)type, 0, 0, 0);
+                                     (uint64_t)(uint32_t)type, (uint32_t)cur->gop, 0, 0);
         _gof->st_stale = _gof->pp_frame;
         return goperl_op_shadow(_gof, next);
     }
@@ -8119,6 +8125,12 @@ typedef struct yy_parser {
     HV *in_my_stash;
     PerlIO *rsfp;
     AV *rsfp_filters;
+    SV *lex_stuff;        /* the text of a quoted construct being scanned */
+    SV *lex_repl;         /* the replacement of an s/// or a tr/// */
+    char *lex_brackstack; /* a host view into the interpreter's memory */
+    U8 filtered;          /* source filters are applied to the text */
+    U16 last_lop_op;
+    char tokenbuf[256];
 } yy_parser;
 /* How the next token is to be read (parser->expect). */
 typedef enum {
@@ -8170,7 +8182,13 @@ enum {
     GOPERL_PARSERW_RSFP = 23,
     GOPERL_PARSERW_RSFP_FILTERS = 24,
     GOPERL_PARSERW_LEX_FORMBRACK = 25,
-    GOPERL_PARSERW_WORDS = 26
+    GOPERL_PARSERW_LEX_STUFF = 26,
+    GOPERL_PARSERW_LEX_REPL = 27,
+    GOPERL_PARSERW_LEX_BRACKSTACK = 28,
+    GOPERL_PARSERW_TOKENBUF = 29,
+    GOPERL_PARSERW_FILTERED = 30,
+    GOPERL_PARSERW_LAST_LOP_OP = 31,
+    GOPERL_PARSERW_WORDS = 32
 };
 /* parser field ids of PARSER_SET */
 enum {
@@ -8183,6 +8201,7 @@ enum {
 typedef struct goperl_parser_state {
     yy_parser parser;
     yy_parser seen;
+    uint32_t tokenbuf; /* the address of the interpreter's parser's tokenbuf */
 } goperl_parser_state_t;
 #define goperl_parser_state_v (*(goperl_parser_state_t **)&GOPERL_SHARED->parser_shadow)
 #define goperl_parser_ptr_v (*(yy_parser **)&GOPERL_SHARED->parser_ptr)
@@ -8236,6 +8255,14 @@ static void goperl_parser_pull(goperl_frame_t *f) {
     p->in_my_stash = (HV *)GOPERL_SV(w[GOPERL_PARSERW_IN_MY_STASH]);
     p->rsfp = (PerlIO *)(uintptr_t)w[GOPERL_PARSERW_RSFP];
     p->rsfp_filters = (AV *)GOPERL_SV(w[GOPERL_PARSERW_RSFP_FILTERS]);
+    p->lex_stuff = GOPERL_SV(w[GOPERL_PARSERW_LEX_STUFF]);
+    p->lex_repl = GOPERL_SV(w[GOPERL_PARSERW_LEX_REPL]);
+    p->lex_brackstack = (char *)goperl_guest_mem(f, w[GOPERL_PARSERW_LEX_BRACKSTACK]);
+    p->filtered = (U8)w[GOPERL_PARSERW_FILTERED];
+    p->last_lop_op = (U16)w[GOPERL_PARSERW_LAST_LOP_OP];
+    st->tokenbuf = w[GOPERL_PARSERW_TOKENBUF];
+    if (st->tokenbuf)
+        memcpy(p->tokenbuf, goperl_guest_mem(f, st->tokenbuf), sizeof p->tokenbuf);
     st->seen = *p;
     goperl_parser_ptr_v = p;
 }
@@ -8306,6 +8333,50 @@ static void goperl_parser_push(goperl_frame_t *f) {
         st->seen.in_my_stash = p->in_my_stash;
         goperl_xs_op(f, GOPERL_OP_PARSER_SET, 100 + GOPERL_PARSERW_IN_MY_STASH,
                      GOPERL_TOK(p->in_my_stash), 0, 0);
+    }
+    /* what native code that scans the buffer by itself stores (a lexer of
+     * its own, as Devel::Declare has): a pointer is into the interpreter's
+     * memory, the buffer's or the bracket stack's */
+#define GOPERL_PARSER_PUSH_PTR(word, field)                                      \
+    if (p->field != st->seen.field) {                                            \
+        const uint64_t g = goperl_guest_addr(f, p->field);                       \
+        if (p->field && !g)                                                      \
+            goperl_croakf(f, "PL_parser->" #field " is not in the parser's memory"); \
+        st->seen.field = p->field;                                               \
+        goperl_xs_op(f, GOPERL_OP_PARSER_SET, 100 + (word), g, 0, 0);            \
+    }
+#define GOPERL_PARSER_PUSH_VAL(word, field, value)                               \
+    if (p->field != st->seen.field) {                                            \
+        st->seen.field = p->field;                                               \
+        goperl_xs_op(f, GOPERL_OP_PARSER_SET, 100 + (word), (uint64_t)(value), 0, 0); \
+    }
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_BUFEND, bufend)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_OLDBUFPTR, oldbufptr)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_OLDOLDBUFPTR, oldoldbufptr)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_LINESTART, linestart)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_LAST_UNI, last_uni)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_LAST_LOP, last_lop)
+    GOPERL_PARSER_PUSH_PTR(GOPERL_PARSERW_LEX_BRACKSTACK, lex_brackstack)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_STUFF, lex_stuff, (uint32_t)GOPERL_TOK(p->lex_stuff))
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_REPL, lex_repl, (uint32_t)GOPERL_TOK(p->lex_repl))
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_RSFP, rsfp, (uint32_t)(uintptr_t)p->rsfp)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_RSFP_FILTERS, rsfp_filters,
+                           (uint32_t)GOPERL_TOK(p->rsfp_filters))
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_STATE, lex_state, p->lex_state)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_BRACKETS, lex_brackets, (uint32_t)p->lex_brackets)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_FORMBRACK, lex_formbrack, (uint32_t)p->lex_formbrack)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LEX_INWHAT, lex_inwhat, p->lex_inwhat)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_MULTI_START, multi_start, (uint32_t)p->multi_start)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_MULTI_END, multi_end, (uint32_t)p->multi_end)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_MULTI_OPEN, multi_open, p->multi_open)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_MULTI_CLOSE, multi_close, p->multi_close)
+    GOPERL_PARSER_PUSH_VAL(GOPERL_PARSERW_LAST_LOP_OP, last_lop_op, p->last_lop_op)
+#undef GOPERL_PARSER_PUSH_PTR
+#undef GOPERL_PARSER_PUSH_VAL
+    /* the token buffer is the parser's own memory: written in place */
+    if (st->tokenbuf && memcmp(p->tokenbuf, st->seen.tokenbuf, sizeof p->tokenbuf)) {
+        memcpy(st->seen.tokenbuf, p->tokenbuf, sizeof p->tokenbuf);
+        memcpy(goperl_guest_mem(f, st->tokenbuf), p->tokenbuf, sizeof p->tokenbuf);
     }
 }
 
@@ -9200,6 +9271,8 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
 #define Perl_call_atexit goperl_call_atexit
 #define perl_atexit(fn, arg) call_atexit((fn), (arg))
 
+static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const uint32_t *req,
+                                     uint32_t reqlen, uint32_t *resp);
 /* Loader entry: one call of native code through the host-call channel.
  * req is [kind] and the kind's words; the answer goes to resp, and its
  * length in bytes is returned. On a croak the frame carries the message. */
@@ -9334,7 +9407,10 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         break;
     }
     default:
-        goperl_croakf(f, "host call: unknown kind %u", (unsigned)req[0]);
+        /* the functions of native code the interpreter runs as its own
+         * (source filters, a run loop, block hooks: goperl_compiler.h) */
+        rlen = goperl_host_invoke_fn(f, req, reqlen, resp);
+        if (rlen < 0) goperl_croakf(f, "host call: unknown kind %u", (unsigned)req[0]);
     }
     goperl_hostsave_settle(f, f->hostsave_base, __builtin_frame_address(0));
     goperl_xs_leave(f);

@@ -739,10 +739,15 @@ static __attribute__((unused)) int goperl_curpad_av(goperl_frame_t *f, uint64_t 
     *out = 0;
     return !val || (goperl_avbody_locate(f, (const void *)(uintptr_t)val, out, &ix) && ix == 0);
 }
+static uint64_t goperl_runops_out(goperl_frame_t *f, uint64_t val);
 static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id, goperl_plshadow_t *s,
                                                        uint64_t *out) {
     if (id == GOPERL_PL_COMPPAD_NAME) {
         *out = goperl_padstruct_tok((const void *)(uintptr_t)s->val);
+        return 1;
+    }
+    if (id == 99 /* GOPERL_PL_RUNOPS */) {
+        *out = goperl_runops_out(f, s->val);
         return 1;
     }
     if (id == GOPERL_PL_MULTIDEREF_PC) {
@@ -1433,6 +1438,324 @@ static void goperl_statcache_writeback(goperl_frame_t *f) {
 }
 #define PL_statcache (*goperl_statcache_ref(_gof))
 
+/* ---- functions of native code the interpreter runs as its own ------------
+ *
+ * A source filter (filter_add), a run loop (PL_runops) and block hooks
+ * (blockhook_register) are functions the interpreter calls where it would
+ * call one of its own. It is given a function of its own that calls the
+ * module's through the host-call channel, by the id it has here: the
+ * index of the function in this instance's table, plus one. */
+#define GOPERL_FNTAB_MAX 64 /* the interpreter has as many filter functions */
+#define GOPERL_BHK_MAX 16   /* and as many block hooks */
+typedef struct block_hooks {
+    U32 bhk_flags;
+    void (*bhk_start)(pTHX_ int full);
+    void (*bhk_pre_end)(pTHX_ OP **seq);
+    void (*bhk_post_end)(pTHX_ OP **seq);
+    void (*bhk_eval)(pTHX_ OP *const saveop);
+} BHK;
+typedef struct goperl_fntab {
+    void (*fns[GOPERL_FNTAB_MAX])(void);
+    int32_t n;
+    int32_t nbhk;
+    BHK *bhks[GOPERL_BHK_MAX];
+    U32 bhk_told[GOPERL_BHK_MAX]; /* the flags the interpreter was given */
+    /* the interpreter's own run loop as native code sees it in PL_runops:
+     * one function for every module, which the interpreter is told of as
+     * its own loop when it is put back */
+    int (*interp_loop)(pTHX);
+} goperl_fntab_t;
+#define goperl_fntab_v (*(goperl_fntab_t **)&GOPERL_SHARED->fntab)
+static int goperl_runops_of_interp(pTHX);
+static goperl_fntab_t *goperl_fntab(goperl_frame_t *f) {
+    goperl_fntab_t *t = goperl_fntab_v;
+    if (!t) {
+        t = (goperl_fntab_t *)calloc(1, sizeof *t);
+        if (!t) goperl_croakf(f, "Out of memory!");
+        t->interp_loop = goperl_runops_of_interp;
+        goperl_fntab_v = t;
+    }
+    return t;
+}
+/* The id of a function, given one the first time. */
+static uint32_t goperl_fn_id(goperl_frame_t *f, void (*fn)(void)) {
+    goperl_fntab_t *t = goperl_fntab(f);
+    for (int32_t i = 0; i < t->n; i++)
+        if (t->fns[i] == fn) return (uint32_t)i + 1;
+    if (t->n >= GOPERL_FNTAB_MAX)
+        goperl_croakf(f, "too many functions of native code given to the interpreter");
+    t->fns[t->n++] = fn;
+    return (uint32_t)t->n;
+}
+static void (*goperl_fn_of(goperl_frame_t *f, uint32_t id))(void) {
+    const goperl_fntab_t *t = goperl_fntab_v;
+    if (!t || id == 0 || (int32_t)id > t->n)
+        goperl_croakf(f, "host call: no function %u of native code", (unsigned)id);
+    return t->fns[id - 1];
+}
+
+/* Source filters. The data of a filter is the module's (FILTER_DATA); the
+ * function a filter has (IoANY of the data) is the module's own function
+ * for one it added, and one that runs the interpreter's filter in that
+ * place for the others. */
+typedef I32 (*filter_t)(pTHX_ int, SV *, int);
+#define GOPERL_INT_FILTER_ADD 24
+#define GOPERL_INT_FILTER_DEL 25
+#define GOPERL_INT_FILTER_READ 26
+#define GOPERL_INT_FILTER_ID 27
+#define GOPERL_INT_SV_GETS 28
+#define GOPERL_INT_BHK_REGISTER 29
+#define GOPERL_INT_BHK_FLAGS 30
+static __attribute__((unused)) SV *goperl_filter_add(goperl_frame_t *f, filter_t fn, SV *datasv) {
+    if (!fn) return (SV *)0;
+    const uint32_t id = goperl_fn_id(f, (void (*)(void))fn);
+    return GOPERL_SV(GOPERL_INTERNAL(f, GOPERL_INT_FILTER_ADD, GOPERL_TOK(datasv), id));
+}
+static __attribute__((unused)) void goperl_filter_del(goperl_frame_t *f, filter_t fn) {
+    const goperl_fntab_t *t = goperl_fntab_v;
+    for (int32_t i = 0; t && i < t->n; i++)
+        if (t->fns[i] == (void (*)(void))fn) {
+            GOPERL_INTERNAL(f, GOPERL_INT_FILTER_DEL, 0, (uint64_t)i + 1);
+            return;
+        }
+}
+#define filter_add(fn, datasv) goperl_filter_add(_gof, (filter_t)(fn), (SV *)(datasv))
+#define filter_del(fn) goperl_filter_del(_gof, (filter_t)(fn))
+#define Perl_filter_add goperl_filter_add
+#define Perl_filter_del goperl_filter_del
+/* The next filter fills the buffer: the interpreter's filter_read. (A
+ * module with a filter_read of its own, as Devel::Declare's copy of toke.c
+ * has, gets the interpreter's for filter_read all the same, as it does on
+ * perl, whose own definition takes the name's place.) */
+static __attribute__((unused)) I32 goperl_filter_read(goperl_frame_t *f, int idx, SV *buf_sv,
+                                                      int maxlen) {
+    return (I32)(int32_t)(uint32_t)GOPERL_INTERNAL(
+        f, GOPERL_INT_FILTER_READ, GOPERL_TOK(buf_sv),
+        ((uint64_t)(uint32_t)idx << 32) | (uint32_t)maxlen);
+}
+#define filter_read(idx, sv, len) goperl_filter_read(_gof, (idx), (SV *)(sv), (len))
+#define FILTER_READ(idx, sv, len) filter_read((idx), (sv), (len))
+#define FILTER_DATA(idx) \
+    (PL_parser ? AvARRAY(PL_parser->rsfp_filters)[idx] : (SV *)0)
+#define FILTER_IS_ACTIVE(datasv) \
+    (PL_parser && PL_parser->rsfp_filters && (datasv) == FILTER_DATA(AvFILLp(PL_parser->rsfp_filters)))
+#define FILTER_ISREADER(idx) \
+    (PL_parser && PL_parser->rsfp_filters && (idx) >= AvFILLp(PL_parser->rsfp_filters))
+/* A filter of the interpreter's in the chain, run as native code would run
+ * the function in that place: by the interpreter, at the same index. */
+static I32 goperl_filter_of_interp(pTHX_ int idx, SV *buf_sv, int maxlen) {
+    return (I32)(int32_t)(uint32_t)GOPERL_INTERNAL(
+        _gof, GOPERL_INT_FILTER_READ, GOPERL_TOK(buf_sv),
+        ((uint64_t)(uint32_t)idx << 32) | (uint32_t)maxlen);
+}
+static __attribute__((unused)) void *goperl_io_any(goperl_frame_t *f, SV *datasv) {
+    const uint32_t id = (uint32_t)GOPERL_INTERNAL(f, GOPERL_INT_FILTER_ID, GOPERL_TOK(datasv), 0);
+    return id ? (void *)goperl_fn_of(f, id) : (void *)goperl_filter_of_interp;
+}
+#define IoANY(sv) goperl_io_any(_gof, (SV *)(sv))
+
+/* sv_gets: a line (or the rest) of a handle into the SV, appended at
+ * append; the buffer, or NULL at the end. */
+static __attribute__((unused)) char *goperl_sv_gets(goperl_frame_t *f, SV *sv, PerlIO *fp, I32 append) {
+    if (!GOPERL_INTERNAL(f, GOPERL_INT_SV_GETS, GOPERL_TOK(sv),
+                         ((uint64_t)(uint32_t)append << 32) | (uint32_t)(uintptr_t)fp))
+        return (char *)0;
+    return SvPVX(sv);
+}
+#define sv_gets(sv, fp, append) goperl_sv_gets(_gof, (SV *)(sv), (PerlIO *)(fp), (I32)(append))
+#define Perl_sv_gets goperl_sv_gets
+
+/* The run loop, PL_runops: the interpreter's own (which runs from PL_op
+ * when native code calls it), or one of native code. */
+typedef int (*runops_proc_t)(pTHX);
+#define GOPERL_PL_RUNOPS 99
+static int goperl_runops_of_interp(pTHX) {
+    goperl_callrunops(_gof);
+    return 0;
+}
+static __attribute__((unused)) runops_proc_t *goperl_runops_ref(goperl_frame_t *f) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[GOPERL_PL_RUNOPS];
+    if (!s->live || s->val == s->shadow) {
+        const uint32_t id = (uint32_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_RUNOPS, 0, 0, 0);
+        s->val = (uint64_t)(uintptr_t)(id ? (runops_proc_t)goperl_fn_of(f, id)
+                                          : goperl_fntab(f)->interp_loop);
+        s->shadow = s->val;
+        s->live = 1;
+    }
+    return (runops_proc_t *)&s->val;
+}
+/* What PL_runops given a function is to the interpreter (goperl_plshadow_out):
+ * its own loop, or the id of the module's. */
+static uint64_t goperl_runops_out(goperl_frame_t *f, uint64_t val) {
+    goperl_fntab_t *t = goperl_fntab(f);
+    if (!val || val == (uint64_t)(uintptr_t)t->interp_loop) return 0;
+    return goperl_fn_id(f, (void (*)(void))(uintptr_t)val);
+}
+#define PL_runops (*goperl_runops_ref(_gof))
+
+/* Block hooks. */
+#define BHKf_bhk_start 0x01
+#define BHKf_bhk_pre_end 0x02
+#define BHKf_bhk_post_end 0x04
+#define BHKf_bhk_eval 0x08
+#define BhkFLAGS(hk) ((hk)->bhk_flags)
+#define BhkENTRY(hk, which) ((BhkFLAGS(hk) & BHKf_##which) ? ((hk)->which) : NULL)
+#define BhkENABLE(hk, which) ((void)(BhkFLAGS(hk) |= BHKf_##which))
+#define BhkDISABLE(hk, which) ((void)(BhkFLAGS(hk) &= ~(BHKf_##which)))
+#define BhkENTRY_set(hk, which, ptr) \
+    ((void)((hk)->which = (ptr), BhkENABLE((hk), which)))
+#define CALL_BLOCK_HOOKS(which, arg) \
+    goperl_croakf(_gof, "CALL_BLOCK_HOOKS is the interpreter's")
+static __attribute__((unused)) void goperl_blockhook_register(goperl_frame_t *f, BHK *hk) {
+    goperl_fntab_t *t = goperl_fntab(f);
+    if (t->nbhk >= GOPERL_BHK_MAX) goperl_croakf(f, "too many block hooks registered");
+    const uint32_t id = (uint32_t)GOPERL_INTERNAL(f, GOPERL_INT_BHK_REGISTER, 0, hk->bhk_flags);
+    if (id != (uint32_t)t->nbhk + 1) goperl_croakf(f, "block hooks out of step with the interpreter");
+    t->bhks[t->nbhk] = hk;
+    t->bhk_told[t->nbhk] = hk->bhk_flags;
+    t->nbhk++;
+}
+#define Perl_blockhook_register goperl_blockhook_register
+#define blockhook_register(hk) goperl_blockhook_register(_gof, (hk))
+/* A hook enabled or disabled after it was registered (BhkDISABLE) is
+ * called by the interpreter as it is now. */
+static void goperl_bhk_sync(goperl_frame_t *f) {
+    goperl_fntab_t *t = goperl_fntab_v;
+    for (int32_t i = 0; t && i < t->nbhk; i++)
+        if (t->bhks[i]->bhk_flags != t->bhk_told[i]) {
+            t->bhk_told[i] = t->bhks[i]->bhk_flags;
+            goperl_xs_op(f, GOPERL_OP_INTERNAL,
+                         ((uint64_t)GOPERL_INT_BHK_FLAGS << 32) | (uint32_t)(i + 1),
+                         t->bhk_told[i], 0, 0);
+        }
+}
+
+/* The host-call kinds of these functions. */
+enum { GOPERL_HOST_FILTER = 6, GOPERL_HOST_RUNOPS = 7, GOPERL_HOST_BHK = 8 };
+static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const uint32_t *req,
+                                     uint32_t reqlen, uint32_t *resp) {
+    switch (req[0]) {
+    case GOPERL_HOST_FILTER: { /* [id][idx][buf][maxlen] -> [result] */
+        if (reqlen < 20) goperl_croakf(f, "host call: short filter request");
+        const filter_t fn = (filter_t)goperl_fn_of(f, req[1]);
+        goperl_flush(f);
+        resp[0] = (uint32_t)fn(f, (int)(int32_t)req[2], GOPERL_SV(req[3]), (int)(int32_t)req[4]);
+        return 4;
+    }
+    case GOPERL_HOST_RUNOPS: { /* [id] */
+        if (reqlen < 8) goperl_croakf(f, "host call: short run loop request");
+        const runops_proc_t fn = (runops_proc_t)goperl_fn_of(f, req[1]);
+        goperl_flush(f);
+        fn(f);
+        return 0;
+    }
+    case GOPERL_HOST_BHK: { /* [id][which][arg] -> [op] */
+        const goperl_fntab_t *t = goperl_fntab_v;
+        if (reqlen < 16 || !t || req[1] == 0 || (int32_t)req[1] > t->nbhk)
+            goperl_croakf(f, "host call: no block hook for the request");
+        BHK *hk = t->bhks[req[1] - 1];
+        OP *o = (OP *)0;
+        goperl_flush(f);
+        switch (req[2]) {
+        case 0:
+            if (BhkENTRY(hk, bhk_start)) hk->bhk_start(f, (int)(int32_t)req[3]);
+            break;
+        case 1:
+        case 2:
+            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
+            if (req[2] == 1 && BhkENTRY(hk, bhk_pre_end)) hk->bhk_pre_end(f, &o);
+            if (req[2] == 2 && BhkENTRY(hk, bhk_post_end)) hk->bhk_post_end(f, &o);
+            if (o && !o->gop)
+                goperl_croakf(f, "a block hook returned an op that is not the interpreter's");
+            break;
+        case 3:
+            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
+            if (BhkENTRY(hk, bhk_eval)) hk->bhk_eval(f, o);
+            break;
+        default:
+            goperl_croakf(f, "host call: unknown block hook %u", (unsigned)req[2]);
+        }
+        goperl_optree_flush(f);
+        resp[0] = o ? (uint32_t)o->gop : 0;
+        return 4;
+    }
+    }
+    return -1;
+}
+
+/* The lexer's buffer, as the interpreter handles it. */
+#define GOPERL_LEX_UNSTUFF 6
+#define GOPERL_LEX_GROW_LINESTR 7
+#define GOPERL_LEX_NEXT_CHUNK 8
+#define GOPERL_LEX_DISCARD_TO 9
+static __attribute__((unused)) void goperl_lex_at(goperl_frame_t *f, int sel, const char *ptr) {
+    const uint64_t g = goperl_guest_addr(f, ptr);
+    if (!g) goperl_croakf(f, "a lexer position outside of the buffer");
+    goperl_do_op(f, GOPERL_OP_LEX, (uint64_t)sel, g, 0, 0);
+}
+#define lex_unstuff(ptr) goperl_lex_at(_gof, GOPERL_LEX_UNSTUFF, (const char *)(ptr))
+#define lex_discard_to(ptr) goperl_lex_at(_gof, GOPERL_LEX_DISCARD_TO, (const char *)(ptr))
+#define lex_grow_linestr(len) \
+    ((char *)goperl_guest_mem(_gof, goperl_op0(GOPERL_OP_LEX, GOPERL_LEX_GROW_LINESTR, (STRLEN)(len))))
+#define lex_next_chunk(flags) \
+    ((bool)goperl_op0(GOPERL_OP_LEX, GOPERL_LEX_NEXT_CHUNK, (U32)(flags)))
+#define Perl_lex_unstuff(ctx, ptr) lex_unstuff(ptr)
+
+/* -n and -p, which the end of the program's text closes the loop of. */
+#define GOPERL_PL_MINUS_N 97
+#define GOPERL_PL_MINUS_P 98
+#define PL_minus_n (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_MINUS_N))
+#define PL_minus_p (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_MINUS_P))
+
+/* The rest of what a copy of toke.c in a module uses. */
+#define GOPERL_CALL_SV_CAT_DECODE 21
+static __attribute__((unused)) bool goperl_sv_cat_decode(goperl_frame_t *f, SV *dsv, SV *encoding,
+                                                         SV *ssv, int *offset, char *tstr, int tlen) {
+    const size_t n = 4 * sizeof(uint32_t) + (size_t)(tlen > 0 ? tlen : 0);
+    char *req = (char *)malloc(n);
+    if (!req) goperl_croakf(f, "Out of memory!");
+    const uint32_t w[4] = {(uint32_t)GOPERL_TOK(encoding), (uint32_t)GOPERL_TOK(ssv),
+                           (uint32_t)*offset, (uint32_t)tlen};
+    memcpy(req, w, sizeof w);
+    if (tlen > 0) memcpy(req + sizeof w, tstr, (size_t)tlen);
+    const uint64_t r = goperl_do_op(f, GOPERL_OP_CALL,
+                                    ((uint64_t)GOPERL_CALL_SV_CAT_DECODE << 32) | (uint32_t)GOPERL_TOK(dsv),
+                                    0, req, n);
+    free(req);
+    *offset = (int)(int32_t)(uint32_t)(r >> 32);
+    return (r & 1) != 0;
+}
+#define sv_cat_decode(dsv, enc, ssv, offset, tstr, tlen) \
+    goperl_sv_cat_decode(_gof, (SV *)(dsv), (SV *)(enc), (SV *)(ssv), (offset), (char *)(tstr), (int)(tlen))
+#define Perl_sv_cat_decode goperl_sv_cat_decode
+/* The encoding of the program's text: gone from perl (the encoding pragma
+ * no longer sets it), as perl.h says outside the core. */
+#define PL_encoding ((SV *)NULL)
+/* -Dp's tracing: this perl is not a DEBUGGING build. */
+#define DEBUG_P(a)
+#define DEBUG_P_TEST 0
+#ifndef isWORDCHAR_A
+#define isWORDCHAR_A(c) isALNUM(c)
+#endif
+#ifndef isIDFIRST_lazy_if
+#define isIDFIRST_lazy_if(p, UTF) \
+    ((!(UTF) || UTF8_IS_INVARIANT(*(p))) ? isIDFIRST(*(p)) : isIDFIRST_utf8_safe((const U8 *)(p), (const U8 *)(p) + UTF8SKIP(p)))
+#endif
+#ifndef isALNUM_lazy_if
+#define isALNUM_lazy_if(p, UTF) \
+    ((!(UTF) || UTF8_IS_INVARIANT(*(p))) ? isALNUM(*(p)) : isIDCONT_utf8_safe((const U8 *)(p), (const U8 *)(p) + UTF8SKIP(p)))
+#endif
+#ifndef toCTRL
+#define toCTRL(c) (toUPPER((U8)(c)) ^ 64)
+#endif
+/* The file of a COP is let go of (CopFILE_set gives it the next one). */
+static __attribute__((unused)) void goperl_cop_file_free(goperl_frame_t *f, COP *c) {
+    if (c->gop)
+        goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)GOPERL_CALL_COP_SET << 32) | (uint32_t)c->gop,
+                     (uint64_t)6 /* FILE_FREE */ << 32, 0, 0);
+    c->cop_file = 0;
+}
+#define CopFILE_free(c) goperl_cop_file_free(_gof, (COP *)(c))
 /* Whether the interpreter's allocator returns NULL instead of ending the
  * process when it has no memory. */
 #define PL_nomemok (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_NOMEMOK))
