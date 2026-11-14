@@ -52,6 +52,12 @@
 #  define _GNU_SOURCE 1
 #endif
 
+/* The interpreter is not a DEBUGGING build: as perl's perl.h does, the
+ * assertions of the C library are off in the code compiled against it
+ * (assert() is the perl API's assertion, which such a build leaves out). */
+#if !defined(DEBUGGING) && !defined(NDEBUG)
+#  define NDEBUG 1
+#endif
 #include <assert.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -491,12 +497,18 @@ typedef struct op METHOP;
 typedef struct op PADOP;
 typedef struct op UNOP_AUX;
 typedef OP *(*Perl_ppaddr_t)(pTHX);
+/* An item of an op's auxiliary data. The items of an op of the
+ * interpreter's (a multideref's) are its memory, where an item is as wide
+ * as here (an IV is 64 bits there too) but a pointer or a pad offset fills
+ * only the low half of it: pad_offset is that half, and UNOP_AUX_item_sv
+ * reads an SV from it. */
 typedef union {
     SV *sv;
     UV uv;
     IV iv;
     char *pv;
     SSize_t ssize;
+    U32 pad_offset;
 } UNOP_AUX_item;
 /* BASEOP mirrors real perl's role: a dist declaring its own op struct
  * (struct myop { BASEOP OP *op_first; OP *op_other; ... }) gets the same
@@ -1461,6 +1473,7 @@ typedef struct goperl_shared {
     void *compiler; /* goperl_compiler_state_t: the shadows of the compiler's
                      * structures (goperl_compiler.h). New fields go last: a
                      * module built before them leaves them alone. */
+    void *statcache; /* goperl_statcache_t: PL_statcache (goperl_compiler.h) */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -2688,12 +2701,14 @@ static SV *goperl_vnewSVpvf(goperl_frame_t *f, const char *fmt, va_list *ap) {
 
 static SV *goperl_mess(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((unused));
+/* mess: the formatted text, and where the program is (" at FILE line N.")
+ * when the text does not end with a newline, as perl's mess_sv adds it. */
 static SV *goperl_mess(goperl_frame_t *f, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     uint64_t sv = goperl_vtext_sv(f, 1, fmt, ap);
     va_end(ap);
-    return (SV *)(uintptr_t)sv;
+    return GOPERL_SV(goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)7 /* MESS_SV */ << 32) | (uint32_t)sv, 1, 0, 0));
 }
 #define mess(...) goperl_mess(_gof, __VA_ARGS__)
 
@@ -3444,10 +3459,14 @@ static void goperl_hooks_sync(goperl_frame_t *f);
 static void goperl_parser_push(goperl_frame_t *f);
 static void goperl_curcop_writeback(goperl_frame_t *f);
 static void goperl_pads_flush(goperl_frame_t *f);
+static void goperl_cx_writeback(goperl_frame_t *f);
+static void goperl_statcache_writeback(goperl_frame_t *f);
 static void goperl_flush(goperl_frame_t *f) {
     goperl_svcur_writeback(f);
     goperl_curcop_writeback(f);
     goperl_parser_push(f);
+    goperl_cx_writeback(f);
+    goperl_statcache_writeback(f);
     if (goperl_hints_live_v && goperl_hints_slot_v != goperl_hints_base_v) {
         goperl_hints_base_v = goperl_hints_slot_v;
         goperl_xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)GOPERL_PL_HINTS,
@@ -5793,6 +5812,9 @@ struct goperl_si {
        CxTYPE(goperl_CxTYPE_is_LOOP_cx_) >= CXt_LOOP_ARY && CxTYPE(goperl_CxTYPE_is_LOOP_cx_) <= CXt_LOOP_PLAIN; })
 #define CxMULTICALL(cx) (((cx)->cx_type & CXp_MULTICALL) != 0)
 #define CxHASARGS(cx) (((cx)->cx_type & CXp_HASARGS) != 0)
+/* The lvalue flags (OPpLVAL_INTRO, OPpENTERSUB_INARGS) a sub was called
+ * with, kept in the low byte of blk_u16 (cop.h). */
+#define CxLVAL(cx) (0 + ((U8)((cx)->blk_u16)))
 #define CxREALEVAL(cx) \
     (((cx)->cx_type & (CXTYPEMASK | CXp_REAL)) == (CXt_EVAL | CXp_REAL))
 #define CxEVALBLOCK(cx) \
@@ -5954,8 +5976,10 @@ static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
     si->si_cxix =
         (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 3, 0, 0);
     I32 n = si->si_cxix + 1;
+    /* the contexts, then what each was when it was read (what native code
+     * stores into one goes to the interpreter: goperl_cx_writeback) */
     si->si_cxstack = (PERL_CONTEXT *)goperl_arena_alloc(
-        sizeof(PERL_CONTEXT) * (size_t)(n > 0 ? n : 1));
+        sizeof(PERL_CONTEXT) * 2 * (size_t)(n > 0 ? n : 1));
     if (!si->si_cxstack) goperl_croakf(f, "context shadow: out of memory");
     for (I32 i = 0; i < n; i++) {
         PERL_CONTEXT *cx = &si->si_cxstack[i];
@@ -6001,6 +6025,7 @@ static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
             cx->blk_loop.my_op = goperl_op_shadow_full(f, c[10]);
             break;
         }
+        si->si_cxstack[n + i] = *cx;
     }
     uint64_t prev =
         goperl_do_op(f, GOPERL_OP_SI_GET, tok, 1, 0, 0);
@@ -6018,6 +6043,130 @@ static PERL_SI *goperl_si_cur(goperl_frame_t *f) {
     return goperl_si_cache_v;
 }
 #define PL_curstackinfo (goperl_si_cur(_gof))
+
+/* CX selectors. */
+enum { GOPERL_CX_DUMP = 0, GOPERL_CX_DOUNWIND = 1, GOPERL_CX_MAX = 2, GOPERL_CX_SET = 3 };
+
+/* What native code stored into the contexts it was shown goes to the
+ * interpreter's contexts, field by field, before the next operation and
+ * before the contexts are read again. Native code may store into a context
+ * it was shown before an operation (one that reads PL_op, say): the
+ * context is the interpreter's still when the interpreter has it as it was
+ * shown, and then it is written; one that is not (popped, or another in
+ * its place) is left alone. */
+static uint32_t goperl_cx_op_tok(goperl_frame_t *f, const OP *o) {
+    if (o && !o->gop)
+        goperl_croakf(f, "an op stored into a context is not the interpreter's");
+    return o ? (uint32_t)o->gop : 0;
+}
+/* A context as the words CX_DUMP gives (fields 0 to 14). */
+static void goperl_cx_words(const PERL_CONTEXT *cx, uint32_t *w) {
+    memset(w, 0, 15 * sizeof *w);
+    w[0] = cx->cx_type;
+    w[1] = cx->blk_gimme;
+    w[2] = cx->blk_u16;
+    w[3] = (uint32_t)cx->blk_oldsaveix;
+    w[4] = (uint32_t)cx->blk_oldsp;
+    w[5] = (uint32_t)cx->blk_oldmarksp;
+    w[6] = (uint32_t)cx->blk_oldscopesp;
+    w[7] = cx->blk_oldcop ? (uint32_t)cx->blk_oldcop->gop : 0;
+    w[8] = cx->blk_oldpm ? (uint32_t)cx->blk_oldpm->gop : 0;
+    w[9] = (uint32_t)cx->blk_old_tmpsfloor;
+    switch (cx->cx_type & CXTYPEMASK) {
+    case CXt_SUB:
+        w[10] = (uint32_t)GOPERL_TOK(cx->blk_sub.cv);
+        w[11] = cx->blk_sub.retop ? (uint32_t)cx->blk_sub.retop->gop : 0;
+        w[12] = (uint32_t)cx->blk_sub.olddepth;
+        w[13] = (uint32_t)GOPERL_TOK(cx->blk_sub.savearray);
+        w[14] = (uint32_t)GOPERL_TOK(cx->blk_sub.prevcomppad);
+        break;
+    case CXt_FORMAT:
+        w[10] = (uint32_t)GOPERL_TOK(cx->blk_format.cv);
+        w[11] = cx->blk_format.retop ? (uint32_t)cx->blk_format.retop->gop : 0;
+        break;
+    case CXt_EVAL:
+        w[10] = cx->blk_eval.retop ? (uint32_t)cx->blk_eval.retop->gop : 0;
+        w[11] = (uint32_t)GOPERL_TOK(cx->blk_eval.old_namesv);
+        w[12] = (uint32_t)GOPERL_TOK(cx->blk_eval.cur_text);
+        w[13] = (uint32_t)GOPERL_TOK(cx->blk_eval.cv);
+        w[14] = cx->blk_eval.old_eval_root ? (uint32_t)cx->blk_eval.old_eval_root->gop : 0;
+        break;
+    default:
+        if (CxTYPE_is_LOOP(cx))
+            w[10] = cx->blk_loop.my_op ? (uint32_t)cx->blk_loop.my_op->gop : 0;
+        break;
+    }
+}
+/* The interpreter has the context as it was shown. */
+static int goperl_cx_unchanged(goperl_frame_t *f, uint64_t si_tok, I32 ix,
+                               const PERL_CONTEXT *was) {
+    uint32_t want[15];
+    const uint32_t *now = (const uint32_t *)goperl_guest_mem(
+        f, goperl_xs_op(f, GOPERL_OP_CX, (uint32_t)si_tok, (uint64_t)(int64_t)ix, 0, 0));
+    if (!now) return 0;
+    goperl_cx_words(was, want);
+    return !memcmp(now, want, sizeof want);
+}
+static void goperl_cx_set(goperl_frame_t *f, uint64_t si_tok, I32 ix,
+                          uint32_t field, uint32_t value) {
+    const uint32_t w[3] = {(uint32_t)ix, field, value};
+    goperl_xs_op(f, GOPERL_OP_CX, ((uint64_t)GOPERL_CX_SET << 32) | (uint32_t)si_tok,
+                 0, (const char *)w, sizeof w);
+}
+static void goperl_cx_writeback(goperl_frame_t *f) {
+    if (!goperl_si_cache_v) return;
+    const int fresh = goperl_si_gen_v == goperl_gen_v;
+    for (PERL_SI *si = goperl_si_cache_v; si; si = si->si_prev) {
+        const I32 n = si->si_cxix + 1;
+        for (I32 i = 0; i < n; i++) {
+            PERL_CONTEXT *cx = &si->si_cxstack[i], *was = &si->si_cxstack[n + i];
+            if (!memcmp(cx, was, sizeof *cx)) continue;
+            if (!fresh && !goperl_cx_unchanged(f, si->tok, i, was)) {
+                *cx = *was;
+                continue;
+            }
+#define GOPERL_CX_FIELD(id, member, value)                             \
+            if (cx->member != was->member)                             \
+                goperl_cx_set(f, si->tok, i, (id), (uint32_t)(value));
+            GOPERL_CX_FIELD(0, cx_type, cx->cx_type)
+            GOPERL_CX_FIELD(1, blk_gimme, cx->blk_gimme)
+            GOPERL_CX_FIELD(2, blk_u16, cx->blk_u16)
+            GOPERL_CX_FIELD(3, blk_oldsaveix, cx->blk_oldsaveix)
+            GOPERL_CX_FIELD(4, blk_oldsp, cx->blk_oldsp)
+            GOPERL_CX_FIELD(5, blk_oldmarksp, cx->blk_oldmarksp)
+            GOPERL_CX_FIELD(6, blk_oldscopesp, cx->blk_oldscopesp)
+            GOPERL_CX_FIELD(7, blk_oldcop, goperl_cx_op_tok(f, cx->blk_oldcop))
+            GOPERL_CX_FIELD(8, blk_oldpm, goperl_cx_op_tok(f, cx->blk_oldpm))
+            GOPERL_CX_FIELD(9, blk_old_tmpsfloor, cx->blk_old_tmpsfloor)
+            switch (was->cx_type & CXTYPEMASK) {
+            case CXt_SUB:
+                GOPERL_CX_FIELD(10, blk_sub.cv, GOPERL_TOK(cx->blk_sub.cv))
+                GOPERL_CX_FIELD(11, blk_sub.retop, goperl_cx_op_tok(f, cx->blk_sub.retop))
+                GOPERL_CX_FIELD(12, blk_sub.olddepth, cx->blk_sub.olddepth)
+                GOPERL_CX_FIELD(13, blk_sub.savearray, GOPERL_TOK(cx->blk_sub.savearray))
+                GOPERL_CX_FIELD(14, blk_sub.prevcomppad, GOPERL_TOK(cx->blk_sub.prevcomppad))
+                break;
+            case CXt_FORMAT:
+                GOPERL_CX_FIELD(10, blk_format.cv, GOPERL_TOK(cx->blk_format.cv))
+                GOPERL_CX_FIELD(11, blk_format.retop, goperl_cx_op_tok(f, cx->blk_format.retop))
+                break;
+            case CXt_EVAL:
+                GOPERL_CX_FIELD(10, blk_eval.retop, goperl_cx_op_tok(f, cx->blk_eval.retop))
+                GOPERL_CX_FIELD(11, blk_eval.old_namesv, GOPERL_TOK(cx->blk_eval.old_namesv))
+                GOPERL_CX_FIELD(12, blk_eval.cur_text, GOPERL_TOK(cx->blk_eval.cur_text))
+                GOPERL_CX_FIELD(13, blk_eval.cv, GOPERL_TOK(cx->blk_eval.cv))
+                GOPERL_CX_FIELD(14, blk_eval.old_eval_root, goperl_cx_op_tok(f, cx->blk_eval.old_eval_root))
+                break;
+            default:
+                if (CxTYPE_is_LOOP(was))
+                    GOPERL_CX_FIELD(10, blk_loop.my_op, goperl_cx_op_tok(f, cx->blk_loop.my_op))
+                break;
+            }
+#undef GOPERL_CX_FIELD
+            *was = *cx;
+        }
+    }
+}
 
 /* caller_cx: the interpreter finds the frame (skipping the debugger's own
  * and crossing stackinfos, as caller does); the answer is the shadow of
@@ -8711,9 +8860,17 @@ static int goperl_kw_decline(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
     return KEYWORD_PLUGIN_DECLINE;
 }
 #define goperl_kw_head_v (*(Perl_keyword_plugin_t *)&GOPERL_SHARED->kw_head)
-/* PL_keyword_plugin only appears in wrap_keyword_plugin-style compare/
- * assign bookkeeping; hand dists the chain head slot. */
-#define PL_keyword_plugin (goperl_kw_head_v)
+/* PL_keyword_plugin is the head of the chain: perl's own plugin, which
+ * declines every word, until a module puts one of its own there, keeping
+ * the one it found to call for the words it declines (the way of modules
+ * older than wrap_keyword_plugin). The interpreter hands its words to the
+ * chain from the moment a module looks at it. */
+static Perl_keyword_plugin_t *goperl_kw_plugin_ref(goperl_frame_t *f) {
+    if (!goperl_kw_head_v) goperl_kw_head_v = goperl_kw_decline;
+    goperl_do_op(f, GOPERL_OP_KEYWORD_ENABLE, 0, 0, 0, 0);
+    return &goperl_kw_head_v;
+}
+#define PL_keyword_plugin (*goperl_kw_plugin_ref(_gof))
 
 static void goperl_wrap_keyword_plugin(goperl_frame_t *f,
                                        Perl_keyword_plugin_t func,

@@ -33,7 +33,9 @@ enum {
     GOPERL_INT_OBJ_FIELDS_NEW = 18,
     GOPERL_INT_PARSER_NEW = 19,
     GOPERL_INT_HV_ARRAY = 20,
-    GOPERL_INT_PERLIO_DEBUG = 21
+    GOPERL_INT_PERLIO_DEBUG = 21,
+    GOPERL_INT_SV_PV_FREE = 22,
+    GOPERL_INT_STATCACHE = 23
 };
 /* The fields of a sub (INTERNAL CV_GET / CV_SET). */
 enum {
@@ -50,6 +52,10 @@ enum {
 };
 /* An interpreter variable that is only ever saved (the parser is CALL 15's). */
 #define GOPERL_PL_PARSER 94
+/* PL_multideref_pc (an address of the interpreter's memory there, one in
+ * this process here) and PL_nomemok. */
+#define GOPERL_PL_MULTIDEREF_PC 95
+#define GOPERL_PL_NOMEMOK 96
 #define GOPERL_INTERNAL(f, sel, tok, b)                                     \
     goperl_do_op((f), GOPERL_OP_INTERNAL,                                   \
                  ((uint64_t)(sel) << 32) | (uint32_t)(uint64_t)(tok),       \
@@ -739,6 +745,13 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
         *out = goperl_padstruct_tok((const void *)(uintptr_t)s->val);
         return 1;
     }
+    if (id == GOPERL_PL_MULTIDEREF_PC) {
+        /* the items of an op's auxiliary data are the interpreter's */
+        *out = goperl_guest_addr(f, (const void *)(uintptr_t)s->val);
+        if (s->val && !*out)
+            goperl_croakf(f, "PL_multideref_pc points outside the interpreter's memory");
+        return 1;
+    }
     if (id == GOPERL_PL_CURPAD) {
         goperl_compiler_state_t *const c = goperl_compiler(f);
         if (goperl_curpad_av(f, s->val, out)) {
@@ -1325,5 +1338,103 @@ static __attribute__((unused)) void goperl_perlio_debug(goperl_frame_t *f, const
     goperl_text_free(&t);
 }
 #define PerlIO_debug(...) goperl_perlio_debug(_gof, __VA_ARGS__)
+
+/* SvPV_free: the string buffer the SV owns goes back to the interpreter's
+ * allocator (a buffer whose start was chopped off as a whole); the length
+ * and the pointer are the caller's to set next, as on perl. */
+#define SvPV_free(sv)                                                        \
+    ((void)GOPERL_INTERNAL(_gof, GOPERL_INT_SV_PV_FREE, GOPERL_TOK(sv), 0))
+
+/* A compile error is queued: the parse goes on and the compilation fails
+ * at its end with every queued message (perl's defer_error, and qerror,
+ * its older name). */
+#define GOPERL_CALL_QERROR 20
+static __attribute__((unused)) void goperl_defer_error(goperl_frame_t *f, SV *err) {
+    goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)GOPERL_CALL_QERROR << 32) | (uint32_t)GOPERL_TOK(err),
+                 0, 0, 0);
+}
+#define defer_error(err) goperl_defer_error(_gof, (SV *)(err))
+#define qerror(err) goperl_defer_error(_gof, (SV *)(err))
+#define Perl_defer_error goperl_defer_error
+#define Perl_qerror goperl_defer_error
+
+/* PL_multideref_pc is the item of a multideref's auxiliary data being run,
+ * which native code running a multideref op of its own keeps up to date
+ * (the messages about undefined values name the element by it): in this
+ * process, a pointer into the items an op's op_aux designates. */
+static __attribute__((unused)) UNOP_AUX_item **goperl_multideref_pc_ref(goperl_frame_t *f) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[GOPERL_PL_MULTIDEREF_PC];
+    if (!s->live || s->val == s->shadow) {
+        s->val = (uint64_t)(uintptr_t)goperl_guest_mem(
+            f, goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_MULTIDEREF_PC, 0, 0, 0));
+        s->shadow = s->val;
+        s->live = 1;
+    }
+    return (UNOP_AUX_item **)&s->val;
+}
+#define PL_multideref_pc (*goperl_multideref_pc_ref(_gof))
+
+/* PL_statcache, what the last stat found and -X _ reads, as a struct stat
+ * of this process: read from the interpreter when native code first looks
+ * at it after an operation, and what native code stored into it goes back
+ * before the next one (EV fills it with what its own stat found). */
+typedef struct goperl_statcache {
+    struct stat st;   /* as native code sees it */
+    struct stat seen; /* as it was read */
+    uint64_t gen;     /* GOPERL_SHARED->gen + 1 when it was read */
+} goperl_statcache_t;
+#define goperl_statcache_v (*(goperl_statcache_t **)&GOPERL_SHARED->statcache)
+#define GOPERL_STATCACHE_WORDS 13
+static __attribute__((unused)) struct stat *goperl_statcache_ref(goperl_frame_t *f) {
+    goperl_statcache_t *c = goperl_statcache_v;
+    if (!c) {
+        c = (goperl_statcache_t *)calloc(1, sizeof *c);
+        if (!c) goperl_croakf(f, "Out of memory!");
+        goperl_statcache_v = c;
+    }
+    if (c->gen != GOPERL_SHARED->gen + 1) {
+        uint64_t w[GOPERL_STATCACHE_WORDS];
+        memcpy(w, goperl_guest_mem(f, goperl_xs_op(f, GOPERL_OP_INTERNAL,
+                                                   (uint64_t)GOPERL_INT_STATCACHE << 32, 0, 0, 0)),
+               sizeof w);
+        memset(&c->st, 0, sizeof c->st);
+        c->st.st_dev = (dev_t)w[0];
+        c->st.st_ino = (ino_t)w[1];
+        c->st.st_mode = (mode_t)w[2];
+        c->st.st_nlink = (nlink_t)w[3];
+        c->st.st_uid = (uid_t)w[4];
+        c->st.st_gid = (gid_t)w[5];
+        c->st.st_rdev = (dev_t)w[6];
+        c->st.st_size = (off_t)(int64_t)w[7];
+        c->st.st_atime = (time_t)(int64_t)w[8];
+        c->st.st_mtime = (time_t)(int64_t)w[9];
+        c->st.st_ctime = (time_t)(int64_t)w[10];
+        c->st.st_blksize = (blksize_t)(int64_t)w[11];
+        c->st.st_blocks = (blkcnt_t)(int64_t)w[12];
+        c->seen = c->st;
+        c->gen = GOPERL_SHARED->gen + 1;
+    }
+    return &c->st;
+}
+static void goperl_statcache_writeback(goperl_frame_t *f) {
+    goperl_statcache_t *c = goperl_statcache_v;
+    if (!c || c->gen != GOPERL_SHARED->gen + 1 || !memcmp(&c->st, &c->seen, sizeof c->st))
+        return;
+    const uint64_t w[GOPERL_STATCACHE_WORDS] = {
+        (uint64_t)c->st.st_dev, (uint64_t)c->st.st_ino, (uint64_t)c->st.st_mode,
+        (uint64_t)c->st.st_nlink, (uint64_t)c->st.st_uid, (uint64_t)c->st.st_gid,
+        (uint64_t)c->st.st_rdev, (uint64_t)(int64_t)c->st.st_size,
+        (uint64_t)(int64_t)c->st.st_atime, (uint64_t)(int64_t)c->st.st_mtime,
+        (uint64_t)(int64_t)c->st.st_ctime, (uint64_t)(int64_t)c->st.st_blksize,
+        (uint64_t)(int64_t)c->st.st_blocks};
+    c->seen = c->st;
+    goperl_xs_op(f, GOPERL_OP_INTERNAL, (uint64_t)GOPERL_INT_STATCACHE << 32, 1,
+                 (const char *)w, sizeof w);
+}
+#define PL_statcache (*goperl_statcache_ref(_gof))
+
+/* Whether the interpreter's allocator returns NULL instead of ending the
+ * process when it has no memory. */
+#define PL_nomemok (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_NOMEMOK))
 
 #endif /* GOPERL_XS_SDK_COMPILER_H */

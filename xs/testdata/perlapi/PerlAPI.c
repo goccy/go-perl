@@ -4232,6 +4232,157 @@ XS(XS_PerlAPI_buckets) {
     }
 }
 
+/* caller_gimme_list(): the calling sub runs in list context from here on
+ * (its context is stored into after an operation of the interpreter, as
+ * Wanted's double_return does). */
+XS(XS_PerlAPI_caller_gimme_list) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        PERL_CONTEXT *cx = &cxstack[cxstack_ix];
+        const OPCODE running = PL_op ? PL_op->op_type : 0;
+        PERL_UNUSED_VAR(running);
+        if (CxTYPE(cx) != CXt_SUB) croak("not called from a sub");
+        cx->blk_gimme = G_LIST;
+        XSRETURN_EMPTY;
+    }
+}
+
+/* assertions_off(): the C library's assertions are off, as in code
+ * compiled against perl's headers. */
+XS(XS_PerlAPI_assertions_off) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    assert(0 && "assertions are off");
+    XSRETURN_YES;
+}
+
+/* vivify_into(sv): the scalar becomes a reference to a new array in place,
+ * its string buffer given back first (autovivification's vivify_ref). */
+XS(XS_PerlAPI_vivify_into) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *sv = ST(0);
+        if (SvREADONLY(sv)) Perl_croak_no_modify();
+        if (SvTYPE(sv) < SVt_PV && SvTYPE(sv) != SVt_IV) {
+            sv_upgrade(sv, SVt_IV);
+        } else if (SvTYPE(sv) >= SVt_PV) {
+            SvPV_free(sv);
+            SvLEN_set(sv, 0);
+            SvCUR_set(sv, 0);
+        }
+        SvRV_set(sv, (SV *)newAV());
+        SvROK_on(sv);
+        SvSETMAGIC(sv);
+        XSRETURN_EMPTY;
+    }
+}
+
+/* mderef_watch() / mderef_seen(): multideref ops run through a pp
+ * function of native code (as autovivification's do), which notes the
+ * items of each: "name:key" for $h{key} of a package hash, "pad:key" for
+ * one of a lexical hash (whose pad offset is small and not 0), and
+ * whether PL_multideref_pc took the address of the second item. */
+static Perl_ppaddr_t goperl_mderef_orig;
+static SV *goperl_mderef_notes;
+static OP *pp_goperl_mderef(pTHX) {
+    UNOP_AUX_item *aux = cUNOP_AUXx(PL_op)->op_aux;
+    const UV actions = aux[0].uv;
+    switch (actions & MDEREF_ACTION_MASK) {
+    case MDEREF_HV_gvhv_helem:
+        sv_catpvf(goperl_mderef_notes, "%s", GvNAME((GV *)UNOP_AUX_item_sv(&aux[1])));
+        break;
+    case MDEREF_HV_padhv_helem:
+        sv_catpvf(goperl_mderef_notes, "pad%s",
+                  aux[1].pad_offset > 0 && aux[1].pad_offset < 1000 ? "" : "?");
+        break;
+    default:
+        sv_catpvf(goperl_mderef_notes, "action%d", (int)(actions & MDEREF_ACTION_MASK));
+        break;
+    }
+    if ((actions & MDEREF_INDEX_MASK) == MDEREF_INDEX_const)
+        sv_catpvf(goperl_mderef_notes, ":%" SVf, SVfARG(UNOP_AUX_item_sv(&aux[2])));
+    PL_multideref_pc = &aux[1];
+    sv_catpvf(goperl_mderef_notes, ":%s;", PL_multideref_pc == &aux[1] ? "pc" : "nopc");
+    return goperl_mderef_orig(aTHX);
+}
+XS(XS_PerlAPI_mderef_watch) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!goperl_mderef_orig) {
+        goperl_mderef_notes = newSVpvs("");
+        goperl_mderef_orig = PL_ppaddr[OP_MULTIDEREF];
+        PL_ppaddr[OP_MULTIDEREF] = pp_goperl_mderef;
+    }
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_mderef_seen) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVsv(goperl_mderef_notes));
+    sv_setpvs(goperl_mderef_notes, "");
+    XSRETURN(1);
+}
+
+/* install_kw42(): a keyword plugin put in PL_keyword_plugin the way of
+ * modules older than wrap_keyword_plugin: goperl_kw42 is the constant 42,
+ * goperl_kwerr queues a compile error (as a parser plugin reports a syntax
+ * error and goes on), every other word goes to the plugin that was
+ * there. */
+static int (*goperl_next_kw)(pTHX_ char *, STRLEN, OP **);
+static int goperl_kw42(pTHX_ char *kw, STRLEN len, OP **op_ptr) {
+    if (len == 11 && memcmp(kw, "goperl_kw42", 11) == 0) {
+        *op_ptr = newSVOP(OP_CONST, 0, newSViv(42));
+        return KEYWORD_PLUGIN_EXPR;
+    }
+    if (len == 12 && memcmp(kw, "goperl_kwerr", 12) == 0) {
+        qerror(mess("queued by a keyword plugin"));
+        *op_ptr = newSVOP(OP_CONST, 0, newSViv(0));
+        return KEYWORD_PLUGIN_EXPR;
+    }
+    return goperl_next_kw(aTHX_ kw, len, op_ptr);
+}
+XS(XS_PerlAPI_install_kw42) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!goperl_next_kw) {
+        goperl_next_kw = PL_keyword_plugin;
+        PL_keyword_plugin = goperl_kw42;
+    }
+    XSRETURN_EMPTY;
+}
+
+/* signal_names(): the name of SIGUSR1 by number, and the number of USR1
+ * by name, from PL_sig_name and PL_sig_num. */
+XS(XS_PerlAPI_signal_names) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        int i, num = -1;
+        for (i = 0; i < SIG_SIZE; i++)
+            if (strEQ(PL_sig_name[i], "USR1")) num = PL_sig_num[i];
+        ST(0) = sv_2mortal(newSVpvf("%s,%d", PL_sig_name[SIGUSR1], num == SIGUSR1));
+        XSRETURN(1);
+    }
+}
+
+/* statcache(size or undef): the size PL_statcache has, and with a size,
+ * stores it there (as EV stores what its own stat found). */
+XS(XS_PerlAPI_statcache) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "size");
+    {
+        IV was = (IV)PL_statcache.st_size;
+        if (SvOK(ST(0))) {
+            PL_statcache.st_size = (off_t)SvIV(ST(0));
+            PL_statcache.st_mode = S_IFREG | 0644;
+        }
+        ST(0) = sv_2mortal(newSViv(was));
+        XSRETURN(1);
+    }
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -4461,5 +4612,13 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
     newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
     newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
+    newXS_deffile("PerlAPI::caller_gimme_list", XS_PerlAPI_caller_gimme_list);
+    newXS_deffile("PerlAPI::assertions_off", XS_PerlAPI_assertions_off);
+    newXS_deffile("PerlAPI::vivify_into", XS_PerlAPI_vivify_into);
+    newXS_deffile("PerlAPI::mderef_watch", XS_PerlAPI_mderef_watch);
+    newXS_deffile("PerlAPI::mderef_seen", XS_PerlAPI_mderef_seen);
+    newXS_deffile("PerlAPI::install_kw42", XS_PerlAPI_install_kw42);
+    newXS_deffile("PerlAPI::signal_names", XS_PerlAPI_signal_names);
+    newXS_deffile("PerlAPI::statcache", XS_PerlAPI_statcache);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

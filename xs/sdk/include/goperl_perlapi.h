@@ -139,6 +139,42 @@ static NV goperl_drand01(goperl_frame_t *f) {
  * delivered: read only. */
 #define PL_sv_count ((IV)GOPERL_PLVAR(GOPERL_PL_SV_COUNT))
 #define PL_sig_pending ((int)GOPERL_PLVAR(GOPERL_PL_SIG_PENDING))
+
+/* The names and numbers of the signals, as perl's Configure finds them on
+ * the system native code runs on (config.h's SIG_NAME, SIG_NUM and
+ * SIG_SIZE): a name by number for every number up to the highest, NUMn
+ * where the system has none, and then the other names of signals that
+ * have one already. Native code works with the numbers of the system it
+ * runs on, which an interpreter running as a process of it uses too. */
+#if defined(__APPLE__)
+#define SIG_NAME "ZERO", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "EMT", "FPE", \
+    "KILL", "BUS", "SEGV", "SYS", "PIPE", "ALRM", "TERM", "URG", "STOP", "TSTP",   \
+    "CONT", "CHLD", "TTIN", "TTOU", "IO", "XCPU", "XFSZ", "VTALRM", "PROF",         \
+    "WINCH", "INFO", "USR1", "USR2", "IOT", 0
+#define SIG_NUM 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, \
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 6, 0
+#define SIG_SIZE 33
+#elif defined(__linux__)
+#define SIG_NAME "ZERO", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", \
+    "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD",      \
+    "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM",       \
+    "PROF", "WINCH", "IO", "PWR", "SYS", "NUM32", "NUM33", "RTMIN", "NUM35",        \
+    "NUM36", "NUM37", "NUM38", "NUM39", "NUM40", "NUM41", "NUM42", "NUM43",         \
+    "NUM44", "NUM45", "NUM46", "NUM47", "NUM48", "NUM49", "NUM50", "NUM51",         \
+    "NUM52", "NUM53", "NUM54", "NUM55", "NUM56", "NUM57", "NUM58", "NUM59",         \
+    "NUM60", "NUM61", "NUM62", "NUM63", "RTMAX", "IOT", "CLD", "POLL", 0
+#define SIG_NUM 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, \
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,   \
+    38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,   \
+    57, 58, 59, 60, 61, 62, 63, 64, 6, 17, 29, 0
+#define SIG_SIZE 68
+#endif
+#ifdef SIG_SIZE
+static const char *const goperl_sig_name_v[] __attribute__((unused)) = {SIG_NAME};
+static const int goperl_sig_num_v[] __attribute__((unused)) = {SIG_NUM};
+#define PL_sig_name ((char **)goperl_sig_name_v)
+#define PL_sig_num ((int *)goperl_sig_num_v)
+#endif
 /* sv_cmp by the rules of the locale in effect (SV_CALL 60). */
 #define sv_cmp_locale_flags(a, b, flags) \
     ((I32)(int64_t)GOPERL_SVCALL(60, a, GOPERL_SV_PAIR(flags, b)))
@@ -2289,7 +2325,9 @@ static Size_t goperl_strlcpy(char *dst, const char *src, Size_t size) {
 }
 #define my_strlcpy goperl_strlcpy
 #define croak_no_modify() croak("%s", PL_no_modify)
+#define Perl_croak_no_modify() croak("%s", PL_no_modify)
 #define croak_memory_wrap() croak("%s", PL_memory_wrap)
+#define Perl_croak_memory_wrap() croak("%s", PL_memory_wrap)
 #define croak_nocontext croak
 #define die_nocontext croak
 #define warn_nocontext warn
@@ -2514,8 +2552,7 @@ static void goperl_cop_stash_set(goperl_frame_t *f, COP *c, HV *hv) {
 
 /* ---- the context stack ----------------------------------------------------- */
 
-/* CX selectors. */
-enum { GOPERL_CX_DUMP = 0, GOPERL_CX_DOUNWIND = 1, GOPERL_CX_MAX = 2 };
+/* (the CX selectors are with the context shadows in perl.h) */
 /* dounwind pops contexts: interpreter code that works on the stacks as a
  * pp function left them. */
 static void goperl_dounwind(goperl_frame_t *f, I32 cxix) __attribute__((unused));
@@ -3045,7 +3082,9 @@ static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
 }
 #define newUNOP_AUX(type, flags, first, aux) \
     goperl_newunop_aux(_gof, (type), (flags), (OP *)(first), (UNOP_AUX_item *)(aux))
-#define UNOP_AUX_item_sv(item) ((item)->sv)
+/* An SV in an item fills its low half (the interpreter's pointers are 32
+ * bits wide, and a module's own items hold the same handles). */
+#define UNOP_AUX_item_sv(item) GOPERL_SV((uint32_t)(item)->uv)
 
 /* ---- pads: goperl_compiler.h ---------------------------------------------------- */
 #define GOPERL_PL_CURPAD 69
