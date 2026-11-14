@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	wasm2go "github.com/goccy/perlwasm2go"
+	"github.com/goccy/perlwasm2go/base"
 )
 
 // nativeXSMethodID is the reserved callback method id the guest's generic
@@ -217,12 +218,22 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendString(buf, 5, s)
-	resp, err := p.m.invoke(0, midXSHelper, buf, wasm2go.Inv_0_24)
+	// The jump is taken off the module as soon as the operation returns,
+	// inside the call: invoke frees the request in the guest after it,
+	// which is guest code, and guest code run with the exception pending
+	// stops at its first call that may raise one and leaves the rest
+	// undone.
+	parked := false
+	resp, err := p.m.invoke(0, midXSHelper, buf, func(g *base.Module, req, n wptr) (int64, error) {
+		r, err := wasm2go.Inv_0_24(g, req, n)
+		parked = p.parkGuestJump()
+		return r, err
+	})
+	if parked {
+		return 0, ErrGuestJump
+	}
 	if err != nil {
 		return 0, err
-	}
-	if p.parkGuestJump() {
-		return 0, ErrGuestJump
 	}
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
@@ -355,15 +366,16 @@ func (p *Perl) parkGuestJump() bool {
 
 // resumeGuestJump puts a parked exception back on the module when the
 // callback activation it was parked in returns to the guest, which then
-// goes on unwinding.
-func (p *Perl) resumeGuestJump() {
+// goes on unwinding; it reports whether it did.
+func (p *Perl) resumeGuestJump() bool {
 	if !p.jump.parked || p.jump.depth != p.callbackDepth {
-		return
+		return false
 	}
 	g := p.m.g
 	g.ExcTag, g.ExcVals = p.jump.tag, p.jump.vals
 	g.ExcPending = 1
 	p.jump = guestJump{}
+	return true
 }
 
 // dispatcher is the per-instance CallbackHandler behind every guest->host
@@ -372,10 +384,14 @@ func (p *Perl) resumeGuestJump() {
 // serves through UserHandler.
 type dispatcher struct{ p *Perl }
 
-func (d dispatcher) HandleCallback(methodID int32, req []byte) ([]byte, error) {
+func (d dispatcher) HandleCallback(methodID int32, req []byte) (resp []byte, err error) {
 	d.p.callbackDepth++
 	defer func() {
-		d.p.resumeGuestJump()
+		if d.p.resumeGuestJump() {
+			// The callback ends by the jump: the guest returns at once,
+			// with nothing to read (errCallbackJumped).
+			resp, err = nil, errCallbackJumped
+		}
 		d.p.callbackDepth--
 	}()
 	return d.handle(methodID, req)

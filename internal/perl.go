@@ -661,7 +661,7 @@ func (m *Module) invoke(serviceID, methodID int32, req []byte, call func(*base.M
 		// the WasmAlloc-returned-zero case: free(NULL) is a
 		// dlmalloc no-op but C++ allocators are less consistent.
 		if reqPtr != 0 {
-			defer m.freeOutsideJump(reqPtr)
+			defer wasm2go.WasmFree(m.g, reqPtr)
 		}
 		copy(wasm2go.Memory(m.g)[wptrOff(reqPtr):], req)
 	}
@@ -798,10 +798,7 @@ func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr)
 		defer m.mu.Lock()
 		resp, err = handler.HandleCallback(methodID, req)
 	}()
-	if m.g.ExcPending != 0 {
-		// The callback ended by a non-local exit of the guest that is on
-		// its way out again (guestJump): the guest is answered nothing it
-		// would have to read, and no guest code runs for an answer.
+	if errors.Is(err, errCallbackJumped) {
 		return callbackJumped
 	}
 	if err != nil {
@@ -813,24 +810,19 @@ func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr)
 	return encodeCallbackResult(m, resp)
 }
 
-// callbackJumped is what a callback answers the guest when it ended by a
-// non-local exit of the guest (perl.cc GOPERL_CALLBACK_JUMPED): the
-// exception is pending again, and the guest code after the import returns
-// at once.
-const callbackJumped int64 = -1
+// errCallbackJumped is what a callback handler returns when the callback
+// ends with an exception of the guest pending: one the host held while it
+// left frames of its own (a non-local exit of the guest that passed
+// through host code) and has put back on the module. The guest sees it
+// only where a function that may raise one returns to its caller, and the
+// guest code after the import runs until then; so no answer is allocated
+// in the guest (that would be guest code, run with the exception pending),
+// and the guest is answered callbackJumped, which it returns on at once.
+var errCallbackJumped = errors.New("the callback ended with an exception of the guest pending")
 
-// freeOutsideJump frees guest memory the host allocated for a call. A call
-// that ended by a non-local exit returns with the exception pending, and
-// guest code run then would stop at its first call that may raise one and
-// leave the rest undone: the exception is taken off the module for the
-// free and put back.
-func (m *Module) freeOutsideJump(ptr wptr) {
-	g := m.g
-	pending, tag, vals := g.ExcPending, g.ExcTag, g.ExcVals
-	g.ExcPending = 0
-	wasm2go.WasmFree(g, ptr)
-	g.ExcPending, g.ExcTag, g.ExcVals = pending, tag, vals
-}
+// callbackJumped is what callback_invoke returns to the guest for a
+// callback whose handler returned errCallbackJumped.
+const callbackJumped int64 = -1
 
 // wasmifyStubs implements wasm2go/base.WasmifyImports: the single
 // callback_invoke entry point that the C++ bridge calls back into.
