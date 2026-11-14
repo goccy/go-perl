@@ -199,7 +199,12 @@ if [ "$builder" = Makefile.PL ]; then
     phase build 1800 make || exit 0
     offline || exit 0
     PERL5LIB=$PERL5LIB:$tools/lib phase test 1200 "${xvfb[@]}" make test
-    PERL5LIB=$stagelib:$PERL5LIB phase install 600 make install DESTDIR=$stage || exit 0
+    # DESTDIR ends in a slash: ExtUtils::MakeMaker prefixes it to each
+    # installation directory as text, and a distribution that names its
+    # own manual pages still installs them to the directory "none" that
+    # turns manual pages off (as cpanm does), which is then /stage/none,
+    # not /stagenone, where the user cannot write.
+    PERL5LIB=$stagelib:$PERL5LIB phase install 600 make install DESTDIR=$stage/ || exit 0
 else
     phase build 1800 ./Build || exit 0
     offline || exit 0
