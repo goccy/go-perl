@@ -4299,13 +4299,19 @@ XS(XS_PerlAPI_assertions_off) {
 }
 
 /* vivify_into(sv): the scalar becomes a reference to a new array in place,
- * its string buffer given back first (autovivification's vivify_ref). */
+ * its string buffer given back first (autovivification's vivify_ref). A
+ * buffer the scalar shares copy-on-write (with a constant, after
+ * `my $s = "text"`) is not its own to free: the sharing is dropped first,
+ * as perl does before it gives a scalar a reference in place
+ * (sv_setrv_noinc's SV_CHECK_THINKFIRST_COW_DROP). autovivification only
+ * meets undefined scalars, which never share a buffer. */
 XS(XS_PerlAPI_vivify_into) {
     dXSARGS;
     if (items != 1) croak_xs_usage(cv, "sv");
     {
         SV *sv = ST(0);
         if (SvREADONLY(sv)) Perl_croak_no_modify();
+        SV_CHECK_THINKFIRST_COW_DROP(sv);
         if (SvTYPE(sv) < SVt_PV && SvTYPE(sv) != SVt_IV) {
             sv_upgrade(sv, SVt_IV);
         } else if (SvTYPE(sv) >= SVt_PV) {

@@ -40,6 +40,10 @@ func TestNativeMultiderefItems(t *testing.T) {
 		{"package hash", `PerlAPI::mderef_watch(); my $v = eval q{ our %pkg_h = (key => 7); $pkg_h{key} }; PerlAPI::mderef_seen() . $v`, "pkg_h:key:pc;7"},
 		{"lexical hash", `PerlAPI::mderef_watch(); my $v = eval q{ my %lex_h = (other => 8); $lex_h{other} }; PerlAPI::mderef_seen() . $v`, "pad:other:pc;8"},
 		{"a string turned into a reference", `my $s = "text"; PerlAPI::vivify_into($s); ref($s) . scalar(@$s)`, "ARRAY0"},
+		// the string shares the constant's buffer, which stays the
+		// constant's (freed, it was given to other strings while the
+		// constant still had it, and freed again with the constant)
+		{"a string sharing a constant's buffer", `my $bad = 0; for (1 .. 20) { my $s = "text"; $bad++ if $s ne "text"; PerlAPI::vivify_into($s); my @fill = map { "q" x 5 } 1 .. 8 } $bad`, "0"},
 		{"a read-only value", `eval { PerlAPI::vivify_into("const") }; $@ =~ /^Modification of a read-only value attempted/ ? "refused" : "other: $@"`, "refused"},
 	})
 }
