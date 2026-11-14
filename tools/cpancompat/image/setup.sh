@@ -29,18 +29,46 @@ test -f "$stdlib/strict.pm"
 ln -s "$stdlib/Config.pm" $G/fakearchlib/Config.pm
 
 # The compiler %Config describes is this machine's, in every key that names
-# it: build scripts choose flags by the compiler's identity.
+# it, as `gperl xs build` describes it (hostToolchain in gperl/xs.go): build
+# scripts choose flags by the compiler's identity, pass the preprocessor
+# flags and libraries on to the C configure scripts they run, and look for
+# libraries where the compiler looks. The interpreter's own values describe
+# the wasm32 toolchain it was built with.
 ccversion=$(cc -dumpfullversion)
+# "libraries: =dir:dir:..." is the format of -print-search-dirs; the list
+# keeps the directories that exist, once each, in order.
+libpth=$(cc -print-search-dirs | sed -n 's/^libraries: =//p' | tr ':' '\n' |
+    while read -r dir; do
+        [ -n "$dir" ] && [ -d "$dir" ] && (cd "$dir" && pwd)
+    done | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
+test -n "$libpth"
+# A name without a directory is the compiler's way of saying it did not
+# find the file.
+libc=$(cc -print-file-name=libc.so.6)
+case $libc in
+/*) test -e "$libc" || libc= ;;
+*) libc= ;;
+esac
+glibc=$(printf '#include <features.h>\n__GLIBC__ __GLIBC_MINOR__\n' | cc -E -P -x c - | tail -1 | tr ' ' .)
 
-sed -e "s|@STDLIB@|$stdlib|g" -e "s|@CCVERSION@|$ccversion|g" > $G/config-overlay.pl <<'EOF'
+sed -e "s|@STDLIB@|$stdlib|g" -e "s|@CCVERSION@|$ccversion|g" \
+    -e "s|@LIBPTH@|$libpth|g" -e "s|@LIBC@|$libc|g" -e "s|@GLIBC@|$glibc|g" \
+    > $G/config-overlay.pl <<'EOF'
 use Config ();
+my $ccflags = '-fno-strict-aliasing -fstack-protector-strong -DPERL_USE_SAFE_PUTENV -D_GNU_SOURCE -I/opt/gperl/proj/local/xs/.sdk';
 my %over = (
     'perlpath' => '/opt/gperl/bin/perl', 'startperl' => '#!/opt/gperl/bin/perl',
     'cc' => 'cc', 'ld' => 'cc', 'ar' => 'ar', 'full_ar' => 'ar',
     'ranlib' => 'ranlib', 'make' => 'make',
     'ccname' => 'gcc', 'gccversion' => '@CCVERSION@', 'ccversion' => '',
-    'cpp' => 'cc -E', 'cpprun' => 'cc -E', 'cppstdin' => 'cc -E', 'libc' => '',
-    'ccflags' => '-fno-strict-aliasing -fstack-protector-strong -DPERL_USE_SAFE_PUTENV -D_GNU_SOURCE -I/opt/gperl/proj/local/xs/.sdk',
+    'gccosandvers' => '',
+    'cpp' => 'cc -E', 'cpprun' => 'cc -E', 'cppstdin' => 'cc -E',
+    'cppminus' => '-', 'cpplast' => '-', 'cppflags' => $ccflags,
+    'ccsymbols' => '', 'cppsymbols' => '', 'cppccsymbols' => '',
+    'libc' => '@LIBC@', 'gnulibc_version' => '@GLIBC@',
+    'libs' => '-lm', 'perllibs' => '-lm',
+    'libpth' => '@LIBPTH@', 'glibpth' => '@LIBPTH@', 'libspath' => '@LIBPTH@',
+    'ccflags' => $ccflags,
     'optimize' => '-O2', 'ldflags' => '', 'cccdlflags' => '-fPIC',
     'ccdlflags' => '', 'obj_ext' => '.o', 'exe_ext' => '', 'lib_ext' => '.a',
     'usedl' => 'define', 'dlsrc' => 'dl_dlopen.xs', 'useshrplib' => 'false',
