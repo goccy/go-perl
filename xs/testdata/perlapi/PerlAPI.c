@@ -2597,6 +2597,24 @@ static void PerlAPI_rpeep(pTHX_ OP *o) {
     }
 }
 
+/* An op checker for sprintf that links the op's execution order itself
+ * (LINKLIST, as Syntax::Keyword::Inplace does before it threads an op of
+ * its own in) and then follows the links from where the order starts: how
+ * many ops come before the op itself, or -1 when the links do not lead to
+ * it. */
+static Perl_check_t PerlAPI_sprintf_hook_before;
+static IV PerlAPI_linklist_seen;
+static OP *PerlAPI_on_new_sprintf(pTHX_ OP *o) {
+    o = PerlAPI_sprintf_hook_before(aTHX_ o);
+    if (o->op_type == OP_SPRINTF && (o->op_flags & OPf_KIDS)) {
+        OP *kid = LINKLIST(o);
+        IV n = 0;
+        for (; kid && kid != o && n < 100; kid = kid->op_next) n++;
+        PerlAPI_linklist_seen = kid == o ? n : -1;
+    }
+    return o;
+}
+
 /* hooks(what, on): installs or removes one of the hooks above and returns
  * its counter. */
 XS(XS_PerlAPI_hooks) {
@@ -2635,6 +2653,15 @@ XS(XS_PerlAPI_hooks) {
                 PerlAPI_rpeep_before = NULL;
             }
             counter = PerlAPI_njoins_seen;
+        } else if (strEQ(what, "linklist")) {
+            if (on) {
+                PerlAPI_linklist_seen = 0;
+                wrap_op_checker(OP_SPRINTF, PerlAPI_on_new_sprintf, &PerlAPI_sprintf_hook_before);
+            } else if (PerlAPI_sprintf_hook_before) {
+                PL_check[OP_SPRINTF] = PerlAPI_sprintf_hook_before;
+                PerlAPI_sprintf_hook_before = NULL;
+            }
+            counter = PerlAPI_linklist_seen;
         } else {
             croak("unknown hook %s", what);
         }

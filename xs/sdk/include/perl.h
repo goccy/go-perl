@@ -8240,7 +8240,14 @@ static OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux, U32 aux2,
                                     (uint32_t)aux,
                                 (uint64_t)aux2, toks, 16);
     if (sel == GOPERL_OPM_FREE) return 0;
-    goperl_op_refresh(f, a);
+    if ((sel == GOPERL_OPM_LINKLIST || sel == GOPERL_OPM_CONTEXTUALIZE) && a) {
+        /* the interpreter set the links of execution (op_next) or the
+         * context of every op below a, which code reads next: `start =
+         * LINKLIST(o); dup->op_next = kid->op_next` */
+        goperl_op_describe(f, a->gop, GOPERL_OPDUMP_SUBTREE);
+    } else {
+        goperl_op_refresh(f, a);
+    }
     goperl_op_refresh(f, b);
     return tok ? goperl_op_shadow_full(f, tok) : 0;
 }

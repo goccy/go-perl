@@ -12,6 +12,19 @@ import (
 	goperlfs "github.com/goccy/go-perl/fs"
 )
 
+// A checker that links the execution order of the op it is handed
+// (LINKLIST) reads the links the interpreter set: from where the order
+// starts they lead through the operands to the op, as a module that
+// threads an op of its own in between follows them
+// (Syntax::Keyword::Inplace); the op still runs as compiled.
+func TestNativeReadsTheLinksTheInterpreterSet(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"links after LINKLIST", `PerlAPI::hooks("linklist", 1); my $f = eval q{ sub { my ($x, $y) = @_; sprintf "%s-%s", $x, $y } }; my $seen = PerlAPI::hooks("linklist", 0); join ",", $seen, $f->("a", "b")`, "4,a-b"},
+	})
+}
+
 // A module puts a function of its own into PL_check (with wrap_op_checker
 // or by assignment) and is handed every op of that type the compiler
 // builds, with the ops below it; it calls the checker it replaced, and the
