@@ -6,6 +6,11 @@
 build-essential ca-certificates curl git patch pkg-config unzip bzip2 xz-utils
 cmake graphviz protobuf-compiler
 
+# The network databases (/etc/services, /etc/protocols, ...): the official
+# perl image's base has them and debian:bookworm-slim does not, so
+# getservbyname and getprotobyname answered differently in the two images.
+netbase
+
 # The C libraries CPAN distributions bind to, as CPAN Testers machines
 # commonly have them: without one, a distribution that binds to it fails
 # before the interpreter is exercised, and every distribution that depends
