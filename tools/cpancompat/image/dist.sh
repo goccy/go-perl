@@ -33,11 +33,19 @@ export PERL5_CPAN_IS_RUNNING=$$ PERL5_CPANPLUS_IS_RUNNING=$$
 phase() {
     local name=$1 limit=$2
     shift 2
-    local start=$SECONDS status seconds timed_out=false
+    local start=$SECONDS status seconds timed_out=false watcher
+    # Shortly before the limit, what the processes still running are doing
+    # goes to <name>.stuck.jsonl: whether a phase that runs out of time is
+    # blocked, spinning or merely slow is told by that record, not by waiting
+    # longer.
+    bash $tools/stuck.sh $((limit > 30 ? limit - 15 : limit)) "$out/$name.stuck.jsonl" &
+    watcher=$!
     # By its full path: distributions install programs into a directory that
     # comes first in PATH, and one of them is named timeout.
     /usr/bin/timeout --kill-after=10 "$limit" "$@" > "$out/$name.log" 2>&1 < /dev/null
     status=$?
+    kill "$watcher" 2> /dev/null
+    wait "$watcher" 2> /dev/null
     seconds=$((SECONDS - start))
     # A command that outlived its limit was ended by timeout (status 124, or
     # 137 when it had to be killed); the duration tells that apart from a

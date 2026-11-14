@@ -11,7 +11,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY gperl /opt/gperl/bin/gperl
-COPY setup.sh dist.sh builder.pl unmet.pl /opt/cpancompat/
+COPY setup.sh dist.sh stuck.sh builder.pl unmet.pl /opt/cpancompat/
 COPY Harness.pm /opt/cpancompat/lib/CPANCompat/Harness.pm
 RUN sh /opt/cpancompat/setup.sh
 
