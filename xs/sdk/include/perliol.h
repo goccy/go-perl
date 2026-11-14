@@ -131,6 +131,68 @@ typedef struct {
 #define PerlIOSelf(f, type) ((type *)PerlIOBase(f))
 #define PerlIONext(f) (&PerlIOBase(f)->next)
 
+/* ---- views of the interpreter's handles -----------------------------------
+ * Code that includes this header walks the layers of a handle it got from
+ * IoIFP, IoOFP or PerlIO_stdin/stdout/stderr (File::Map takes only a handle
+ * whose layers are all binary; PerlIO::Layers answers what they are):
+ * PerlIOBase(f)->tab->name and kind, PerlIOBase(f)->flags, PerlIONext(f).
+ * Those handles are views made for the native call from the interpreter's
+ * layers as they are then: the handle, and the next field of each layer,
+ * is preceded by the interpreter's address of the handle it stands for
+ * (see goperl_pio_tok), so that every handle function given one of them,
+ * or a PerlIONext of one, works on the interpreter's. The functions of a
+ * layer's tab are the interpreter's to run and are not in the view. */
+typedef struct {
+    uint32_t gslot;
+    uint32_t mark; /* GOPERL_PIO_VIEW_MARK */
+} goperl_pio_mark_t;
+typedef struct {
+    goperl_pio_mark_t mark;
+    PerlIOl *top;
+} goperl_pio_handle_view_t;
+typedef struct {
+    goperl_pio_mark_t mark; /* of the layer below: base.next is its handle */
+    PerlIOl base;
+    PerlIO_funcs tab;
+} goperl_pio_layer_view_t;
+static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
+    if (!tok) return 0;
+    const uint32_t *w = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_PERLIO, ((uint64_t)GOPERL_PIO_LAYERS << 32) | (uint32_t)tok,
+                        0, 0, 0));
+    const uint32_t n = w ? w[0] : 0;
+    goperl_pio_handle_view_t *hv = (goperl_pio_handle_view_t *)goperl_arena_alloc(
+        sizeof(goperl_pio_handle_view_t) + (size_t)n * sizeof(goperl_pio_layer_view_t));
+    if (!hv) goperl_croakf(f, "Out of memory!");
+    goperl_pio_layer_view_t *lv = (goperl_pio_layer_view_t *)(hv + 1);
+    hv->mark.gslot = (uint32_t)tok;
+    hv->mark.mark = GOPERL_PIO_VIEW_MARK;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t *l = w + 1 + 4 * i;
+        lv[i].mark.gslot = l[0];
+        lv[i].mark.mark = GOPERL_PIO_VIEW_MARK;
+        lv[i].tab.fsize = sizeof(PerlIO_funcs);
+        lv[i].tab.name = l[1] ? (const char *)goperl_guest_mem(f, l[1]) : "";
+        lv[i].tab.size = sizeof(PerlIOl);
+        lv[i].tab.kind = l[2];
+        lv[i].base.tab = &lv[i].tab;
+        lv[i].base.flags = l[3];
+        lv[i].base.next = i + 1 < n ? &lv[i + 1].base : 0;
+    }
+    hv->top = n ? &lv[0].base : 0;
+    return &hv->top;
+}
+#undef IoIFP
+#undef IoOFP
+#undef PerlIO_stdin
+#undef PerlIO_stdout
+#undef PerlIO_stderr
+#define IoIFP(io) goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_IFP, (io), 0, 0, 0))
+#define IoOFP(io) goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_OFP, (io), 0, 0, 0))
+#define PerlIO_stdin() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDIN, 0, 0, 0, 0))
+#define PerlIO_stdout() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDOUT, 0, 0, 0, 0))
+#define PerlIO_stderr() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDERR, 0, 0, 0, 0))
+
 /* utf8_strict walks PL_perlio to flush line-buffered TTY handles; there is
  * no host-visible handle table, and the walk exits immediately on NULL. */
 __attribute__((weak)) PerlIOl *goperl_pl_perlio_null_v = 0;
@@ -251,38 +313,64 @@ __attribute__((weak)) PerlIO_funcs goperl_tail_funcs_v = {
     goperl_tail_set_ptrcnt,
 };
 
-/* PerlIO_* dispatchers used by hook bodies (dispatch through the tab). */
+/* PerlIO_* dispatchers used by hook bodies (dispatch through the tab); a
+ * view of a handle of the interpreter's (or of a layer of one) is the
+ * interpreter's to work on. */
+static int goperl_pio_is_view(const PerlIO *f) {
+    goperl_frame_t *const fr = goperl_cur_frame_v;
+    return fr && f && (uintptr_t)f >= fr->memcap &&
+           ((const uint32_t *)f)[-1] == GOPERL_PIO_VIEW_MARK;
+}
 static SSize_t PerlIO_read(PerlIO *f, void *vbuf, Size_t count) {
+    if (goperl_pio_is_view(f)) return goperl_pio_read(goperl_cur_frame_v, f, vbuf, count);
     return PerlIOBase(f)->tab->Read(aTHX_ f, vbuf, count);
 }
 static IV PerlIO_fill(PerlIO *f) {
+    if (goperl_pio_is_view(f)) return goperl_pio_status(goperl_cur_frame_v, GOPERL_PIO_FILL, f);
     return PerlIOBase(f)->tab->Fill(aTHX_ f);
 }
 static IV PerlIO_eof(PerlIO *f) {
+    if (goperl_pio_is_view(f))
+        return (IV)goperl_pio(goperl_cur_frame_v, GOPERL_PIO_EOF, f, 0, 0, 0);
     return PerlIOBase(f)->tab->Eof(aTHX_ f);
 }
 static IV PerlIO_error(PerlIO *f) {
+    if (goperl_pio_is_view(f))
+        return (IV)(int64_t)goperl_pio(goperl_cur_frame_v, GOPERL_PIO_ERROR, f, 0, 0, 0);
     return PerlIOBase(f)->tab->Error(aTHX_ f);
 }
 static IV PerlIO_flush(PerlIO *f) {
+    if (goperl_pio_is_view(f)) return goperl_pio_flush(goperl_cur_frame_v, f);
     if (!PerlIOValid(f)) return 0;
     return PerlIOBase(f)->tab->Flush(aTHX_ f);
 }
 static STDCHAR *PerlIO_get_ptr(PerlIO *f) {
+    if (goperl_pio_is_view(f))
+        return goperl_pio_bufptr(goperl_cur_frame_v, GOPERL_PIO_GET_PTR, f);
     return PerlIOBase(f)->tab->Get_ptr(aTHX_ f);
 }
 static SSize_t PerlIO_get_cnt(PerlIO *f) {
+    if (goperl_pio_is_view(f))
+        return (SSize_t)(int64_t)goperl_pio(goperl_cur_frame_v, GOPERL_PIO_GET_CNT, f, 0, 0, 0);
     return PerlIOBase(f)->tab->Get_cnt(aTHX_ f);
 }
 static void PerlIO_set_ptrcnt(PerlIO *f, STDCHAR *ptr, SSize_t cnt) {
+    if (goperl_pio_is_view(f)) {
+        goperl_pio_set_ptrcnt(goperl_cur_frame_v, f, ptr, cnt);
+        return;
+    }
     PerlIOBase(f)->tab->Set_ptrcnt(aTHX_ f, ptr, cnt);
 }
 static STDCHAR *PerlIO_get_base(PerlIO *f) {
+    if (goperl_pio_is_view(f))
+        return goperl_pio_bufptr(goperl_cur_frame_v, GOPERL_PIO_GET_BASE, f);
     PerlIOBuf *b = PerlIOSelf(f, PerlIOBuf);
     return b->buf;
 }
 static int PerlIO_fast_gets(PerlIO *f) {
     goperl_iol_shadow_t *sh;
+    if (goperl_pio_is_view(f))
+        return (int)goperl_pio(goperl_cur_frame_v, GOPERL_PIO_FAST_GETS, f, 0, 0, 0);
     if (!PerlIOValid(f)) return 0;
     if (PerlIOBase(f)->tab != &goperl_tail_funcs_v)
         return (PerlIOBase(f)->tab->kind & PERLIO_K_FASTGETS) != 0;

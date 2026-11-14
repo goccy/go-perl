@@ -4036,7 +4036,8 @@ enum {
     GOPERL_PIO_GET_BUFSIZ = 28,
     GOPERL_PIO_SET_PTRCNT = 29,
     GOPERL_PIO_FILL = 30,
-    GOPERL_PIO_APPLY_LAYERS = 31
+    GOPERL_PIO_APPLY_LAYERS = 31,
+    GOPERL_PIO_LAYERS = 32
 };
 #define GOPERL_PIO_READ_MAX 65536
 #define GOPERL_PL_ERRNO 60
@@ -4051,10 +4052,21 @@ static void goperl_errno_from_interp(goperl_frame_t *f) {
 static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen)
     __attribute__((unused));
+/* A handle is the interpreter's (an address of its memory), or a view of
+ * one that code which walks layers is given (perliol.h): the interpreter's
+ * address of the handle, or of the layer below, is the word before it,
+ * marked as such. */
+#define GOPERL_PIO_VIEW_MARK 0xFFFFFFFFu
+static inline __attribute__((unused)) uint32_t goperl_pio_tok(goperl_frame_t *f,
+                                                              const void *h) {
+    if (!h || (uintptr_t)h < f->memcap) return (uint32_t)(uintptr_t)h;
+    const uint32_t *mark = (const uint32_t *)h - 2;
+    return mark[1] == GOPERL_PIO_VIEW_MARK ? mark[0] : (uint32_t)(uintptr_t)h;
+}
 static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen) {
     return goperl_do_op(f, GOPERL_OP_PERLIO,
-                        ((uint64_t)sel << 32) | (uint32_t)(uintptr_t)h, b, s,
+                        ((uint64_t)sel << 32) | goperl_pio_tok(f, h), b, s,
                         slen);
 }
 #define GOPERL_PIO_H(sel) \
