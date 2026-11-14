@@ -220,8 +220,11 @@ func runSurvey(opts runOptions) error {
 		nodes:    map[string]*node{},
 		waiters:  map[string][]*node{},
 		runDir:   filepath.Join(opts.dataDir, "runs", opts.run),
-		archives: filepath.Join(opts.dataDir, "archives"),
 		volume:   "cpancompat-" + opts.run,
+	}
+	var err error
+	if r.archives, err = archivesDir(opts.dataDir); err != nil {
+		return err
 	}
 	r.buildVolume = r.volume + "-build"
 	all, err := readDists(filepath.Join(opts.dataDir, "dists.jsonl"))
@@ -239,9 +242,6 @@ func runSurvey(opts runOptions) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(r.runDir, "work"), 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(r.archives, 0o755); err != nil {
 		return err
 	}
 	resultsPath := filepath.Join(r.runDir, "results.jsonl")
@@ -855,4 +855,19 @@ func readJSONLines[T any](path string) ([]T, error) {
 		rows = append(rows, row)
 	}
 	return rows, sc.Err()
+}
+
+// archivesDir returns the directory of the run's archives, the one the
+// containers get read-only, made if missing. Docker resolves a bind mount's
+// source on the machine that runs the containers, which sees only the
+// directories shared with it (the survey VM is given the archives directory
+// itself, read-only, and nothing of the data directories around it): when a
+// data directory's archives is a link to another data directory's, the
+// directory the link leads to is the one to name.
+func archivesDir(dataDir string) (string, error) {
+	dir := filepath.Join(dataDir, "archives")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(dir)
 }

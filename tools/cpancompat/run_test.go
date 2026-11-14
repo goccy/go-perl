@@ -443,3 +443,36 @@ func TestScheduleRunsPastProviderThatFails(t *testing.T) {
 		}
 	}
 }
+
+func TestArchivesDirNamesTheDirectoryALinkLeadsTo(t *testing.T) {
+	// The reference data directory's archives is a link to the survey's.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	survey := filepath.Join(base, "data", "archives")
+	if err := os.MkdirAll(survey, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ref := filepath.Join(base, "data-ref")
+	if err := os.MkdirAll(ref, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(survey, filepath.Join(ref, "archives")); err != nil {
+		t.Fatal(err)
+	}
+	for dataDir, want := range map[string]string{
+		filepath.Join(base, "data"): survey,
+		ref:                         survey,
+	} {
+		got, err := archivesDir(dataDir)
+		if err != nil || got != want {
+			t.Errorf("archivesDir(%s) = %q, %v; want %q", dataDir, got, err, want)
+		}
+	}
+	// A data directory without archives gets them made.
+	fresh := filepath.Join(base, "fresh")
+	if got, err := archivesDir(fresh); err != nil || got != filepath.Join(fresh, "archives") {
+		t.Errorf("archivesDir(fresh) = %q, %v", got, err)
+	}
+}
