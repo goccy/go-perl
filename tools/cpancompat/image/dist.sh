@@ -47,6 +47,11 @@ phase() {
     # comes first in PATH, and one of them is named timeout.
     /usr/bin/timeout --kill-after=10 "$limit" "$@" > "$out/$name.log" 2>&1 < /dev/null
     status=$?
+    # A record of the processes the watcher has begun is kept whole: it is
+    # what tells why a phase ran out of time. It takes some seconds.
+    while [ -e "$out/$name.stuck.jsonl.partial" ] && [ $((SECONDS - start)) -lt $((limit + 60)) ]; do
+        sleep 1
+    done
     kill "$watcher" 2> /dev/null
     wait "$watcher" 2> /dev/null
     seconds=$((SECONDS - start))

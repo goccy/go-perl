@@ -17,9 +17,15 @@
 #
 # Written by the shell on purpose, like dist.sh: it must not depend on the
 # perl under measurement.
+#
+# SIGTERM ends it by its default action. A trap would not do: bash runs a
+# trap where the signal finds it, and when that is in the middle of parsing
+# a command substitution, bash 5.2 fails to parse the trap's own text
+# ("unexpected EOF while looking for matching `)'") and goes on watching, so
+# dist.sh would wait for it until the container is ended. The record of the
+# processes is written under another name and renamed when it is whole,
+# and dist.sh lets it finish before stopping the watcher.
 parent=$1 limit=$2 log=$3 max=$4 prefix=$5
-sleeper=
-trap '[ -n "$sleeper" ] && kill "$sleeper" 2> /dev/null; exit 0' TERM
 
 # The phase's /usr/bin/timeout process.
 phase_pid() {
@@ -105,10 +111,7 @@ start=$SECONDS
 snapshot_at=$(( limit > 30 ? limit - 15 : limit ))
 taken=false
 while :; do
-    sleep 5 &
-    sleeper=$!
-    wait "$sleeper"
-    sleeper=
+    sleep 5
     size=$(stat -c %s "$log" 2> /dev/null || echo 0)
     if [ "$size" -gt "$max" ]; then
         printf '{"bytes":%d,"limit":%d}\n' "$size" "$max" > "$prefix.output-limit"
@@ -117,7 +120,8 @@ while :; do
         exit 0
     fi
     if ! $taken && [ $((SECONDS - start)) -ge "$snapshot_at" ]; then
-        processes > "$prefix.stuck.jsonl"
+        processes > "$prefix.stuck.jsonl.partial"
+        mv "$prefix.stuck.jsonl.partial" "$prefix.stuck.jsonl"
         taken=true
     fi
 done
