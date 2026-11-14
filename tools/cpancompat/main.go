@@ -6,12 +6,18 @@
 //
 //	cpancompat fetch   download the CPAN package index and the MetaCPAN
 //	                   metadata of every latest release
+//	cpancompat testers download the CPAN Testers reports made on one perl
+//	                   version (-perl), the version the interpreter is
+//	                   built from
 //	cpancompat graph   join them into one record per distribution and
-//	                   derive the dependency graph
+//	                   derive the dependency graph (-perl: with the reports
+//	                   each release got on that perl version)
 //	cpancompat native  find the distributions with native (XS) code among
 //	                   the most depended-upon ones (-top N)
 //	cpancompat image   build the container image distributions are tested
-//	                   in, around a gperl binary built for linux
+//	                   in, around a gperl binary built for linux, or the
+//	                   same environment around an official perl image (the
+//	                   reference the interpreter is compared with)
 //	cpancompat run     configure, build, test and install distributions on
 //	                   go-perl, in dependency order, one container each;
 //	                   results accumulate in runs/<name>/results.jsonl and
@@ -34,9 +40,10 @@ import (
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   cpancompat fetch  [-data dir]
-  cpancompat graph  [-data dir]
+  cpancompat testers [-data dir] -perl version
+  cpancompat graph  [-data dir] [-perl version]
   cpancompat native [-data dir] [-top n]
-  cpancompat image  [-data dir] -gperl binary [-image tag]
+  cpancompat image  [-data dir] (-gperl binary | -perl-image image) [-image tag]
   cpancompat run    [-data dir] -run name [-image tag] [-top n | -dists a,b,...]
                     [-jobs n] [-cpus n] [-memory size] [-wall duration]
                     [-interpreter label] [-redo outcome,...]
@@ -53,6 +60,8 @@ func main() {
 	data := fs.String("data", os.Getenv("CPANCOMPAT_DATA"), "data directory")
 	top := fs.Int("top", 0, "native, run: only the n most depended-upon distributions (native: default 1000; run: default all)")
 	gperl := fs.String("gperl", "", "image: the gperl binary, built for linux")
+	perl := fs.String("perl", "", "testers, graph: the perl version the interpreter is built from, as CPAN Testers names it (e.g. 5.44.0)")
+	perlImage := fs.String("perl-image", "", "image: build the reference image around this official perl image instead of gperl")
 	image := fs.String("image", "cpancompat:latest", "image, run: the container image tag")
 	run := fs.String("run", "", "run, report: the name of the run")
 	only := fs.String("dists", "", "run: only these distributions (comma separated), with what they need")
@@ -71,15 +80,17 @@ func main() {
 	switch os.Args[1] {
 	case "fetch":
 		err = fetch(*data)
+	case "testers":
+		err = fetchTesters(*data, *perl)
 	case "graph":
-		err = buildGraph(*data)
+		err = buildGraph(*data, *perl)
 	case "native":
 		if *top == 0 {
 			*top = 1000
 		}
 		err = scanNative(*data, *top)
 	case "image":
-		err = buildImage(*data, *gperl, *image)
+		err = buildImage(*data, *gperl, *perlImage, *image)
 	case "run":
 		if *run == "" {
 			usage()

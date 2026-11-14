@@ -304,7 +304,10 @@ func runSurvey(opts runOptions) error {
 	return nil
 }
 
-// targets returns the names of the distributions to measure.
+// targets returns the names of the distributions to measure: the ones
+// named with -dists, or else the reference set (when the graph has the
+// CPAN Testers reports of the interpreter's perl version), the most
+// depended-upon first, the first -top of them.
 func (r *runner) targets(all []dist) ([]string, error) {
 	if len(r.opts.only) > 0 {
 		for _, name := range r.opts.only {
@@ -314,9 +317,19 @@ func (r *runner) targets(all []dist) ([]string, error) {
 		}
 		return r.opts.only, nil
 	}
-	order := make([]*dist, len(all))
+	perl, err := graphPerl(r.opts.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	order := make([]*dist, 0, len(all))
 	for i := range all {
-		order[i] = &all[i]
+		if perl == "" || all[i].passesOnPerl() {
+			order = append(order, &all[i])
+		}
+	}
+	if perl != "" {
+		fmt.Fprintf(os.Stderr, "cpancompat: %d of %d distributions pass on perl %s on Linux by their CPAN Testers reports\n",
+			len(order), len(all), perl)
 	}
 	sort.SliceStable(order, func(i, j int) bool {
 		if order[i].DependentsTotal != order[j].DependentsTotal {

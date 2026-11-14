@@ -95,6 +95,10 @@ type dist struct {
 	Unresolved []string `json:"unresolved,omitempty"`
 
 	Testers *testers `json:"testers,omitempty"`
+	// OnPerl counts the CPAN Testers reports this release got on the perl
+	// version the interpreter is built from (graph -perl); nil when it got
+	// none there.
+	OnPerl *perlReports `json:"on_perl,omitempty"`
 
 	// Level is the length of the longest dependency chain below this
 	// distribution: every distribution only needs lower levels (members
@@ -112,25 +116,31 @@ type dist struct {
 }
 
 type graphSummary struct {
-	Distributions       int            `json:"distributions"`
-	DuplicateLatest     int            `json:"extra_latest_releases_dropped"`
-	Modules             int            `json:"modules"`
-	IndexedModules      int            `json:"indexed_modules"`
-	NoIndexedModules    int            `json:"distributions_without_indexed_modules"`
-	IndexOnlyArchives   int            `json:"index_archives_of_unknown_release"`
-	Edges               int            `json:"edges"`
-	NoNeeds             int            `json:"distributions_needing_nothing"`
-	WithUnresolved      int            `json:"distributions_with_unresolved_requirements"`
-	ProvidedModules     int            `json:"modules_provided_by_interpreter"`
-	UnreadableVersions  int            `json:"requirements_with_unreadable_version"`
-	Cycles              int            `json:"cycles"`
-	InCycles            int            `json:"distributions_in_cycles"`
-	MaxLevel            int            `json:"max_level"`
-	ByLevel             map[int]int    `json:"distributions_by_level"`
-	TestersWithReports  int            `json:"distributions_with_tester_reports"`
-	TestersAnyPass      int            `json:"distributions_with_a_passing_report"`
-	TestersMajorityPass int            `json:"distributions_with_more_pass_than_fail"`
-	MostDependedOn      []dependedUpon `json:"most_depended_on"`
+	Distributions       int         `json:"distributions"`
+	DuplicateLatest     int         `json:"extra_latest_releases_dropped"`
+	Modules             int         `json:"modules"`
+	IndexedModules      int         `json:"indexed_modules"`
+	NoIndexedModules    int         `json:"distributions_without_indexed_modules"`
+	IndexOnlyArchives   int         `json:"index_archives_of_unknown_release"`
+	Edges               int         `json:"edges"`
+	NoNeeds             int         `json:"distributions_needing_nothing"`
+	WithUnresolved      int         `json:"distributions_with_unresolved_requirements"`
+	ProvidedModules     int         `json:"modules_provided_by_interpreter"`
+	UnreadableVersions  int         `json:"requirements_with_unreadable_version"`
+	Cycles              int         `json:"cycles"`
+	InCycles            int         `json:"distributions_in_cycles"`
+	MaxLevel            int         `json:"max_level"`
+	ByLevel             map[int]int `json:"distributions_by_level"`
+	TestersWithReports  int         `json:"distributions_with_tester_reports"`
+	TestersAnyPass      int         `json:"distributions_with_a_passing_report"`
+	TestersMajorityPass int         `json:"distributions_with_more_pass_than_fail"`
+	// The same on the perl version the interpreter is built from alone.
+	Perl               string         `json:"perl,omitempty"`
+	OnPerlWithReports  int            `json:"distributions_with_reports_on_perl,omitempty"`
+	OnPerlAnyPass      int            `json:"distributions_with_a_passing_report_on_perl,omitempty"`
+	OnPerlMajorityPass int            `json:"distributions_with_more_pass_than_fail_on_perl,omitempty"`
+	OnPerlLinuxPass    int            `json:"distributions_with_a_passing_linux_report_on_perl,omitempty"`
+	MostDependedOn     []dependedUpon `json:"most_depended_on"`
 }
 
 type dependedUpon struct {
@@ -142,7 +152,11 @@ type dependedUpon struct {
 // a distribution's tests can run.
 var requiredPhases = map[string]bool{"configure": true, "build": true, "test": true, "runtime": true}
 
-func buildGraph(dataDir string) error {
+// buildGraph joins the fetched sources into dists.jsonl. perl, when not
+// empty, is the perl version the interpreter is built from: the CPAN
+// Testers reports on that version (cpancompat testers) are attached to
+// every release.
+func buildGraph(dataDir, perl string) error {
 	moduleArchive, err := readPackages(filepath.Join(dataDir, packagesFile))
 	if err != nil {
 		return err
@@ -154,6 +168,12 @@ func buildGraph(dataDir string) error {
 	releases, err := readReleases(filepath.Join(dataDir, releasesFile))
 	if err != nil {
 		return err
+	}
+	var onPerl map[string]*perlReports
+	if perl != "" {
+		if onPerl, err = readTesters(dataDir, perl); err != nil {
+			return err
+		}
 	}
 
 	// Join the two sources on the archive path below authors/id/.
@@ -198,7 +218,7 @@ func buildGraph(dataDir string) error {
 		d := &dist{
 			Dist: r.Distribution, Release: r.Name, Version: string(r.Version), Author: r.Author,
 			Path: path, SHA256: r.SHA256, Size: int64(r.Stat.Size), Date: r.Date, Testers: r.Tests,
-			Modules: []string{},
+			OnPerl: onPerl[r.Name], Modules: []string{},
 		}
 		dists = append(dists, d)
 		byName[d.Dist] = d
@@ -229,7 +249,7 @@ func buildGraph(dataDir string) error {
 	sum := graphSummary{
 		Distributions: len(dists), Modules: len(moduleArchive),
 		DuplicateLatest: duplicates, ByLevel: map[int]int{},
-		ProvidedModules: len(provided),
+		ProvidedModules: len(provided), Perl: perl,
 	}
 	indexOnly := map[string]bool{}
 	for module, path := range moduleArchive {
@@ -407,6 +427,18 @@ func buildGraph(dataDir string) error {
 			}
 			if t.Pass > t.Fail {
 				sum.TestersMajorityPass++
+			}
+		}
+		if p := d.OnPerl; p != nil {
+			sum.OnPerlWithReports++
+			if p.Pass > 0 {
+				sum.OnPerlAnyPass++
+			}
+			if p.Pass > p.Fail {
+				sum.OnPerlMajorityPass++
+			}
+			if p.LinuxPass > 0 {
+				sum.OnPerlLinuxPass++
 			}
 		}
 	}

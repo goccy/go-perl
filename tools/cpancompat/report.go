@@ -36,10 +36,15 @@ type blocker struct {
 // runSummary is what report writes to summary.json.
 type runSummary struct {
 	Run string `json:"run"`
+	// Perl is the perl version the interpreter is built from, whose CPAN
+	// Testers reports define Reference: the distributions whose release
+	// passes there more often than it fails on Linux (dist.passesOnPerl),
+	// the set this survey measures against.
+	Perl      string   `json:"perl,omitempty"`
+	Reference coverage `json:"reference"`
 	// All is every distribution of the snapshot. PassOnPerl are the ones
-	// CPAN Testers saw pass more often than fail on perl itself, the
-	// reference this survey measures against; AnyPassOnPerl the ones with
-	// at least one passing report.
+	// whose CPAN Testers reports on any perl, summed, pass more often than
+	// they fail; AnyPassOnPerl the ones with at least one passing report.
 	All           coverage  `json:"all"`
 	PassOnPerl    coverage  `json:"pass_on_perl"`
 	AnyPassOnPerl coverage  `json:"any_pass_on_perl"`
@@ -64,11 +69,16 @@ func report(dataDir, run string, w io.Writer) error {
 		latest[rows[i].Dist] = &rows[i]
 	}
 
-	s := runSummary{Run: run}
+	perl, err := graphPerl(dataDir)
+	if err != nil {
+		return err
+	}
+	s := runSummary{Run: run, Perl: perl}
 	sets := []struct {
 		c      *coverage
 		member func(d *dist) bool
 	}{
+		{&s.Reference, (*dist).passesOnPerl},
 		{&s.All, func(*dist) bool { return true }},
 		{&s.PassOnPerl, func(d *dist) bool { return d.Testers != nil && d.Testers.Pass > d.Testers.Fail }},
 		{&s.AnyPassOnPerl, func(d *dist) bool { return d.Testers != nil && d.Testers.Pass > 0 }},
@@ -147,9 +157,12 @@ func report(dataDir, run string, w io.Writer) error {
 			fmt.Fprintf(w, "  %-22s %6d\n", name, c.Outcomes[name])
 		}
 	}
+	if perl != "" {
+		print(fmt.Sprintf("passing on perl %s on Linux (more passing than failing CPAN Testers reports on the release there; the reference)", perl), s.Reference)
+	}
 	print("all of CPAN", s.All)
-	print("passing on perl (more passing than failing CPAN Testers reports)", s.PassOnPerl)
-	print("with at least one passing CPAN Testers report", s.AnyPassOnPerl)
+	print("more passing than failing CPAN Testers reports on any perl, summed", s.PassOnPerl)
+	print("with at least one passing CPAN Testers report on any perl", s.AnyPassOnPerl)
 	if len(s.Blockers) > 0 {
 		fmt.Fprintln(w, "not installable, by how much depends on them:")
 		for i, b := range s.Blockers {

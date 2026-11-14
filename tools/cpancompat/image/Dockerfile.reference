@@ -1,0 +1,20 @@
+# The environment of Dockerfile, built around perl itself instead of gperl:
+# an official perl image of the release gperl's interpreter is built from,
+# with the same packages and the same harness. What fails here fails on
+# perl in this environment, whatever gperl does.
+ARG PERL_IMAGE
+FROM ${PERL_IMAGE}
+
+COPY packages /opt/cpancompat/packages
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends $(sed 's/#.*//' /opt/cpancompat/packages) \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY dist.sh watch.sh builder.pl unmet.pl /opt/cpancompat/
+COPY Harness.pm /opt/cpancompat/lib/CPANCompat/Harness.pm
+
+# The harness installs into /opt/gperl/local (the run's volume) whichever
+# perl it drives; the image's perl is the first perl in PATH.
+RUN mkdir -p /opt/gperl/local/lib/perl5 /opt/gperl/local/bin
+ENV PATH=/opt/gperl/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PERL5LIB=/opt/gperl/local/lib/perl5
