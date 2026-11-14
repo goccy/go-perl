@@ -98,6 +98,7 @@
 #define HAS_FSYNC
 #define HAS_FLOCK
 #define HAS_FCNTL
+#define HAS_IOCTL
 #define HAS_DUP2
 #define HAS_PIPE
 #define HAS_FORK

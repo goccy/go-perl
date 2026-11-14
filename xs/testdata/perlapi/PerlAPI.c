@@ -5330,9 +5330,33 @@ XS(XS_PerlAPI_install_kw_scan) {
     XSRETURN_EMPTY;
 }
 
+/* pending(fh): the bytes waiting to be read on the handle's descriptor,
+ * by ioctl, which perl's config.h says the system has (HAS_IOCTL). */
+XS(XS_PerlAPI_pending) {
+    dXSARGS;
+    int n = -1;
+    if (items != 1) croak_xs_usage(cv, "fh");
+#ifdef HAS_IOCTL
+    if (ioctl(PerlIO_fileno(IoIFP(sv_2io(ST(0)))), FIONREAD, &n) != 0) n = -2;
+#endif
+    ST(0) = sv_2mortal(newSViv(n));
+    XSRETURN(1);
+}
+
+/* require_file(name): perl_require_pv, the old name of require_pv, of the
+ * file name. */
+XS(XS_PerlAPI_require_file) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "name");
+    perl_require_pv(SvPV_nolen(ST(0)));
+    XSRETURN_EMPTY;
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
+    newXS_deffile("PerlAPI::require_file", XS_PerlAPI_require_file);
+    newXS_deffile("PerlAPI::pending", XS_PerlAPI_pending);
     newXS_deffile("PerlAPI::refuse_set", XS_PerlAPI_refuse_set);
     newXS_deffile("PerlAPI::enable_infix", XS_PerlAPI_enable_infix);
     newXS_deffile("PerlAPI::case_map", XS_PerlAPI_case_map);

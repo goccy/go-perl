@@ -197,6 +197,27 @@ func TestNativeCaseChangesAndInterpreterStart(t *testing.T) {
 	})
 }
 
+// config.h says the system has ioctl (HAS_IOCTL), as perl's does: native
+// code asks the descriptor of a handle (IO::Interface's interface flags).
+func TestNativeIoctlOnAHandle(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"bytes waiting in a pipe", `pipe(my $r, my $w) or die $!; syswrite($w, "abcde") == 5 or die $!; PerlAPI::pending($r)`, "5"},
+	})
+}
+
+// perl_require_pv is require_pv: it requires a file by its name, and a
+// failure is left in $@ (Math::Prime::Util loads its Perl half so).
+func TestNativeRequireByFileName(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a file", `my $before = $INC{"File/Basename.pm"} ? 1 : 0; PerlAPI::require_file("File/Basename.pm"); join ",", $before, $INC{"File/Basename.pm"} ? 1 : 0, defined &File::Basename::basename ? 1 : 0`, "0,1,1"},
+		{"a missing file", `PerlAPI::require_file("No/Such/Module.pm"); $@ =~ m{^Can't locate No/Such/Module\.pm} ? "error" : "[$@]"`, "error"},
+	})
+}
+
 // Module state is the static my_cxt, as with perl without MULTIPLICITY;
 // CvAUTOLOAD_on and CvAUTOLOAD_off change the sub's flag; Time::HiRes's C
 // hook is in PL_modglobal once Time::HiRes is loaded, and not before, and

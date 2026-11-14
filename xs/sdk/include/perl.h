@@ -6941,14 +6941,9 @@ static char *goperl_pv_uni_display(goperl_frame_t *f, SV *dsv, const U8 *spv,
 #define CopFILEGV(cop) gv_fetchfile(CopFILE(cop))
 #define DEFSV_set(sv) ((void)(DEFSV = (SV *)(sv)))
 #define die Perl_croak_nocontext
-#define perl_require_pv(pv)                                              \
-    do {                                                                 \
-        char goperl_req_buf[512];                                        \
-        snprintf(goperl_req_buf, sizeof goperl_req_buf, "require %s",    \
-                 (pv));                                                  \
-        goperl_do_op(_gof, GOPERL_OP_EVAL_PV, 0, 0, goperl_req_buf,      \
-                     strlen(goperl_req_buf));                            \
-    } while (0)
+/* The old name of require_pv: the argument is the name of a file, as the
+ * one require takes in a string ("Math/Prime/Util/PP.pm"). */
+#define perl_require_pv(pv) require_pv(pv)
 /* Host-local save of plain C variables: restored at XSUB return via the
  * host save-stack (same mechanism as SAVEVPTR). */
 #define SAVEI32(i) goperl_save_i32(_gof, (int32_t *)&(i))
