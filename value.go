@@ -396,6 +396,29 @@ type refHandle struct {
 	released atomic.Bool
 }
 
+// opPins are the reference handles one guest operation names: the
+// handle it operates on and the handles encoded in its arguments.
+type opPins []*refHandle
+
+// guestOp runs op, one guest operation, and keeps the handles in pins
+// reachable until op has returned, that is until the guest has run the
+// operation — the callbacks into Go it makes included.
+//
+// A handle's registry entry is released once no Go value holds the handle
+// any more (newRefHandle's finalizer queues the release, and the queue is
+// sent to the guest ahead of the next operation). An operation reads the
+// ids it sends out of its handles before it starts, and the last Go
+// reference to a handle can be the operation itself: Deref(...).Call(...)
+// on a reference nothing else holds, or a value made only to be passed as
+// an argument. Without the pins a collection while the operation is on its
+// way releases the very entry it names — before the guest looks it up, or
+// while it runs (a callback's operation sends the queue too).
+func guestOp(pins opPins, op func() ([]byte, bool, error)) ([]byte, bool, error) {
+	resp, interrupted, err := op()
+	runtime.KeepAlive(pins)
+	return resp, interrupted, err
+}
+
 func newRefHandle(p *Perl, id uint64, refkind uint8, class string) *refHandle {
 	h := &refHandle{p: p, id: id, refkind: refkind, class: class}
 	runtime.SetFinalizer(h, func(h *refHandle) {
@@ -453,7 +476,9 @@ func (v RefValue) Deref(ctx context.Context) (Value, error) {
 	case wireRefIO:
 		return IOValue{h: v.h}, nil
 	default:
-		resp, interrupted, err := v.h.p.raw.DerefOp(ctx, v.h.id)
+		resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+			return v.h.p.raw.DerefOp(ctx, v.h.id)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -469,11 +494,13 @@ func (v RefValue) MethodCall(ctx context.Context, method string, args ...Value) 
 		return nil, errors.New("perl: empty method name")
 	}
 	p := v.h.p
-	enc, err := p.encodeArgs(args)
+	enc, pins, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	resp, interrupted, err := p.raw.MethodCallOp(ctx, v.h.id, method, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return p.raw.MethodCallOp(ctx, v.h.id, method, enc)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +553,9 @@ func (v ArrayValue) Ref() RefValue { return RefValue{h: v.h} }
 
 // Len returns scalar @array.
 func (v ArrayValue) Len(ctx context.Context) (int, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayLenOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayLenOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -536,7 +565,9 @@ func (v ArrayValue) Len(ctx context.Context) (int, error) {
 
 // Index returns $array[i] (Perl indexing: negative counts from the end).
 func (v ArrayValue) Index(ctx context.Context, i int) (Value, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayGetOp(ctx, v.h.id, int64(i))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayGetOp(ctx, v.h.id, int64(i))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -545,11 +576,14 @@ func (v ArrayValue) Index(ctx context.Context, i int) (Value, error) {
 
 // SetIndex performs $array[i] = val.
 func (v ArrayValue) SetIndex(ctx context.Context, i int, val Value) error {
-	enc, err := v.h.p.encodeSingle(val)
+	pins := opPins{v.h}
+	enc, err := v.h.p.encodeSingle(&pins, val)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.ArraySetOp(ctx, v.h.id, int64(i), enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArraySetOp(ctx, v.h.id, int64(i), enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -559,11 +593,13 @@ func (v ArrayValue) SetIndex(ctx context.Context, i int, val Value) error {
 // Push appends vals to the array. An ArrayValue or HashValue among vals
 // flattens into its contents, exactly like push @a, @b, %h in Perl.
 func (v ArrayValue) Push(ctx context.Context, vals ...Value) error {
-	enc, err := v.h.p.encodeArgs(vals)
+	enc, pins, err := v.h.p.encodeArgs(vals)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.ArrayPushOp(ctx, v.h.id, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayPushOp(ctx, v.h.id, enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -572,7 +608,9 @@ func (v ArrayValue) Push(ctx context.Context, vals ...Value) error {
 
 // Values returns every element in one crossing.
 func (v ArrayValue) Values(ctx context.Context) ([]Value, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayValuesOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayValuesOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +635,9 @@ func (v HashValue) Ref() RefValue { return RefValue{h: v.h} }
 
 // Get returns $hash{key} and whether the key exists.
 func (v HashValue) Get(ctx context.Context, key string) (Value, bool, error) {
-	resp, interrupted, err := v.h.p.raw.HashGetOp(ctx, v.h.id, encodeKey(key))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashGetOp(ctx, v.h.id, encodeKey(key))
+	})
 	if err != nil {
 		return nil, false, err
 	}
@@ -606,11 +646,14 @@ func (v HashValue) Get(ctx context.Context, key string) (Value, bool, error) {
 
 // Set performs $hash{key} = val.
 func (v HashValue) Set(ctx context.Context, key string, val Value) error {
-	enc, err := v.h.p.encodeSingle(val)
+	pins := opPins{v.h}
+	enc, err := v.h.p.encodeSingle(&pins, val)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.HashSetOp(ctx, v.h.id, encodeKey(key), enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashSetOp(ctx, v.h.id, encodeKey(key), enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -619,7 +662,9 @@ func (v HashValue) Set(ctx context.Context, key string, val Value) error {
 
 // Delete performs delete $hash{key}.
 func (v HashValue) Delete(ctx context.Context, key string) error {
-	resp, interrupted, err := v.h.p.raw.HashDeleteOp(ctx, v.h.id, encodeKey(key))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashDeleteOp(ctx, v.h.id, encodeKey(key))
+	})
 	if err != nil {
 		return err
 	}
@@ -628,7 +673,9 @@ func (v HashValue) Delete(ctx context.Context, key string) error {
 
 // Keys returns keys %hash (Perl's hash order: unordered).
 func (v HashValue) Keys(ctx context.Context) ([]string, error) {
-	resp, interrupted, err := v.h.p.raw.HashKeysOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashKeysOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -686,11 +733,13 @@ func (v CodeValue) CallScalar(ctx context.Context, args ...Value) (Value, error)
 
 func (v CodeValue) call(ctx context.Context, scalarCtx bool, args []Value) ([]Value, error) {
 	p := v.h.p
-	enc, err := p.encodeArgs(args)
+	enc, pins, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	resp, interrupted, err := p.raw.InvokeOp(ctx, v.h.id, scalarCtx, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return p.raw.InvokeOp(ctx, v.h.id, scalarCtx, enc)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -739,11 +788,13 @@ type Pair struct {
 // crossing) and returns it. An ArrayValue or HashValue among vals flattens,
 // like [@a, %h]; pass Ref() to nest a reference.
 func (p *Perl) NewArray(ctx context.Context, vals ...Value) (ArrayValue, error) {
-	enc, err := p.encodeArgs(vals)
+	enc, pins, err := p.encodeArgs(vals)
 	if err != nil {
 		return ArrayValue{}, err
 	}
-	resp, interrupted, err := p.raw.NewArrayOp(ctx, enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return p.raw.NewArrayOp(ctx, enc)
+	})
 	if err != nil {
 		return ArrayValue{}, err
 	}
@@ -762,16 +813,19 @@ func (p *Perl) NewArray(ctx context.Context, vals ...Value) (ArrayValue, error) 
 // crossing) and returns it.
 func (p *Perl) NewHash(ctx context.Context, pairs ...Pair) (HashValue, error) {
 	var enc []byte
+	var pins opPins
 	enc = appendU32(enc, uint32(len(pairs)*2))
 	for _, pr := range pairs {
 		enc = append(enc, encodeKey(pr.K)...)
-		one, err := p.encodeSingle(pr.V)
+		one, err := p.encodeSingle(&pins, pr.V)
 		if err != nil {
 			return HashValue{}, err
 		}
 		enc = append(enc, one...)
 	}
-	resp, interrupted, err := p.raw.NewHashOp(ctx, enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return p.raw.NewHashOp(ctx, enc)
+	})
 	if err != nil {
 		return HashValue{}, err
 	}
