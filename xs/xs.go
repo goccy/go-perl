@@ -40,6 +40,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -326,6 +327,12 @@ type state struct {
 	// cloneHookSet records that Load registered adoptClone with the
 	// instance (once, however many modules load).
 	cloneHookSet bool
+
+	// nativeThread is the thread running native code for the instance
+	// right now (0: none), for a signal to interrupt it from another
+	// goroutine (see native_interrupt.go): which thread the instance's
+	// goroutine is on is known only on that goroutine.
+	nativeThread atomic.Uint64
 }
 
 // adoptClone builds the loader state for a copy of this state's instance:
@@ -788,6 +795,7 @@ func (s *state) dispatch(req []byte) []byte {
 	s.mu.Lock()
 	inv, epi := s.xsInvoke, s.xsEpilogue
 	s.mu.Unlock()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	if inv != 0 {
 		// The SDK's entry makes the frame current before the XSUB's first
 		// statement. A module built before the SDK had the entry is
@@ -801,6 +809,7 @@ func (s *state) dispatch(req []byte) []byte {
 	if epi != 0 {
 		purego.SyscallN(epi, fp)
 	}
+	s.leaveNative(prevThread, prevInterrupt, entered)
 	if f.xerrno != 0 {
 		// What the C code left in errno is what $! says after the call.
 		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), ""); err != nil {
@@ -898,7 +907,11 @@ func (s *state) ppHook(req []byte) []byte {
 	}
 	f.markidx = int32(nmarks)
 	fp := pinFrame(f)
+	runtime.LockOSThread()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	next, _, _ := purego.SyscallN(invoke, fp, fn)
+	s.leaveNative(prevThread, prevInterrupt, entered)
+	runtime.UnlockOSThread()
 	unpinFrame(fp)
 	var stackState []byte
 	if f.ppState != 0 {
@@ -944,7 +957,9 @@ func (s *state) hostCall(req []byte) []byte {
 	// One OS thread for the whole call: the SDK's current frame is per
 	// thread.
 	runtime.LockOSThread()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	n, _, _ := purego.SyscallN(inv, fp, reqC, uintptr(len(req)), respC, respCap)
+	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
 	var out []byte
@@ -974,7 +989,11 @@ func (s *state) dtorFired(id uint32) {
 		return
 	}
 	_, fp := s.bootFrame()
+	runtime.LockOSThread()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	purego.SyscallN(invoke, fp, uintptr(id))
+	s.leaveNative(prevThread, prevInterrupt, entered)
+	runtime.UnlockOSThread()
 	unpinFrame(fp)
 }
 
@@ -1232,6 +1251,8 @@ func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) {
 	s.mu.Lock()
 	invoke := s.svtInvoke
 	s.mu.Unlock()
+	runtime.LockOSThread()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	if invoke != 0 {
 		// The SDK-side entry installs the current frame and a croak guard
 		// before running the hook; interpreter macros inside it need both.
@@ -1239,6 +1260,8 @@ func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) {
 	} else {
 		purego.SyscallN(fn, fp, uintptr(sv), mg)
 	}
+	s.leaveNative(prevThread, prevInterrupt, entered)
+	runtime.UnlockOSThread()
 	_ = f
 	unpinFrame(fp)
 }
@@ -1331,7 +1354,11 @@ func (s *state) perlioHook(req []byte) []byte {
 	pokeBytes(reqC, req)
 	respC := cMalloc(4096)
 	f, fp := s.bootFrame()
+	runtime.LockOSThread()
+	prevThread, prevInterrupt, entered := s.enterNative()
 	rlen, _, _ := purego.SyscallN(inv, fp, funcs, reqC, uintptr(len(req)), respC, 4096)
+	s.leaveNative(prevThread, prevInterrupt, entered)
+	runtime.UnlockOSThread()
 	_ = f
 	unpinFrame(fp)
 	n := int(int32(rlen))

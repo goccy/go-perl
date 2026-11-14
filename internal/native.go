@@ -254,6 +254,16 @@ func (p *Perl) HostDescriptor(fd int32) (uintptr, bool) {
 	return p.wasi.HostDescriptor(fd)
 }
 
+// SetOutsideInterrupt registers interrupt as what a signal for the program
+// does while the instance runs native code: it is called, from another
+// goroutine, for each signal that arrives meanwhile and would interrupt a
+// blocking call of the program's (see the runtime's
+// WasiStubs.SetOutsideInterrupt). It returns what was registered before,
+// for the caller to put back when the native code returns.
+func (p *Perl) SetOutsideInterrupt(interrupt func()) (previous func()) {
+	return p.wasi.SetOutsideInterrupt(interrupt)
+}
+
 func (p *Perl) RawMemory() []byte {
 	return wasm2go.Memory(p.m.g)
 }
