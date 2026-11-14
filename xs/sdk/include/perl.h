@@ -98,7 +98,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 22u
+#define GOPERL_XS_ABI 23u
 
 /* Signal actions of the process.
  *
@@ -4921,7 +4921,7 @@ typedef struct goperl_opreg_ent {
     struct goperl_opreg_ent *active_next; /* among the ones with a baseline */
     U8 persist; /* its size is a module's (NewOpSz): the memory is not reused */
     U8 active;
-    U16 pad;
+    U16 ext; /* a persistent one: the bytes of the module's struct past OP */
     uint32_t gen; /* the generation its links were described in */
     void *aux_own; /* the aux of the op in this process's layout (a signature's
                     * parameters), which lasts as long as the shadow: code
@@ -4943,6 +4943,7 @@ typedef struct goperl_opreg {
     ((goperl_opreg_ent_t *)((char *)(o) - offsetof(goperl_opreg_ent_t, op)))
 
 static void goperl_op_base_capture(OP *o);
+static int goperl_raw_links(const OP *o);
 static void goperl_optree_flush(goperl_frame_t *f);
 static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f);
 static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type);
@@ -5141,18 +5142,22 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     o->op_next = goperl_op_link(f, r, w[GOPERL_OPREC_NEXT]);
     o->op_sibparent = goperl_op_link(f, r, w[GOPERL_OPREC_SIBPARENT]);
     o->op_moresib = (bits & GOPERL_OPBIT_MORESIB) ? 1 : 0;
-    o->op_first = goperl_op_link(f, r, w[GOPERL_OPREC_FIRST]);
-    /* op_last and op_other share storage: an op has one of them */
-    o->op_last = goperl_op_link(f, r, w[GOPERL_OPREC_LAST] ? w[GOPERL_OPREC_LAST]
-                                                           : w[GOPERL_OPREC_OTHER]);
     if (bits & GOPERL_OPBIT_RAW) {
-        /* a module's own op struct: the interpreter holds its links, and
-         * everything else of it is the module's, here */
+        /* a module's own op struct: the interpreter holds the links perl
+         * reads in it (see goperl_raw_links), and everything else of it is
+         * the module's, here */
+        const int links = goperl_raw_links(o);
+        if (links >= 1) o->op_first = goperl_op_link(f, r, w[GOPERL_OPREC_FIRST]);
+        if (links >= 2) o->op_other = goperl_op_link(f, r, w[GOPERL_OPREC_OTHER]);
         o->gop_full = 1;
         e->gen = r->gen;
         goperl_op_activate(r, e);
         return;
     }
+    o->op_first = goperl_op_link(f, r, w[GOPERL_OPREC_FIRST]);
+    /* op_last and op_other share storage: an op has one of them */
+    o->op_last = goperl_op_link(f, r, w[GOPERL_OPREC_LAST] ? w[GOPERL_OPREC_LAST]
+                                                           : w[GOPERL_OPREC_OTHER]);
     o->op_redoop = goperl_op_link(f, r, w[GOPERL_OPREC_REDOOP]);
     o->op_nextop = goperl_op_link(f, r, w[GOPERL_OPREC_NEXTOP]);
     o->op_lastop = goperl_op_link(f, r, w[GOPERL_OPREC_LASTOP]);
@@ -5477,8 +5482,15 @@ static void goperl_ppaddr_sync(goperl_frame_t *f) {
 typedef struct {
     void (*fn)(pTHX_ void *);
     void *arg;
-    U8 used; /* 1: fn(aTHX_ arg), SAVEDESTRUCTOR_X; 2: fn(arg), SAVEDESTRUCTOR */
+    U8 used; /* 1: fn(aTHX_ arg), SAVEDESTRUCTOR_X; 2: fn(arg), SAVEDESTRUCTOR;
+              * 3: fn(aTHX_ arg) that releases memory of this process (the
+              * buffer of SAVEFREEPV or SSNEW, a deferred save): the copies
+              * of an instance share that memory, so a copy leaves its
+              * release to the original (see __goperl_shared_clone) */
 } goperl_dtor_t;
+#define GOPERL_DTOR_X 1
+#define GOPERL_DTOR_PLAIN 2
+#define GOPERL_DTOR_CALL_OWN 3
 #define goperl_dtor_v ((goperl_dtor_t *)GOPERL_SHARED->dtors)
 #define goperl_dtor_hint_v (GOPERL_SHARED->dtor_hint)
 typedef char goperl_dtor_fits
@@ -5506,12 +5518,14 @@ static void goperl_save_destructor(goperl_frame_t *f,
     goperl_do_op(f, GOPERL_OP_SAVE_DESTRUCTOR, (uint64_t)(uint32_t)(id + 1),
                  0, 0, 0);
 }
-#define save_destructor_x(fn, p) goperl_save_destructor(_gof, (fn), (p), 1)
-#define SAVEDESTRUCTOR_X(fn, p) goperl_save_destructor(_gof, (fn), (p), 1)
+#define save_destructor_x(fn, p) \
+    goperl_save_destructor(_gof, (fn), (p), GOPERL_DTOR_X)
+#define SAVEDESTRUCTOR_X(fn, p) \
+    goperl_save_destructor(_gof, (fn), (p), GOPERL_DTOR_X)
 /* SAVEDESTRUCTOR's function takes the argument alone (void (*)(void *)). */
 #define save_destructor(fn, p)                                           \
     goperl_save_destructor(_gof, (void (*)(pTHX_ void *))(void (*)(void))(fn), \
-                           (void *)(p), 2)
+                           (void *)(p), GOPERL_DTOR_PLAIN)
 #define SAVEDESTRUCTOR(fn, p) save_destructor((fn), (p))
 
 /* ---- saves of native code's own locations at the end of a native call --
@@ -5560,7 +5574,7 @@ static void goperl_hostsave_settle(goperl_frame_t *f, int32_t base, const void *
         if (!d) goperl_croakf(f, "Out of memory!");
         d->e = *e;
         e->loc = 0; /* handed over */
-        goperl_save_destructor(f, goperl_deferred_save_cb, d, 1);
+        goperl_save_destructor(f, goperl_deferred_save_cb, d, GOPERL_DTOR_CALL_OWN);
     }
     /* what is on the call's stack is put back now, last saved first */
     while (goperl_hostsave_n > base) {
@@ -5595,7 +5609,7 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
         goperl_cur_frame_v = prev_frame;
         return;
     }
-    if (d.used == 2)
+    if (d.used == GOPERL_DTOR_PLAIN)
         ((void (*)(void *))(void (*)(void))d.fn)(d.arg);
     else
         d.fn(f, d.arg);
@@ -5855,7 +5869,8 @@ static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
     goperl_ssnew_hint_v = ix + 1;
     goperl_ssnew_v[ix].mem = calloc(1, size);
     if (!goperl_ssnew_v[ix].mem) goperl_croakf(f, "SSNEW: out of memory");
-    goperl_save_destructor(f, goperl_ssnew_free_cb, (void *)(intptr_t)ix, 1);
+    goperl_save_destructor(f, goperl_ssnew_free_cb, (void *)(intptr_t)ix,
+                           GOPERL_DTOR_CALL_OWN);
     return (SSize_t)ix;
 }
 #define SSNEW(size) goperl_ssnew(_gof, (size_t)(size))
@@ -8599,6 +8614,8 @@ static uint32_t goperl_op_tok32(goperl_frame_t *f, OP *kid) {
 static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     struct goperl_op_base *b = o->gop_base;
     if (!o->gop || !b) return;
+    /* in a module's own op struct only the links it has are links */
+    const int links = GOPERL_OPENT(o)->persist ? goperl_raw_links(o) : 2;
     if (b->op_next != o->op_next)
         goperl_op_setfield(f, o, GOPERL_OPF_NEXT,
                            goperl_op_tok32(f, o->op_next));
@@ -8607,13 +8624,13 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
                            GOPERL_OPF_SIBPARENT |
                                ((int)(o->op_moresib ? 1 : 0) << 16),
                            goperl_op_tok32(f, o->op_sibparent));
-    if (b->op_first != o->op_first)
+    if (links >= 1 && b->op_first != o->op_first)
         goperl_op_setfield(f, o, GOPERL_OPF_FIRST,
                            goperl_op_tok32(f, o->op_first));
-    if (b->op_last != o->op_last)
+    if (links >= 2 && b->op_last != o->op_last)
         goperl_op_setfield(f, o, GOPERL_OPF_LAST,
                            goperl_op_tok32(f, o->op_last));
-    if (b->op_other != o->op_other)
+    if (links >= 2 && b->op_other != o->op_other)
         goperl_op_setfield(f, o, GOPERL_OPF_OTHER,
                            goperl_op_tok32(f, o->op_other));
     if (b->op_targ != o->op_targ)
@@ -9229,8 +9246,11 @@ typedef struct goperl_callcks {
 #define goperl_callcks_v (*(goperl_callcks_t **)&GOPERL_SHARED->callcks)
 
 typedef struct goperl_atexit {
-    ATEXIT_t fn;
+    ATEXIT_t fn; /* NULL once it ran */
     void *arg;
+    /* NULL, or how many instances hold a copy of the entry: the copies of
+     * an instance share it (see __goperl_shared_clone) */
+    int32_t *holders;
 } goperl_atexit_t;
 /* The description of a custom op, laid out as perl's (a module may
  * initialize one statically, flags first): a field counts when its flag is
@@ -9379,6 +9399,7 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
     }
     h->atexit[h->atexit_n].fn = fn;
     h->atexit[h->atexit_n].arg = arg;
+    h->atexit[h->atexit_n].holders = 0;
     h->atexit_n++;
     goperl_do_op(f, GOPERL_OP_HOOK, GOPERL_HOOK_ATEXIT, (uint64_t)h->atexit_n,
                  0, 0);
@@ -9436,8 +9457,17 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
     case GOPERL_HOST_ATEXIT: {
         if (reqlen < 8 || !h || req[1] == 0 || (int32_t)req[1] > h->atexit_n)
             goperl_croakf(f, "host call: no function for the request");
-        const goperl_atexit_t a = h->atexit[req[1] - 1];
-        a.fn(f, a.arg);
+        goperl_atexit_t *const slot = &h->atexit[req[1] - 1];
+        const goperl_atexit_t a = *slot;
+        slot->fn = 0;
+        slot->holders = 0;
+        /* one the copies of the instance share runs for the last of them:
+         * it releases what the module keeps for all of them */
+        if (a.holders) {
+            if (__atomic_sub_fetch(a.holders, 1, __ATOMIC_ACQ_REL) > 0) break;
+            free(a.holders);
+        }
+        if (a.fn) a.fn(f, a.arg);
         break;
     }
     case GOPERL_HOST_CALLCK: {
@@ -9551,6 +9581,23 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
     (((xop)->xop_flags & XOPf_##which) ? (xop)->which : XOPd_##which)
 #define XopDISABLE(xop, which) ((xop)->xop_flags &= ~XOPf_##which)
 #define XopENABLE(xop, which) ((xop)->xop_flags |= XOPf_##which)
+
+/* How many links a module's own op struct (NewOpSz) has, as perl reads
+ * them: none without kids, op_first with them (OPf_KIDS), and op_other or
+ * op_last as well unless the op is registered as a custom op of a class
+ * that has only op_first. What follows the links is the module's. */
+static int goperl_raw_links_by(const goperl_hooks_t *h, const OP *o) {
+    if (!(o->op_flags & OPf_KIDS)) return 0;
+    for (int32_t i = 0; h && i < h->xop_n; i++) {
+        if (h->xops[i].pp != o->op_ppaddr) continue;
+        const U32 cls = XopENTRY(h->xops[i].xop, xop_class);
+        return cls == OA_BASEOP || cls == OA_UNOP || cls == OA_BASEOP_OR_UNOP ? 1 : 2;
+    }
+    return 2;
+}
+static int goperl_raw_links(const OP *o) {
+    return goperl_raw_links_by(goperl_cur_frame_v ? goperl_hooks_v : 0, o);
+}
 /* A registered custom op is the interpreter's too: it is told the name,
  * the description and the class, and gives the op a number that the ops
  * running this pp function carry (see goperl_perop_pp_register). */
@@ -10076,6 +10123,9 @@ static OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv) {
 enum { GOPERL_OPC_RAW = 12 };
 static OP *goperl_newopsz(goperl_frame_t *f, size_t size) {
     if (size < sizeof(OP)) size = sizeof(OP);
+    if (size - sizeof(OP) > 0xFFFF)
+        goperl_croakf(f, "NewOpSz: an op struct of %lu bytes is larger than "
+                         "this SDK keeps", (unsigned long)size);
     uint64_t tok = goperl_do_op(f, GOPERL_OP_OPTREE_NEW,
                                 ((uint64_t)GOPERL_OPC_RAW << 32), 0, 0, 0);
     goperl_opreg_t *r = goperl_opreg_get(f);
@@ -10084,6 +10134,7 @@ static OP *goperl_newopsz(goperl_frame_t *f, size_t size) {
         1, offsetof(goperl_opreg_ent_t, op) + size);
     if (!e) goperl_croakf(f, "NewOpSz: out of memory");
     e->persist = 1;
+    e->ext = (U16)(size - sizeof(OP));
     e->op.gop = tok;
     goperl_opreg_insert(f, r, e);
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
@@ -10128,7 +10179,8 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
     (void)_gof;
     free(p);
 }
-#define SAVEFREEPV(p) SAVEDESTRUCTOR_X(goperl_savefreepv_cb, (void *)(p))
+#define SAVEFREEPV(p) \
+    goperl_save_destructor(_gof, goperl_savefreepv_cb, (void *)(p), GOPERL_DTOR_CALL_OWN)
 
 /* op_private flag values (from the guest perl's generated opcode.h) */
 #define OPpCONST_STRICT 0x08
@@ -10138,6 +10190,161 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
 
 #include "goperl_perlapi.h"
 #include "goperl_handy.h"
+
+/* ---- a copy of the instance -----------------------------------------------
+ * Loader entry: what this SDK keeps for an instance, for a copy of the
+ * instance (a Clone, the child of a fork) whose interpreter memory is a
+ * copy of the original's. dst is the copy's block, zeroed; src is the
+ * original's.
+ *
+ * What modules registered with the interpreter goes with the copy, which
+ * has its own tables of it from here on, as a forked process has its own
+ * copy of perl's: the op checkers, peephole hooks and call_atexit
+ * functions, the custom ops, the call checkers, the keyword and infix
+ * plugins, the source filters, run loops and block hooks, the destructors
+ * the interpreter's save stack names, and the ops of a module's own struct
+ * (NewOpSz), whose fields past the op are nowhere else. The strings
+ * interned so far are shared: they are never changed or freed.
+ *
+ * The rest is the state of the native calls in progress, which exist only
+ * in the original, or what was read from the interpreter and is read again
+ * when needed. Memory of this process is shared by the copies, as a
+ * module's own variables are; the destructors that release such memory
+ * (SAVEFREEPV, SSNEW, deferred saves) stay with the original, so that it is
+ * released once.
+ *
+ * Returns 0, or -1 when memory runs out. */
+__attribute__((weak, visibility("default"), used)) int32_t
+__goperl_shared_clone(void *dst_raw, const void *src_raw) {
+    goperl_shared_t *const dst = (goperl_shared_t *)dst_raw;
+    const goperl_shared_t *const src = (const goperl_shared_t *)src_raw;
+    dst->modglobal_seeded = src->modglobal_seeded;
+    dst->kw_head = src->kw_head;
+    dst->infix_head = src->infix_head;
+    memcpy(dst->intern, src->intern, sizeof dst->intern);
+    dst->na = src->na;
+
+    const goperl_dtor_t *const sd = (const goperl_dtor_t *)src->dtors;
+    goperl_dtor_t *const dd = (goperl_dtor_t *)dst->dtors;
+    for (int32_t i = 0; i < GOPERL_DTOR_MAX; i++)
+        if (sd[i].used == GOPERL_DTOR_X || sd[i].used == GOPERL_DTOR_PLAIN)
+            dd[i] = sd[i];
+    dst->dtor_hint = src->dtor_hint;
+
+    goperl_hooks_t *const sh = (goperl_hooks_t *)src->hooks;
+    if (sh) {
+        goperl_hooks_t *const h = (goperl_hooks_t *)malloc(sizeof *h);
+        if (!h) return -1;
+        *h = *sh;
+        h->atexit = 0;
+        h->atexit_cap = 0;
+        if (sh->atexit_n > 0) {
+            h->atexit = (goperl_atexit_t *)malloc((size_t)sh->atexit_n *
+                                                  sizeof(goperl_atexit_t));
+            if (!h->atexit) {
+                free(h);
+                return -1;
+            }
+            /* a function given to call_atexit releases what the module
+             * keeps, which the copies share: it runs once, for the last
+             * instance that holds it */
+            for (int32_t i = 0; i < sh->atexit_n; i++) {
+                goperl_atexit_t *const a = &sh->atexit[i];
+                if (a->fn && !a->holders) {
+                    a->holders = (int32_t *)malloc(sizeof(int32_t));
+                    if (!a->holders) {
+                        free(h->atexit);
+                        free(h);
+                        return -1;
+                    }
+                    *a->holders = 1;
+                }
+                if (a->holders) __atomic_add_fetch(a->holders, 1, __ATOMIC_ACQ_REL);
+                h->atexit[i] = *a;
+            }
+            h->atexit_cap = sh->atexit_n;
+        }
+        dst->hooks = h;
+    }
+
+    const goperl_callcks_t *const sc = (const goperl_callcks_t *)src->callcks;
+    if (sc) {
+        goperl_callcks_t *const c = (goperl_callcks_t *)calloc(1, sizeof *c);
+        if (!c) return -1;
+        if (sc->n > 0) {
+            c->fns = (Perl_call_checker *)malloc((size_t)sc->n * sizeof(Perl_call_checker));
+            if (!c->fns) {
+                free(c);
+                return -1;
+            }
+            memcpy(c->fns, sc->fns, (size_t)sc->n * sizeof(Perl_call_checker));
+            c->n = c->cap = sc->n;
+        }
+        dst->callcks = c;
+    }
+
+    const goperl_fntab_t *const st = (const goperl_fntab_t *)src->fntab;
+    if (st) {
+        goperl_fntab_t *const t = (goperl_fntab_t *)malloc(sizeof *t);
+        if (!t) return -1;
+        *t = *st;
+        dst->fntab = t;
+    }
+
+    /* the ops of a module's own struct: a copy of each, whose links are
+     * the interpreter's to describe again in the copy */
+    const goperl_opreg_t *const sr = (const goperl_opreg_t *)src->opreg[0];
+    if (sr) {
+        goperl_opreg_t *const r = (goperl_opreg_t *)calloc(1, sizeof *r);
+        if (!r) return -1;
+        r->nbuckets = sr->nbuckets;
+        r->buckets = (goperl_opreg_ent_t **)calloc(r->nbuckets, sizeof(void *));
+        if (!r->buckets) {
+            free(r);
+            return -1;
+        }
+        r->gen = 1;
+        for (uint32_t b = 0; b < sr->nbuckets; b++)
+            for (const goperl_opreg_ent_t *e = sr->buckets[b]; e; e = e->next) {
+                if (!e->persist || !e->op.gop) continue;
+                const size_t size = offsetof(goperl_opreg_ent_t, op) + sizeof(OP) + e->ext;
+                goperl_opreg_ent_t *const c = (goperl_opreg_ent_t *)malloc(size);
+                if (!c) return -1;
+                memcpy(c, e, size);
+                c->active_next = 0;
+                c->active = 0;
+                c->gen = 0;
+                c->aux_own = 0;
+                c->op.gop_base = 0;
+                c->op.gop_full = 0;
+                c->op.op_next = c->op.op_sibparent = 0;
+                const int links = goperl_raw_links_by(sh, &c->op);
+                if (links >= 1) c->op.op_first = 0;
+                if (links >= 2) c->op.op_other = 0;
+                const uint32_t h = goperl_opreg_hash(r, c->op.gop);
+                c->next = r->buckets[h];
+                r->buckets[h] = c;
+                r->count++;
+            }
+        dst->opreg[0] = r;
+    }
+    return 0;
+}
+
+/* Loader entry: the instance of the block is gone. The functions given to
+ * call_atexit it shares with copies and did not run are left to them: the
+ * last instance that runs one runs it. */
+__attribute__((weak, visibility("default"), used)) void
+__goperl_shared_release(void *raw) {
+    goperl_hooks_t *const h = (goperl_hooks_t *)((goperl_shared_t *)raw)->hooks;
+    for (int32_t i = 0; h && i < h->atexit_n; i++) {
+        goperl_atexit_t *const a = &h->atexit[i];
+        if (!a->fn || !a->holders) continue;
+        if (__atomic_sub_fetch(a->holders, 1, __ATOMIC_ACQ_REL) == 0) free(a->holders);
+        a->fn = 0;
+        a->holders = 0;
+    }
+}
 
 /* The interpreter a function of the API is called with: the current frame
  * (perl's get_context, which dTHX and PERL_GET_THX go through). */

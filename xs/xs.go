@@ -52,7 +52,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 22
+const abiVersion = 23
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -336,6 +336,12 @@ type state struct {
 	xsEpilogue   uintptr // __goperl_xs_epilogue
 	perlioInvoke uintptr // __goperl_perlio_invoke
 	hostInvoke   uintptr // __goperl_host_invoke
+	// sharedClone and sharedRelease are the SDK's __goperl_shared_clone,
+	// which gives the block of a copy of the instance what modules
+	// registered with the interpreter, and __goperl_shared_release, which
+	// lets go of what the block shares with copies when the instance goes.
+	sharedClone   uintptr
+	sharedRelease uintptr
 
 	// cloneHookSet records that Load registered adoptClone with the
 	// instance (once, however many modules load).
@@ -365,8 +371,10 @@ type state struct {
 // a perl without ithreads, so no svt_dup or CLONE hook runs. What the
 // loader can do for that memory it does: the copies of one MAGIC are
 // released together, svt_free running once, for the last of them (see
-// magicShares). Scope bookkeeping starts empty: the native activations it
-// belongs to exist only in the original.
+// magicShares). The SDK's block of the instance gets what modules
+// registered with the interpreter (op checkers, keyword plugins, ...: see
+// __goperl_shared_clone); scope bookkeeping starts empty: the native
+// activations it belongs to exist only in the original.
 func (s *state) adoptClone(clone *internal.Perl) error {
 	from, to := spanOf(s.p.RawMemory()), spanOf(clone.RawMemory())
 	s.mu.Lock()
@@ -388,6 +396,8 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		hookFns:       make(map[int32]uintptr, len(s.hookFns)),
 		perOpFns:      make(map[uint64]uintptr, len(s.perOpFns)),
 		sharedRaw:     cMalloc(sharedBlockSize),
+		sharedClone:   s.sharedClone,
+		sharedRelease: s.sharedRelease,
 		keywordInvoke: s.keywordInvoke,
 		ppInvoke:      s.ppInvoke,
 		dtorInvoke:    s.dtorInvoke,
@@ -395,9 +405,18 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		xsInvoke:      s.xsInvoke,
 		xsEpilogue:    s.xsEpilogue,
 		perlioInvoke:  s.perlioInvoke,
+		hostInvoke:    s.hostInvoke,
 		cloneHookSet:  true,
 	}
 	pokeBytes(cs.sharedRaw, make([]byte, sharedBlockSize))
+
+	if s.sharedClone != 0 {
+		if rc, _, _ := purego.SyscallN(s.sharedClone, cs.sharedRaw, s.sharedRaw); int32(rc) != 0 {
+			statesMu.Unlock()
+			s.mu.Unlock()
+			return errors.New("xs: out of memory copying the native modules' state")
+		}
+	}
 	cs.foreignTab, cs.foreignIdx, cs.foreignCap = newForeignTable(clone, s)
 	for cv, slot := range s.cvAny {
 		own := cMalloc(8)
@@ -626,6 +645,16 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	if fn, err := purego.Dlsym(lib, "__goperl_pp_invoke"); err == nil {
 		s.mu.Lock()
 		s.ppInvoke = fn
+		s.mu.Unlock()
+	}
+	if fn, err := purego.Dlsym(lib, "__goperl_shared_clone"); err == nil {
+		s.mu.Lock()
+		s.sharedClone = fn
+		s.mu.Unlock()
+	}
+	if fn, err := purego.Dlsym(lib, "__goperl_shared_release"); err == nil {
+		s.mu.Lock()
+		s.sharedRelease = fn
 		s.mu.Unlock()
 	}
 	if fn, err := purego.Dlsym(lib, "__goperl_svt_invoke"); err == nil {
@@ -1069,7 +1098,8 @@ var magicShares = struct {
 // the instance, as a process's memory goes with the process. So it no
 // longer holds the copies of MAGIC it shares with the instances it was
 // copied from or to, and no svt_free runs for them here: the last instance
-// that frees its copy runs it.
+// that frees its copy runs it. So it is with a function given to
+// call_atexit that it shares and did not run (see __goperl_shared_release).
 func releaseState(p *internal.Perl) {
 	statesMu.Lock()
 	s := states[p]
@@ -1080,6 +1110,9 @@ func releaseState(p *internal.Perl) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sharedRelease != 0 {
+		purego.SyscallN(s.sharedRelease, s.sharedRaw)
+	}
 	for _, rec := range s.magicBySV {
 		for mg := rec.head; mg != 0; {
 			node := copyIn(mg, mgAllocSize)

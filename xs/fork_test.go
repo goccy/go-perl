@@ -223,6 +223,69 @@ func TestForkMagicPointsIntoTheChildsMemory(t *testing.T) {
 	}
 }
 
+// A fork child has what native modules registered with the interpreter
+// before the fork: it runs an op checker and a keyword plugin the parent
+// installed when it compiles code, an op of a module's own struct the
+// parent compiled, and the destructor a module left in a scope of the
+// parent's when it leaves that scope; and a function it gives to
+// call_atexit runs when its interpreter is destroyed. The interpreter
+// calls each of them through the host.
+func TestForkChildRunsNativeHooksOfTheInterpreter(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "report")
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		`PerlAPI::hooks("add", 1); PerlAPI::lexical_keywords();`,
+		`my $tagged = eval q{ sub { my $v = tag_op; $v } } or die $@;`,
+		`pipe(my $r, my $w) or die "pipe: $!";`,
+		`my $pid;`,
+		`{`,
+		`    my $who = "parent";`,
+		`    PerlAPI::scope_guard(sub { syswrite($w, "guard of the $who\n") if $who eq "child"; $main::guarded = $who });`,
+		`    $pid = fork // die "fork: $!";`,
+		`    $who = "child" if !$pid;`,
+		`}`,
+		`if (!$pid) {`,
+		`    close $r;`,
+		`    syswrite($w, join("|", eval(q{my ($x, $y) = (1, 2); $x + $y}) // "error: $@", eval(q{one_into_x; $x}) // "error: $@", $tagged->()) . "\n");`,
+		`    PerlAPI::at_exit_write('`+report+`');`,
+		`    exit 4;`,
+		`}`,
+		`close $w; my @lines = <$r>; waitpid($pid, 0);`,
+		`print "child: ", @lines, "status ", $? >> 8, "\n", "guard in the parent: $main::guarded\n";`,
+	)
+	want := "child: guard of the child\n1003|1|4242\nstatus 4\nguard in the parent: parent\n"
+	if status != 0 || stdout != want {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, want)
+	}
+	got, err := os.ReadFile(report)
+	if err != nil || string(got) != "the interpreter is gone\n" {
+		t.Fatalf("report %q (%v), want the line of the child's call_atexit function; stderr %q", got, err, stderr)
+	}
+}
+
+// A function a module gave to call_atexit before a fork releases what the
+// module keeps, which the parent and the child share: it runs once, when
+// the last of them ends. A child that ends first leaves it to the parent.
+func TestForkSharesAtexitFunctionsWithTheParent(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "report")
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		`PerlAPI::at_exit_write('`+report+`');`,
+		`my $pid = fork // die "fork: $!";`,
+		`exit 0 if !$pid;`,
+		`waitpid($pid, 0);`,
+		`print "child status ", $? >> 8, ", ", (-e '`+report+`' ? "run by the child" : "not run yet"), "\n";`,
+	)
+	want := "child status 0, not run yet\n"
+	if status != 0 || stdout != want {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, want)
+	}
+	got, err := os.ReadFile(report)
+	if err != nil || string(got) != "the interpreter is gone\n" {
+		t.Fatalf("report %q (%v), want the line of the parent's call_atexit function; stderr %q", got, err, stderr)
+	}
+}
+
 // The process id native code asks for is the id of the process the program
 // is: in a fork child, the child's, as $$ says.
 func TestForkChildProcessIDInNativeCode(t *testing.T) {
@@ -240,6 +303,34 @@ func TestForkChildProcessIDInNativeCode(t *testing.T) {
 	if status != 0 || stdout != want {
 		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, want)
 	}
+}
+
+// A Clone has the op checkers and keyword plugins native modules installed
+// in the original and the ops of a module's own struct compiled there, and
+// installing a checker in the clone leaves the original without it.
+func TestCloneWithNativeHooksOfTheInterpreter(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	ctx := context.Background()
+	if r, err := p.Eval(ctx, `PerlAPI::hooks("add", 1); PerlAPI::lexical_keywords(); our $tagged = eval q{ sub { my $v = tag_op; $v } } or die $@; 1`); err != nil || r.Error != nil {
+		t.Fatalf("prepare: err=%v error=%v", err, r.Error)
+	}
+	c, err := p.Clone()
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	defer c.Close()
+	runEvalCases(t, c, []evalCase{
+		{"the op checker", `my ($x, $y) = (1, 2); $x + $y`, "1003"},
+		{"the keyword plugin", `one_into_x; $x`, "1"},
+		{"the op of a module's struct", `$tagged->()`, "4242"},
+		{"one of the clone's own", `PerlAPI::hooks("join", 1); eval q{join "-", 1, 2}`, "1+2"},
+	})
+	runEvalCases(t, p, []evalCase{
+		{"the original keeps its own", `my ($x, $y) = (1, 2); $x + $y`, "1003"},
+		{"and its op of a module's struct", `$tagged->()`, "4242"},
+		{"and not the clone's", `join "-", 1, 2`, "1-2"},
+	})
 }
 
 // A Clone of an instance whose variables carry native magic has the magic

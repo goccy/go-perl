@@ -131,5 +131,8 @@ func TestNativeKeywordDeclaresALexical(t *testing.T) {
 		{"a plugin that dies with an object", `my $r = eval q{ throw_hash; 1 }; join ",", defined $r ? "compiled" : "died", ref $@, ref $@ ? $@->{code} : $@`, "died,HASH,9"},
 		{"a plugin that dies with characters beyond Latin-1", `my $r = eval q{ throw_wide; 1 }; join ",", (utf8::is_utf8($@) ? "characters" : "bytes"), ($@ =~ /^In p\x{155}\x{f6}\x{e7}: refused at / ? "the text" : "other: $@")`, "characters,the text"},
 		{"a field of the parser the module set is the interpreter's at once", `my @w; local $SIG{__WARN__} = sub { push @w, $_[0] }; eval q{ use warnings; twice_z; 1 } // die $@; join "|", map { /^("\w+" variable \$z masks earlier declaration)/ ? $1 : $_ } @w`, `"my" variable $z masks earlier declaration`},
+		// The op has no kids: what follows BASEOP in its struct is the
+		// module's, not links of the op.
+		{"an op of the module's own struct keeps its fields", `my $f = eval q{ sub { my $v = tag_op; $v } } // die $@; join ",", $f->(), $f->()`, "4242,4242"},
 	})
 }

@@ -3046,6 +3046,26 @@ XS(XS_PerlAPI_destructor_found) {
     XSRETURN(1);
 }
 
+/* scope_guard(code): runs the code when the scope of the caller ends, as
+ * Guard's scope_guard does: a destructor of that scope holds the code (the
+ * XSUB steps out of the scope the interpreter opened for its call to save
+ * it there). */
+static void PerlAPI_run_guard(pTHX_ void *arg) {
+    SV *const code = (SV *)arg;
+    dSP;
+    PUSHMARK(SP);
+    call_sv(code, G_VOID | G_DISCARD | G_EVAL);
+    SvREFCNT_dec(code);
+}
+XS(XS_PerlAPI_scope_guard) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    LEAVE;
+    SAVEDESTRUCTOR_X(PerlAPI_run_guard, newSVsv(ST(0)));
+    ENTER;
+    XSRETURN_EMPTY;
+}
+
 /* show(text, max): pv_pretty of the text in quotes, pv_display of it, and
  * how much of it pv_escape took. */
 XS(XS_PerlAPI_show) {
@@ -3707,7 +3727,28 @@ XS(XS_PerlAPI_look_without_magic) {
  */
 static Perl_keyword_plugin_t perlapi_next_keyword_plugin;
 
+/* An op of this module's own struct (NewOpSz), made by the keyword tag_op:
+ * its pp function pushes the number the struct holds past the op. */
+struct PerlAPI_tagop {
+    BASEOP
+    IV tag;
+};
+static OP *PerlAPI_pp_tag(pTHX) {
+    dSP;
+    XPUSHs(sv_2mortal(newSViv(((struct PerlAPI_tagop *)PL_op)->tag)));
+    RETURN;
+}
+
 static int perlapi_keyword_plugin(pTHX_ char *kw, STRLEN kwlen, OP **op_ptr) {
+    if (kwlen == 6 && strnEQ(kw, "tag_op", 6)) {
+        OP *o;
+        NewOpSz(1101, o, sizeof(struct PerlAPI_tagop));
+        o->op_type = OP_CUSTOM;
+        o->op_ppaddr = PerlAPI_pp_tag;
+        ((struct PerlAPI_tagop *)o)->tag = 4242;
+        *op_ptr = o;
+        return KEYWORD_PLUGIN_EXPR;
+    }
     if (kwlen == 10 && strnEQ(kw, "one_into_x", 10)) {
         PADOFFSET padix = pad_add_name_pvn("$x", 2, 0, NULL, NULL);
         OP *varop, *assignop;
@@ -4998,6 +5039,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::own_magic", XS_PerlAPI_own_magic);
     newXS_deffile("PerlAPI::constant_calls", XS_PerlAPI_constant_calls);
     newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);
+    newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
     newXS_deffile("PerlAPI::destructor_found", XS_PerlAPI_destructor_found);
     newXS_deffile("PerlAPI::show", XS_PerlAPI_show);
     newXS_deffile("PerlAPI::observe", XS_PerlAPI_observe);
