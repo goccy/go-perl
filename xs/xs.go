@@ -2043,14 +2043,20 @@ var (
 
 func libcInit() {
 	libcOnce.Do(func() {
-		// A perl executable is linked with the C math library, and XS
-		// modules count on its functions being loaded already: many are
-		// linked without -lm. This binary has no libm of its own, so the
-		// library goes into the global namespace before the first module.
-		// Where it is missing, a module that needs it fails to load with
-		// the dynamic linker's own message.
+		// A perl executable is linked with the C libraries of its
+		// configuration (perllibs: -lpthread -ldl -lm -lcrypt -lutil -lc),
+		// and XS modules count on their functions being loaded already:
+		// many are linked without -lm, and a module that calls crypt or
+		// fcrypt (Crypt::Passwd) without -lcrypt. Of these, the math
+		// library and libcrypt are libraries of their own on Linux (the
+		// others are in the C library); this binary has neither, so they go
+		// into the global namespace before the first module. Where one is
+		// missing, a module that needs it fails to load with the dynamic
+		// linker's own message.
 		if runtime.GOOS == "linux" {
-			_, _ = purego.Dlopen("libm.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			for _, lib := range []string{"libm.so.6", "libcrypt.so.1"} {
+				_, _ = purego.Dlopen(lib, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			}
 		}
 		for _, sym := range []struct {
 			name string

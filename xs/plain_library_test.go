@@ -91,3 +91,17 @@ $user ? (DynaLoader::dl_find_symbol($user, "consumed_value") ? "linked" : "no sy
 		t.Errorf("provider loaded with flags 0: got %q, want %q", got, "unresolved")
 	}
 }
+
+// A library that calls crypt without being linked with libcrypt loads, as
+// it does into perl, whose executable is linked with libcrypt (perllibs):
+// Crypt::Passwd's module calls fcrypt that way.
+func TestDynaLoaderLoadsALibraryThatCountsOnPerlsLibcrypt(t *testing.T) {
+	lib := buildSharedLibrary(t, t.TempDir(), "usescrypt",
+		"char *crypt(const char *key, const char *salt);\nconst char *hashed(void) { return crypt(\"pw\", \"ab\"); }\n")
+	got := evalWithInc(t, true, true, nil, `require DynaLoader;
+my $lib = DynaLoader::dl_load_file('`+lib+`', 0) or die "dl_load_file: " . DynaLoader::dl_error();
+DynaLoader::dl_find_symbol($lib, "hashed") ? "loaded" : "no symbol: " . DynaLoader::dl_error()`)
+	if got != "loaded" {
+		t.Fatalf("got %q, want %q", got, "loaded")
+	}
+}
