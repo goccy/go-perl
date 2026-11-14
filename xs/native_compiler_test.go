@@ -170,3 +170,15 @@ func TestNativeBucketsOfAHash(t *testing.T) {
 	})
 }
 
+// custom_op_xop is the description a custom op's pp function was
+// registered with, and perl's empty one, whose fields have their defaults,
+// for a pp function nothing registered.
+func TestNativeCustomOpDescription(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"registered", `PerlAPI::custom_op_description(1)`, "goperl_described|a described op|1"},
+		{"not registered", `PerlAPI::custom_op_description(0)`, "custom|unknown custom operator|0"},
+	})
+}
+

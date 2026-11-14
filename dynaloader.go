@@ -25,7 +25,7 @@ const dynaLoaderGlue = `package DynaLoader;
 my $error = '';
 sub dl_error { $error }
 sub dl_load_file {
-    my ($lib, $message) = DynaLoader::__goperl_load_file($_[0]);
+    my ($lib, $message) = DynaLoader::__goperl_load_file($_[0], $_[1] // 0);
     $error = $message // '';
     return $lib;
 }
@@ -113,7 +113,7 @@ func (p *Perl) bindDynaLoader() {
 	}
 	fns := [...]GoFunc{
 		func(args []Value) ([]Value, error) {
-			lib, err := loader.Open(p.raw, scalar(args, 0).String())
+			lib, err := loader.Open(p.raw, scalar(args, 0).String(), int(scalar(args, 1).Int()))
 			if err != nil {
 				return failure(err)
 			}

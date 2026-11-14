@@ -717,9 +717,13 @@ struct goperl_frame {
     const goperl_foreign_t *foreign; /* the instance's (goperl_value_in) */
 };
 
-/* ---- shared module state (weak: one copy across a multi-TU .so) --------- */
+/* ---- shared module state (weak: one copy across a multi-TU .so) ---------
+ * The module's own globals are hidden: a module loaded with its symbols
+ * global (dl_load_flags 0x01, for modules that link against the functions
+ * it exports) must not lend them to the modules loaded after it, whose
+ * references would otherwise bind to its copies. */
 
-__attribute__((weak)) const goperl_api_t *goperl_api_v = 0;
+__attribute__((weak, visibility("hidden"))) const goperl_api_t *goperl_api_v = 0;
 
 /* ---- the current frame, per THREAD --------------------------------------
  * "The current activation" is per-thread process-wide state: several
@@ -1545,7 +1549,7 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     (uintptr_t)__builtin_frame_address(0)
 
 /* PL_ppaddr proxy: every slot is the same generic trampoline. */
-__attribute__((weak)) Perl_ppaddr_t goperl_ppaddr_v[OP_max];
+__attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_v[OP_max];
 
 /* Native-XSUB nesting depth: when the top-level XSUB returns, the lvalue
  * slots are dropped (the interpreter may free what they designate between
@@ -5152,7 +5156,7 @@ static COP *goperl_cop_shadow(goperl_frame_t *f, uint64_t tok) {
  * without checks, so hand it a stable dummy COP (line 0, package main)
  * instead — the same shape modules already handle for optimized-away
  * COPs. */
-__attribute__((weak)) OP goperl_nullcop_v = {
+__attribute__((weak, visibility("hidden"))) OP goperl_nullcop_v = {
     0, 0, 0, 0, OP_NEXTSTATE, 0, 0, 0, /* base scalars */
     1 /* gop_full */, 1 /* gop_iscop */, 0 /* moresib */, 12 /* a COP */,
     0, 0, 0, 0, 0 /* the flag bits */, 0 /* gop */,
@@ -5234,9 +5238,9 @@ static OP *goperl_newop_dispatch(pTHX_ int type, OP *o);
 static void goperl_pp_stack_push(goperl_frame_t *f);
 #include "goperl_ppslots.h"
 
-__attribute__((weak)) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max];
-__attribute__((weak)) uint8_t goperl_pp_installed_v[OP_max];
-__attribute__((weak)) int32_t goperl_ppaddr_inited_v = 0;
+__attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max];
+__attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max];
+__attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
 
 static OP *goperl_pp_dispatch(pTHX_ int type) {
     OP *cur = _gof->plop;
@@ -9227,6 +9231,21 @@ static void goperl_custom_op_register(goperl_frame_t *f, Perl_ppaddr_t pp,
 #define Perl_custom_op_register goperl_custom_op_register
 #define custom_op_register(pp, xop) \
     goperl_custom_op_register(_gof, (pp), (xop))
+/* The description an op of type OP_CUSTOM was registered with, found by the
+ * pp function it runs; perl's empty description, whose fields all have
+ * their defaults, for a pp function nothing registered. */
+static const XOP goperl_xop_null = {0, 0, 0, 0, 0};
+static const XOP *goperl_custom_op_xop(goperl_frame_t *f, const OP *o)
+    __attribute__((unused));
+static const XOP *goperl_custom_op_xop(goperl_frame_t *f, const OP *o) {
+    (void)f;
+    const goperl_hooks_t *h = goperl_hooks_v;
+    for (int32_t i = 0; h && i < h->xop_n; i++)
+        if (h->xops[i].pp == o->op_ppaddr) return h->xops[i].xop;
+    return &goperl_xop_null;
+}
+#define Perl_custom_op_xop goperl_custom_op_xop
+#define custom_op_xop(o) goperl_custom_op_xop(_gof, (o))
 
 /* ---- character classification via the guest ----------------------------- */
 

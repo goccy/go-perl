@@ -537,7 +537,7 @@ func load(p *internal.Perl, module, path string) error {
 	if err != nil {
 		return err
 	}
-	lib, err := s.open(path)
+	lib, err := s.open(path, false)
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,10 @@ func loaderState(p *internal.Perl) (*state, error) {
 
 // open dlopens a native XS module built against the SDK, injects the
 // vtable, and picks up the SDK entry points the module carries.
-func (s *state) open(path string) (lib uintptr, err error) {
+// open loads the module at path; global makes its symbols available to the
+// modules loaded after it (DynaLoader's dl_load_flags 0x01, RTLD_GLOBAL),
+// for modules that link against the functions another one exports.
+func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	p := s.p
 	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
 		return 0, err
@@ -602,7 +605,11 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	}
 	vtableOnce.Do(buildVtable)
 
-	lib, err = purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	mode := purego.RTLD_NOW | purego.RTLD_LOCAL
+	if global {
+		mode = purego.RTLD_NOW | purego.RTLD_GLOBAL
+	}
+	lib, err = purego.Dlopen(path, mode)
 	if err != nil {
 		return 0, fmt.Errorf("dlopen %s: %w", path, err)
 	}
@@ -659,12 +666,12 @@ func (s *state) open(path string) (lib uintptr, err error) {
 
 // openLibrary is DynaLoader's dl_load_file: it loads the module at path
 // and returns the token Perl code names it by.
-func openLibrary(p *internal.Perl, path string) (uint64, error) {
+func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 	s, err := loaderState(p)
 	if err != nil {
 		return 0, err
 	}
-	lib, err := s.open(path)
+	lib, err := s.open(path, flags&0x01 != 0)
 	if err != nil {
 		return 0, err
 	}

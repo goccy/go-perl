@@ -4232,6 +4232,37 @@ XS(XS_PerlAPI_buckets) {
     }
 }
 
+static OP *pp_goperl_described(pTHX) { return NORMAL; }
+static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
+static XOP xop_goperl_described;
+
+/* custom_op_description(registered): the name, description and class of a
+ * custom op running pp_goperl_described, registered with a name and a
+ * description (at the first call), or of one running a pp function no one
+ * registered, whose fields have their defaults. */
+XS(XS_PerlAPI_custom_op_description) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "registered");
+    {
+        OP o;
+        const XOP *xop;
+        if (!(XopFLAGS(&xop_goperl_described) & XOPf_xop_name)) {
+            XopENTRY_set(&xop_goperl_described, xop_name, "goperl_described");
+            XopENTRY_set(&xop_goperl_described, xop_desc, "a described op");
+            XopENTRY_set(&xop_goperl_described, xop_class, OA_UNOP);
+            Perl_custom_op_register(aTHX_ pp_goperl_described, &xop_goperl_described);
+        }
+        Zero(&o, 1, OP);
+        o.op_type = OP_CUSTOM;
+        o.op_ppaddr = SvTRUE(ST(0)) ? pp_goperl_described : pp_goperl_undescribed;
+        xop = Perl_custom_op_xop(aTHX_ &o);
+        ST(0) = sv_2mortal(newSVpvf("%s|%s|%d", XopENTRY(xop, xop_name),
+                                    XopENTRY(xop, xop_desc),
+                                    (int)(XopENTRY(xop, xop_class) == OA_UNOP)));
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -4429,5 +4460,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::statement_line", XS_PerlAPI_statement_line);
     newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
     newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
+    newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
