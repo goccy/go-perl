@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -118,5 +119,33 @@ print "preprocessed=", (qx(echo __VERSION__ | $Config::Config{cpprun} -) =~ /"\Q
 	// that reads it gets what it gets from perl.
 	if got["perl_version"] != "undef" {
 		t.Errorf("$Config{perl_version} is %s, perl leaves it undefined", got["perl_version"])
+	}
+}
+
+// perl -V prints the summary of the configuration and what the binary was
+// built with, under the overlay as without it: the overlay gives $^O the
+// host's name, and Config::_V's check that the library was built for the
+// system that runs it is made with the interpreter's own system. The
+// summary shows %Config as the overlay leaves it.
+func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
+	got := overlayRun(t, "-V")
+	for _, want := range []string{
+		"Summary of my perl5 (revision 5 version 44",
+		"    osname=" + runtime.GOOS + "\n",
+		"    cc='cc'\n",
+		"Characteristics of this binary (from libperl):",
+		"  @INC:\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("perl -V under the overlay does not print %q:\n%s", want, got)
+		}
+	}
+	status, plain, stderr := runCLI(t, t.TempDir(), "", "-V")
+	if status != 0 || !strings.Contains(plain, "Summary of my perl5") || !strings.Contains(plain, "  @INC:\n") {
+		t.Errorf("perl -V without the overlay: status=%d stderr=%q stdout:\n%s", status, stderr, plain)
+	}
+	// $^O stays the host's for the rest of the program.
+	if got := overlayRun(t, "-V", "-e", `print "after: $^O\n"`); !strings.HasSuffix(got, "after: "+runtime.GOOS+"\n") {
+		t.Errorf("$^O after the summary, under the overlay: %q", got[max(0, len(got)-40):])
 	}
 }
