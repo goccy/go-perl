@@ -39,6 +39,10 @@ const (
 	outcomeBuildFailed = "build_failed"
 	// outcomeTimeout: a phase ran out of time.
 	outcomeTimeout = "timeout"
+	// outcomeOutputLimit: a phase was stopped because its output passed
+	// the limit (a script that prompts in a loop on a closed stdin, a test
+	// that prints without end).
+	outcomeOutputLimit = "output_limit"
 	// outcomeBlocked: a distribution this one needs could not be
 	// installed, so it was not attempted (or not attempted again).
 	outcomeBlocked = "blocked"
@@ -54,6 +58,7 @@ type phaseRecord struct {
 	Status        int    `json:"status"`
 	Seconds       int    `json:"seconds"`
 	TimedOut      bool   `json:"timed_out"`
+	OutputLimited bool   `json:"output_limited,omitempty"`
 	NoBuildScript bool   `json:"no_build_script,omitempty"`
 }
 
@@ -533,9 +538,14 @@ func outcomeOf(res *result, wallTimeout bool) (outcome string, installed bool) {
 	return outcome, installed
 }
 
+// timeoutOr is the outcome of a failed phase: outcome, unless the phase was
+// stopped for running out of time or for writing too much.
 func timeoutOr(p phaseRecord, outcome string) string {
-	if p.TimedOut {
+	switch {
+	case p.TimedOut:
 		return outcomeTimeout
+	case p.OutputLimited:
+		return outcomeOutputLimit
 	}
 	return outcome
 }

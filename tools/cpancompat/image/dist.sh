@@ -23,6 +23,8 @@ out=/out
 stage=/stage
 dest=/opt/gperl/local
 tools=/opt/cpancompat
+# The most a phase may write to its log, in bytes.
+output_limit=$((256 << 20))
 
 # What CPAN clients set for the programs they drive.
 export PERL_MM_USE_DEFAULT=1 NONINTERACTIVE_TESTING=1 PERL_USE_UNSAFE_INC=1
@@ -33,12 +35,13 @@ export PERL5_CPAN_IS_RUNNING=$$ PERL5_CPANPLUS_IS_RUNNING=$$
 phase() {
     local name=$1 limit=$2
     shift 2
-    local start=$SECONDS status seconds timed_out=false watcher
-    # Shortly before the limit, what the processes still running are doing
-    # goes to <name>.stuck.jsonl: whether a phase that runs out of time is
-    # blocked, spinning or merely slow is told by that record, not by waiting
-    # longer.
-    bash $tools/stuck.sh $((limit > 30 ? limit - 15 : limit)) "$out/$name.stuck.jsonl" &
+    local start=$SECONDS status seconds timed_out=false output_limited=false watcher
+    # The watcher ends a phase whose log passes the output limit (and says
+    # so in <name>.output-limit), and shortly before the time limit writes
+    # what the processes still running are doing to <name>.stuck.jsonl:
+    # whether a phase that runs out of time is blocked, spinning or merely
+    # slow is told by that record, not by waiting longer.
+    bash $tools/watch.sh $$ "$limit" "$out/$name.log" $output_limit "$out/$name" &
     watcher=$!
     # By its full path: distributions install programs into a directory that
     # comes first in PATH, and one of them is named timeout.
@@ -51,8 +54,9 @@ phase() {
     # 137 when it had to be killed); the duration tells that apart from a
     # command that returned such a status by itself.
     if [ "$seconds" -ge "$limit" ]; then timed_out=true; fi
-    printf '{"phase":"%s","status":%d,"seconds":%d,"timed_out":%s}\n' \
-        "$name" "$status" "$seconds" "$timed_out" >> "$out/phases.jsonl"
+    if [ -f "$out/$name.output-limit" ]; then output_limited=true; fi
+    printf '{"phase":"%s","status":%d,"seconds":%d,"timed_out":%s,"output_limited":%s}\n' \
+        "$name" "$status" "$seconds" "$timed_out" "$output_limited" >> "$out/phases.jsonl"
     return $status
 }
 
