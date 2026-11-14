@@ -32,6 +32,9 @@ type XSDynamicLoader struct {
 	Symbol func(p *Perl, lib uint64, name string) (sym uint64, err error)
 	// Install binds the function behind sym as the Perl sub name.
 	Install func(p *Perl, name string, sym uint64) error
+	// Release gives up what the loader keeps for an instance that closes:
+	// its interpreter is destroyed and it is never entered again.
+	Release func(p *Perl)
 }
 
 // xsDynamicLoader is installed by the xs package's init.

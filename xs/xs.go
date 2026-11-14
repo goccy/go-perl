@@ -236,6 +236,7 @@ func init() {
 		Open:    openLibrary,
 		Symbol:  librarySymbol,
 		Install: installXSub,
+		Release: releaseState,
 	})
 }
 
@@ -1040,6 +1041,32 @@ var magicShares = struct {
 	nextID  uint64
 	holders map[uint64]int
 }{holders: map[uint64]int{}}
+
+// releaseState gives up the loader state of an instance that closes. Its
+// interpreter was destroyed the way perl's main() destroys one, which frees
+// no value that is left (a global with native magic): its memory goes with
+// the instance, as a process's memory goes with the process. So it no
+// longer holds the copies of MAGIC it shares with the instances it was
+// copied from or to, and no svt_free runs for them here: the last instance
+// that frees its copy runs it.
+func releaseState(p *internal.Perl) {
+	statesMu.Lock()
+	s := states[p]
+	delete(states, p)
+	statesMu.Unlock()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.magicBySV {
+		for mg := rec.head; mg != 0; {
+			node := copyIn(mg, mgAllocSize)
+			lastMagicHolder(node)
+			mg = uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
+		}
+	}
+}
 
 // shareMagic makes the copy of the MAGIC at mg, which is one more holder of
 // what the original holds.

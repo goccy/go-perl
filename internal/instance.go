@@ -759,6 +759,9 @@ func (p *Perl) Close() error {
 // The end of the family's first process is the end of the pseudo-processes
 // forked from it that are still running.
 func (p *Perl) releaseHostState() error {
+	if xsDynamicLoader != nil && xsDynamicLoader.Release != nil {
+		xsDynamicLoader.Release(p)
+	}
 	first := p.family == nil || p.family.origin == p
 	if !first && p.family.isOver() {
 		// A pseudo-process that goes because the family is over takes its
