@@ -31,8 +31,14 @@ func TestNativeMultiderefItems(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
 	runEvalCases(t, p, []evalCase{
-		{"package hash", `PerlAPI::mderef_watch(); our %pkg_h = (key => 7); my $v = $pkg_h{key}; PerlAPI::mderef_seen() . $v`, "pkg_h:key:pc;7"},
-		{"lexical hash", `PerlAPI::mderef_watch(); my %lex_h = (other => 8); my $v = $lex_h{other}; PerlAPI::mderef_seen() . $v`, "pad:other:pc;8"},
+		// the function put in PL_ppaddr is the one of the ops made after
+		// (perl's newOP copies PL_ppaddr[type]); the ops made before keep
+		// the interpreter's
+		{"ops made before and after the replacement",
+			`my $before = sub { our %h_before = (a => 1); $h_before{a} }; PerlAPI::mderef_watch(); my $after = eval q{ sub { our %h_after = (b => 2); $h_after{b} } }; my $v = $before->(); my $n1 = PerlAPI::mderef_seen(); $v .= $after->(); "[$n1][" . PerlAPI::mderef_seen() . "]$v"`,
+			"[][h_after:b:pc;]12"},
+		{"package hash", `PerlAPI::mderef_watch(); my $v = eval q{ our %pkg_h = (key => 7); $pkg_h{key} }; PerlAPI::mderef_seen() . $v`, "pkg_h:key:pc;7"},
+		{"lexical hash", `PerlAPI::mderef_watch(); my $v = eval q{ my %lex_h = (other => 8); $lex_h{other} }; PerlAPI::mderef_seen() . $v`, "pad:other:pc;8"},
 		{"a string turned into a reference", `my $s = "text"; PerlAPI::vivify_into($s); ref($s) . scalar(@$s)`, "ARRAY0"},
 		{"a read-only value", `eval { PerlAPI::vivify_into("const") }; $@ =~ /^Modification of a read-only value attempted/ ? "refused" : "other: $@"`, "refused"},
 	})
@@ -60,6 +66,8 @@ func TestNativeLongNames(t *testing.T) {
 	runEvalCases(t, p, []evalCase{
 		{"long names", `my @a = (1); PerlAPI::long_names(\@a, "12") . ":" . $a[1]`, "1,2,101:12"},
 		{"not a number", `my @a; PerlAPI::long_names(\@a, "x")`, "0,1,101"},
+		// a module's own copy of a function of the API, under its long name
+		{"a module's own definition", `PerlAPI::own_long_name()`, "4242"},
 	})
 }
 
@@ -92,6 +100,29 @@ func TestNativeFieldLvalues(t *testing.T) {
 		{"iterator kept and put back",
 			`my %h = (a => 1, b => 2, c => 3); my ($k1) = each %h; my $at = PerlAPI::iter_save(\%h); my ($k2) = each %h; PerlAPI::iter_restore(\%h); my ($k3) = each %h; ($at eq $k1 ? "at" : "not at") . "," . ($k3 eq $k2 ? "same" : "other")`,
 			"at,same"},
+	})
+}
+
+// Interpreter variables native code reads and stores into (PL_argvoutgv,
+// PL_signals, PL_defstash under save_hptr, the last stat, the stacks, the
+// op mask under SAVEVPTR), the engine's exec with flags (CALLREGEXEC),
+// sv_peek, despatch_signals and save_re_context.
+func TestNativeInterpreterVariables(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	f := filepath.Join(t.TempDir(), "statted")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvalCases(t, p, []evalCase{
+		{"variables", `our $gl_vars; stat "` + f + `"; PerlAPI::interp_vars(\*gl_vars)`, "01111|0,1|" + f},
+		{"op mask in a scope", `PerlAPI::op_mask_scope("1 + 1")`, "refused|1"},
+		{"no op mask", `PerlAPI::op_mask_scope("1 + 1") . "," . (eval "2 + 2")`, "refused|1,4"},
+		{"regex, peek, signals, match variables",
+			`"keep" =~ /(e+)/; my $r = PerlAPI::regex_api(qr/b+/, "abbc"); "$r:$1"`, "10|IV(42)|0:ee"},
+		{"recoded by an encoding object",
+			`package Upper::Enc { sub decode { my ($self, $s) = @_; my $r = uc $s; utf8::upgrade($r); $r } } my $s = "abc"; PerlAPI::recode($s, bless {}, "Upper::Enc")`,
+			"ABC:1"},
 	})
 }
 

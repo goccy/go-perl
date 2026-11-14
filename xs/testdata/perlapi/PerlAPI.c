@@ -4682,6 +4682,145 @@ XS(XS_PerlAPI_misc_api) {
     }
 }
 
+/* interp_vars(glob, ref): interpreter variables: whether the glob is
+ * PL_argvoutgv after storing it there (and before), the unsafe-signals
+ * flag set and cleared again, the last stat's result and type, the name
+ * of the stash of the main package as PL_globalstash, PL_defstash and the
+ * stack's array, and the op mask taken away and put back by a scope. */
+XS(XS_PerlAPI_interp_vars) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "glob");
+    {
+        GV *gv = (GV *)SvRV(ST(0));
+        GV *const saved_out = PL_argvoutgv;
+        const int before = PL_argvoutgv == gv;
+        PL_argvoutgv = gv;
+        const int after = PL_argvoutgv == gv;
+        PL_argvoutgv = saved_out;
+        const U32 sig = PL_signals;
+        PL_signals |= PERL_SIGNALS_UNSAFE_FLAG;
+        const int unsafe = (PL_signals & PERL_SIGNALS_UNSAFE_FLAG) != 0;
+        PL_signals = sig;
+        HV *const def = PL_defstash;
+        const int stack_is_av = SvTYPE((SV *)PL_curstack) == SVt_PVAV &&
+                                SvTYPE((SV *)PL_mainstack) == SVt_PVAV;
+        ENTER;
+        save_hptr(&PL_defstash);
+        PL_defstash = PL_globalstash ? PL_globalstash : def;
+        LEAVE;
+        const int def_back = PL_defstash == def;
+        ST(0) = sv_2mortal(newSVpvf("%d%d%d%d%d|%d,%d|%" SVf, before, after, unsafe,
+                                    stack_is_av, def_back, (int)PL_laststatval,
+                                    PL_laststype == OP_STAT ? 1 : 0,
+                                    SVfARG(PL_statname ? PL_statname : &PL_sv_no)));
+        XSRETURN(1);
+    }
+}
+
+/* op_mask_scope(code): runs the code (a string) under an op mask that
+ * refuses every op, in a scope that puts the mask back after, as
+ * Safe::Hole does; answers $@ of the compilation, and whether the mask is
+ * back. */
+XS(XS_PerlAPI_op_mask_scope) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        char *const before = PL_op_mask;
+        SV *mask = sv_2mortal(newSV(OP_MASK_BUF_SIZE));
+        SvPOK_on(mask);
+        memset(SvPVX(mask), 1, OP_MASK_BUF_SIZE);
+        SvCUR_set(mask, OP_MASK_BUF_SIZE);
+        ENTER;
+        SAVEVPTR(PL_op_mask);
+        PL_op_mask = SvPVX(mask);
+        eval_sv(ST(0), G_SCALAR | G_EVAL);
+        LEAVE;
+        ST(0) = sv_2mortal(newSVpvf("%s|%d", SvTRUE(ERRSV) ? "refused" : "ran",
+                                    PL_op_mask == before ? 1 : 0));
+        XSRETURN(1);
+    }
+}
+
+/* regex_api(regex, string): CALLREGEXEC of a compiled regex on a string
+ * (with REXEC_COPY_STR), sv_peek of a number, despatch_signals and
+ * save_re_context. */
+XS(XS_PerlAPI_regex_api) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "regex, string");
+    {
+        REGEXP *rx = SvRX(ST(0));
+        STRLEN len;
+        char *s = SvPV(ST(1), len);
+        const I32 hit = CALLREGEXEC(rx, s, s + len, s, 0, ST(1), NULL, REXEC_COPY_STR);
+        const I32 miss = CALLREGEXEC(rx, s + len, s + len, s, 0, ST(1), NULL, 0);
+        SV *num = sv_2mortal(newSViv(42));
+        const char *peek = sv_peek(num);
+        despatch_signals();
+        save_re_context();
+        if (PL_parser) (void)PL_bufptr;
+        /* patchlevel.h included by name: the local patches, none */
+        ST(0) = sv_2mortal(newSVpvf("%d%d|%s|%d%s", (int)hit, (int)miss, peek,
+                                    LOCAL_PATCH_COUNT, local_patches[0] ? "?" : ""));
+        XSRETURN(1);
+    }
+}
+
+/* recode(string, encoding): sv_recode_to_utf8 of the string with the
+ * encoding object; answers the string after, and whether it is UTF-8. */
+XS(XS_PerlAPI_recode) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "string, encoding");
+    {
+        SV *sv = ST(0);
+        const char *after = sv_recode_to_utf8(sv, ST(1));
+        ST(0) = sv_2mortal(newSVpvf("%s:%d", after ? after : "(null)", SvUTF8(sv) ? 1 : 0));
+        XSRETURN(1);
+    }
+}
+
+/* A copy of a function of perl's API defined under its long name, as a
+ * module with a copy of perl's source has one (Devel::Declare's of toke.c's
+ * filter_read): the module's definition is the one that runs. */
+I32
+Perl_filter_read(pTHX_ int idx, SV *buf_sv, int maxlen)
+{
+    PERL_UNUSED_ARG(buf_sv);
+    return (I32)(idx * 1000 + maxlen);
+}
+XS(XS_PerlAPI_own_long_name) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv((IV)Perl_filter_read(aTHX_ 4, NULL, 242)));
+    XSRETURN(1);
+}
+
+/* any_true(code, values...): whether the block is true for a value, as
+ * List::SomeUtils::XS's any: $_ saved after PUSH_MULTICALL and set for each
+ * call, the multicall popped before returning, which undoes the save. */
+XS(XS_PerlAPI_any_true) {
+    dXSARGS;
+    if (items < 1) croak_xs_usage(cv, "code, ...");
+    {
+        dMULTICALL;
+        I32 gimme = G_SCALAR;
+        I32 i;
+        CV *code = (CV *)SvRV(ST(0));
+        SV **args = &PL_stack_base[ax];
+        PUSH_MULTICALL(code);
+        SAVESPTR(GvSV(PL_defgv));
+        for (i = 1; i < items; i++) {
+            GvSV(PL_defgv) = args[i];
+            MULTICALL;
+            if (SvTRUE(*PL_stack_sp)) {
+                POP_MULTICALL;
+                XSRETURN_YES;
+            }
+        }
+        POP_MULTICALL;
+        XSRETURN_NO;
+    }
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -4931,5 +5070,11 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::chars_l1", XS_PerlAPI_chars_l1);
     newXS_deffile("PerlAPI::format_none", XS_PerlAPI_format_none);
     newXS_deffile("PerlAPI::misc_api", XS_PerlAPI_misc_api);
+    newXS_deffile("PerlAPI::interp_vars", XS_PerlAPI_interp_vars);
+    newXS_deffile("PerlAPI::op_mask_scope", XS_PerlAPI_op_mask_scope);
+    newXS_deffile("PerlAPI::regex_api", XS_PerlAPI_regex_api);
+    newXS_deffile("PerlAPI::recode", XS_PerlAPI_recode);
+    newXS_deffile("PerlAPI::own_long_name", XS_PerlAPI_own_long_name);
+    newXS_deffile("PerlAPI::any_true", XS_PerlAPI_any_true);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

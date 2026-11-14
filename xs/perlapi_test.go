@@ -43,6 +43,37 @@ func buildPerlAPI(t testing.TB) string {
 	return so
 }
 
+// TestSDKCoreLinksLibperl links a program the way a module's C configure
+// does on perl (-L$Config{archlibexp}/CORE -lperl, the SDK being that
+// CORE): the SDK's libperl.a has nothing in it, as the API is the headers'.
+// A source that includes perlapi.h by name compiles, as on perl.
+func TestSDKCoreLinksLibperl(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("no host C compiler available")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "conftest.c")
+	if err := os.WriteFile(src, []byte("#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"perlapi.h\"\nint main(void) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-I", "sdk/include", "-o", filepath.Join(dir, "conftest"), src, "-L", "sdk/include", "-lperl", "-lm"}
+	if runtime.GOOS == "darwin" {
+		switch runtime.GOARCH {
+		case "arm64":
+			args = append([]string{"-arch", "arm64"}, args...)
+		case "amd64":
+			args = append([]string{"-arch", "x86_64"}, args...)
+		}
+	}
+	if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+		t.Fatalf("link with -lperl: %v\n%s", err, out)
+	}
+	if out, err := exec.Command(filepath.Join(dir, "conftest")).CombinedOutput(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+}
+
 // TestPerlAPISurface runs XSUBs written against the perl API the SDK
 // provides and compares what they observe with what perl itself documents
 // for each function or macro.

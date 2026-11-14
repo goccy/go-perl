@@ -18,3 +18,11 @@
 #define SUBVERSION PERL_SUBVERSION
 
 #endif /* GOPERL_XS_SDK_PATCHLEVEL_H */
+
+/* The patches applied locally to the interpreter (none), for code that
+ * includes this header itself; perl.h includes it with
+ * PERL_PATCHLEVEL_H_IMPLICIT, as perl's does, and defines no array. */
+#if !defined(PERL_PATCHLEVEL_H_IMPLICIT) && !defined(LOCAL_PATCH_COUNT)
+static const char *const local_patches[] = {NULL, NULL};
+#define LOCAL_PATCH_COUNT ((int)(sizeof(local_patches) / sizeof(local_patches[0]) - 2))
+#endif

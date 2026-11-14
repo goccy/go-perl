@@ -35,7 +35,8 @@ enum {
     GOPERL_INT_HV_ARRAY = 20,
     GOPERL_INT_PERLIO_DEBUG = 21,
     GOPERL_INT_SV_PV_FREE = 22,
-    GOPERL_INT_STATCACHE = 23
+    GOPERL_INT_STATCACHE = 23,
+    GOPERL_INT_SAVE_FIELD = 31 /* a: an SV; b: field<<8 | kind: a save of the field */
 };
 /* The fields of a sub (INTERNAL CV_GET / CV_SET). */
 enum {
@@ -196,6 +197,37 @@ static __attribute__((unused)) int goperl_save_routed(goperl_frame_t *f, void *l
         if (kind == GOPERL_SAVEK_INT)
             goperl_croakf(f, "an integer save of a slot of an array");
         GOPERL_INTERNAL(f, GOPERL_INT_SAVE_AVELEM, av, ((uint64_t)(uint32_t)ix << 8) | (uint64_t)kind);
+        return 1;
+    }
+    /* the slot of a field an accessor designates (GvSV(gv), SvIVX(sv)):
+     * the field is saved where it is, the slot being only this process's
+     * copy of it */
+    goperl_lvstate_t *st = goperl_lvstate_v;
+    goperl_lvslot_t *m = 0;
+    for (int32_t i = 0; st && !m && i < st->nuses; i++)
+        if ((void *)&st->uses[i].slot->val == loc) m = st->uses[i].slot;
+    for (int32_t i = 0; st && !m && i < st->nrecent; i++)
+        if ((void *)&st->recent[i]->val == loc) m = st->recent[i];
+    if (m) {
+        switch (m->field) {
+        case GOPERL_LV_GVSV:
+        case GOPERL_LV_GVAV:
+        case GOPERL_LV_GVHV:
+        case GOPERL_LV_RV:
+            if (kind == GOPERL_SAVEK_INT)
+                goperl_croakf(f, "an integer save of a field that holds a pointer");
+            break;
+        case GOPERL_LV_IV:
+        case GOPERL_LV_UV:
+        case GOPERL_LV_NV:
+            if (kind != GOPERL_SAVEK_INT || width != 8)
+                goperl_croakf(f, "a save of a field that holds a number of 8 bytes as %d bytes", width);
+            break;
+        default:
+            return 0;
+        }
+        /* the operation writes back what is pending, the slot first */
+        GOPERL_INTERNAL(f, GOPERL_INT_SAVE_FIELD, m->svtok, ((uint64_t)m->field << 8) | (uint64_t)kind);
         return 1;
     }
     return 0;
@@ -748,6 +780,13 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
     }
     if (id == 99 /* GOPERL_PL_RUNOPS */) {
         *out = goperl_runops_out(f, s->val);
+        return 1;
+    }
+    if (id == 103 /* GOPERL_PL_OP_MASK */) {
+        /* a mask is the interpreter's bytes */
+        *out = goperl_guest_addr(f, (const void *)(uintptr_t)s->val);
+        if (s->val && !*out)
+            goperl_croakf(f, "PL_op_mask points outside the interpreter's memory");
         return 1;
     }
     if (id == GOPERL_PL_MULTIDEREF_PC) {

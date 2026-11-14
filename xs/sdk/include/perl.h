@@ -159,7 +159,9 @@ static inline void (*goperl_signal(int sig, void (*handler)(int)))(int) {
 #define signal(sig, handler) goperl_signal((sig), (handler))
 
 /* The perl this SDK targets (the embedded interpreter's version). */
+#define PERL_PATCHLEVEL_H_IMPLICIT
 #include "patchlevel.h"
+#undef PERL_PATCHLEVEL_H_IMPLICIT
 #define PERL_VERSION_DECIMAL(r, v, s) ((r)*1000000 + (v)*1000 + (s))
 #define PERL_DECIMAL_VERSION \
     PERL_VERSION_DECIMAL(PERL_REVISION, PERL_VERSION, PERL_SUBVERSION)
@@ -4911,6 +4913,7 @@ enum {
 #define GOPERL_OPBIT_SAVEFREE 0x40000
 #define GOPERL_OPBIT_STATIC 0x80000
 #define GOPERL_OPBIT_FOLDED 0x100000
+#define GOPERL_OPBIT_TYPEHOOK 0x200000
 #define GOPERL_PL_OP_FREED 72
 
 typedef struct goperl_opreg_ent {
@@ -4942,6 +4945,7 @@ typedef struct goperl_opreg {
 static void goperl_op_base_capture(OP *o);
 static void goperl_optree_flush(goperl_frame_t *f);
 static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f);
+static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type);
 
 static goperl_opreg_t *goperl_opreg_get(goperl_frame_t *f) {
     goperl_opreg_t *r = goperl_opreg_v;
@@ -5121,10 +5125,15 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     o->op_savefree = (bits & GOPERL_OPBIT_SAVEFREE) != 0;
     o->op_static = (bits & GOPERL_OPBIT_STATIC) != 0;
     o->op_folded = (bits & GOPERL_OPBIT_FOLDED) != 0;
-    if (!(bits & GOPERL_OPBIT_HOOKED))
-        /* its own pp function: the slot of its type, which is what
-         * `o->op_ppaddr == PL_ppaddr[OP_X]` compares with */
+    if (bits & GOPERL_OPBIT_TYPEHOOK)
+        /* made while a module had its type: PL_ppaddr's function of the
+         * type, the module's (perl's newOP copies PL_ppaddr[type]) */
         o->op_ppaddr = o->op_type < OP_max ? goperl_ppaddr_get(f)[o->op_type] : 0;
+    else if (!(bits & GOPERL_OPBIT_HOOKED))
+        /* the interpreter's own pp function of its type, whatever a module
+         * put in PL_ppaddr after the op was made: the slot the table had
+         * for the type before (`o->op_ppaddr == orig_ppaddr[OP_X]`) */
+        o->op_ppaddr = o->op_type < OP_max ? goperl_ppaddr_base(f, o->op_type) : 0;
     if (edge) {
         goperl_op_activate(r, e);
         return;
@@ -5437,6 +5446,11 @@ static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
     return goperl_ppaddr_v;
 }
 #define PL_ppaddr (goperl_ppaddr_get(_gof))
+/* The slot PL_ppaddr had for a type before any module wrote it. */
+static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type) {
+    goperl_ppaddr_get(f);
+    return goperl_ppaddr_base_v[type];
+}
 
 /* Detect module writes to the proxy table and (de)register them as guest
  * pp hooks. Called from the funnel flush. Uses the raw vtable (never the

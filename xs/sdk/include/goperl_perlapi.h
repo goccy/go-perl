@@ -3326,6 +3326,9 @@ static void goperl_multicall_push(goperl_frame_t *f, goperl_multicall_t *m, CV *
     f->stbase = calls;
     f->stcap = first_cap;
     f->psp = calls;
+    /* the scope of the calls: what is saved until POP_MULTICALL is undone
+     * there (perl's CX_LEAVE_SCOPE of the multicall's context) */
+    ENTER;
 }
 #define PUSH_MULTICALL_FLAGS(the_cv, flags)                                    \
     goperl_multicall_push(_gof, (goperl_multicall_t *)multicall_cop,           \
@@ -3354,6 +3357,7 @@ static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m)
     __attribute__((unused));
 static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m) {
     if (!m->outer_base) return;
+    LEAVE;
     free(f->stbase);
     f->stbase = m->outer_base;
     f->stcap = m->outer_cap;
@@ -3936,6 +3940,176 @@ static void goperl_mini_mktime(struct tm *ptm) {
 }
 #define mini_mktime(ptm) goperl_mini_mktime(ptm)
 #define Perl_mini_mktime(ptm) goperl_mini_mktime(ptm)
+
+/* ---- more interpreter variables (intrpvar.h) ------------------------------- */
+
+#define GOPERL_PL_ARGVOUTGV 100
+#define GOPERL_PL_GLOBALSTASH 101
+#define GOPERL_PL_SIGNALS 102
+#define GOPERL_PL_OP_MASK 103
+#define GOPERL_PL_LASTSTATVAL 104
+#define GOPERL_PL_LASTSTYPE 105
+#define GOPERL_PL_STATNAME 106
+#define GOPERL_PL_CURSTACK 107
+#define GOPERL_PL_MAINSTACK 108
+/* Lvalues like the others (goperl_plint_ref): read from the interpreter,
+ * stored back before its next operation, and saved by the interpreter
+ * (SAVEVPTR(PL_op_mask), save_hptr(&PL_defstash)). */
+#define PL_argvoutgv (*(GV **)goperl_plsv_ref(_gof, GOPERL_PL_ARGVOUTGV))
+#define PL_globalstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_GLOBALSTASH))
+#define PL_signals (*(U32 *)goperl_plint_ref(_gof, GOPERL_PL_SIGNALS))
+#define PL_laststatval (*(I32 *)goperl_plint_ref(_gof, GOPERL_PL_LASTSTATVAL))
+#define PL_laststype (*(U16 *)goperl_plint_ref(_gof, GOPERL_PL_LASTSTYPE))
+#define PL_statname (*goperl_plsv_ref(_gof, GOPERL_PL_STATNAME))
+#define PL_curstack ((AV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_CURSTACK)))
+#define PL_mainstack ((AV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_MAINSTACK)))
+#undef PL_defstash
+#define PL_defstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_DEFSTASH))
+#undef PL_tmps_floor
+#define PL_tmps_floor (*(SSize_t *)goperl_plint_ref(_gof, GOPERL_PL_TMPS_FLOOR))
+/* The mask of the ops a compilation refuses (Safe's opmask), MAXO bytes in
+ * the interpreter's memory, or NULL: in this process, a pointer into that
+ * memory (where the buffer of a string is, SvPVX). */
+#define OP_MASK_BUF_SIZE (MAXO + 100)
+static __attribute__((unused)) char **goperl_op_mask_ref(goperl_frame_t *f) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[GOPERL_PL_OP_MASK];
+    if (!s->live || s->val == s->shadow) {
+        s->val = (uint64_t)(uintptr_t)goperl_guest_mem(
+            f, goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_OP_MASK, 0, 0, 0));
+        s->shadow = s->val;
+        s->live = 1;
+    }
+    return (char **)&s->val;
+}
+#define PL_op_mask (*goperl_op_mask_ref(_gof))
+
+/* The variables of the parser that perl's own headers leave to ppport.h,
+ * which defines them over PL_parser on every perl since 5.9.5; the SDK
+ * neutralizes a module's ppport.h (see ppport.h), so they are here, with
+ * ppport's check that there is a parser. */
+static __attribute__((unused)) yy_parser *goperl_parser_present(goperl_frame_t *f,
+                                                                const char *file, int line) {
+    yy_parser *p = PL_parser;
+    if (!p) goperl_croakf(f, "panic: PL_parser == NULL in %s:%d", file, line);
+    return p;
+}
+#define GOPERL_PARSER_VAR(var) (goperl_parser_present(_gof, __FILE__, __LINE__)->var)
+#ifndef PL_expect
+#define PL_expect GOPERL_PARSER_VAR(expect)
+#endif
+#ifndef PL_copline
+#define PL_copline GOPERL_PARSER_VAR(copline)
+#endif
+#ifndef PL_rsfp
+#define PL_rsfp GOPERL_PARSER_VAR(rsfp)
+#endif
+#ifndef PL_rsfp_filters
+#define PL_rsfp_filters GOPERL_PARSER_VAR(rsfp_filters)
+#endif
+#ifndef PL_linestr
+#define PL_linestr GOPERL_PARSER_VAR(linestr)
+#endif
+#ifndef PL_bufptr
+#define PL_bufptr GOPERL_PARSER_VAR(bufptr)
+#endif
+#ifndef PL_bufend
+#define PL_bufend GOPERL_PARSER_VAR(bufend)
+#endif
+#ifndef PL_lex_state
+#define PL_lex_state GOPERL_PARSER_VAR(lex_state)
+#endif
+#ifndef PL_lex_stuff
+#define PL_lex_stuff GOPERL_PARSER_VAR(lex_stuff)
+#endif
+#ifndef PL_tokenbuf
+#define PL_tokenbuf GOPERL_PARSER_VAR(tokenbuf)
+#endif
+#ifndef PL_in_my
+#define PL_in_my GOPERL_PARSER_VAR(in_my)
+#endif
+#ifndef PL_in_my_stash
+#define PL_in_my_stash GOPERL_PARSER_VAR(in_my_stash)
+#endif
+#ifndef PL_error_count
+#define PL_error_count GOPERL_PARSER_VAR(error_count)
+#endif
+
+/* What is pending is delivered (the handler of a signal), as between two
+ * ops: despatch_signals, which PERL_ASYNC_CHECK runs. */
+#define despatch_signals() goperl_async(_gof)
+#define Perl_despatch_signals(...) goperl_async(_gof)
+
+/* save_re_context: the match variables of the code calling native code are
+ * kept from the matches of the code it calls (CALL 22). */
+#define save_re_context() ((void)goperl_do_op(_gof, GOPERL_OP_CALL, (uint64_t)22 << 32, 0, 0, 0))
+
+/* sv_peek: perl's short description of a value (dump.c), the text of a
+ * mortal of the interpreter (CALL 23). */
+static __attribute__((unused)) char *goperl_sv_peek(goperl_frame_t *f, SV *sv) {
+    return (char *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)23 << 32) | (uint32_t)GOPERL_TOK(sv), 0, 0, 0));
+}
+#define sv_peek(sv) goperl_sv_peek(_gof, (SV *)(sv))
+
+/* sv_recode_to_utf8: a string of bytes decoded by an encoding object into
+ * characters (its decode method), in place (CALL 24). */
+static __attribute__((unused)) char *goperl_sv_recode_to_utf8(goperl_frame_t *f, SV *sv, SV *encoding) {
+    return (char *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)24 << 32) | (uint32_t)GOPERL_TOK(sv),
+                        (uint32_t)GOPERL_TOK(encoding), 0, 0));
+}
+#define sv_recode_to_utf8(sv, encoding) goperl_sv_recode_to_utf8(_gof, (SV *)(sv), (SV *)(encoding))
+#define Perl_sv_peek(...) GOPERL_LONG_CALL(sv_peek, GOPERL_THX_DROP(__VA_ARGS__))
+
+/* CALLREGEXEC: the engine's exec, regexec_flags with the flags as given
+ * (REXEC_COPY_STR, REXEC_IGNOREPOS, ...) and its data (RX EXEC_FLAGS). */
+#define GOPERL_RX_EXEC_FLAGS 6
+#ifndef REXEC_COPY_STR
+#define REXEC_COPY_STR 0x01
+#define REXEC_CHECKED 0x02
+#define REXEC_SCREAM 0x04
+#define REXEC_IGNOREPOS 0x08
+#define REXEC_NOT_FIRST 0x10
+#define REXEC_COPY_SKIP_PRE 0x20
+#define REXEC_COPY_SKIP_POST 0x40
+#define REXEC_FAIL_ON_UNDERFLOW 0x80
+#endif
+static __attribute__((unused)) I32 goperl_regexec_flags(goperl_frame_t *f, REGEXP *rx, char *stringarg,
+                                                        char *strend, char *strbeg, SSize_t minend,
+                                                        SV *screamer, void *data, U32 flags) {
+    uint32_t w[7];
+    const uintptr_t b = (uintptr_t)strbeg - (uintptr_t)f->membase;
+    const uintptr_t e = (uintptr_t)strend - (uintptr_t)f->membase;
+    if (data) goperl_croakf(f, "CALLREGEXEC: the data argument of the engine is not available to native XS modules");
+    if (b < f->memcap && e < f->memcap) {
+        w[0] = (uint32_t)((uintptr_t)stringarg - (uintptr_t)f->membase);
+        w[1] = (uint32_t)e;
+        w[2] = (uint32_t)b;
+    } else {
+        SV *copy = sv_2mortal(newSVpvn(strbeg, (STRLEN)(strend - strbeg)));
+        if (screamer && SvUTF8(screamer)) SvUTF8_on(copy);
+        const uint32_t base = (uint32_t)goperl_do_op(f, GOPERL_OP_SV_PVX_RAW,
+                                                     GOPERL_TOK(copy), 0, 0, 0);
+        w[2] = base;
+        w[0] = base + (uint32_t)(stringarg - strbeg);
+        w[1] = base + (uint32_t)(strend - strbeg);
+        screamer = copy;
+    }
+    w[3] = (uint32_t)(int32_t)minend;
+    w[4] = (uint32_t)GOPERL_TOK(screamer);
+    w[5] = flags;
+    w[6] = 0;
+    return (I32)(int64_t)goperl_do_op(
+        f, GOPERL_OP_REGEXP,
+        ((uint64_t)GOPERL_RX_EXEC_FLAGS << 32) | (uint32_t)GOPERL_TOK(rx), sizeof w,
+        (const char *)w, sizeof w);
+}
+#define CALLREGEXEC(rx, stringarg, strend, strbeg, minend, sv, data, flags)          \
+    goperl_regexec_flags(_gof, (REGEXP *)(rx), (char *)(stringarg), (char *)(strend), \
+                         (char *)(strbeg), (SSize_t)(minend), (SV *)(sv), (void *)(data), \
+                         (U32)(flags))
+#define regexec_flags(rx, stringarg, strend, strbeg, minend, sv, data, flags) \
+    CALLREGEXEC(rx, stringarg, strend, strbeg, minend, sv, data, flags)
 
 #include "goperl_compiler.h"
 

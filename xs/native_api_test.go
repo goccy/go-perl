@@ -213,6 +213,12 @@ func TestNativeMulticall(t *testing.T) {
 		{"a block that returns nothing, and one that returns more than the stack held", `PerlAPI::each_pair(sub { $a == 1 ? () : (($a) x 3) }, 1, 2, 3) . "|" . length(PerlAPI::each_pair(sub { (1) x 200 }, 1, 2))`, ";2,2,2,;args 1 2 3|409"},
 		{"an overloaded <=>", `{ package Rank; use overload "<=>" => sub { ($_[2] ? -1 : 1) * ($_[0]{r} <=> (ref $_[1] ? $_[1]{r} : $_[1])) }, q("") => sub { "rank" . $_[0]{r} }; } PerlAPI::largest(sub { $a <=> $b }, (map { bless { r => $_ }, "Rank" } 2, 9, 4))`, "rank9,overloaded -1"},
 		{"many calls", `my $n = 0; join ",", PerlAPI::first_index(sub { $n++; $_ == 4999 }, 0 .. 5000), $n`, "4999,5000"},
+		// a save made after PUSH_MULTICALL is undone by POP_MULTICALL, also
+		// when the block itself makes such calls (List::SomeUtils::XS)
+		{"$_ after a multicall that saved it", `$_ = "top"; my $r = PerlAPI::any_true(sub { $_ eq "b" }, "a", "b"); "$r:$_"`, "1:top"},
+		{"$_ in a block after a nested multicall",
+			`my @seen; $_ = "top"; PerlAPI::any_true(sub { my $in = $_; PerlAPI::any_true(sub { $_ eq "q" }, "x", "q"); push @seen, "$in=$_"; 0 }, "o1", "o2"); "@seen:$_"`,
+			"o1=o1 o2=o2:top"},
 		{"$_ is the caller's again", `my @r; for ("outer") { PerlAPI::first_index(sub { 0 }, 1, 2); push @r, $_ } "@r"`, "outer"},
 	})
 }
