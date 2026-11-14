@@ -53,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 25
+const abiVersion = 26
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -454,9 +454,6 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	if err := clone.SetNativeXSHandler(cs.dispatch); err != nil {
 		return err
 	}
-	if err := clone.SetSetMagicHandler(cs.magicSetFired); err != nil {
-		return err
-	}
 	if err := clone.SetMagicFreeHandler(cs.magicFreed); err != nil {
 		return err
 	}
@@ -593,9 +590,6 @@ func loaderState(p *internal.Perl) (*state, error) {
 func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	p := s.p
 	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
-		return 0, err
-	}
-	if err := p.SetSetMagicHandler(s.magicSetFired); err != nil {
 		return 0, err
 	}
 	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
@@ -1110,6 +1104,14 @@ const (
 	hefSVKey      = -2 // HEf_SVKEY: the name of a MAGIC is an SV
 )
 
+// struct Perl_custom_infix of sdk/include/perl.h: prec (an enum, 4 bytes)
+// at 0, parse at 8, build_op at 16.
+const (
+	infixSize     = 24
+	infixOffPrec  = 0
+	infixOffParse = 8
+)
+
 // magicShares counts, for every MAGIC that was copied to another instance
 // (a Clone or a fork child), the instances that still hold a copy. The
 // copies point at the same module memory, which the module's svt_free
@@ -1234,10 +1236,10 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 
 	// A vtbl with svt_get, svt_set, svt_len, svt_clear or svt_copy needs
 	// the guest anchor to have that hook too, so that the interpreter
-	// reports the access (set by reserved method -5, the others through
-	// the host-call channel). Anchors start without: most mirrors only
-	// carry svt_free, and a hook on the anchor costs a host round trip on
-	// every such access to the SV.
+	// reports the access (through the host-call channel, where a hook
+	// that croaks dies in the interpreter). Anchors start without: most
+	// mirrors only carry svt_free, and a hook on the anchor costs a host
+	// round trip on every such access to the SV.
 	var hooks uint64
 	if vtbl != 0 {
 		fns := copyIn(vtbl, 8*8)
@@ -1386,29 +1388,6 @@ func (s *state) callSvtFree(sv uint64, mg uintptr) {
 	s.callSvtHook(sv, mg, vtblOffFree)
 }
 
-// magicSetFired runs when the guest reports an assignment to an SV whose
-// anchor was upgraded: run every mirror node's svt_set. Hooks may unlink
-// themselves (SvMAGIC_set + Safefree, the Moose export-flag pattern), so
-// each node's successor is read BEFORE the hook runs.
-func (s *state) magicSetFired(id uint32) {
-	s.mu.Lock()
-	rec := s.magicByID[id]
-	var head uintptr
-	if rec != nil {
-		head = rec.head
-	}
-	s.mu.Unlock()
-	if rec == nil {
-		return
-	}
-	for mg := head; mg != 0; {
-		node := copyIn(mg, mgSize)
-		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
-		s.callSvtHook(rec.svTok, mg, vtblOffSet)
-		mg = next
-	}
-}
-
 // magicLocalized runs when `local` puts the SV nsv in the place of the
 // variable whose anchor is id. It does for the mirror chain what perl's
 // mg_localize does for an SV's own: value magic stays behind; an entry
@@ -1492,7 +1471,9 @@ func (s *state) perlioHook(req []byte) []byte {
 // keywordHook services reserved method -7: run the host keyword/infix
 // plugin chain for one candidate word (the SDK's __goperl_keyword_invoke
 // does the marshalling, parser sync, and croak guard). Response:
-// [1][handled u8][ret u32][op token u32] or [0]+message.
+// [1][handled u8][ret u32][op token u32] or [0]+message; for an infix
+// operator a module claimed, [1][1][length u32][the module's struct
+// u64][prec u32][has parse u8].
 func (s *state) keywordHook(req []byte) []byte {
 	if len(req) < 5 {
 		return append([]byte{0}, "keyword hook: short request"...)
@@ -1533,6 +1514,23 @@ func (s *state) keywordHook(req []byte) []byte {
 		out[1] = 1
 		copy(out[2:6], copyIn(retC, 4))
 		tok := copyIn(tokC, 8)
+		if kind == 1 {
+			// An infix operator: tok is the module's struct
+			// Perl_custom_infix {prec int32; parse; build_op}, whose
+			// precedence and whether it has a parse go to the
+			// interpreter with it: [length][struct u64][prec u32][has
+			// parse u8].
+			def := uintptr(binary.LittleEndian.Uint64(tok))
+			fields := copyIn(def, infixSize)
+			out = append(out[:6], tok...)
+			out = append(out, fields[infixOffPrec:infixOffPrec+4]...)
+			hasParse := byte(0)
+			if binary.LittleEndian.Uint64(fields[infixOffParse:]) != 0 {
+				hasParse = 1
+			}
+			out = append(out, hasParse)
+			break
+		}
 		copy(out[6:10], tok[:4])
 	default:
 		out[0] = 1

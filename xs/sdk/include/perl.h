@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 25u
+#define GOPERL_XS_ABI 26u
 
 /* Signal actions of the process.
  *
@@ -5728,7 +5728,7 @@ __goperl_xs_epilogue(goperl_frame_t *f) {
     return n;
 }
 
-/* Loader entry: run one mirror-MAGIC hook (svt_set / svt_free — the
+/* Loader entry: run one mirror-MAGIC hook (svt_free, svt_local — the
  * int (*)(pTHX_ SV*, MAGIC*) shape) with the current frame installed and a
  * croak guard armed. The loader calls this instead of the raw function
  * pointer so interpreter macros inside the hook see the right frame. */
@@ -9227,10 +9227,10 @@ static void goperl_wrap_keyword_plugin(goperl_frame_t *f,
 #define wrap_keyword_plugin(func, var) \
     goperl_wrap_keyword_plugin(_gof, (func), (var))
 
-/* Infix plugins (5.38+ core surface). The chain registration works; the
- * guest-side wrapper reports any HOST claim of an operator loudly instead
- * of running it (custom infix operators are not bridged yet — XPK's own
- * parsing of core operators never reaches this). */
+/* Infix plugins (5.38+ core surface): the interpreter's lexer offers each
+ * candidate operator to the chain; an operator a module claims is given to
+ * the interpreter with its precedence, and the interpreter has the host run
+ * the module's parse and build_op for it (GOPERL_HOST_INFIX). */
 struct Perl_custom_infix;
 enum Perl_custom_infix_precedence {
     INFIX_PREC_LOW = 10,
@@ -9324,11 +9324,16 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
         if (wordlen >= sizeof(wbuf)) goperl_croakf(f, "operator too long");
         memcpy(wbuf, word, wordlen);
         wbuf[wordlen] = 0;
-        if (goperl_infix_head_v(wbuf, wordlen, &inf) != 0)
-            goperl_croakf(f,
-                          "custom infix operator '%s' is not supported by "
-                          "the go-perl XS SDK yet",
-                          wbuf);
+        const STRLEN n = goperl_infix_head_v(wbuf, wordlen, &inf);
+        if (n != 0) {
+            if (!inf || !inf->build_op)
+                goperl_croakf(f, "an infix plugin claimed '%s' without a build_op", wbuf);
+            /* the loader reads the precedence and whether there is a parse
+             * from the struct */
+            *ret_out = (uint32_t)n;
+            *op_out = (uint64_t)(uintptr_t)inf;
+            rc = 1;
+        }
     }
     goperl_optree_flush(f);
     goperl_hostsave_settle(f, f->hostsave_base, __builtin_frame_address(0));
@@ -9366,11 +9371,13 @@ enum {
     GOPERL_HOST_ATEXIT = 2,
     GOPERL_HOST_CALLCK = 3,
     GOPERL_HOST_MAGIC = 4,
-    GOPERL_HOST_UVAR = 5
+    GOPERL_HOST_UVAR = 5,
+    GOPERL_HOST_INFIX = 9
 };
-/* The hooks of GOPERL_HOST_MAGIC (set, free and local come another way). */
+/* The hooks of GOPERL_HOST_MAGIC (free and local come another way). */
 enum {
     GOPERL_MGHOOK_GET = 0,
+    GOPERL_MGHOOK_SET = 1,
     GOPERL_MGHOOK_LEN = 2,
     GOPERL_MGHOOK_CLEAR = 3,
     GOPERL_MGHOOK_COPY = 4
@@ -9639,6 +9646,9 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
             case GOPERL_MGHOOK_GET:
                 if (v->svt_get) result = (uint32_t)v->svt_get(sv, mg);
                 break;
+            case GOPERL_MGHOOK_SET:
+                if (v->svt_set) result = (uint32_t)v->svt_set(sv, mg);
+                break;
             case GOPERL_MGHOOK_LEN:
                 if (v->svt_len) result = v->svt_len(sv, mg);
                 break;
@@ -9662,6 +9672,36 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
         }
         resp[0] = result;
         rlen = 4;
+        break;
+    }
+    case GOPERL_HOST_INFIX: {
+        /* [0][def lo][def hi][opdata] -> [opdata]: the operator's parse, with
+         * the lexer after the operator; [1][def lo][def hi][opdata][lhs][rhs]
+         * -> [opdata][op]: its build_op */
+        if (reqlen < 16) goperl_croakf(f, "host call: short infix request");
+        struct Perl_custom_infix *def = (struct Perl_custom_infix *)(uintptr_t)(
+            (uint64_t)req[2] | (uint64_t)req[3] << 32);
+        SV *opdata = GOPERL_SV(req[4]);
+        OP *o = 0;
+        if (req[1] == 0) {
+            if (!def->parse) goperl_croakf(f, "host call: the infix operator has no parse");
+            goperl_parser_pull(f);
+            def->parse(&opdata, def);
+            goperl_optree_flush(f);
+            goperl_parser_push(f);
+        } else {
+            if (reqlen < 24) goperl_croakf(f, "host call: short infix request");
+            OP *lhs = req[5] ? goperl_op_describe(f, req[5], GOPERL_OPDUMP_SUBTREE) : 0;
+            OP *rhs = req[6] ? goperl_op_describe(f, req[6], GOPERL_OPDUMP_SUBTREE) : 0;
+            o = def->build_op(&opdata, lhs, rhs, def);
+            if (o && !o->gop)
+                goperl_croakf(f, "an infix operator built an op that is not the "
+                                 "interpreter's");
+            goperl_optree_flush(f);
+        }
+        resp[0] = (uint32_t)GOPERL_TOK(opdata);
+        resp[1] = o ? (uint32_t)o->gop : 0;
+        rlen = 8;
         break;
     }
     case GOPERL_HOST_UVAR: {

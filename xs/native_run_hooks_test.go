@@ -60,3 +60,29 @@ func TestNativeBlockHook(t *testing.T) {
 		{"blocks started", `my $n = PerlAPI::block_starts(); eval q{ { 1 } { 2 } 1 }; PerlAPI::block_starts() - $n >= 2 ? "called" : "not called"`, "called"},
 	})
 }
+
+// An infix operator of native code (wrap_infix_plugin) is parsed with its
+// precedence and built by its build_op; its parse runs after the operator,
+// and what it leaves in the operator's data reaches build_op.
+func TestNativeInfixOperators(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a named operator", `PerlAPI::enable_infix(); eval q{ join ",", ("a" equ "a") ? 1 : 0, ("a" equ "b") ? 1 : 0 } // $@`, "1,0"},
+		{"a symbolic operator with a parse", `PerlAPI::enable_infix(); eval q{ join ",", 3 <~> 5, 5 <~> 3, 2 + 2 <~> 4 } // $@`, "-1,1,0"},
+		{"other operators", `PerlAPI::enable_infix(); eval q{ my $x = 2; $x <=> 3 } // $@`, "-1"},
+	})
+}
+
+// The scanning functions perl gives an extension that defines PERL_EXT
+// (B::Hooks::Parser): skipspace_flags, scan_word and scan_str read the
+// lexer's buffer from a place in it, and scan_str leaves the string in
+// PL_lex_stuff.
+func TestNativeLexerScanning(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a word and a string", `PerlAPI::install_kw_scan(); eval q{ goperl_scan Foo::bar "some text" } // $@`, "Foo::bar|some text"},
+		{"the rest of the statement", `PerlAPI::install_kw_scan(); eval q{ my $v = goperl_scan w 'x y'; "$v!" } // $@`, "w|x y!"},
+	})
+}

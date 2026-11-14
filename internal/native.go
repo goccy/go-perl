@@ -34,11 +34,6 @@ const ppHookMethodID = -3
 // GOPERL_DTOR_METHOD_ID); the payload is the u32 host destructor id.
 const destructorMethodID = -4
 
-// setMagicMethodID is the reserved callback method id fired when a guest SV
-// whose anchor magic was upgraded (op SV_MAGIC_SET_HOOK) is assigned to, so
-// the loader can run its mirror chain's svt_set hooks.
-const setMagicMethodID = -5
-
 // magicLocalMethodID is the reserved callback method id fired when `local`
 // puts a new SV in the place of one that carries the anchor magic (perl.cc
 // GOPERL_MG_LOCAL_METHOD_ID): the payload is the anchor's u32 host id and
@@ -86,18 +81,6 @@ func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
 	}
 	p.hookMu.Lock()
 	p.magicFree = fn
-	p.hookMu.Unlock()
-	return nil
-}
-
-// SetSetMagicHandler installs the hook for host-side set-magic: id is
-// delivered when the guest SV carrying that anchor is assigned to.
-func (p *Perl) SetSetMagicHandler(fn func(id uint32)) error {
-	if err := p.EnsureDispatcher(); err != nil {
-		return err
-	}
-	p.hookMu.Lock()
-	p.magicSet = fn
 	p.hookMu.Unlock()
 	return nil
 }
@@ -438,15 +421,6 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		d.p.hookMu.RUnlock()
 		if free != nil && len(req) >= 4 {
 			free(binary.LittleEndian.Uint32(req))
-		}
-		return []byte{1}, nil
-	}
-	if methodID == setMagicMethodID {
-		d.p.hookMu.RLock()
-		set := d.p.magicSet
-		d.p.hookMu.RUnlock()
-		if set != nil && len(req) >= 4 {
-			set(binary.LittleEndian.Uint32(req))
 		}
 		return []byte{1}, nil
 	}

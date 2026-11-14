@@ -1828,4 +1828,138 @@ static __attribute__((unused)) void goperl_cop_file_free(goperl_frame_t *f, COP 
  * process when it has no memory. */
 #define PL_nomemok (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_NOMEMOK))
 
+/* ---- case changes of characters (handy.h) ----------------------------------
+ * The interpreter's: the result is the UTF-8 of the character in the other
+ * case (possibly more than one character: the upper case of U+00DF is
+ * "SS"), its length goes to *lenp, and the first code point of it is
+ * returned. */
+#define GOPERL_CALL_CASEMAP 25
+enum { GOPERL_CASE_UPPER = 0, GOPERL_CASE_LOWER = 1, GOPERL_CASE_TITLE = 2, GOPERL_CASE_FOLD = 3 };
+static __attribute__((unused)) UV goperl_case_uvchr(goperl_frame_t *f, int which, UV cp,
+                                                    U8 *s, STRLEN *lenp) {
+    const uint32_t *r = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)GOPERL_CALL_CASEMAP << 32) | (uint32_t)which,
+                        (uint64_t)cp, 0, 0));
+    if (!r) goperl_croakf(f, "the interpreter did not change the case of a character");
+    const UV first = r[0];
+    const STRLEN len = r[1];
+    memcpy(s, (const U8 *)(r + 2), len);
+    s[len] = 0;
+    if (lenp) *lenp = len;
+    return first;
+}
+/* The same for the character at p (before e) of UTF-8 text. */
+static __attribute__((unused)) UV goperl_case_utf8(goperl_frame_t *f, int which, const U8 *p,
+                                                   const U8 *e, U8 *s, STRLEN *lenp) {
+    if (p >= e) goperl_croakf(f, "Attempting case change past the end of a string");
+    STRLEN clen = 0;
+    const UV cp = utf8_to_uvchr_buf(p, e, &clen);
+    return goperl_case_uvchr(f, which, cp, s, lenp);
+}
+#define toUPPER_uvchr(c, s, l) goperl_case_uvchr(_gof, GOPERL_CASE_UPPER, (UV)(c), (U8 *)(s), (l))
+#define toLOWER_uvchr(c, s, l) goperl_case_uvchr(_gof, GOPERL_CASE_LOWER, (UV)(c), (U8 *)(s), (l))
+#define toTITLE_uvchr(c, s, l) goperl_case_uvchr(_gof, GOPERL_CASE_TITLE, (UV)(c), (U8 *)(s), (l))
+#define toFOLD_uvchr(c, s, l) goperl_case_uvchr(_gof, GOPERL_CASE_FOLD, (UV)(c), (U8 *)(s), (l))
+#define to_uni_upper(c, s, l) toUPPER_uvchr((c), (s), (l))
+#define to_uni_lower(c, s, l) toLOWER_uvchr((c), (s), (l))
+#define to_uni_title(c, s, l) toTITLE_uvchr((c), (s), (l))
+#define to_uni_fold(c, s, l) toFOLD_uvchr((c), (s), (l))
+#define toUPPER_utf8_safe(p, e, s, l) \
+    goperl_case_utf8(_gof, GOPERL_CASE_UPPER, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+#define toLOWER_utf8_safe(p, e, s, l) \
+    goperl_case_utf8(_gof, GOPERL_CASE_LOWER, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+#define toTITLE_utf8_safe(p, e, s, l) \
+    goperl_case_utf8(_gof, GOPERL_CASE_TITLE, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+#define toFOLD_utf8_safe(p, e, s, l) \
+    goperl_case_utf8(_gof, GOPERL_CASE_FOLD, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+#define toUPPER_utf8(p, e, s, l) toUPPER_utf8_safe((p), (e), (s), (l))
+#define toLOWER_utf8(p, e, s, l) toLOWER_utf8_safe((p), (e), (s), (l))
+#define toTITLE_utf8(p, e, s, l) toTITLE_utf8_safe((p), (e), (s), (l))
+#define toFOLD_utf8(p, e, s, l) toFOLD_utf8_safe((p), (e), (s), (l))
+
+/* ---- more interpreter variables -------------------------------------------- */
+#define GOPERL_PL_IN_CLEAN_OBJS 109
+#define GOPERL_PL_IN_CLEAN_ALL 110
+#define GOPERL_PL_ORIGARGC 111
+#define GOPERL_PL_ORIGARGV 112
+/* Global destruction: the objects are being destroyed (sv_clean_objs), or
+ * every SV is (sv_clean_all). */
+#define PL_in_clean_objs (GOPERL_PLVAR(GOPERL_PL_IN_CLEAN_OBJS) != 0)
+#define PL_in_clean_all (GOPERL_PLVAR(GOPERL_PL_IN_CLEAN_ALL) != 0)
+/* The argument vector the interpreter was started with: the strings are
+ * the interpreter's own (writing into them is what an assignment to $0
+ * does), the vector of their addresses here is a view made for the native
+ * call. */
+#define PL_origargc ((int)GOPERL_PLVAR(GOPERL_PL_ORIGARGC))
+static __attribute__((unused)) char **goperl_origargv(goperl_frame_t *f) {
+    const int argc = (int)goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_ORIGARGC, 0, 0, 0);
+    const uint32_t *g = (const uint32_t *)goperl_guest_mem(
+        f, goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_ORIGARGV, 0, 0, 0));
+    if (!g || argc < 0) return 0;
+    char **v = (char **)goperl_arena_alloc(sizeof(char *) * (size_t)(argc + 1));
+    if (!v) goperl_croakf(f, "Out of memory!");
+    for (int i = 0; i < argc; i++) v[i] = (char *)goperl_guest_mem(f, g[i]);
+    v[argc] = 0;
+    return v;
+}
+#define PL_origargv goperl_origargv(_gof)
+
+/* ---- the scanning functions perl gives B::Hooks::Parser ---------------------
+ * (embed.h has them for PERL_CORE and PERL_EXT): they scan the lexer's
+ * buffer from s, which is a place in it, and give the place after what they
+ * read. */
+#if defined(PERL_CORE) || defined(PERL_EXT)
+#define GOPERL_LEX_SCAN_WORD 10
+#define GOPERL_LEX_SCAN_STR 11
+#define GOPERL_LEX_SKIPSPACE 12
+/* A place in the lexer's buffer from the interpreter's address of it. */
+static __attribute__((unused)) char *goperl_lex_place(goperl_frame_t *f, uint32_t g) {
+    return g ? (char *)goperl_guest_mem(f, g) : 0;
+}
+static __attribute__((unused)) uint64_t goperl_lex_from(goperl_frame_t *f, const char *s) {
+    const uint64_t g = goperl_guest_addr(f, s);
+    if (!g) goperl_croakf(f, "a lexer position outside of the buffer");
+    return g;
+}
+static __attribute__((unused)) char *goperl_scan_word(goperl_frame_t *f, char *s, char *dest,
+                                                      STRLEN destlen, int allow_package,
+                                                      STRLEN *slp) {
+    const uint32_t w[2] = {(uint32_t)destlen, (uint32_t)allow_package};
+    const uint64_t from = goperl_lex_from(f, s);
+    const uint32_t *r = (const uint32_t *)goperl_guest_mem(
+        f, (uint64_t)goperl_lex(f, GOPERL_LEX_SCAN_WORD, from, (const char *)w, sizeof w));
+    if (!r) goperl_croakf(f, "the interpreter did not scan the word");
+    const STRLEN len = r[1];
+    if (len < destlen) {
+        memcpy(dest, (const char *)(r + 2), len);
+        dest[len] = 0;
+    }
+    *slp = len;
+    return goperl_lex_place(f, r[0]);
+}
+#define scan_word(s, dest, destlen, allow_package, slp) \
+    goperl_scan_word(_gof, (s), (dest), (STRLEN)(destlen), (allow_package), (slp))
+static __attribute__((unused)) char *goperl_scan_str(goperl_frame_t *f, char *start,
+                                                     int keep_quoted, int keep_delims,
+                                                     int re_reparse, char **delimp) {
+    const uint32_t w[3] = {(uint32_t)keep_quoted, (uint32_t)keep_delims, (uint32_t)re_reparse};
+    const uint64_t from = goperl_lex_from(f, start);
+    const uint32_t *r = (const uint32_t *)goperl_guest_mem(
+        f, (uint64_t)goperl_lex(f, GOPERL_LEX_SCAN_STR, from, (const char *)w, sizeof w));
+    if (!r) goperl_croakf(f, "the interpreter did not scan the string");
+    if (delimp) *delimp = goperl_lex_place(f, r[1]);
+    return goperl_lex_place(f, r[0]);
+}
+#define scan_str(start, keep_quoted, keep_delims, re_reparse, delimp) \
+    goperl_scan_str(_gof, (start), (keep_quoted), (keep_delims), (re_reparse), (delimp))
+static __attribute__((unused)) char *goperl_skipspace_flags(goperl_frame_t *f, char *s,
+                                                            U32 flags) {
+    const uint32_t w[1] = {(uint32_t)flags};
+    const uint64_t from = goperl_lex_from(f, s);
+    return goperl_lex_place(
+        f, (uint32_t)goperl_lex(f, GOPERL_LEX_SKIPSPACE, from, (const char *)w, sizeof w));
+}
+#define skipspace_flags(s, flags) goperl_skipspace_flags(_gof, (s), (U32)(flags))
+#endif
+
 #endif /* GOPERL_XS_SDK_COMPILER_H */

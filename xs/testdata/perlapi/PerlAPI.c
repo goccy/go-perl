@@ -1,6 +1,10 @@
 /* Exercises the perl API surface of the SDK (goperl_perlapi.h) the way XS
  * distributions use it. Written directly in the shape xsubpp generates. */
 #include <time.h>
+/* As B::Hooks::Parser does: perl gives an extension that says it is one the
+ * functions of its lexer that it gives no other module (scan_word,
+ * scan_str, skipspace_flags). */
+#define PERL_EXT
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -5193,9 +5197,147 @@ XS(XS_PerlAPI_autoload_flag) {
     XSRETURN(1);
 }
 
+/* refuse_set(\$v, word): magic whose svt_set croaks when the value
+ * assigned is the word, as a type check of a field does. */
+static int PerlAPI_refuse_set(pTHX_ SV *sv, MAGIC *mg) {
+    if (SvPOK(sv) && sv_eq(sv, mg->mg_obj))
+        croak("refused: %s", SvPV_nolen(sv));
+    return 0;
+}
+static MGVTBL PerlAPI_refuse_vtbl = {0, PerlAPI_refuse_set, 0, 0, 0, 0, 0, 0};
+XS(XS_PerlAPI_refuse_set) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "scalarref, word");
+    sv_magicext(SvRV(ST(0)), ST(1), PERL_MAGIC_ext, &PerlAPI_refuse_vtbl, NULL, 0);
+    XSRETURN_EMPTY;
+}
+
+/* enable_infix(): infix operators of the module: "equ" (named; string
+ * equality), and "<~>" (symbolic; numeric comparison), whose parse puts a
+ * value in the operator's data that its build_op checks. */
+static STRLEN (*PerlAPI_next_infix)(pTHX_ char *, STRLEN, struct Perl_custom_infix **);
+static OP *PerlAPI_build_equ(pTHX_ SV **opdata, OP *lhs, OP *rhs, struct Perl_custom_infix *def) {
+    PERL_UNUSED_ARG(opdata);
+    PERL_UNUSED_ARG(def);
+    return newBINOP(OP_SEQ, 0, lhs, rhs);
+}
+static void PerlAPI_parse_cmp(pTHX_ SV **opdata, struct Perl_custom_infix *def) {
+    PERL_UNUSED_ARG(def);
+    *opdata = newSVpvs("parsed");
+}
+static OP *PerlAPI_build_cmp(pTHX_ SV **opdata, OP *lhs, OP *rhs, struct Perl_custom_infix *def) {
+    PERL_UNUSED_ARG(def);
+    if (!*opdata || !strEQ(SvPV_nolen(*opdata), "parsed"))
+        croak("the operator's data is not what its parse left");
+    return newBINOP(OP_NCMP, 0, lhs, rhs);
+}
+static struct Perl_custom_infix PerlAPI_infix_equ = {INFIX_PREC_REL, NULL, PerlAPI_build_equ};
+static struct Perl_custom_infix PerlAPI_infix_cmp = {INFIX_PREC_REL, PerlAPI_parse_cmp,
+                                                     PerlAPI_build_cmp};
+static STRLEN PerlAPI_infix_plugin(pTHX_ char *op, STRLEN oplen, struct Perl_custom_infix **def) {
+    if (oplen == 3 && memcmp(op, "equ", 3) == 0) {
+        *def = &PerlAPI_infix_equ;
+        return 3;
+    }
+    if (oplen >= 3 && memcmp(op, "<~>", 3) == 0) {
+        *def = &PerlAPI_infix_cmp;
+        return 3;
+    }
+    return PerlAPI_next_infix(aTHX_ op, oplen, def);
+}
+XS(XS_PerlAPI_enable_infix) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    wrap_infix_plugin(PerlAPI_infix_plugin, &PerlAPI_next_infix);
+    XSRETURN_EMPTY;
+}
+
+/* case_map(string): the UTF-8 of the upper, lower, title and fold case of
+ * the string's first character, in hex, and of toUPPER_uvchr of its code
+ * point, with the first code point of each result. */
+XS(XS_PerlAPI_case_map) {
+    dXSARGS;
+    STRLEN len, l;
+    const U8 *p;
+    U8 buf[UTF8_MAXBYTES_CASE + 1];
+    SV *out;
+    UV first;
+    STRLEN i;
+    int k;
+    if (items != 1) croak_xs_usage(cv, "string");
+    p = (const U8 *)SvPVutf8(ST(0), len);
+    out = sv_2mortal(newSVpvs(""));
+    for (k = 0; k < 5; k++) {
+        switch (k) {
+        case 0: first = toUPPER_utf8_safe(p, p + len, buf, &l); break;
+        case 1: first = toLOWER_utf8_safe(p, p + len, buf, &l); break;
+        case 2: first = toTITLE_utf8_safe(p, p + len, buf, &l); break;
+        case 3: first = toFOLD_utf8_safe(p, p + len, buf, &l); break;
+        default: first = to_uni_upper(utf8_to_uvchr_buf(p, p + len, NULL), buf, &l); break;
+        }
+        sv_catpvf(out, "%s%" UVxf ":", k ? "," : "", first);
+        for (i = 0; i < l; i++) sv_catpvf(out, "%02x", buf[i]);
+    }
+    ST(0) = out;
+    XSRETURN(1);
+}
+
+/* interp_start(): PL_origargc and PL_origargv, and PL_in_clean_objs and
+ * PL_in_clean_all. */
+XS(XS_PerlAPI_interp_start) {
+    dXSARGS;
+    SV *out;
+    int i;
+    PERL_UNUSED_VAR(items);
+    out = sv_2mortal(newSVpvf("%d:", PL_origargc));
+    for (i = 0; i < PL_origargc; i++) sv_catpvf(out, "%s%s", i ? "," : "", PL_origargv[i]);
+    sv_catpvf(out, ":%d%d", (int)PL_in_clean_objs, (int)PL_in_clean_all);
+    ST(0) = out;
+    XSRETURN(1);
+}
+
+/* install_kw_scan(): a keyword plugin that scans as B::Hooks::Parser does,
+ * with perl's scanning functions: goperl_scan WORD "STRING" is the
+ * constant "WORD|STRING". */
+static int (*goperl_next_kw3)(pTHX_ char *, STRLEN, OP **);
+static int goperl_kw_scan(pTHX_ char *kw, STRLEN len, OP **op_ptr) {
+    if (len == 11 && memcmp(kw, "goperl_scan", 11) == 0) {
+        char word[256];
+        STRLEN wlen = 0;
+        char *s = skipspace_flags(PL_bufptr, 0);
+        char *after = scan_word(s, word, sizeof word, 1, &wlen);
+        SV *str;
+        if (!after) croak("no word");
+        s = skipspace_flags(after, 0);
+        after = scan_str(s, 0, 0, 0, NULL);
+        if (!after) croak("no string");
+        str = PL_lex_stuff;
+        PL_lex_stuff = NULL;
+        lex_read_to(after);
+        *op_ptr = newSVOP(OP_CONST, 0, newSVpvf("%s|%" SVf, word, SVfARG(str)));
+        SvREFCNT_dec(str);
+        return KEYWORD_PLUGIN_EXPR;
+    }
+    return goperl_next_kw3(aTHX_ kw, len, op_ptr);
+}
+XS(XS_PerlAPI_install_kw_scan) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!goperl_next_kw3) {
+        goperl_next_kw3 = PL_keyword_plugin;
+        PL_keyword_plugin = goperl_kw_scan;
+    }
+    XSRETURN_EMPTY;
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
+    newXS_deffile("PerlAPI::refuse_set", XS_PerlAPI_refuse_set);
+    newXS_deffile("PerlAPI::enable_infix", XS_PerlAPI_enable_infix);
+    newXS_deffile("PerlAPI::case_map", XS_PerlAPI_case_map);
+    newXS_deffile("PerlAPI::interp_start", XS_PerlAPI_interp_start);
+    newXS_deffile("PerlAPI::install_kw_scan", XS_PerlAPI_install_kw_scan);
     newXS_deffile("PerlAPI::rx_ok", XS_PerlAPI_rx_ok);
     newXS_deffile("PerlAPI::invariant", XS_PerlAPI_invariant);
     newXS_deffile("PerlAPI::fold_eq", XS_PerlAPI_fold_eq);

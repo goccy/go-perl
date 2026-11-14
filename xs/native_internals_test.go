@@ -182,6 +182,21 @@ func TestNativeJumpEnvironment(t *testing.T) {
 	})
 }
 
+// The case changes of a character are the interpreter's, whole (the upper
+// case of U+00DF is "SS"); PL_origargv is the argument vector the
+// interpreter was started with; PL_in_clean_objs and PL_in_clean_all are
+// false before global destruction.
+func TestNativeCaseChangesAndInterpreterStart(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"sharp s", `PerlAPI::case_map("\x{df}")`, "53:5353,df:c39f,53:5373,73:7373,53:5353"},
+		{"a title case letter", `PerlAPI::case_map("\x{1c6}")`, "1c4:c784,1c6:c786,1c5:c785,1c6:c786,1c4:c784"},
+		{"ASCII", `PerlAPI::case_map("q")`, "51:51,71:71,51:51,71:71,51:51"},
+		{"the start of the interpreter", `PerlAPI::interp_start()`, "3:perl,-e,0:00"},
+	})
+}
+
 // Module state is the static my_cxt, as with perl without MULTIPLICITY;
 // CvAUTOLOAD_on and CvAUTOLOAD_off change the sub's flag; Time::HiRes's C
 // hook is in PL_modglobal once Time::HiRes is loaded, and not before, and

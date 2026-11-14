@@ -146,6 +146,18 @@ func TestNativeUvarMagic(t *testing.T) {
 	})
 }
 
+// A croak in an svt_set hook of native code dies where the value is
+// assigned, as in perl's mg_set: the value is assigned, and code after the
+// assignment does not run.
+func TestNativeMagicSetHookCroaks(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"refused", `my $v = "ok"; PerlAPI::refuse_set(\$v, "bad"); my $after = 0; my $r = eval { $v = "bad"; $after = 1; 1 }; join ",", $r ? "returned" : "died", $@ =~ /^refused: bad at / ? "message" : $@, $after, $v`, "died,message,0,bad"},
+		{"accepted", `my $v = "ok"; PerlAPI::refuse_set(\$v, "bad"); $v = "good"; $v`, "good"},
+	})
+}
+
 // uvar magic on a scalar: perl calls the ufuncs with their index when the
 // variable is read and written; and a module that replaces the MAGIC's
 // vtable after attaching it, as SWIG does for the variables of a wrapped

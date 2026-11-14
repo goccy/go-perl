@@ -148,9 +148,6 @@ type Perl struct {
 	// ppHook handles pp-hook dispatch for op types a native module claimed
 	// (reserved callback method id -3).
 	ppHook func(req []byte) []byte
-	// magicSet runs mirror svt_set hooks when the guest reports an
-	// assignment to an SV whose anchor magic was upgraded to fire them.
-	magicSet func(id uint32)
 	// magicLocal gives the SV `local` puts in a variable's place the
 	// host-side magic of the variable (reserved callback method id -8).
 	magicLocal func(id uint32, sv uint64)
