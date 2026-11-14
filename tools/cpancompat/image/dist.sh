@@ -48,6 +48,16 @@ output_limit=$((256 << 20))
 # here gets it.
 exec 3>&1 1>&2
 
+# The container's init (docker run --init) passes on to this script the
+# signals it gets, and the code under test can signal it, as it runs as the
+# same user: Async-Event-Interval's tests send TERM to process 1 over and
+# over. On a smoker's machine init belongs to root and such a kill fails;
+# here it would end this script in the middle of a phase. So this script
+# takes no action on the signals init passes on (the commands it runs get
+# their default actions back: a handled signal is reset when a command
+# starts), and the driver ends a container with SIGKILL.
+trap : HUP INT QUIT TERM USR1 USR2 PIPE ALRM
+
 # What CPAN clients set for the programs they drive.
 export PERL_MM_USE_DEFAULT=1 NONINTERACTIVE_TESTING=1 PERL_USE_UNSAFE_INC=1
 export PERL5_CPAN_IS_RUNNING=$$ PERL5_CPANPLUS_IS_RUNNING=$$
