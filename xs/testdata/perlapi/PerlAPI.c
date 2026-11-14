@@ -4489,6 +4489,26 @@ XS(XS_PerlAPI_block_starts) {
     XSRETURN(1);
 }
 
+/* long_names(array ref, value): the public functions under their long names
+ * (Perl_av_push(aTHX_ ...), with the interpreter first, or none for one
+ * that takes none) and utf8.h's invariant macros: pushes the value, then
+ * answers whether it looks like a number, the array's new length, and
+ * which of 0x41 and 0xe9 are invariant in UTF-8. */
+XS(XS_PerlAPI_long_names) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "array, value");
+    {
+        AV *av = (AV *)SvRV(ST(0));
+        SV *v = ST(1);
+        const bool num = cBOOL(Perl_looks_like_number(aTHX_ v));
+        Perl_av_push(aTHX_ av, Perl_newSVsv(aTHX_ v));
+        ST(0) = sv_2mortal(Perl_newSVpvf(aTHX_ "%d,%d,%d%d%d", (int)num, (int)(av_top_index(av) + 1),
+                                         (int)UNI_IS_INVARIANT(0x41), (int)UVCHR_IS_INVARIANT(0xe9),
+                                         (int)(Perl_get_context() != NULL)));
+        XSRETURN(1);
+    }
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -4730,5 +4750,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::install_kw_parser", XS_PerlAPI_install_kw_parser);
     newXS_deffile("PerlAPI::runloop", XS_PerlAPI_runloop);
     newXS_deffile("PerlAPI::block_starts", XS_PerlAPI_block_starts);
+    newXS_deffile("PerlAPI::long_names", XS_PerlAPI_long_names);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

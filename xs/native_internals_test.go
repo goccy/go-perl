@@ -52,6 +52,17 @@ func TestNativeParserPlugins(t *testing.T) {
 	})
 }
 
+// Perl's public functions have their long names too (Perl_av_push(aTHX_
+// ...)), and utf8.h's invariant macros are there.
+func TestNativeLongNames(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"long names", `my @a = (1); PerlAPI::long_names(\@a, "12") . ":" . $a[1]`, "1,2,101:12"},
+		{"not a number", `my @a; PerlAPI::long_names(\@a, "x")`, "0,1,101"},
+	})
+}
+
 // The signal names and numbers native code sees are the system's; what
 // native code stores into PL_statcache is what -X _ answers from.
 func TestNativeSignalNamesAndStatCache(t *testing.T) {

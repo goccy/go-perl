@@ -3863,6 +3863,13 @@ static inline __attribute__((unused)) void goperl_async(goperl_frame_t *f) {
 #define PERL_ASYNC_CHECK() goperl_async(_gof)
 #define strNE(a, b) (strcmp((a), (b)) != 0)
 #define UTF8_IS_INVARIANT(c) ((U8)(c) < 0x80)
+/* A code point that is the same one byte in UTF-8 (utf8.h; ASCII). */
+#define OFFUNI_IS_INVARIANT(cp) ((UV)(cp) < 0x80)
+#define UVCHR_IS_INVARIANT(cp) OFFUNI_IS_INVARIANT(cp)
+#define UNI_IS_INVARIANT(cp) UVCHR_IS_INVARIANT(cp)
+#define NATIVE_BYTE_IS_INVARIANT(c) UVCHR_IS_INVARIANT(c)
+/* The bytes the case change of one character can take (utf8.h). */
+#define UTF8_MAXBYTES_CASE 13
 #define UTF8_EIGHT_BIT_HI(c) ((U8)(0xC0 | ((U8)(c) >> 6)))
 #define UTF8_EIGHT_BIT_LO(c) ((U8)(0x80 | ((U8)(c)&0x3F)))
 
@@ -10021,5 +10028,12 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
 #define HINT_BLOCK_SCOPE 0x00000100
 
 #include "goperl_perlapi.h"
+
+/* The interpreter a function of the API is called with: the current frame
+ * (perl's get_context, which dTHX and PERL_GET_THX go through). */
+#ifndef Perl_get_context
+#define Perl_get_context() ((void *)goperl_cur_frame_v)
+#endif
+#include "goperl_longnames.h"
 
 #endif /* GOPERL_XS_SDK_PERL_H */
