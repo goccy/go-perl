@@ -49,6 +49,10 @@ type perlCommand struct {
 	rs      string
 	// bitBucket: a switch said to read no program at all (-V).
 	bitBucket bool
+	// describe holds the positions in prog.Preamble of the statements of
+	// -V (Config::_V), which are written once the interpreter has started
+	// (describeStatement): they name the system it was built for.
+	describe []int
 	// defines: the program's leading arguments are -name[=value]
 	// switches (-s).
 	defines bool
@@ -57,6 +61,28 @@ type perlCommand struct {
 // bitBucketPath is the empty program perl reads when a switch said not to
 // look for one.
 const bitBucketPath = "/dev/null"
+
+// describeStatement is the statement of -V: perl's "use Config;
+// Config::_V()", which prints the summary of the configuration and the
+// characteristics of the binary. Config::_V first makes sure that the
+// library was built for the system that runs it by comparing that system
+// with $^O, the name perl gives its own system. A preload can present the
+// host to a build by setting $^O to the host's name (the XS build's %Config
+// overlay does) while the binary and its library stay what they were built
+// for; so with builtFor, the system the interpreter was built for (its $^O
+// before any preload), the comparison is made with that, and the summary
+// still shows %Config as the preload left it.
+func describeStatement(builtFor string) string {
+	if builtFor == "" {
+		return "use Config; Config::_V()"
+	}
+	return "use Config; { local $^O = " + perlSingleQuoted(builtFor) + "; Config::_V() }"
+}
+
+// perlSingleQuoted returns s as a single-quoted Perl string literal.
+func perlSingleQuoted(s string) string {
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s) + "'"
+}
 
 // parsePerlCommand reads a perl command line: argv without the command
 // name, and the environment it is given in (for PERL5OPT and, under -S,
@@ -148,7 +174,8 @@ args:
 						"use Config; Config::config_vars(qw\x00"+s[1:]+"\x00)")
 					s = ""
 				} else {
-					c.prog.Preamble = append(c.prog.Preamble, "use Config; Config::_V()")
+					c.describe = append(c.describe, len(c.prog.Preamble))
+					c.prog.Preamble = append(c.prog.Preamble, describeStatement(""))
 				}
 			case 'x':
 				c.prog.Extract = true

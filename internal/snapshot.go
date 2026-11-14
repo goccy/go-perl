@@ -19,6 +19,14 @@ package internal
 //     what the snapshotted instance was booted with.
 // Everything else in Options (FS backend, hooks, stdio, memory caps) lives on
 // the host side of the WASI boundary and is freely per-instance.
+//
+// The snapshot is built for the SECOND instance of a key, not the first.
+// Most processes start one interpreter (the gperl command, a program built
+// with gperl build), and for that one building the snapshot first — start an
+// interpreter, write its memory into an image, map the image again — costs
+// as much as starting it. The first instance starts on memory of its own
+// that keeps one address (base.AnonymousMemory); its first fork images its
+// memory as any fork does.
 
 import (
 	"bytes"
@@ -51,25 +59,38 @@ type perlSnapshot struct {
 var (
 	snapMu    sync.Mutex
 	snapshots = map[string]*perlSnapshot{}
+	// started holds the keys an instance has been made for without a
+	// snapshot: the first instance of a key starts on its own memory.
+	started = map[string]bool{}
 )
 
 // sharedSnapshot returns the process-wide snapshot for (stdlibDir, siteDir,
-// env), building and caching it on first use. A failure is remembered, not
-// retried: New then initializes each instance privately, which is correct,
-// only larger.
+// env), building and caching it — from the second instance of the key on:
+// for the first it returns nil, and that instance starts on memory of its
+// own. A failure is remembered, not retried: New then initializes each
+// instance privately, which is correct, only larger.
 func sharedSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	if os.Getenv("GO_PERL_NO_SHARED_IMAGE") != "" {
 		return &perlSnapshot{err: fmt.Errorf("disabled by GO_PERL_NO_SHARED_IMAGE")}
 	}
-	key := fmt.Sprintf("lib=%q site=%q env=%q", stdlibDir, siteDir, env)
+	key := snapshotKey(stdlibDir, siteDir, env)
 	snapMu.Lock()
 	defer snapMu.Unlock()
 	if s, ok := snapshots[key]; ok {
 		return s
 	}
+	if !started[key] {
+		started[key] = true
+		return nil
+	}
 	s := buildSnapshot(stdlibDir, siteDir, env)
 	snapshots[key] = s
 	return s
+}
+
+// snapshotKey names what a snapshot bakes in (see the top of this file).
+func snapshotKey(stdlibDir, siteDir string, env []string) string {
+	return fmt.Sprintf("lib=%q site=%q env=%q", stdlibDir, siteDir, env)
 }
 
 func buildSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {

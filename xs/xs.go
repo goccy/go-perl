@@ -586,10 +586,10 @@ func loaderState(p *internal.Perl) (*state, error) {
 }
 
 // open dlopens a native XS module built against the SDK, injects the
-// vtable, and picks up the SDK entry points the module carries.
-// open loads the module at path; global makes its symbols available to the
-// modules loaded after it (DynaLoader's dl_load_flags 0x01, RTLD_GLOBAL),
-// for modules that link against the functions another one exports.
+// vtable, and picks up the SDK entry points the module carries. global
+// makes the library's symbols available to the libraries loaded after it
+// (RTLD_GLOBAL), as DynaLoader's dl_load_file does when a module's
+// dl_load_flags ask for it; otherwise they stay the library's own.
 func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	p := s.p
 	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
@@ -635,7 +635,7 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	}
 	initFn, err := purego.Dlsym(lib, "__goperl_xs_init")
 	if err != nil {
-		return 0, fmt.Errorf("%s is not a go-perl native XS module (no __goperl_xs_init): %w", path, err)
+		return lib, &plainLibraryError{path: path, err: err}
 	}
 	got, _, _ := purego.SyscallN(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
@@ -694,14 +694,44 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	return lib, nil
 }
 
-// openLibrary is DynaLoader's dl_load_file: it loads the module at path
-// and returns the token Perl code names it by.
+// dlGlobalSymbols is the bit of dl_load_file's flags that makes a library's
+// symbols global (perl's dl_dlopen.xs: RTLD_GLOBAL).
+const dlGlobalSymbols = 0x01
+
+// plainLibraryError is the failure of open for a shared library that is
+// not a native XS module: it has none of the SDK's entry points. The
+// library is loaded all the same (lib of open's result).
+type plainLibraryError struct {
+	path string
+	err  error
+}
+
+func (e *plainLibraryError) Error() string {
+	return fmt.Sprintf("%s is not a go-perl native XS module (no __goperl_xs_init): %v", e.path, e.err)
+}
+
+func (e *plainLibraryError) Unwrap() error { return e.err }
+
+// openLibrary is DynaLoader's dl_load_file: it loads the library at path
+// and returns the token Perl code names it by. Like dlopen, which perl's
+// dl_load_file is, it loads any shared library, not only a native module:
+// code that looks for a C library's functions through DynaLoader
+// (FFI::CheckLib, for one) loads the library to find its symbols. Only a
+// module is initialized for the SDK. flags are dl_load_file's: with bit
+// 0x01 (a module's dl_load_flags returning it) the library's symbols are
+// global, so that the modules loaded after it link against it — XS::Loader
+// loads every module that way, and a module built on another one's library
+// (Test::Catch on XS::libcatch) needs it.
 func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 	s, err := loaderState(p)
 	if err != nil {
 		return 0, err
 	}
-	lib, err := s.open(path, flags&0x01 != 0)
+	lib, err := s.open(path, flags&dlGlobalSymbols != 0)
+	var plain *plainLibraryError
+	if errors.As(err, &plain) {
+		err = nil
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -2044,14 +2074,20 @@ var (
 
 func libcInit() {
 	libcOnce.Do(func() {
-		// A perl executable is linked with the C math library, and XS
-		// modules count on its functions being loaded already: many are
-		// linked without -lm. This binary has no libm of its own, so the
-		// library goes into the global namespace before the first module.
-		// Where it is missing, a module that needs it fails to load with
-		// the dynamic linker's own message.
+		// A perl executable is linked with the C libraries of its
+		// configuration (perllibs: -lpthread -ldl -lm -lcrypt -lutil -lc),
+		// and XS modules count on their functions being loaded already:
+		// many are linked without -lm, and a module that calls crypt or
+		// fcrypt (Crypt::Passwd) without -lcrypt. Of these, the math
+		// library and libcrypt are libraries of their own on Linux (the
+		// others are in the C library); this binary has neither, so they go
+		// into the global namespace before the first module. Where one is
+		// missing, a module that needs it fails to load with the dynamic
+		// linker's own message.
 		if runtime.GOOS == "linux" {
-			_, _ = purego.Dlopen("libm.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			for _, lib := range []string{"libm.so.6", "libcrypt.so.1"} {
+				_, _ = purego.Dlopen(lib, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			}
 		}
 		for _, sym := range []struct {
 			name string

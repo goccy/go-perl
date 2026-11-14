@@ -359,3 +359,28 @@ func TestCloneWithNativeState(t *testing.T) {
 		{"released by its last holder", `@box = (); PerlAPI::tally_freed()`, "1"},
 	})
 }
+
+// A forked process calls native code through the host-call channel as its
+// parent does: a function a module gives to call_atexit in the child runs
+// when the child's interpreter is destroyed, and the child ends with its
+// own status.
+func TestForkChildCallsNativeCodeThroughTheHostChannel(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "at-exit.txt")
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		`my $pid = fork // die "fork: $!";`,
+		`if (!$pid) { PerlAPI::at_exit_write('`+file+`'); exit 3 }`,
+		`waitpid($pid, 0);`,
+		`print "status ", $? >> 8, "\n";`,
+	)
+	if status != 0 || stdout != "status 3\n" || stderr != "" {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want status=0 stdout=%q", status, stdout, stderr, "status 3\n")
+	}
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("the child's function did not run: %v", err)
+	}
+	if string(got) != "the interpreter is gone\n" {
+		t.Fatalf("got %q", got)
+	}
+}

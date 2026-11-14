@@ -53,11 +53,13 @@ type GoFunc func(args []Value) ([]Value, error)
 // host/transport failures or a context cancellation, which behaves exactly
 // like Eval's.
 func (p *Perl) Call(ctx context.Context, name string, args ...Value) ([]Value, error) {
-	enc, err := p.encodeArgs(args)
+	enc, pins, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	resp, interrupted, err := p.raw.CallOp(ctx, name, enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return p.raw.CallOp(ctx, name, enc)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +188,11 @@ func (p *Perl) handleUserCallback(methodID int32, req []byte) ([]byte, error) {
 	if err != nil {
 		return callbackDie(err), nil
 	}
-	enc, err := p.encodeArgs(results)
+	// The results are taken by the guest as soon as the callback returns,
+	// before it can make another operation that would send releases, so
+	// their handles need no pins past this point: the guest has its own
+	// references to what it takes.
+	enc, _, err := p.encodeArgs(results)
 	if err != nil {
 		return callbackDie(fmt.Errorf("encode Go results: %w", err)), nil
 	}
