@@ -1917,6 +1917,22 @@ XS(XS_PerlAPI_magic_refcounted) {
     }
 }
 
+/* SvRV reads the slot, whatever the flags say: a reference whose ROK flag
+ * is turned off still has its target there, as in perl. */
+XS(XS_PerlAPI_rv_slot_after_rok_off) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "target");
+    {
+        SV *rv = sv_2mortal(newRV_inc(ST(0)));
+        int same;
+        SvROK_off(rv);
+        same = SvRV(rv) == ST(0);
+        SvROK_on(rv); /* the mortal gives its reference back */
+        ST(0) = boolSV(same);
+        XSRETURN(1);
+    }
+}
+
 /* The first n bytes at the place the magic points to. */
 XS(XS_PerlAPI_view_read) {
     dXSARGS;
@@ -3690,6 +3706,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::view_read", XS_PerlAPI_view_read);
     newXS_deffile("PerlAPI::pin_attach", XS_PerlAPI_pin_attach);
     newXS_deffile("PerlAPI::magic_refcounted", XS_PerlAPI_magic_refcounted);
+    newXS_deffile("PerlAPI::rv_slot_after_rok_off", XS_PerlAPI_rv_slot_after_rok_off);
     newXS_deffile("PerlAPI::process_id", XS_PerlAPI_process_id);
     newXS_deffile("PerlAPI::discard_string", XS_PerlAPI_discard_string);
     newXS_deffile("PerlAPI::resize_buffer", XS_PerlAPI_resize_buffer);

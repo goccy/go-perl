@@ -25,6 +25,16 @@ func TestNativeReadsTheLinksTheInterpreterSet(t *testing.T) {
 	})
 }
 
+// SvRV reads the slot of a reference, as perl's does, also when the ROK
+// flag is off.
+func TestNativeReadsTheReferenceSlot(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the slot of a reference without its flag", `my $t = "target"; PerlAPI::rv_slot_after_rok_off($t) ? "the target" : "something else"`, "the target"},
+	})
+}
+
 // A module puts a function of its own into PL_check (with wrap_op_checker
 // or by assignment) and is handed every op of that type the compiler
 // builds, with the ops below it; it calls the checker it replaced, and the

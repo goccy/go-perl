@@ -289,7 +289,11 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
                             ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0);
     case GOPERL_LV_RV:
-        return goperl_do_op(f, GOPERL_OP_SV_RV, tok, 0, 0, 0);
+        /* the slot, as perl's SvRV reads it whatever the flags say (not
+         * "the target if SvROK", which is SvROK's question) */
+        return goperl_do_op(f, GOPERL_OP_SV_SLOT_GET,
+                            ((uint64_t)0 /* GOPERL_SVSLOT_RV */ << 32) | (uint32_t)tok,
+                            0, 0, 0);
     case GOPERL_LV_CVXSUB:
         return (uint64_t)(uintptr_t)goperl_api_cv_xsub(f, tok);
     case GOPERL_LV_GVSTASH:
