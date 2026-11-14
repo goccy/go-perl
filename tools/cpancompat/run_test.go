@@ -103,6 +103,36 @@ func TestEnsureNodeReleasesEachNodeOnce(t *testing.T) {
 	}
 }
 
+func TestRecordStuckBlocksEachByWhatItWaitedFor(t *testing.T) {
+	// A and B wait for each other (as configuring them revealed); C waits
+	// only for A. Recording A must not release C.
+	results, err := os.Create(filepath.Join(t.TempDir(), "results.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer results.Close()
+	a := &node{d: &dist{Dist: "A"}, waiting: map[string]bool{"B": true}}
+	b := &node{d: &dist{Dist: "B"}, waiting: map[string]bool{"A": true}}
+	c := &node{d: &dist{Dist: "C", Needs: []string{"A"}}, waiting: map[string]bool{"A": true}}
+	r := &runner{
+		nodes:   map[string]*node{"A": a, "B": b, "C": c},
+		waiters: map[string][]*node{"A": {b, c}, "B": {a}},
+		results: results,
+	}
+	if err := r.recordStuck(); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]string{"A": {"B"}, "B": {"A"}, "C": {"A"}} {
+		res := r.nodes[name].res
+		if res == nil || res.Outcome != outcomeBlocked || !reflect.DeepEqual(res.BlockedBy, want) {
+			t.Errorf("%s settled as %+v; want blocked by %v", name, res, want)
+		}
+	}
+	if r.ready.Len() != 0 || r.done != 3 {
+		t.Errorf("%d ready, %d recorded; want none ready, 3 recorded", r.ready.Len(), r.done)
+	}
+}
+
 func TestSettlePutsConfigureFailureDownToMissingNeeds(t *testing.T) {
 	r, n := blockingRunner(t, "Runtime")
 	res := &result{Dist: "Dependent", Outcome: outcomeConfigureFailed}

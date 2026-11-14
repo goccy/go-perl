@@ -280,8 +280,13 @@ func runSurvey(opts runOptions) error {
 			return err
 		}
 	}
-	// What is left waits for something that never finished: distributions
-	// that need each other.
+	return r.recordStuck()
+}
+
+// recordStuck settles, once nothing runs or can run, what is left: it waits
+// for something that never finished, distributions that need each other.
+// Each is blocked by the ones it waited for.
+func (r *runner) recordStuck() error {
 	var stuck []string
 	for name, n := range r.nodes {
 		if n.res == nil {
@@ -289,6 +294,12 @@ func runSurvey(opts runOptions) error {
 		}
 	}
 	sort.Strings(stuck)
+	// They wait only for one another: recording one must not release
+	// another, which would be run by no one and recorded as blocked by
+	// nothing.
+	for _, name := range stuck {
+		delete(r.waiters, name)
+	}
 	for _, name := range stuck {
 		n := r.nodes[name]
 		var on []string
