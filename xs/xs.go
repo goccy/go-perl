@@ -608,7 +608,7 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	}
 	initFn, err := purego.Dlsym(lib, "__goperl_xs_init")
 	if err != nil {
-		return 0, fmt.Errorf("%s is not a go-perl native XS module (no __goperl_xs_init): %w", path, err)
+		return lib, &plainLibraryError{path: path, err: err}
 	}
 	got, _, _ := purego.SyscallN(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
@@ -657,14 +657,36 @@ func (s *state) open(path string) (lib uintptr, err error) {
 	return lib, nil
 }
 
-// openLibrary is DynaLoader's dl_load_file: it loads the module at path
-// and returns the token Perl code names it by.
+// plainLibraryError is the failure of open for a shared library that is
+// not a native XS module: it has none of the SDK's entry points. The
+// library is loaded all the same (lib of open's result).
+type plainLibraryError struct {
+	path string
+	err  error
+}
+
+func (e *plainLibraryError) Error() string {
+	return fmt.Sprintf("%s is not a go-perl native XS module (no __goperl_xs_init): %v", e.path, e.err)
+}
+
+func (e *plainLibraryError) Unwrap() error { return e.err }
+
+// openLibrary is DynaLoader's dl_load_file: it loads the library at path
+// and returns the token Perl code names it by. Like dlopen, which perl's
+// dl_load_file is, it loads any shared library, not only a native module:
+// code that looks for a C library's functions through DynaLoader
+// (FFI::CheckLib, for one) loads the library to find its symbols. Only a
+// module is initialized for the SDK.
 func openLibrary(p *internal.Perl, path string) (uint64, error) {
 	s, err := loaderState(p)
 	if err != nil {
 		return 0, err
 	}
 	lib, err := s.open(path)
+	var plain *plainLibraryError
+	if errors.As(err, &plain) {
+		err = nil
+	}
 	if err != nil {
 		return 0, err
 	}
