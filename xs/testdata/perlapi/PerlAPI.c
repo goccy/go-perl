@@ -839,6 +839,27 @@ XS(XS_PerlAPI_release_pair) {
     }
 }
 
+/* waited(usec): what select(2) through PerlSock_select returned after
+ * waiting that long with no descriptor, and whether the time passed. */
+XS(XS_PerlAPI_waited) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "usec");
+    {
+        const long usec = (long)SvIV(ST(0));
+        struct timeval tv, before, after;
+        int r;
+        tv.tv_sec = usec / 1000000;
+        tv.tv_usec = usec % 1000000;
+        gettimeofday(&before, NULL);
+        r = PerlSock_select(0, NULL, NULL, NULL, &tv);
+        gettimeofday(&after, NULL);
+        ST(0) = sv_2mortal(newSVpvf("%d,%s", r,
+            (after.tv_sec - before.tv_sec) * 1000000L + (after.tv_usec - before.tv_usec) >= usec
+                ? "waited" : "early"));
+        XSRETURN(1);
+    }
+}
+
 /* ---- structures of the module's own kept as values ------------------------ */
 
 /* A structure of the module's own, in memory mapped for it, so that its
@@ -4263,6 +4284,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::keep_pair", XS_PerlAPI_keep_pair);
     newXS_deffile("PerlAPI::kept_pair", XS_PerlAPI_kept_pair);
     newXS_deffile("PerlAPI::release_pair", XS_PerlAPI_release_pair);
+    newXS_deffile("PerlAPI::waited", XS_PerlAPI_waited);
     newXS_deffile("PerlAPI::kept_array", XS_PerlAPI_kept_array);
     newXS_deffile("PerlAPI::kept_array_sums", XS_PerlAPI_kept_array_sums);
     newXS_deffile("PerlAPI::kept_hash", XS_PerlAPI_kept_hash);

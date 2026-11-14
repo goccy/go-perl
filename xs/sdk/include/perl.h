@@ -86,6 +86,7 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -7778,6 +7779,9 @@ typedef struct stat Stat_t;
 #define PerlLIO_chmod(path, mode) chmod((path), (mode))
 #define PerlLIO_rename(a, b) rename((a), (b))
 #define PerlLIO_isatty(fd) isatty(fd)
+/* select(2) of this process, as the other system calls here are (a module
+ * that waits a while: Devel::NYTProf's ticks_for_usleep). */
+#define PerlSock_select(n, r, w, e, t) select((n), (r), (w), (e), (t))
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif

@@ -176,6 +176,16 @@ func TestNativeErrnoIsDollarBang(t *testing.T) {
 // in $!, a number the program assigns to $! is the one native code reads
 // from it, and a number native code assigns to $! is the one the program
 // reads.
+// PerlSock_select is select(2) of this process, as the other system calls
+// of the SDK are: a module waits a while with it (Devel::NYTProf).
+func TestNativeSelectWaits(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"no descriptor, a timeout", `PerlAPI::waited(20000)`, "0,waited"},
+	})
+}
+
 func TestNativeErrnoOfTheHostProcess(t *testing.T) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
