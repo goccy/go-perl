@@ -4509,6 +4509,179 @@ XS(XS_PerlAPI_long_names) {
     }
 }
 
+/* field_lvalues(object, glob, array): SvFLAGS, SvSTASH and GvFLAGS stored
+ * into as lvalues, and AvREAL turned off and on: answers the object's class
+ * after its stash was taken (it is not an object then), whether the
+ * READONLY bit went on and came off through the flag word, whether the
+ * glob's IMPORTED_SV bit flipped twice, and the array's REAL bit. */
+XS(XS_PerlAPI_field_lvalues) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "object, glob, array");
+    {
+        SV *obj = SvRV(ST(0));
+        GV *gv = (GV *)SvRV(ST(1));
+        AV *av = (AV *)SvRV(ST(2));
+        const U32 saved = SvFLAGS(obj);
+        SvFLAGS(obj) |= SVf_READONLY;
+        const int ro = SvREADONLY(obj) ? 1 : 0;
+        SvFLAGS(obj) = saved;
+        const int back = SvREADONLY(obj) ? 1 : 0;
+        SvFLAGS(obj) &= ~SVs_OBJECT;
+        SvREFCNT_dec(SvSTASH(obj));
+        SvSTASH(obj) = NULL;
+        GvFLAGS(gv) ^= GVf_IMPORTED_SV;
+        const int imported = GvIMPORTED_SV(gv) ? 1 : 0;
+        GvFLAGS(gv) ^= GVf_IMPORTED_SV;
+        AvREAL_off(av);
+        const int real_off = AvREAL(av) ? 1 : 0;
+        AvREAL_on(av);
+        ST(0) = sv_2mortal(newSVpvf("%d%d%d%d%d%d%d", ro, back, imported,
+                                    GvIMPORTED_SV(gv) ? 1 : 0, real_off,
+                                    AvREAL(av) ? 1 : 0, sv_isobject(ST(0)) ? 1 : 0));
+        XSRETURN(1);
+    }
+}
+
+/* iter_save(hash) / iter_restore(hash): where a hash's iterator is, kept
+ * in one call and put back in another (HvRITER and HvEITER as lvalues);
+ * iter_save answers the key the iterator is at. */
+static I32 iter_saved_riter;
+static HE *iter_saved_eiter;
+XS(XS_PerlAPI_iter_save) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hash");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        iter_saved_riter = HvRITER(hv);
+        iter_saved_eiter = HvEITER(hv);
+        ST(0) = iter_saved_eiter ? sv_2mortal(newSVpvn(HeKEY(iter_saved_eiter),
+                                                       HeKLEN(iter_saved_eiter)))
+                                 : &PL_sv_undef;
+        XSRETURN(1);
+    }
+}
+XS(XS_PerlAPI_iter_restore) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hash");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        HvRITER(hv) = iter_saved_riter;
+        HvEITER(hv) = iter_saved_eiter;
+        XSRETURN_EMPTY;
+    }
+}
+
+/* op_info(): what the op that called it is to the API: its description,
+ * its class, the number of ops, and the classes and description of a few
+ * op types made here (and a pp function defined with PP). */
+static PP(pp_goperl_by_pp_macro) { return NORMAL; }
+XS(XS_PerlAPI_op_info) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    PERL_UNUSED_VAR(Perl_pp_goperl_by_pp_macro);
+    {
+        OP fake;
+        memset(&fake, 0, sizeof fake);
+        fake.op_type = OP_FTSIZE;
+        const int ft = OP_IS_FILETEST(fake.op_type) ? 1 : 0;
+        const int ftclass = (int)op_class(&fake);
+        fake.op_type = OP_NEXT;
+        fake.op_flags = OPf_SPECIAL;
+        const int nextclass = (int)op_class(&fake);
+        ST(0) = sv_2mortal(newSVpvf("%s|%d|%d|%d,%d,%d|%s", OP_DESC(PL_op), (int)op_class(PL_op),
+                                    (int)(PL_maxo == MAXO && MAXO > 400), ft, ftclass, nextclass,
+                                    PL_op_desc[OP_PADSV]));
+        XSRETURN(1);
+    }
+}
+
+/* chars_l1(): Latin-1 classes and case changes of perl's tables, the
+ * decimal digits of the integers and the version string. */
+XS(XS_PerlAPI_chars_l1) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf(
+        "%d%d%d%d%d%d%d%d|%c%c|%d,%d|%d|%s",
+        isSPACE_L1(0xA0), isSPACE_A(0xA0), isALPHA_L1(0xE9), isALPHA_A(0xE9),
+        isUPPER_L1(0xC9), isPUNCT_A('!'), isXDIGIT_L1('f'), isCNTRL_L1(0x85),
+        (int)toLOWER_L1(0xC9) == 0xE9 ? 'y' : 'n', (int)toUPPER_A('q'),
+        (int)IV_DIG, (int)UV_DIG, (int)PL_fold['A'], PERL_VERSION_STRING));
+    XSRETURN(1);
+}
+
+/* format_none(): the formatting functions given no argument list (a NULL
+ * va_list *): the pattern as it is, "%%" as "%", and a conversion as a
+ * missing argument (an empty string or zero, with a warning). */
+static SV *format_none_with(pTHX_ const char *pat) { return vnewSVpvf(pat, NULL); }
+XS(XS_PerlAPI_format_none) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        SV *plain = format_none_with(aTHX_ "no args, 100%%");
+        SV *missing = format_none_with(aTHX_ "[%s|%d]");
+        vwarn("warned without arguments\n", NULL);
+        ST(0) = sv_2mortal(newSVpvf("%" SVf "/%" SVf "/%s", SVfARG(plain), SVfARG(missing),
+                                    vform("form %%", NULL)));
+        SvREFCNT_dec(plain);
+        SvREFCNT_dec(missing);
+        XSRETURN(1);
+    }
+}
+
+/* misc_api(utf8 string, list): bytes_cmp_utf8, mini_mktime, newSVhek,
+ * sortsv_flags (descending), newAV_alloc_x, CvAUTOLOAD, ANY's members and
+ * xsubpp's INTERFACE. */
+static int any_seen;
+static void any_mark(void *p) { any_seen = *(int *)p; }
+static int interface_target(void) { return 42; }
+XS(XS_PerlAPI_misc_api) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "utf8, list");
+    {
+        STRLEN ulen;
+        const char *u = SvPV(ST(0), ulen);
+        const int cmp_eq = bytes_cmp_utf8((const U8 *)"caf\xe9", 4, (const U8 *)u, ulen);
+        const int cmp_lt = bytes_cmp_utf8((const U8 *)"caf", 3, (const U8 *)u, ulen);
+        struct tm tm;
+        memset(&tm, 0, sizeof tm);
+        tm.tm_year = 124; /* 2024 */
+        tm.tm_mon = 1;
+        tm.tm_mday = 30; /* February 30th: March 1st */
+        tm.tm_hour = 25;
+        mini_mktime(&tm);
+        AV *list = (AV *)SvRV(ST(1));
+        SSize_t n = av_top_index(list) + 1;
+        SV **svs = (SV **)malloc((size_t)(n > 0 ? n : 1) * sizeof(SV *));
+        for (SSize_t i = 0; i < n; i++) svs[i] = *av_fetch(list, i, 0);
+        sortsv_flags(svs, (size_t)n, Perl_sv_cmp, SORTf_DESC);
+        SV *sorted = sv_2mortal(newSVpvs(""));
+        for (SSize_t i = 0; i < n; i++) sv_catpvf(sorted, "%" SVf, SVfARG(svs[i]));
+        free(svs);
+        HEK *hek = (HEK *)malloc(sizeof(HEK) + 4);
+        hek->hek_hash = 0;
+        hek->hek_len = 2;
+        memcpy(hek->hek_key, "hk\0", 4);
+        SV *hk = sv_2mortal(newSVhek(hek));
+        free(hek);
+        AV *alloc = newAV_alloc_x(8);
+        const int alloc_empty = av_top_index(alloc) == -1;
+        SvREFCNT_dec((SV *)alloc);
+        ANY any;
+        int mark = 7;
+        any.any_dptr = any_mark;
+        any.any_dptr(&mark);
+        dXSFUNCTION(int);
+        XSINTERFACE_FUNC_SET(cv, interface_target);
+        XSFUNCTION = XSINTERFACE_FUNC(int, cv, XSANY.any_dxptr);
+        ST(0) = sv_2mortal(newSVpvf("%d,%d|%04d-%02d-%02d %02d:%d:%d|%" SVf "|%" SVf "|%d%d|%d|%d",
+                                    cmp_eq, cmp_lt, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                                    tm.tm_hour, tm.tm_wday, tm.tm_yday, SVfARG(sorted), SVfARG(hk),
+                                    alloc_empty, CvAUTOLOAD(cv) ? 1 : 0, any_seen,
+                                    XSFUNCTION()));
+        XSRETURN(1);
+    }
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -4751,5 +4924,12 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::runloop", XS_PerlAPI_runloop);
     newXS_deffile("PerlAPI::block_starts", XS_PerlAPI_block_starts);
     newXS_deffile("PerlAPI::long_names", XS_PerlAPI_long_names);
+    newXS_deffile("PerlAPI::field_lvalues", XS_PerlAPI_field_lvalues);
+    newXS_deffile("PerlAPI::iter_save", XS_PerlAPI_iter_save);
+    newXS_deffile("PerlAPI::iter_restore", XS_PerlAPI_iter_restore);
+    newXS_deffile("PerlAPI::op_info", XS_PerlAPI_op_info);
+    newXS_deffile("PerlAPI::chars_l1", XS_PerlAPI_chars_l1);
+    newXS_deffile("PerlAPI::format_none", XS_PerlAPI_format_none);
+    newXS_deffile("PerlAPI::misc_api", XS_PerlAPI_misc_api);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

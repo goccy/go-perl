@@ -824,9 +824,6 @@
 #if defined(mg_set) && !defined(Perl_mg_set)
 #define Perl_mg_set(...) GOPERL_LONG_CALL(mg_set, GOPERL_THX_DROP(__VA_ARGS__))
 #endif
-#if defined(mini_mktime) && !defined(Perl_mini_mktime)
-#define Perl_mini_mktime(...) GOPERL_LONG_CALL(mini_mktime, __VA_ARGS__)
-#endif
 #if defined(mortal_destructor_sv) && !defined(Perl_mortal_destructor_sv)
 #define Perl_mortal_destructor_sv(...) GOPERL_LONG_CALL(mortal_destructor_sv, GOPERL_THX_DROP(__VA_ARGS__))
 #endif

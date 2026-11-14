@@ -96,6 +96,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/file.h>
 
 #define GOPERL_XS_ABI 22u
 
@@ -1549,6 +1550,14 @@ typedef struct goperl_shared {
  * number less one (ObjectMAXFIELD). */
 #define GOPERL_LV_OBJFIELDS 26
 #define GOPERL_LV_OBJMAXFIELD 27
+/* The flag word of a scalar (SvFLAGS), its stash (SvSTASH), the flags of a
+ * glob (GvFLAGS), and where the iterator of a hash is (HvRITER, and HvEITER,
+ * whose slot holds the address of the entry's shadow here). */
+#define GOPERL_LV_FLAGS 28
+#define GOPERL_LV_STASH 29
+#define GOPERL_LV_GVFLAGS 30
+#define GOPERL_LV_HVRITER 31
+#define GOPERL_LV_HVEITER 32
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
 #define GOPERL_LV_IS_BODY(field) \
     ((field) == GOPERL_LV_CVBODY || (field) == GOPERL_LV_OBJFIELDS)
@@ -2168,9 +2177,11 @@ static void goperl_text_put(goperl_text_t *t, const char *src, size_t n,
 
 /* One standard conversion of the next argument, of the given type,
  * rendered by snprintf into a buffer of the size it needs. */
-#define GOPERL_TEXT_CONV(t, spec, ap, type)                              \
+#define GOPERL_VA(app, type) \
+    ((app) ? va_arg(*(app), type) : (goperl_missing = 1, (type)0))
+#define GOPERL_TEXT_CONV(t, spec, app, type)                             \
     do {                                                                 \
-        type goperl_arg = va_arg(ap, type);                              \
+        type goperl_arg = GOPERL_VA(app, type);                          \
         GOPERL_TEXT_VALUE(t, spec, goperl_arg);                          \
     } while (0)
 #define GOPERL_TEXT_VALUE(t, spec, arg)                                  \
@@ -2189,8 +2200,16 @@ static void goperl_text_put(goperl_text_t *t, const char *src, size_t n,
         }                                                                \
     } while (0)
 
-static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
-                         va_list ap) {
+/* The text of a format and its arguments: a pointer to them, as perl's
+ * functions that take a va_list * have it (what is taken is gone from the
+ * caller's list), or NULL for none, where every conversion is a missing
+ * argument: perl's empty string, or zero, and a warning in the category
+ * "missing". */
+static void Perl_ck_warner(pTHX_ U32 cat, const char *fmt, ...);
+static const char *goperl_op_desc_now(goperl_frame_t *f);
+static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
+                           va_list *app) {
+    int goperl_missing = 0;
     while (*fmt) {
         if (*fmt != '%') {
             const char *run = fmt;
@@ -2205,10 +2224,10 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             continue;
         }
         if (strncmp(fmt, SVf, sizeof(SVf) - 1) == 0) {
-            SV *sv = va_arg(ap, SV *);
+            SV *sv = GOPERL_VA(app, SV *);
             fmt += sizeof(SVf) - 1;
             if (!sv) {
-                goperl_text_put(t, "(null)", 6, 0);
+                if (app) goperl_text_put(t, "(null)", 6, 0);
                 continue;
             }
             uint64_t len = 0;
@@ -2222,9 +2241,9 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             continue;
         }
         if (strncmp(fmt, UTF8f, sizeof(UTF8f) - 1) == 0) {
-            int is_utf8 = va_arg(ap, int);
-            UV ulen = va_arg(ap, UV);
-            const char *up = va_arg(ap, const char *);
+            int is_utf8 = GOPERL_VA(app, int);
+            UV ulen = GOPERL_VA(app, UV);
+            const char *up = GOPERL_VA(app, const char *);
             if (up) goperl_text_put(t, up, (size_t)ulen, is_utf8 != 0);
             fmt += sizeof(UTF8f) - 1;
             continue;
@@ -2232,7 +2251,7 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         /* a shared key (HEKf): its bytes, UTF-8 by the flags byte that
          * follows them and their NUL */
         if (strncmp(fmt, HEKf, sizeof(HEKf) - 1) == 0) {
-            const HEK *hek = va_arg(ap, const HEK *);
+            const HEK *hek = GOPERL_VA(app, const HEK *);
             fmt += sizeof(HEKf) - 1;
             if (hek)
                 goperl_text_put(t, hek->hek_key, (size_t)hek->hek_len,
@@ -2248,7 +2267,7 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         if (*fmt == '*') {
             fmt++;
             sn += (size_t)snprintf(spec + sn, sizeof spec - sn, "%d",
-                                   va_arg(ap, int));
+                                   GOPERL_VA(app, int));
         } else {
             while (*fmt >= '0' && *fmt <= '9' && sn < 14) spec[sn++] = *fmt++;
         }
@@ -2257,25 +2276,25 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             if (*fmt == '*') {
                 fmt++;
                 sn += (size_t)snprintf(spec + sn, sizeof spec - sn, "%d",
-                                       va_arg(ap, int));
+                                       GOPERL_VA(app, int));
             } else {
                 while (*fmt >= '0' && *fmt <= '9' && sn < 24)
                     spec[sn++] = *fmt++;
             }
         }
-        int lmod = 0; /* 0 none, 1 l, 2 ll, 3 z, 4 h */
+        int goperl_lmod = 0; /* 0 none, 1 l, 2 ll, 3 z, 4 h */
         if (fmt[0] == 'l' && fmt[1] == 'l') {
-            lmod = 2;
+            goperl_lmod = 2;
             spec[sn++] = *fmt++;
             spec[sn++] = *fmt++;
         } else if (*fmt == 'l') {
-            lmod = 1;
+            goperl_lmod = 1;
             spec[sn++] = *fmt++;
         } else if (*fmt == 'z') {
-            lmod = 3;
+            goperl_lmod = 3;
             spec[sn++] = *fmt++;
         } else if (*fmt == 'h') {
-            lmod = 4;
+            goperl_lmod = 4;
             spec[sn++] = *fmt++;
             if (*fmt == 'h') spec[sn++] = *fmt++;
         }
@@ -2286,31 +2305,31 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         switch (conv) {
         case 'd':
         case 'i':
-            if (lmod == 2) GOPERL_TEXT_CONV(t, spec, ap, long long);
-            else if (lmod == 1) GOPERL_TEXT_CONV(t, spec, ap, long);
-            else if (lmod == 3) GOPERL_TEXT_CONV(t, spec, ap, size_t);
-            else GOPERL_TEXT_CONV(t, spec, ap, int);
+            if (goperl_lmod == 2) GOPERL_TEXT_CONV(t, spec, app, long long);
+            else if (goperl_lmod == 1) GOPERL_TEXT_CONV(t, spec, app, long);
+            else if (goperl_lmod == 3) GOPERL_TEXT_CONV(t, spec, app, size_t);
+            else GOPERL_TEXT_CONV(t, spec, app, int);
             break;
         case 'u':
         case 'o':
         case 'x':
         case 'X':
-            if (lmod == 2) GOPERL_TEXT_CONV(t, spec, ap, unsigned long long);
-            else if (lmod == 1) GOPERL_TEXT_CONV(t, spec, ap, unsigned long);
-            else if (lmod == 3) GOPERL_TEXT_CONV(t, spec, ap, size_t);
-            else GOPERL_TEXT_CONV(t, spec, ap, unsigned int);
+            if (goperl_lmod == 2) GOPERL_TEXT_CONV(t, spec, app, unsigned long long);
+            else if (goperl_lmod == 1) GOPERL_TEXT_CONV(t, spec, app, unsigned long);
+            else if (goperl_lmod == 3) GOPERL_TEXT_CONV(t, spec, app, size_t);
+            else GOPERL_TEXT_CONV(t, spec, app, unsigned int);
             break;
         case 'c':
-            GOPERL_TEXT_CONV(t, spec, ap, int);
+            GOPERL_TEXT_CONV(t, spec, app, int);
             break;
         case 's': {
-            const char *sp = va_arg(ap, const char *);
-            if (!sp) sp = "(null)";
+            const char *sp = GOPERL_VA(app, const char *);
+            if (!sp) sp = app ? "(null)" : "";
             GOPERL_TEXT_VALUE(t, spec, sp);
             break;
         }
         case 'p':
-            GOPERL_TEXT_CONV(t, spec, ap, void *);
+            GOPERL_TEXT_CONV(t, spec, app, void *);
             break;
         case 'e':
         case 'E':
@@ -2318,7 +2337,7 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         case 'F':
         case 'g':
         case 'G':
-            GOPERL_TEXT_CONV(t, spec, ap, double);
+            GOPERL_TEXT_CONV(t, spec, app, double);
             break;
         default: {
             char unknown[8];
@@ -2328,6 +2347,16 @@ static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         }
         }
     }
+    if (goperl_missing)
+        Perl_ck_warner(f, WARN_MISSING, "Missing argument in %s",
+                       goperl_op_desc_now(f));
+}
+static void goperl_vtext(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
+                         va_list ap) {
+    va_list goperl_ap;
+    va_copy(goperl_ap, ap);
+    goperl_vtext_p(f, t, fmt, &goperl_ap);
+    va_end(goperl_ap);
 }
 
 /* The formatted text in a buffer of fixed size, cut where it does not
@@ -2394,21 +2423,26 @@ static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap) {
  * interpreter, whole and with its encoding. It is handed over here and the
  * frame ends as one that threw a value, like croak_sv. The frame keeps the
  * start of the text for the catch points that only report a message. */
+static void goperl_croak_text(goperl_frame_t *f, goperl_text_t *tp)
+    __attribute__((noreturn));
 static void goperl_vcroak(goperl_frame_t *f, const char *fmt, va_list ap) {
     goperl_text_t t;
     goperl_text_init(&t);
     goperl_vtext(f, &t, fmt, ap);
-    size_t n = t.len < sizeof f->err - 1 ? t.len : sizeof f->err - 1;
-    memcpy(f->err, t.p, n);
+    goperl_croak_text(f, &t);
+}
+static void goperl_croak_text(goperl_frame_t *f, goperl_text_t *tp) {
+    size_t n = tp->len < sizeof f->err - 1 ? tp->len : sizeof f->err - 1;
+    memcpy(f->err, tp->p, n);
     f->err[n] = '\0';
     if (!f->jb) {
-        goperl_text_free(&t);
+        goperl_text_free(tp);
         goperl_raise(f);
     }
     goperl_flush(f);
     goperl_xs_op(f, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_THROW << 32,
-                 GOPERL_TEXT_ARG(&t, 0), t.p, t.len);
-    goperl_text_free(&t);
+                 GOPERL_TEXT_ARG(tp, 0), tp->p, tp->len);
+    goperl_text_free(tp);
     f->failed = 2; /* GOPERL_FAILED_THROWN */
     goperl_jump_out(f);
 }
@@ -2697,7 +2731,12 @@ static SV *goperl_newSVpvf(goperl_frame_t *f, const char *fmt, ...) {
 static SV *goperl_vnewSVpvf(goperl_frame_t *f, const char *fmt, va_list *ap)
     __attribute__((unused));
 static SV *goperl_vnewSVpvf(goperl_frame_t *f, const char *fmt, va_list *ap) {
-    return (SV *)(uintptr_t)goperl_vtext_sv(f, 0, fmt, *ap);
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, fmt, ap);
+    return GOPERL_SV(goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                                    (uint64_t)GOPERL_SVSTR_NEWPVN << 32,
+                                    GOPERL_TEXT_ARG(&t, 0)));
 }
 #define vnewSVpvf(fmt, ap) goperl_vnewSVpvf(_gof, (fmt), (ap))
 
@@ -2713,6 +2752,19 @@ static SV *goperl_mess(goperl_frame_t *f, const char *fmt, ...) {
     return GOPERL_SV(goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)7 /* MESS_SV */ << 32) | (uint32_t)sv, 1, 0, 0));
 }
 #define mess(...) goperl_mess(_gof, __VA_ARGS__)
+/* vmess: mess with the arguments of a va_list * (or NULL). */
+static SV *goperl_vmess(goperl_frame_t *f, const char *fmt, va_list *ap)
+    __attribute__((unused));
+static SV *goperl_vmess(goperl_frame_t *f, const char *fmt, va_list *ap) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, fmt, ap);
+    const uint64_t sv = goperl_text_op(f, &t, GOPERL_OP_SV_STR,
+                                       (uint64_t)GOPERL_SVSTR_NEWPVN << 32,
+                                       GOPERL_TEXT_ARG(&t, GOPERL_TEXT_MORTAL));
+    return GOPERL_SV(goperl_do_op(f, GOPERL_OP_CALL, ((uint64_t)7 /* MESS_SV */ << 32) | (uint32_t)sv, 1, 0, 0));
+}
+#define vmess(fmt, ap) goperl_vmess(_gof, (fmt), (ap))
 
 #define newSVpvn_share(p, l, h) \
     ({ GOPERL_ONCE(goperl_newSVpvn_share_l_, l); \
@@ -2831,8 +2883,11 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 
 #define GOPERL_SVINFO(sv) \
     ((U32)goperl_op0(GOPERL_OP_SV_INFO, GOPERL_TOK(sv), 0))
-/* SvFLAGS is the interpreter's real flag word. */
-#define SvFLAGS(sv) ((U32)goperl_op0(GOPERL_OP_SV_FLAGS, GOPERL_TOK(sv), 0))
+/* SvFLAGS is the interpreter's real flag word, and an lvalue as on perl
+ * (`SvFLAGS(sv) |= SVf_BREAK`, `SvFLAGS(av) = saved_flags`): what is stored
+ * into it is the whole word, as it is. A U32: the low half of the slot. */
+#define SvFLAGS(sv) \
+    (*(U32 *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_FLAGS, GOPERL_LV_AT))
 #define SvOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_OK) != 0)
 #define SvPOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_POK) != 0)
 #define SvIOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_IOK) != 0)
@@ -2892,8 +2947,10 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
     ((I32)goperl_op0(GOPERL_OP_LOOKS_LIKE_NUMBER, GOPERL_TOK(sv), 0))
 #define SvAMAGIC(sv) \
     (goperl_op0(GOPERL_OP_SV_AMAGIC, GOPERL_TOK(sv), 0) != 0)
+/* The stash of an object, an lvalue as on perl (`SvSTASH(sv) = NULL`): the
+ * store is the slot's, as SvSTASH_set's is (no reference is counted). */
 #define SvSTASH(sv) \
-    ((HV *)GOPERL_SV(goperl_op0(GOPERL_OP_SV_STASH, GOPERL_TOK(sv), 0)))
+    (*(HV **)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_STASH, GOPERL_LV_AT))
 
 /* SvREFCNT_inc and SvREFCNT_dec take any pointer: on perl the macro casts
  * its argument to an SV. A module can pass a pointer to a structure of its
@@ -3042,9 +3099,6 @@ static SV **goperl_av_store(goperl_frame_t *f, AV *av, SSize_t i, SV *sv) {
 }
 #define av_store(av, i, sv) \
     goperl_av_store(_gof, (AV *)(av), (SSize_t)(i), (SV *)(sv))
-#define AvREAL_on(av) ((void)(av))
-#define AvREAL_only(av) ((void)(av))
-#define AvREIFY_off(av) ((void)(av))
 
 static SV **goperl_tmp_slot(goperl_frame_t *f, uint64_t tok) {
     uint64_t *slot = &f->tmp[(f->tmpidx++) % GOPERL_XS_TMPS];
@@ -3690,22 +3744,50 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
     ((SV **)(uintptr_t)*goperl_lv_ref(_gof, (SV *)(av), GOPERL_LV_AVBODY, \
                                       GOPERL_LV_AT))
 
-/* sortsv over a mirror (or any host SV* array): perl's stable sort is
- * approximated with insertion sort — the arrays this surface sorts are
- * method/key lists. The mirror flush propagates the permutation. */
+/* sortsv and sortsv_flags over a mirror (or any host SV* array): a
+ * stable merge sort, as perl's (pp_sort.c), descending for SORTf_DESC;
+ * the mirror flush propagates the permutation. */
 typedef I32 (*SVCOMPARE_t)(pTHX_ SV *a, SV *b);
+#ifndef SORTf_DESC
+#define SORTf_DESC 1
+#define SORTf_STABLE 2
+#define SORTf_UNSTABLE 8
+#endif
+static void goperl_sortsv_flags(goperl_frame_t *f, SV **array, size_t n,
+                                SVCOMPARE_t cmp, U32 flags) {
+    const int desc = (flags & SORTf_DESC) != 0;
+    if (n < 2) return;
+    SV **tmp = (SV **)malloc(n * sizeof(SV *));
+    if (!tmp) goperl_croakf(f, "%s", "Out of memory!");
+    /* bottom-up: runs of width w merged into the other buffer, whose role
+     * then swaps */
+    SV **from = array, **to = tmp;
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            const size_t mid = lo + w < n ? lo + w : n;
+            const size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                I32 c = cmp(f, from[i], from[j]);
+                if (desc) c = -c;
+                to[k++] = c <= 0 ? from[i++] : from[j++];
+            }
+            while (i < mid) to[k++] = from[i++];
+            while (j < hi) to[k++] = from[j++];
+        }
+        SV **x = from;
+        from = to;
+        to = x;
+    }
+    if (from != array) memcpy(array, from, n * sizeof(SV *));
+    free(tmp);
+}
 static void goperl_sortsv(goperl_frame_t *f, SV **array, size_t n,
                           SVCOMPARE_t cmp) {
-    for (size_t i = 1; i < n; i++) {
-        SV *key = array[i];
-        size_t j = i;
-        while (j > 0 && cmp(f, array[j - 1], key) > 0) {
-            array[j] = array[j - 1];
-            j--;
-        }
-        array[j] = key;
-    }
+    goperl_sortsv_flags(f, array, n, cmp, 0);
 }
+#define sortsv_flags(a, n, c, flags) \
+    goperl_sortsv_flags(_gof, (a), (size_t)(n), (c), (U32)(flags))
 #define sortsv(a, n, c) goperl_sortsv(_gof, (a), (size_t)(n), (c))
 static I32 goperl_sv_cmp_fn(pTHX_ SV *a, SV *b) {
     return (I32)(int64_t)goperl_op0(GOPERL_OP_SV_CMP, GOPERL_TOK(a),
@@ -4457,10 +4539,28 @@ static inline goperl_frame_t *goperl_frame_handed(const goperl_no_frame_arg &) {
     (goperl_op0(GOPERL_OP_SV_ISGV_GP, GOPERL_TOK(sv), 0) != 0)
 
 /* CvXSUBANY / XSANY / alias dispatch: per-CV host storage via the loader. */
+/* perl's ANY, every member (the slot of a sub's XSANY holds eight bytes). */
 typedef union goperl_any {
     void *any_ptr;
-    IV any_iv;
+    SV *any_sv;
+    SV **any_svp;
+    GV *any_gv;
+    AV *any_av;
+    HV *any_hv;
+    OP *any_op;
+    char *any_pv;
+    char **any_pvp;
     I32 any_i32;
+    U32 any_u32;
+    IV any_iv;
+    UV any_uv;
+    long any_long;
+    bool any_bool;
+    size_t any_size;
+    ssize_t any_ssize;
+    STRLEN any_strlen;
+    void (*any_dptr)(void *);
+    void (*any_dxptr)(pTHX_ void *);
 } ANY;
 #define CvXSUBANY(cv) \
     (*(ANY *)goperl_api_cv_any(_gof, GOPERL_TOK(cv)))
@@ -4806,10 +4906,6 @@ enum {
 #define GOPERL_OPBIT_HOOKED 4
 #define GOPERL_OPBIT_EDGE 8
 #define GOPERL_OPBIT_RAW 16
-/* The type of an op the interpreter has freed (its opnames.h). */
-#ifndef OP_FREED
-#define OP_FREED OP_max
-#endif
 #define GOPERL_OPBIT_OPT 0x10000
 #define GOPERL_OPBIT_SLABBED 0x20000
 #define GOPERL_OPBIT_SAVEFREE 0x40000
@@ -7589,7 +7685,6 @@ typedef pid_t Pid_t;
 #define strnEQ(a, b, n) (strncmp((a), (b), (n)) == 0)
 #define strnNE(a, b, n) (strncmp((a), (b), (n)) != 0)
 typedef U16 OPCODE;
-typedef int opcode;
 #define GvEGV(gv) \
     ((GV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 4)))
 #define GvNAMELEN(gv) \
@@ -10028,6 +10123,7 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
 #define HINT_BLOCK_SCOPE 0x00000100
 
 #include "goperl_perlapi.h"
+#include "goperl_handy.h"
 
 /* The interpreter a function of the API is called with: the current frame
  * (perl's get_context, which dTHX and PERL_GET_THX go through). */

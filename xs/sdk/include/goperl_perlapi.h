@@ -212,6 +212,14 @@ static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) __attribute__((unused));
  * over (@_). */
 #define AvREAL(av) ((SvFLAGS(av) & SVpav_REAL) != 0)
 #define AvREIFY(av) ((SvFLAGS(av) & SVpav_REIFY) != 0)
+#define AvREALISH(av) (SvFLAGS(av) & (SVpav_REAL | SVpav_REIFY))
+/* Whether an array counts a reference for each element (av.h). */
+#define AvREAL_on(av) ((void)GOPERL_FLAGS_CHANGE(av, SVpav_REAL, 0))
+#define AvREAL_off(av) ((void)GOPERL_FLAGS_CHANGE(av, 0, SVpav_REAL))
+#define AvREAL_only(av) ((void)GOPERL_FLAGS_CHANGE(av, SVpav_REAL, SVpav_REIFY))
+#define AvREIFY_on(av) ((void)GOPERL_FLAGS_CHANGE(av, SVpav_REIFY, 0))
+#define AvREIFY_off(av) ((void)GOPERL_FLAGS_CHANGE(av, 0, SVpav_REIFY))
+#define AvREIFY_only(av) ((void)GOPERL_FLAGS_CHANGE(av, SVpav_REIFY, SVpav_REAL))
 /* What is in a pad slot: a glob, or a constant. */
 #define IS_PADGV(v) ((v) && isGV(v))
 #define IS_PADCONST(v) \
@@ -354,6 +362,83 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
 }
 static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
 static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
+
+/* The entry a hash's iterator is at (HvEITER) is kept by modules beyond the
+ * call that read it, to be put back later (Hash::SafeKeys,
+ * Hash::StoredIterator); the shadows of other calls live in the call's
+ * arena, released when it returns. Each entry of an instance therefore has
+ * one shadow that lasts, here, with its value as it was last read. */
+typedef struct {
+    void *inst;
+    uint64_t tok;
+    HE *he;
+} goperl_eiter_t;
+__attribute__((weak, visibility("hidden"))) goperl_eiter_t *goperl_eiter_v = 0;
+__attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_cap_v = 0;
+__attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_n_v = 0;
+__attribute__((weak, visibility("hidden"))) pthread_mutex_t goperl_eiter_lock_v =
+    PTHREAD_MUTEX_INITIALIZER;
+/* The lasting shadow of the entry, made when there is none (NULL when
+ * memory ran out); several instances may run native code at once. */
+static HE *goperl_eiter_find(void *inst, uint64_t tok) __attribute__((unused));
+static HE *goperl_eiter_find(void *inst, uint64_t tok) {
+    HE *he = 0;
+    pthread_mutex_lock(&goperl_eiter_lock_v);
+    if (2 * (goperl_eiter_n_v + 1) > goperl_eiter_cap_v) {
+        uint32_t ncap = goperl_eiter_cap_v ? 2 * goperl_eiter_cap_v : 64;
+        goperl_eiter_t *n = (goperl_eiter_t *)calloc(ncap, sizeof(*n));
+        if (!n) goto out;
+        for (uint32_t i = 0; i < goperl_eiter_cap_v; i++) {
+            goperl_eiter_t *e = &goperl_eiter_v[i];
+            if (!e->he) continue;
+            uint32_t h = (uint32_t)((e->tok ^ (uintptr_t)e->inst) * 2654435761u) & (ncap - 1);
+            while (n[h].he) h = (h + 1) & (ncap - 1);
+            n[h] = *e;
+        }
+        free(goperl_eiter_v);
+        goperl_eiter_v = n;
+        goperl_eiter_cap_v = ncap;
+    }
+    {
+        uint32_t h = (uint32_t)((tok ^ (uintptr_t)inst) * 2654435761u) & (goperl_eiter_cap_v - 1);
+        while (goperl_eiter_v[h].he &&
+               (goperl_eiter_v[h].tok != tok || goperl_eiter_v[h].inst != inst))
+            h = (h + 1) & (goperl_eiter_cap_v - 1);
+        goperl_eiter_t *e = &goperl_eiter_v[h];
+        if (!e->he && (e->he = (HE *)calloc(1, sizeof(HE))) != 0) {
+            e->inst = inst;
+            e->tok = tok;
+            e->he->goperl_tok = tok;
+            goperl_eiter_n_v++;
+        }
+        he = e->he;
+    }
+out:
+    pthread_mutex_unlock(&goperl_eiter_lock_v);
+    return he;
+}
+static HE *goperl_eiter_shadow(goperl_frame_t *f, uint64_t hvtok, uint64_t tok)
+    __attribute__((unused));
+static HE *goperl_eiter_shadow(goperl_frame_t *f, uint64_t hvtok, uint64_t tok) {
+    if (!tok) return 0;
+    HE *he = goperl_eiter_find(f->inst, tok);
+    if (!he) goperl_croakf(f, "%s", "Out of memory!");
+    /* the key and the value now (the address may be another entry's by
+     * now); the key is the shadow's own, as the shadow is */
+    HEK *old = he->hent_hek;
+    he->hent_hek = 0;
+    free(old);
+    const HEK *k = goperl_he_hek(f, he);
+    const size_t ksize = sizeof(HEK) + (size_t)k->hek_len + 2;
+    HEK *own = (HEK *)malloc(ksize);
+    if (!own) goperl_croakf(f, "%s", "Out of memory!");
+    memcpy(own, k, ksize);
+    he->hent_hek = own;
+    he->he_valu.hent_val = GOPERL_SV(goperl_value_out(
+        f, goperl_do_op(f, GOPERL_OP_HV_ITERVAL, hvtok, tok, 0, 0)));
+    return he;
+}
+
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     switch (field) {
     case GOPERL_LV_IV:
@@ -406,6 +491,18 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
     case GOPERL_LV_CVFILE:
     case GOPERL_LV_OBJMAXFIELD:
         return goperl_cvfield_load(f, tok, field);
+    case GOPERL_LV_FLAGS:
+        return goperl_do_op(f, GOPERL_OP_SV_FLAGS, tok, 0, 0, 0);
+    case GOPERL_LV_STASH:
+        return goperl_do_op(f, GOPERL_OP_SV_STASH, tok, 0, 0, 0);
+    case GOPERL_LV_GVFLAGS:
+        return goperl_do_op(f, GOPERL_OP_GV_CALL,
+                            ((uint64_t)GOPERL_GVCALL_FLAGS << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_HVRITER: /* FIELD 2 */
+        return goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)2 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_HVEITER: /* FIELD 4 */
+        return (uint64_t)(uintptr_t)goperl_eiter_shadow(
+            f, tok, goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0));
     default:
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CVGEN << 32) | (uint32_t)tok,
@@ -487,6 +584,28 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_CVFILE:
     case GOPERL_LV_OBJMAXFIELD:
         goperl_cvfield_store(f, tok, field, val);
+        break;
+    case GOPERL_LV_FLAGS: /* every bit cleared, the word's set */
+        goperl_xs_op(f, GOPERL_OP_SV_FLAGS, tok,
+                     ((uint64_t)0xffffffffu << 32) | (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_STASH:
+        goperl_xs_op(f, GOPERL_OP_SV_SLOT_SET,
+                     ((uint64_t)GOPERL_SVSLOT_STASH << 32) | (uint32_t)tok,
+                     (uint32_t)goperl_value_in(f, val), 0, 0);
+        break;
+    case GOPERL_LV_GVFLAGS:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_FLAGS << 32) | (uint32_t)tok,
+                     ((uint64_t)0xffffffffu << 32) | (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_HVRITER: /* FIELD 3 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)3 << 32) | (uint32_t)tok,
+                     (uint64_t)(int64_t)(int32_t)(uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_HVEITER: /* FIELD 5: the entry the shadow stands for */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)5 << 32) | (uint32_t)tok,
+                     val ? ((HE *)(uintptr_t)val)->goperl_tok : 0, 0, 0);
         break;
     default:
         goperl_xs_op(f, GOPERL_OP_GV_CALL,
@@ -1479,7 +1598,7 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
                                STRLEN patlen, va_list *args, SV **svargs,
                                Size_t sv_count, int cat) {
     goperl_text_t t;
-    if (!args || svargs || sv_count)
+    if (svargs || sv_count)
         goperl_croakf(f, "sv_v%spvfn: formatting from an SV argument list is "
                          "not available to native XS modules",
                       cat ? "cat" : "set");
@@ -1489,7 +1608,7 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
     memcpy(fmt, pat, patlen);
     fmt[patlen] = '\0';
     goperl_text_init(&t);
-    goperl_vtext(f, &t, fmt, *args);
+    goperl_vtext_p(f, &t, fmt, args);
     free(fmt);
     if (cat)
         goperl_text_op(f, &t, GOPERL_OP_SV_STR, (uint32_t)GOPERL_TOK(sv),
@@ -1520,16 +1639,34 @@ static void goperl_sv_vsetpvfn(goperl_frame_t *f, SV *sv, const char *pat,
 static void goperl_vcroak_args(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((noreturn, unused));
 static void goperl_vcroak_args(goperl_frame_t *f, const char *pat, va_list *args) {
+    goperl_text_t t;
     if (!pat) goperl_croak_errsv(f);
-    goperl_vcroak(f, pat, *args);
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, pat, args);
+    goperl_croak_text(f, &t);
 }
 #define vcroak(pat, args) goperl_vcroak_args(_gof, (pat), (args))
-#define vwarn(pat, args) goperl_vwarn(_gof, (pat), *(args))
+static void goperl_vwarn_args(goperl_frame_t *f, const char *pat, va_list *args)
+    __attribute__((unused));
+static void goperl_vwarn_args(goperl_frame_t *f, const char *pat, va_list *args) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, pat, args);
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR, (uint64_t)GOPERL_SVSTR_WARN << 32,
+                   GOPERL_TEXT_ARG(&t, 0));
+}
+#define vwarn(pat, args) goperl_vwarn_args(_gof, (pat), (args))
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((unused));
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
     char *buf = goperl_form_bufs_v[goperl_form_ix_v++ % GOPERL_FORM_BUFS];
-    goperl_vfmt(f, buf, GOPERL_FORM_LEN, pat, *args);
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, pat, args);
+    const size_t n = t.len < GOPERL_FORM_LEN - 1 ? t.len : GOPERL_FORM_LEN - 1;
+    memcpy(buf, t.p, n);
+    buf[n] = '\0';
+    goperl_text_free(&t);
     return buf;
 }
 #define vform(pat, args) goperl_vform(_gof, (pat), (args))
@@ -1545,7 +1682,9 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvFORM(gv) ((CV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_FORM, gv, 0)))
 #define GvCV_set(gv, cv) \
     ((void)GOPERL_GVCALL(GOPERL_GVCALL_CV_SET, gv, (uint32_t)GOPERL_TOK(cv)))
-#define GvFLAGS(gv) ((U32)GOPERL_GVCALL(GOPERL_GVCALL_FLAGS, gv, 0))
+/* An lvalue as on perl (`GvFLAGS(gv) ^= flag`): the whole word is stored. */
+#define GvFLAGS(gv) \
+    (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVFLAGS, GOPERL_LV_AT))
 #define GOPERL_GVFLAGS_CHANGE(gv, set, clear)                             \
     ((void)GOPERL_GVCALL(GOPERL_GVCALL_FLAGS, gv,                         \
                          ((uint64_t)(U32)(clear) << 32) | (U32)(set)))
@@ -2398,6 +2537,22 @@ enum {
 #define HvRITER_get(hv) ((I32)(int64_t)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER, hv, 0))
 #define HvRITER_set(hv, r) \
     ((void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER_SET, hv, (uint64_t)(int64_t)(r)))
+/* Where the iterator of a hash is: lvalues as on perl (`HvRITER(hv) =
+ * saved_riter; HvEITER(hv) = saved_eiter;`). An entry is a shadow that
+ * lasts beyond the call (goperl_eiter_shadow). */
+#define HvRITER(hv) \
+    (*(I32 *)goperl_lv_ref(_gof, (SV *)(hv), GOPERL_LV_HVRITER, GOPERL_LV_AT))
+#define HvEITER(hv) \
+    (*(HE **)goperl_lv_ref(_gof, (SV *)(hv), GOPERL_LV_HVEITER, GOPERL_LV_AT))
+#define HvEITER_get(hv)                                                     \
+    ({ GOPERL_ONCE(goperl_HvEITER_get_hv_, hv);                             \
+       goperl_eiter_shadow(_gof, GOPERL_TOK(goperl_HvEITER_get_hv_),        \
+                           GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER,           \
+                                        goperl_HvEITER_get_hv_, 0)); })
+#define HvEITER_set(hv, e)                                                  \
+    ({ HE *const goperl_HvEITER_set_e_ = (e);                               \
+       (void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER_SET, hv,                 \
+                          goperl_HvEITER_set_e_ ? goperl_HvEITER_set_e_->goperl_tok : 0); })
 
 /* ---- ops ----------------------------------------------------------------- */
 
@@ -3350,6 +3505,437 @@ static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g) {
 static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) {
     return sv_cmp_locale(a, b);
 }
+
+/* ---- more of perl's public API (op.h, cv.h, gv.h, hv.h, pp.h, XSUB.h,
+ * util.c, utf8.c) ---------------------------------------------------------- */
+
+/* The description of an op; a custom op's is its XOP's (op.h). */
+#define OP_DESC(o)                                                          \
+    ({ GOPERL_ONCE(goperl_OP_DESC_o_, (const OP *)(o));                     \
+       goperl_OP_DESC_o_->op_type == OP_CUSTOM                              \
+           ? XopENTRY(goperl_custom_op_xop(_gof, goperl_OP_DESC_o_), xop_desc) \
+           : PL_op_desc[goperl_OP_DESC_o_->op_type]; })
+/* The number of ops the interpreter has (intrpvar.h's PL_maxo, which the
+ * interpreter never changes). */
+#define PL_maxo MAXO
+/* The definition of a pp function (pp.h). */
+#ifndef PP
+#define PP(s) OP *Perl_##s(pTHX)
+#endif
+/* Where a missing argument of a format was missed: the op running. */
+static const char *goperl_op_desc_now(goperl_frame_t *f) {
+    (void)f;
+    return PL_op ? OP_DESC(PL_op) : "sv_vcatpvfn()";
+}
+
+/* The class of an op, as B sees it (dump.c's op_class). */
+typedef enum {
+    OPclass_NULL,
+    OPclass_BASEOP,
+    OPclass_UNOP,
+    OPclass_BINOP,
+    OPclass_LOGOP,
+    OPclass_LISTOP,
+    OPclass_PMOP,
+    OPclass_SVOP,
+    OPclass_PADOP,
+    OPclass_PVOP,
+    OPclass_LOOP,
+    OPclass_COP,
+    OPclass_METHOP,
+    OPclass_UNOP_AUX
+} OPclass;
+static OPclass goperl_op_class_of(const OP *o) __attribute__((unused));
+static OPclass goperl_op_class_of(const OP *o) {
+    bool custom = 0;
+    if (!o) return OPclass_NULL;
+    if (o->op_type == 0) {
+        if (o->op_targ == OP_NEXTSTATE || o->op_targ == OP_DBSTATE) return OPclass_COP;
+        return (o->op_flags & OPf_KIDS) ? OPclass_UNOP : OPclass_BASEOP;
+    }
+    if (o->op_type == OP_SASSIGN)
+        return (o->op_private & OPpASSIGN_BACKWARDS) ? OPclass_UNOP : OPclass_BINOP;
+    if (o->op_type == OP_AELEMFAST) return OPclass_SVOP;
+    if (o->op_type == OP_CUSTOM) custom = 1;
+    switch (OP_CLASS(o)) {
+    case OA_BASEOP: return OPclass_BASEOP;
+    case OA_UNOP: return OPclass_UNOP;
+    case OA_BINOP: return OPclass_BINOP;
+    case OA_LOGOP: return OPclass_LOGOP;
+    case OA_LISTOP: return OPclass_LISTOP;
+    case OA_PMOP: return OPclass_PMOP;
+    case OA_SVOP: return OPclass_SVOP;
+    case OA_PADOP: return OPclass_PADOP;
+    case OA_PVOP_OR_SVOP:
+        return (!custom && (o->op_private & OPpTRANS_USE_SVOP)) ? OPclass_SVOP : OPclass_PVOP;
+    case OA_LOOP: return OPclass_LOOP;
+    case OA_COP: return OPclass_COP;
+    case OA_BASEOP_OR_UNOP:
+        return (o->op_flags & OPf_KIDS) ? OPclass_UNOP : OPclass_BASEOP;
+    case OA_FILESTATOP:
+        return (o->op_flags & OPf_KIDS) ? OPclass_UNOP
+               : (o->op_flags & OPf_REF) ? OPclass_SVOP : OPclass_BASEOP;
+    case OA_LOOPEXOP:
+        if (o->op_flags & OPf_STACKED) return OPclass_UNOP;
+        if (o->op_flags & OPf_SPECIAL) return OPclass_BASEOP;
+        return OPclass_PVOP;
+    case OA_METHOP: return OPclass_METHOP;
+    case OA_UNOP_AUX: return OPclass_UNOP_AUX;
+    }
+    return OPclass_BASEOP;
+}
+#define op_class(o) goperl_op_class_of((const OP *)(o))
+
+/* Flags of subs, globs, hashes and pad names that are bits of the words
+ * above (cv.h, gv.h, hv.h, pad.h, sv.h). */
+#define CvAUTOLOAD(cv) (CvFLAGS(cv) & CVf_AUTOLOAD)
+#ifndef GvIMPORTED_SV
+#define GvIMPORTED_SV(gv) (GvFLAGS(gv) & GVf_IMPORTED_SV)
+#endif
+#ifndef GvIMPORTED_AV
+#define GvIMPORTED_AV(gv) (GvFLAGS(gv) & GVf_IMPORTED_AV)
+#endif
+#ifndef GvIMPORTED_HV
+#define GvIMPORTED_HV(gv) (GvFLAGS(gv) & GVf_IMPORTED_HV)
+#endif
+#define GvIMPORTED_off(gv) ((void)GOPERL_GVFLAGS_CHANGE(gv, 0, GVf_IMPORTED))
+#define GvIMPORTED_SV_off(gv) ((void)GOPERL_GVFLAGS_CHANGE(gv, 0, GVf_IMPORTED_SV))
+#define GvIMPORTED_AV_off(gv) ((void)GOPERL_GVFLAGS_CHANGE(gv, 0, GVf_IMPORTED_AV))
+#define GvIMPORTED_HV_off(gv) ((void)GOPERL_GVFLAGS_CHANGE(gv, 0, GVf_IMPORTED_HV))
+#define GvIMPORTED_CV_off(gv) ((void)GOPERL_GVFLAGS_CHANGE(gv, 0, GVf_IMPORTED_CV))
+/* No glob is in a pad on a perl without threads, and nothing is compiled
+ * into a scalar (gv.h, sv.h outside the core). */
+#define GvIN_PAD(gv) 0
+#define GvIN_PAD_on(gv) NOOP
+#define GvIN_PAD_off(gv) NOOP
+#define SvCOMPILED(sv) 0
+#define SvCOMPILED_on(sv)
+#define SvCOMPILED_off(sv)
+#define HvLAZYDEL(hv) (SvFLAGS(hv) & SVphv_LAZYDEL)
+#define HvLAZYDEL_on(hv) ((void)GOPERL_FLAGS_CHANGE(hv, SVphv_LAZYDEL, 0))
+#define HvLAZYDEL_off(hv) ((void)GOPERL_FLAGS_CHANGE(hv, 0, SVphv_LAZYDEL))
+#ifndef SvPAD_TYPED
+#define SvPAD_TYPED PadnameHasTYPE
+#endif
+#ifndef SvPAD_OUR
+#define SvPAD_OUR(pn) cBOOL(PadnameOURSTASH(pn))
+#endif
+#define PAD_FAKELEX_ANON 1
+#define PAD_FAKELEX_MULTI 2
+#define PERL_SIGNALS_UNSAFE_FLAG 0x0001
+
+/* The decimal digits an integer can have, and the version as a string
+ * (perl.h). */
+#define IV_BITS (IVSIZE * 8)
+#define UV_BITS (UVSIZE * 8)
+#ifndef BIT_DIGITS
+#define BIT_DIGITS(N) (((N) * 146) / 485 + 1)
+#endif
+#define IV_DIG (BIT_DIGITS(IV_BITS))
+#define UV_DIG (BIT_DIGITS(UV_BITS))
+#define PERL_VERSION_STRING \
+    STRINGIFY(PERL_REVISION) "." STRINGIFY(PERL_VERSION) "." STRINGIFY(PERL_SUBVERSION)
+
+/* The interpreter is not a DEBUGGING build: the debugging statements of
+ * every letter compile to nothing (perl.h). */
+#ifndef DEBUG_p
+#define DEBUG_p(a)
+#endif
+#ifndef DEBUG_s
+#define DEBUG_s(a)
+#endif
+#ifndef DEBUG_t
+#define DEBUG_t(a)
+#endif
+#ifndef DEBUG_o
+#define DEBUG_o(a)
+#endif
+#ifndef DEBUG_c
+#define DEBUG_c(a)
+#endif
+#ifndef DEBUG_m
+#define DEBUG_m(a)
+#endif
+#ifndef DEBUG_f
+#define DEBUG_f(a)
+#endif
+#ifndef DEBUG_r
+#define DEBUG_r(a)
+#endif
+#ifndef DEBUG_u
+#define DEBUG_u(a)
+#endif
+#ifndef DEBUG_U
+#define DEBUG_U(a)
+#endif
+#ifndef DEBUG_X
+#define DEBUG_X(a)
+#endif
+#ifndef DEBUG_D
+#define DEBUG_D(a)
+#endif
+#ifndef DEBUG_S
+#define DEBUG_S(a)
+#endif
+#ifndef DEBUG_T
+#define DEBUG_T(a)
+#endif
+#ifndef DEBUG_R
+#define DEBUG_R(a)
+#endif
+#ifndef DEBUG_J
+#define DEBUG_J(a)
+#endif
+#ifndef DEBUG_C
+#define DEBUG_C(a)
+#endif
+#ifndef DEBUG_A
+#define DEBUG_A(a)
+#endif
+#ifndef DEBUG_q
+#define DEBUG_q(a)
+#endif
+#ifndef DEBUG_M
+#define DEBUG_M(a)
+#endif
+#ifndef DEBUG_B
+#define DEBUG_B(a)
+#endif
+#ifndef DEBUG_L
+#define DEBUG_L(a)
+#endif
+#ifndef DEBUG_i
+#define DEBUG_i(a)
+#endif
+#ifndef DEBUG_y
+#define DEBUG_y(a)
+#endif
+
+/* The target of a pp function or an XSUB set to a value and left in the
+ * place of the top of the stack (pp.h). */
+#ifndef SETi
+#define SETi(i) STMT_START { sv_setiv(TARG, (IV)(i)); SvSETMAGIC(TARG); SETs(TARG); } STMT_END
+#endif
+#ifndef SETu
+#define SETu(u) STMT_START { sv_setuv(TARG, (UV)(u)); SvSETMAGIC(TARG); SETs(TARG); } STMT_END
+#endif
+#ifndef SETn
+#define SETn(n) STMT_START { sv_setnv(TARG, (NV)(n)); SvSETMAGIC(TARG); SETs(TARG); } STMT_END
+#endif
+#ifndef SETp
+#define SETp(p, l) STMT_START { sv_setpvn(TARG, (p), (l)); SvSETMAGIC(TARG); SETs(TARG); } STMT_END
+#endif
+#ifndef SETTARG
+#define SETTARG STMT_START { SvSETMAGIC(TARG); SETs(TARG); } STMT_END
+#endif
+
+/* xsubpp's INTERFACE: the C function an XSUB stands for is kept in its
+ * XSANY (XSUB.h). */
+#define XSINTERFACE_CVT(ret, name) ret (*name)()
+#define XSINTERFACE_CVT_ANON(ret) ret (*)()
+#define dXSFUNCTION(ret) XSINTERFACE_CVT(ret, XSFUNCTION)
+#define XSINTERFACE_FUNC(ret, cv, f) ((XSINTERFACE_CVT_ANON(ret))(f))
+#define XSINTERFACE_FUNC_SET(cv, f) \
+    CvXSUBANY(cv).any_dxptr = (void (*)(pTHX_ void *))(f)
+
+/* A new scalar of a shared key (hv.h): the key's bytes, shared; a key
+ * that was UTF-8 and is kept downgraded comes back upgraded, and a key
+ * that is a scalar is that scalar's copy. */
+#ifndef HEf_SVKEY
+#define HEf_SVKEY -2
+#endif
+static SV *goperl_newSVhek(goperl_frame_t *f, const HEK *hek) __attribute__((unused));
+static SV *goperl_newSVhek(goperl_frame_t *f, const HEK *hek) {
+    (void)f;
+    if (!hek) return &PL_sv_undef;
+    if (HEK_LEN(hek) == HEf_SVKEY) return newSVsv(*(SV *const *)HEK_KEY(hek));
+    if (HEK_FLAGS(hek) & HVhek_WASUTF8) {
+        SV *sv = newSVpvn(HEK_KEY(hek), HEK_LEN(hek));
+        sv_utf8_upgrade(sv);
+        return sv;
+    }
+    return newSVpvn_share(HEK_KEY(hek), HEK_UTF8(hek) ? -(I32)HEK_LEN(hek) : (I32)HEK_LEN(hek),
+                          HEK_HASH(hek));
+}
+#define newSVhek(hek) goperl_newSVhek(_gof, (const HEK *)(hek))
+#define newSVhek_mortal(hek) sv_2mortal(newSVhek(hek))
+
+/* An array with room for size elements and none yet (av.h). */
+#define newAV_alloc_x(size)                                                 \
+    ({ AV *const goperl_newAV_alloc_av_ = newAV();                          \
+       av_extend(goperl_newAV_alloc_av_, (SSize_t)(size) - 1);              \
+       goperl_newAV_alloc_av_; })
+#define newAV_alloc_xz(size) newAV_alloc_x(size)
+#define newSV_type_mortal(type) sv_2mortal(newSV_type(type))
+#define sv_setpvn_fresh(sv, p, l) sv_setpvn((sv), (p), (l))
+#define lex_stuff_pv(pv, flags)                                             \
+    ({ const char *const goperl_lex_stuff_pv_ = (pv);                       \
+       lex_stuff_pvn(goperl_lex_stuff_pv_, strlen(goperl_lex_stuff_pv_), (flags)); })
+
+/* A hint by a key that is a scalar (cop_hints_fetch_sv): its bytes, and
+ * whether they are UTF-8. */
+#ifndef REFCOUNTED_HE_KEY_UTF8
+#define REFCOUNTED_HE_KEY_UTF8 0x00000001
+#endif
+#define cop_hints_fetch_sv(cop, keysv, hash, flags)                         \
+    ({ SV *const goperl_chf_key_ = (keysv);                                 \
+       STRLEN goperl_chf_len_;                                              \
+       const char *const goperl_chf_pv_ = SvPV(goperl_chf_key_, goperl_chf_len_); \
+       cop_hints_fetch_pvn((cop), goperl_chf_pv_, goperl_chf_len_, (hash),  \
+                           (flags) | (SvUTF8(goperl_chf_key_) ? REFCOUNTED_HE_KEY_UTF8 : 0)); })
+
+/* One continuation byte more of a UTF-8 sequence (utf8.h). */
+#ifndef UTF_ACCUMULATION_SHIFT
+#define UTF_ACCUMULATION_SHIFT 6
+#endif
+#ifndef UTF_CONTINUATION_MASK
+#define UTF_CONTINUATION_MASK ((U8)0x3f)
+#endif
+#ifndef NATIVE_UTF8_TO_I8
+#define NATIVE_UTF8_TO_I8(ch) ((U8)(ch))
+#endif
+#ifndef I8_TO_NATIVE_UTF8
+#define I8_TO_NATIVE_UTF8(ch) ((U8)(ch))
+#endif
+#define UTF8_ACCUMULATE(old, new) \
+    (((old) << UTF_ACCUMULATION_SHIFT) | (NATIVE_UTF8_TO_I8(new) & UTF_CONTINUATION_MASK))
+
+/* Bytes compared with a UTF-8 string of the same characters (utf8.c):
+ * -1 or +1 when one is a prefix of the other, -2 or +2 when they differ
+ * (and -2 for UTF-8 that does not come down to bytes). */
+static int goperl_bytes_cmp_utf8(goperl_frame_t *f, const U8 *b, STRLEN blen, const U8 *u,
+                                 STRLEN ulen) __attribute__((unused));
+static int goperl_bytes_cmp_utf8(goperl_frame_t *f, const U8 *b, STRLEN blen, const U8 *u,
+                                 STRLEN ulen) {
+    const U8 *const bend = b + blen;
+    const U8 *const uend = u + ulen;
+    while (b < bend && u < uend) {
+        U8 c = *u++;
+        if (c >= 0x80) {
+            if (c == 0xc2 || c == 0xc3) {
+                if (u < uend) {
+                    const U8 c1 = *u++;
+                    if ((c1 & 0xc0) == 0x80) {
+                        c = (U8)(((c & 0x03) << 6) | (c1 & 0x3f));
+                    } else {
+                        Perl_ck_warner_d(f, WARN_UTF8,
+                            "Malformed UTF-8 character: \\x%02x\\x%02x (unexpected "
+                            "non-continuation byte 0x%02x, immediately after start "
+                            "byte 0x%02x; need 2 bytes, got 1)%s%s",
+                            u[-2], c1, c1, u[-2], PL_op ? " in " : "", PL_op ? OP_DESC(PL_op) : "");
+                        return -2;
+                    }
+                } else {
+                    Perl_ck_warner_d(f, WARN_UTF8,
+                        "Malformed UTF-8 character (unexpected end of string)%s%s",
+                        PL_op ? " in " : "", PL_op ? OP_DESC(PL_op) : "");
+                    return -2;
+                }
+            } else {
+                return -2;
+            }
+        }
+        if (*b != c) return *b < c ? -2 : +2;
+        ++b;
+    }
+    if (b == bend && u == uend) return 0;
+    return b < bend ? +1 : -1;
+}
+#define bytes_cmp_utf8(b, blen, u, ulen) \
+    goperl_bytes_cmp_utf8(_gof, (const U8 *)(b), (STRLEN)(blen), (const U8 *)(u), (STRLEN)(ulen))
+
+/* A struct tm with the zone of now, and the normalising of one without
+ * the zone (util.c's init_tm and mini_mktime). */
+static void goperl_init_tm(struct tm *ptm) __attribute__((unused));
+static void goperl_init_tm(struct tm *ptm) {
+    const time_t now = time(NULL);
+    struct tm t;
+    if (localtime_r(&now, &t)) *ptm = t;
+}
+#define init_tm(ptm) goperl_init_tm(ptm)
+static void goperl_mini_mktime(struct tm *ptm) __attribute__((unused));
+static void goperl_mini_mktime(struct tm *ptm) {
+    enum { DAYS_PER_YEAR_ = 365, DAYS_PER_QYEAR_ = 4 * 365 + 1,
+           DAYS_PER_CENT_ = 25 * (4 * 365 + 1) - 1,
+           DAYS_PER_QCENT_ = 4 * (25 * (4 * 365 + 1) - 1) + 1,
+           SECS_PER_HOUR_ = 60 * 60, SECS_PER_DAY_ = 24 * 60 * 60,
+           YEAR_ADJUST_ = 4 * 153 / 5 + 1, WEEKDAY_BIAS_ = 6 };
+    int yearday, secs, month, mday, year, jday, odd_cent, odd_year;
+    year = 1900 + ptm->tm_year;
+    month = ptm->tm_mon;
+    mday = ptm->tm_mday;
+    jday = 0;
+    if (month >= 2) month += 2;
+    else month += 14, year--;
+    yearday = DAYS_PER_YEAR_ * year + year / 4 - year / 100 + year / 400;
+    yearday += month * 153 / 5 + mday + jday;
+    if ((unsigned)ptm->tm_sec <= 60) {
+        secs = 0;
+    } else {
+        secs = ptm->tm_sec;
+        ptm->tm_sec = 0;
+    }
+    secs += 60 * ptm->tm_min;
+    secs += SECS_PER_HOUR_ * ptm->tm_hour;
+    if (secs < 0) {
+        if (secs - (secs / SECS_PER_DAY_ * SECS_PER_DAY_) < 0) {
+            yearday += (secs / SECS_PER_DAY_) - 1;
+            secs -= SECS_PER_DAY_ * (secs / SECS_PER_DAY_ - 1);
+        } else {
+            yearday += (secs / SECS_PER_DAY_);
+            secs -= SECS_PER_DAY_ * (secs / SECS_PER_DAY_);
+        }
+    } else if (secs >= SECS_PER_DAY_) {
+        yearday += (secs / SECS_PER_DAY_);
+        secs %= SECS_PER_DAY_;
+    }
+    ptm->tm_hour = secs / SECS_PER_HOUR_;
+    secs %= SECS_PER_HOUR_;
+    ptm->tm_min = secs / 60;
+    secs %= 60;
+    ptm->tm_sec += secs;
+    jday = yearday;
+    yearday -= YEAR_ADJUST_;
+    year = (yearday / DAYS_PER_QCENT_) * 400;
+    yearday %= DAYS_PER_QCENT_;
+    odd_cent = yearday / DAYS_PER_CENT_;
+    year += odd_cent * 100;
+    yearday %= DAYS_PER_CENT_;
+    year += (yearday / DAYS_PER_QYEAR_) * 4;
+    yearday %= DAYS_PER_QYEAR_;
+    odd_year = yearday / DAYS_PER_YEAR_;
+    year += odd_year;
+    yearday %= DAYS_PER_YEAR_;
+    if (!yearday && (odd_cent == 4 || odd_year == 4)) {
+        month = 1;
+        yearday = 29;
+    } else {
+        yearday += YEAR_ADJUST_;
+        month = yearday * 5 / 153;
+        yearday -= month * 153 / 5;
+        if (month > 13) {
+            month -= 14;
+            year++;
+        } else {
+            month -= 2;
+        }
+    }
+    ptm->tm_year = year - 1900;
+    if (yearday) {
+        ptm->tm_mday = yearday;
+        ptm->tm_mon = month;
+    } else {
+        ptm->tm_mday = 31;
+        ptm->tm_mon = month - 1;
+    }
+    year--;
+    yearday = year * DAYS_PER_YEAR_ + year / 4 - year / 100 + year / 400;
+    yearday += 14 * 153 / 5 + 1;
+    ptm->tm_yday = jday - yearday;
+    ptm->tm_wday = (jday + WEEKDAY_BIAS_) % 7;
+}
+#define mini_mktime(ptm) goperl_mini_mktime(ptm)
+#define Perl_mini_mktime(ptm) goperl_mini_mktime(ptm)
 
 #include "goperl_compiler.h"
 

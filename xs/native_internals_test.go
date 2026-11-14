@@ -78,3 +78,36 @@ func TestNativeSignalNamesAndStatCache(t *testing.T) {
 		{"a size stored by native code", `stat "` + f + `"; PerlAPI::statcache(4242); -s _`, "4242"},
 	})
 }
+
+// Fields perl's macros make lvalues (SvFLAGS, SvSTASH, GvFLAGS, HvRITER,
+// HvEITER) are stored into, AvREAL is turned off and on, and an iterator
+// position kept by one call is put back by another.
+func TestNativeFieldLvalues(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"flags, stash, glob flags, AvREAL",
+			`our $glob_for_flags; my $o = bless {}, "Some::Class"; my @a = (1); my $r = PerlAPI::field_lvalues($o, \*glob_for_flags, \@a); $r . ":" . ref($o)`,
+			"1010010:HASH"},
+		{"iterator kept and put back",
+			`my %h = (a => 1, b => 2, c => 3); my ($k1) = each %h; my $at = PerlAPI::iter_save(\%h); my ($k2) = each %h; PerlAPI::iter_restore(\%h); my ($k3) = each %h; ($at eq $k1 ? "at" : "not at") . "," . ($k3 eq $k2 ? "same" : "other")`,
+			"at,same"},
+	})
+}
+
+// The descriptions and classes of ops, the Latin-1 classes and case tables,
+// formats given no argument list, and assorted functions and macros of the
+// API (bytes_cmp_utf8, mini_mktime, newSVhek, sortsv_flags, newAV_alloc_x,
+// CvAUTOLOAD, ANY's members, xsubpp's INTERFACE).
+func TestNativeMoreAPI(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"op descriptions and classes", `PerlAPI::op_info()`, "subroutine entry|2|1|1,1,1|private variable"},
+		{"Latin-1 classes", `PerlAPI::chars_l1()`, "10101111|yQ|20,20|97|5.44.0"},
+		{"formats without arguments",
+			`use warnings; my @w; local $SIG{__WARN__} = sub { push @w, $_[0] }; my $r = PerlAPI::format_none(); $r . "|" . join "", map { /^(warned without arguments|Missing argument in subroutine entry)/ ? "<$1>" : "<other: $_>" } @w`,
+			"no args, 100%/[|0]/form %|<Missing argument in subroutine entry><warned without arguments>"},
+		{"assorted functions", `PerlAPI::misc_api("caf\xc3\xa9", ["b", "a", "c"])`, "0,-1|2024-03-02 01:6:61|cba|hk|10|7|42"},
+	})
+}
