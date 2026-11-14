@@ -6458,11 +6458,20 @@ struct ufuncs {
 static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                             const char *name, I32 namlen) {
     if (how == PERL_MAGIC_uvar && name) {
-        const struct ufuncs *uf = (const struct ufuncs *)name;
+        /* The name is the module's struct ufuncs, copied (namlen is its
+         * size) or kept (0). A shorter one is not: a module that attaches
+         * the magic with some other name puts its own vtable in the MAGIC
+         * afterwards (SWIG's variables), and the interpreter then reports
+         * both reads and writes, for that vtable to handle. */
+        uint64_t calls = 3;
+        if (namlen == 0 || namlen >= (I32)sizeof(struct ufuncs)) {
+            const struct ufuncs *uf = (const struct ufuncs *)name;
+            calls = (uf->uf_val ? 1 : 0) | (uf->uf_set ? 2 : 0);
+        }
         /* CALL 11: UVAR; bit 0: uf_val, bit 1: uf_set */
         goperl_do_op(f, GOPERL_OP_CALL,
                      ((uint64_t)11 << 32) | (uint32_t)GOPERL_TOK(sv),
-                     (uf->uf_val ? 1 : 0) | (uf->uf_set ? 2 : 0), 0, 0);
+                     calls, 0, 0);
     } else
     goperl_do_op(f, GOPERL_OP_SV_MAGIC_STD, GOPERL_TOK(sv),
                  ((uint64_t)(uint32_t)how << 32) | (uint32_t)GOPERL_TOK(obj),
@@ -9614,21 +9623,36 @@ __goperl_host_invoke(goperl_frame_t *f, const uint32_t *req, uint32_t reqlen,
             if (m->mg_type == PERL_MAGIC_uvar) mg = m;
         if (!mg || !mg->mg_ptr) goperl_croakf(f, "host call: no uvar magic on the value");
         const struct ufuncs *uf = (const struct ufuncs *)mg->mg_ptr;
-        SV *const kept = mg->mg_obj;
-        const int is_hash = SvTYPE(sv) == SVt_PVHV;
         int32_t r = 0;
-        mg->mg_obj = GOPERL_SV(req[4]);
-        if (is_hash) {
-            /* the kind of access goes in, the key is in mg_obj */
+        uint32_t key = req[4];
+        if (SvTYPE(sv) == SVt_PVHV) {
+            /* perl's hash access calls uf_val itself, with the kind of
+             * access; the key is in mg_obj, where the function may leave
+             * another */
+            SV *const kept = mg->mg_obj;
+            mg->mg_obj = GOPERL_SV(req[4]);
             if (uf->uf_val) r = uf->uf_val((IV)(int32_t)req[2], sv);
+            key = (uint32_t)GOPERL_TOK(mg->mg_obj);
+            mg->mg_obj = kept;
+        } else if (mg->mg_virtual) {
+            /* a scalar's magic runs through the MAGIC's vtable, as with
+             * perl's mg_get and mg_set: a module may have put its own there
+             * (SWIG's variables) */
+            const MGVTBL *v = mg->mg_virtual;
+            if (req[1]) {
+                if (v->svt_set) r = v->svt_set(sv, mg);
+            } else if (v->svt_get) {
+                r = v->svt_get(sv, mg);
+            }
         } else if (req[1]) {
+            /* the mirror has no vtable of its own: perl's PL_vtbl_uvar,
+             * which calls the ufuncs with their index */
             if (uf->uf_set) r = uf->uf_set(uf->uf_index, sv);
         } else {
             if (uf->uf_val) r = uf->uf_val(uf->uf_index, sv);
         }
-        resp[0] = (uint32_t)GOPERL_TOK(mg->mg_obj);
+        resp[0] = key;
         resp[1] = (uint32_t)r;
-        mg->mg_obj = kept;
         rlen = 8;
         break;
     }

@@ -146,6 +146,21 @@ func TestNativeUvarMagic(t *testing.T) {
 	})
 }
 
+// uvar magic on a scalar: perl calls the ufuncs with their index when the
+// variable is read and written; and a module that replaces the MAGIC's
+// vtable after attaching it, as SWIG does for the variables of a wrapped
+// library, gets its own svt_get and svt_set called, with the MAGIC as it
+// attached it.
+func TestNativeUvarMagicOnAScalar(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the ufuncs", `my $v; PerlAPI::uvar_scalar(\$v, 100); PerlAPI::uvar_value(5); my $read = $v; $v = 142; join ",", $read, (PerlAPI::uvar_value())[0]`, "105,42"},
+		{"a vtable of the module's", `PerlAPI::swig_variable("PerlAPI::answer"); PerlAPI::uvar_value(42); my $read = $PerlAPI::answer; $PerlAPI::answer = 7; join ",", $read, PerlAPI::uvar_value()`, "42,7,2"},
+		{"a short name", `PerlAPI::swig_variable("main::x"); PerlAPI::uvar_value(3); my $read = $main::x; $main::x = 4; join ",", $read, PerlAPI::uvar_value()`, "3,4,2"},
+	})
+}
+
 // A magic holds a reference on its mg_obj only when sv_magicext took one
 // (MGf_REFCOUNTED), and that is the reference given up with the magic. A
 // module that sets mg_obj itself after sv_magicext gives its reference up

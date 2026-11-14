@@ -3166,6 +3166,76 @@ XS(XS_PerlAPI_uvar_calls) {
     XSRETURN(1);
 }
 
+/* uvar magic for a scalar, the two ways modules use it. uvar_scalar(\$v,
+ * index): the ufuncs, which perl calls with their index, uf_val when the
+ * variable is read and uf_set when it is written; the variable reads as
+ * the C value plus the index. swig_variable(name): a variable of the module
+ * made the way SWIG makes one (_swig_create_magic): the magic is attached
+ * with the variable's name and the variable itself as mg_obj, and its
+ * vtable is then replaced by one whose svt_get and svt_set read and write
+ * the C value. The hooks note whether mg_obj is the variable. */
+static IV PerlAPI_uvar_value;
+static IV PerlAPI_uvar_obj_seen;
+static I32 PerlAPI_uvar_scalar_get(pTHX_ IV index, SV *sv) {
+    sv_setiv(sv, PerlAPI_uvar_value + index);
+    return 0;
+}
+static I32 PerlAPI_uvar_scalar_set(pTHX_ IV index, SV *sv) {
+    PerlAPI_uvar_value = SvIV(sv) - index;
+    return 0;
+}
+static int PerlAPI_swig_get(pTHX_ SV *sv, MAGIC *mg) {
+    PerlAPI_uvar_obj_seen += mg->mg_obj == sv;
+    sv_setiv(sv, PerlAPI_uvar_value);
+    return 1;
+}
+static int PerlAPI_swig_set(pTHX_ SV *sv, MAGIC *mg) {
+    PerlAPI_uvar_obj_seen += mg->mg_obj == sv;
+    PerlAPI_uvar_value = SvIV(sv);
+    return 1;
+}
+XS(XS_PerlAPI_uvar_scalar) {
+    dXSARGS;
+    struct ufuncs uf;
+    if (items != 2) croak_xs_usage(cv, "scalarref, index");
+    uf.uf_val = PerlAPI_uvar_scalar_get;
+    uf.uf_set = PerlAPI_uvar_scalar_set;
+    uf.uf_index = SvIV(ST(1));
+    sv_magic(SvRV(ST(0)), NULL, PERL_MAGIC_uvar, (char *)&uf, sizeof(uf));
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_swig_variable) {
+    dXSARGS;
+    const char *name;
+    SV *sv;
+    MAGIC *mg;
+    if (items != 1) croak_xs_usage(cv, "name");
+    name = SvPV_nolen(ST(0));
+    sv = get_sv(name, GV_ADD | GV_ADDMULTI);
+    sv_setiv(sv, 0);
+    sv_magic(sv, sv, 'U', name, strlen(name));
+    mg = mg_find(sv, 'U');
+    mg->mg_virtual = (MGVTBL *)malloc(sizeof(MGVTBL));
+    mg->mg_virtual->svt_get = PerlAPI_swig_get;
+    mg->mg_virtual->svt_set = PerlAPI_swig_set;
+    mg->mg_virtual->svt_len = 0;
+    mg->mg_virtual->svt_clear = 0;
+    mg->mg_virtual->svt_free = 0;
+    XSRETURN_EMPTY;
+}
+/* uvar_value([value]): the C value (set first when given) and how many
+ * times a hook saw the variable as mg_obj since the last call */
+XS(XS_PerlAPI_uvar_value) {
+    dXSARGS;
+    if (items > 0) PerlAPI_uvar_value = SvIV(ST(0));
+    SP -= items;
+    EXTEND(SP, 2);
+    mPUSHi(PerlAPI_uvar_value);
+    mPUSHi(PerlAPI_uvar_obj_seen);
+    PerlAPI_uvar_obj_seen = 0;
+    PUTBACK;
+}
+
 /* firsts(arrays): the first element of every array of the list, read
  * from the array's body, and the last element of each array replaced by
  * the count of its elements through the body. */
@@ -5145,6 +5215,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::observed", XS_PerlAPI_observed);
     newXS_deffile("PerlAPI::uvar_hash", XS_PerlAPI_uvar_hash);
     newXS_deffile("PerlAPI::uvar_calls", XS_PerlAPI_uvar_calls);
+    newXS_deffile("PerlAPI::uvar_scalar", XS_PerlAPI_uvar_scalar);
+    newXS_deffile("PerlAPI::swig_variable", XS_PerlAPI_swig_variable);
+    newXS_deffile("PerlAPI::uvar_value", XS_PerlAPI_uvar_value);
     newXS_deffile("PerlAPI::firsts", XS_PerlAPI_firsts);
     newXS_deffile("PerlAPI::take_buffer", XS_PerlAPI_take_buffer);
     newXS_deffile("PerlAPI::const_ops", XS_PerlAPI_const_ops);
