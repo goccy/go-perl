@@ -395,6 +395,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		xsInvoke:      s.xsInvoke,
 		xsEpilogue:    s.xsEpilogue,
 		perlioInvoke:  s.perlioInvoke,
+		hostInvoke:    s.hostInvoke,
 		cloneHookSet:  true,
 	}
 	pokeBytes(cs.sharedRaw, make([]byte, sharedBlockSize))
