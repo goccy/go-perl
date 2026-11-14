@@ -3370,9 +3370,11 @@ static OP **goperl_plop_ref(goperl_frame_t *f) {
 #define PL_exit_flags (*goperl_plint_ref(_gof, GOPERL_PL_EXIT_FLAGS))
 #define PL_basetime ((Time_t) * goperl_plint_ref(_gof, GOPERL_PL_BASETIME))
 /* PL_modglobal carries Time::HiRes's exported C hooks (Time::NVtime /
- * Time::U2time), which consumers call as raw function pointers — a guest
- * pointer is uncallable from the host, so the first host access re-seeds
- * those two entries with HOST implementations of the same wallclock. */
+ * Time::U2time) once Time::HiRes is loaded, which consumers call as raw
+ * function pointers — a guest pointer is uncallable from the host, so the
+ * first host access after Time::HiRes put them there replaces those two
+ * entries with HOST implementations of the same wallclock. Before that
+ * they are not there, as with perl (UUID requires Time::HiRes and looks). */
 static NV goperl_nvtime_fn(void) {
     struct timeval tv;
     gettimeofday(&tv, 0);
@@ -3387,7 +3389,10 @@ static void goperl_u2time_fn(pTHX_ UV *r) {
 static SV **goperl_plsv_ref(goperl_frame_t *f, int id);
 static HV **goperl_modglobal_ref(goperl_frame_t *f) {
     HV **ref = (HV **)goperl_plsv_ref(f, GOPERL_PL_MODGLOBAL);
-    if (!GOPERL_SHARED->modglobal_seeded && *ref) {
+    if (!GOPERL_SHARED->modglobal_seeded && *ref &&
+        goperl_do_op(f, GOPERL_OP_HV_FETCH_KLEN,
+                     GOPERL_HV_KEYED(*ref, sizeof("Time::U2time") - 1), 0,
+                     "Time::U2time", sizeof("Time::U2time") - 1)) {
         GOPERL_SHARED->modglobal_seeded = 1;
         uint64_t iv;
         iv = goperl_do_op(
@@ -3975,7 +3980,9 @@ static inline __attribute__((unused)) void goperl_async(goperl_frame_t *f) {
 }
 #define PERL_ASYNC_CHECK() goperl_async(_gof)
 #define strNE(a, b) (strcmp((a), (b)) != 0)
-#define UTF8_IS_INVARIANT(c) ((U8)(c) < 0x80)
+/* A character or a byte that is the same one byte in UTF-8: the value is
+ * not cut to a byte (a code point above 0xFF is not invariant). */
+#define UTF8_IS_INVARIANT(c) UVCHR_IS_INVARIANT(c)
 /* A code point that is the same one byte in UTF-8 (utf8.h; ASCII). */
 #define OFFUNI_IS_INVARIANT(cp) ((UV)(cp) < 0x80)
 #define UVCHR_IS_INVARIANT(cp) OFFUNI_IS_INVARIANT(cp)
@@ -4323,6 +4330,47 @@ static void goperl_xcpt_rethrow(goperl_frame_t *f, int32_t failed) {
     goperl_croakf(f, "%s", f->err);
 }
 #define XCPT_RETHROW goperl_xcpt_rethrow(_gof, goperl_xcpt_failed)
+
+/* JMPENV: the place native code catches what ends the code it calls before
+ * it returns (cop.h), the way the XCPT macros above do. JMPENV_PUSH gives
+ * 0, and gives 3 again when a croak of native code, or a die of the
+ * interpreter inside an operation, comes back to it; from there until
+ * JMPENV_POP, what the code calls runs as usual (another such end comes
+ * back to the same place, as on perl). JMPENV_JUMP goes on with what was
+ * caught, whole, as XCPT_RETHROW does; with nothing caught it dies with
+ * $@. The interpreter has unwound to the eval that catches the exception
+ * by the time it comes back here, as perl's die_unwind has before its
+ * jump. */
+typedef struct goperl_jmpenv {
+    jmp_buf je_buf;
+    void *je_prev;     /* the frame's place to jump to before the push */
+    int je_ret;        /* 0, or 3 once something came back here */
+    int32_t je_failed; /* how the native call was failing when it came */
+} JMPENV;
+#define dJMPENV JMPENV cur_env
+#define JMPENV_PUSH(v)                                 \
+    do {                                               \
+        cur_env.je_prev = _gof->jb;                    \
+        cur_env.je_failed = 0;                         \
+        _gof->jb = (void *)&cur_env.je_buf;            \
+        if (setjmp(cur_env.je_buf)) {                  \
+            cur_env.je_ret = 3;                        \
+            cur_env.je_failed = _gof->failed;          \
+            _gof->failed = 0;                          \
+        } else {                                       \
+            cur_env.je_ret = 0;                        \
+        }                                              \
+        (v) = cur_env.je_ret;                          \
+    } while (0)
+#define JMPENV_POP (_gof->jb = cur_env.je_prev)
+static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed)
+    __attribute__((noreturn, unused));
+static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
+    (void)v;
+    if (!failed) goperl_croak_errsv(f);
+    goperl_xcpt_rethrow(f, failed);
+}
+#define JMPENV_JUMP(v) goperl_jmpenv_jump(_gof, (v), cur_env.je_failed)
 #define PERL_UNUSED_VAR(v) ((void)(v))
 #define PERL_UNUSED_ARG(v) ((void)(v))
 #define PERL_UNUSED_DECL __attribute__((unused))
@@ -5978,6 +6026,11 @@ struct goperl_si {
 /* The lvalue flags (OPpLVAL_INTRO, OPpENTERSUB_INARGS) a sub was called
  * with, kept in the low byte of blk_u16 (cop.h). */
 #define CxLVAL(cx) (0 + ((U8)((cx)->blk_u16)))
+/* What an eval context keeps in blk_u16 (cop.h): the PL_in_eval it saved,
+ * whether it holds a reference on cur_text, and the type of its eval op. */
+#define CxOLD_IN_EVAL(cx) (((cx)->blk_u16) & 0x3F)
+#define CxEVAL_TXT_REFCNTED(cx) (((cx)->blk_u16) & 0x40)
+#define CxOLD_OP_TYPE(cx) (((cx)->blk_u16) >> 7)
 #define CxREALEVAL(cx) \
     (((cx)->cx_type & (CXTYPEMASK | CXp_REAL)) == (CXt_EVAL | CXp_REAL))
 #define CxEVALBLOCK(cx) \
@@ -6571,10 +6624,9 @@ static struct mro_meta *goperl_hvmrometa(goperl_frame_t *f, HV *hv) {
  * prehashing collapses to zero. */
 #define PERL_HASH(hash, str, len) ((hash) = 0)
 
-/* Compiled-regex test (ppport's NEED_SvRX fallback defers to this). */
-#define SvRXOK(sv) \
-    ({ GOPERL_ONCE(goperl_SvRXOK_sv_, sv); \
-       SvROK(goperl_SvRXOK_sv_) && SvTYPE(SvRV((SV *)goperl_SvRXOK_sv_)) == SVt_REGEXP; })
+/* Compiled-regex test: what SvRX finds, a regexp or a reference to one
+ * (perl's get_re_arg, which runs get magic). */
+#define SvRXOK(sv) (SvRX(sv) != 0)
 
 /* $_ is a slot of the interpreter that holds an SV: DEFSV reads it,
  * DEFSV_set (and an assignment to DEFSV) puts another SV there, and
@@ -6648,13 +6700,12 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 
 /* MY_CXT: module state, as perl without MULTIPLICITY keeps it: one static
  * struct, and no context argument (pMY_CXT is void). */
-#define START_MY_CXT static my_cxt_t goperl_my_cxt_v;
-#define MY_CXT goperl_my_cxt_v
+#define START_MY_CXT static my_cxt_t my_cxt;
+#define MY_CXT my_cxt
 #define dMY_CXT dNOOP
 #define dMY_CXT_SV dNOOP
 #define dMY_CXT_INTERP(interp) dNOOP
-#define MY_CXT_INIT \
-    memset(&goperl_my_cxt_v, 0, sizeof goperl_my_cxt_v)
+#define MY_CXT_INIT memset(&my_cxt, 0, sizeof my_cxt)
 #define MY_CXT_INIT_INTERP(interp) MY_CXT_INIT
 #define MY_CXT_CLONE MY_CXT_INIT
 #define pMY_CXT void
@@ -10294,6 +10345,35 @@ static void goperl_savefreepv_cb(pTHX_ void *p) {
 
 #include "goperl_perlapi.h"
 #include "goperl_handy.h"
+
+/* Case-insensitive comparison of bytes (inline.h, util.h): ASCII, Latin-1,
+ * or the C library's locale; the ibcmp names are their negations. */
+static inline __attribute__((unused)) I32 goperl_fold_eq(const char *s1,
+                                                         const char *s2, I32 len,
+                                                         const unsigned char *fold) {
+    const U8 *a = (const U8 *)s1, *b = (const U8 *)s2;
+    while (len-- > 0) {
+        if (*a != *b && *a != fold[*b]) return 0;
+        a++, b++;
+    }
+    return 1;
+}
+static inline __attribute__((unused)) I32 goperl_fold_eq_locale(const char *s1,
+                                                                const char *s2,
+                                                                I32 len) {
+    const U8 *a = (const U8 *)s1, *b = (const U8 *)s2;
+    while (len-- > 0) {
+        if (*a != *b && *a != (isupper(*b) ? tolower(*b) : toupper(*b))) return 0;
+        a++, b++;
+    }
+    return 1;
+}
+#define foldEQ(s1, s2, len) goperl_fold_eq((s1), (s2), (I32)(len), PL_fold)
+#define foldEQ_latin1(s1, s2, len) \
+    goperl_fold_eq((s1), (s2), (I32)(len), PL_fold_latin1)
+#define foldEQ_locale(s1, s2, len) goperl_fold_eq_locale((s1), (s2), (I32)(len))
+#define ibcmp(s1, s2, len) cBOOL(!foldEQ(s1, s2, len))
+#define ibcmp_locale(s1, s2, len) cBOOL(!foldEQ_locale(s1, s2, len))
 
 /* ---- a copy of the instance -----------------------------------------------
  * Loader entry: what this SDK keeps for an instance, for a copy of the

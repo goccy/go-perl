@@ -5057,9 +5057,155 @@ XS(XS_PerlAPI_custom_op_description) {
     }
 }
 
+/* rx_ok(value, deref): SvRXOK of the value, or of what it refers to. */
+XS(XS_PerlAPI_rx_ok) {
+    dXSARGS;
+    SV *sv;
+    if (items != 2) croak_xs_usage(cv, "value, deref");
+    sv = SvTRUE(ST(1)) ? SvRV(ST(0)) : ST(0);
+    ST(0) = boolSV(SvRXOK(sv));
+    XSRETURN(1);
+}
+
+/* invariant(code point): whether UTF8_IS_INVARIANT holds for it. */
+XS(XS_PerlAPI_invariant) {
+    dXSARGS;
+    UV cp;
+    if (items != 1) croak_xs_usage(cv, "cp");
+    cp = SvUV(ST(0));
+    ST(0) = boolSV(UTF8_IS_INVARIANT(cp));
+    XSRETURN(1);
+}
+
+/* fold_eq(a, b): foldEQ, foldEQ_latin1 and ibcmp of the two strings over
+ * the length of the first. */
+XS(XS_PerlAPI_fold_eq) {
+    dXSARGS;
+    STRLEN la, lb;
+    const char *a, *b;
+    if (items != 2) croak_xs_usage(cv, "a, b");
+    a = SvPV(ST(0), la);
+    b = SvPV(ST(1), lb);
+    if (lb < la) la = lb;
+    ST(0) = sv_2mortal(newSVpvf("%d,%d,%d", (int)foldEQ(a, b, (I32)la),
+                                (int)foldEQ_latin1(a, b, (I32)la),
+                                (int)ibcmp(a, b, (I32)la)));
+    XSRETURN(1);
+}
+
+/* hires_hook(): "absent" without Time::HiRes's C hook in PL_modglobal,
+ * else "called" when calling it gives a time after 2020. */
+XS(XS_PerlAPI_hires_hook) {
+    dXSARGS;
+    SV **svp;
+    PERL_UNUSED_VAR(items);
+    svp = hv_fetchs(PL_modglobal, "Time::U2time", 0);
+    if (!svp) {
+        ST(0) = sv_2mortal(newSVpvs("absent"));
+    } else {
+        void (*u2time)(pTHX_ UV ret[2]) = INT2PTR(void (*)(pTHX_ UV ret[2]), SvIV(*svp));
+        UV t[2] = {0, 0};
+        u2time(aTHX_ t);
+        ST(0) = sv_2mortal(newSVpv(t[0] > 1577836800 ? "called" : "wrong time", 0));
+    }
+    XSRETURN(1);
+}
+
+/* eval_context(): of the innermost eval context, the name of the op that
+ * made it and the PL_in_eval it saved (CxOLD_OP_TYPE, CxOLD_IN_EVAL). */
+XS(XS_PerlAPI_eval_context) {
+    dXSARGS;
+    I32 i;
+    PERL_UNUSED_VAR(items);
+    for (i = cxstack_ix; i >= 0; i--) {
+        const PERL_CONTEXT *cx = &cxstack[i];
+        if (CxTYPE(cx) != CXt_EVAL) continue;
+        ST(0) = sv_2mortal(newSVpvf("%s,%d", PL_op_name[CxOLD_OP_TYPE(cx)],
+                                    (int)CxOLD_IN_EVAL(cx)));
+        XSRETURN(1);
+    }
+    XSRETURN_UNDEF;
+}
+
+/* guarded(code): calls the code under a JMPENV, counts that the cleanup
+ * after it ran, and goes on with what ended the code, if anything did;
+ * guard_count() gives the count (and starts it again). */
+static IV PerlAPI_guard_count;
+XS(XS_PerlAPI_guarded) {
+    dXSARGS;
+    dJMPENV;
+    int ret;
+    SV *code;
+    if (items != 1) croak_xs_usage(cv, "code");
+    code = ST(0);
+    JMPENV_PUSH(ret);
+    if (ret == 0) {
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(code, G_DISCARD | G_NOARGS);
+    }
+    JMPENV_POP;
+    PerlAPI_guard_count++;
+    if (ret != 0) JMPENV_JUMP(ret);
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_guard_count) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PerlAPI_guard_count));
+    PerlAPI_guard_count = 0;
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_croak_now) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "message");
+    croak("%s", SvPV_nolen(ST(0)));
+}
+
+/* Module state named the way perl without MULTIPLICITY names it: code
+ * that does not use MY_CXT reads my_cxt itself. counted(): how many times
+ * it was called. */
+#define MY_CXT_KEY "PerlAPI::_guts" XS_VERSION
+typedef struct {
+    IV calls;
+} my_cxt_t;
+START_MY_CXT
+XS(XS_PerlAPI_counted) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    my_cxt.calls++;
+    ST(0) = sv_2mortal(newSViv(MY_CXT.calls));
+    XSRETURN(1);
+}
+
+/* autoload_flag(code, on): sets or clears the sub's CvAUTOLOAD and gives
+ * the flag as it is then. */
+XS(XS_PerlAPI_autoload_flag) {
+    dXSARGS;
+    CV *sub;
+    if (items != 2) croak_xs_usage(cv, "code, on");
+    sub = (CV *)SvRV(ST(0));
+    if (SvTRUE(ST(1)))
+        CvAUTOLOAD_on(sub);
+    else
+        CvAUTOLOAD_off(sub);
+    ST(0) = boolSV(CvAUTOLOAD(sub));
+    XSRETURN(1);
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
+    newXS_deffile("PerlAPI::rx_ok", XS_PerlAPI_rx_ok);
+    newXS_deffile("PerlAPI::invariant", XS_PerlAPI_invariant);
+    newXS_deffile("PerlAPI::fold_eq", XS_PerlAPI_fold_eq);
+    newXS_deffile("PerlAPI::hires_hook", XS_PerlAPI_hires_hook);
+    newXS_deffile("PerlAPI::eval_context", XS_PerlAPI_eval_context);
+    newXS_deffile("PerlAPI::guarded", XS_PerlAPI_guarded);
+    newXS_deffile("PerlAPI::guard_count", XS_PerlAPI_guard_count);
+    newXS_deffile("PerlAPI::croak_now", XS_PerlAPI_croak_now);
+    newXS_deffile("PerlAPI::counted", XS_PerlAPI_counted);
+    newXS_deffile("PerlAPI::autoload_flag", XS_PerlAPI_autoload_flag);
     newXS_deffile("PerlAPI::flags", XS_PerlAPI_flags);
     newXSproto_portable("PerlAPI::is_plain_value", XS_PerlAPI_is_plain_value, __FILE__, "$");
     newXS_deffile("PerlAPI::string_only", XS_PerlAPI_string_only);

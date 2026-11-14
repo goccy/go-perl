@@ -3595,6 +3595,8 @@ static OPclass goperl_op_class_of(const OP *o) {
 /* Flags of subs, globs, hashes and pad names that are bits of the words
  * above (cv.h, gv.h, hv.h, pad.h, sv.h). */
 #define CvAUTOLOAD(cv) (CvFLAGS(cv) & CVf_AUTOLOAD)
+#define CvAUTOLOAD_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_AUTOLOAD, 0)
+#define CvAUTOLOAD_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_AUTOLOAD)
 #ifndef GvIMPORTED_SV
 #define GvIMPORTED_SV(gv) (GvFLAGS(gv) & GVf_IMPORTED_SV)
 #endif

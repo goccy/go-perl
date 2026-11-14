@@ -146,3 +146,52 @@ func TestNativeMoreAPI(t *testing.T) {
 		{"assorted functions", `PerlAPI::misc_api("caf\xc3\xa9", ["b", "a", "c"])`, "0,-1|2024-03-02 01:6:61|cba|hk|10|7|42"},
 	})
 }
+
+// SvRXOK holds for a regexp and for a reference to one, as perl's
+// get_re_arg finds them; UTF8_IS_INVARIANT of a code point above 0xFF is
+// false (the value is not cut to a byte); an eval context says which op
+// made it and the PL_in_eval it saved.
+func TestNativeRegexpsCharactersAndEvalContexts(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a regexp and a reference to one", `my $re = qr/a/; join ",", map { $_ ? 1 : 0 } PerlAPI::rx_ok($re, 1), PerlAPI::rx_ok($re, 0), PerlAPI::rx_ok("a", 0), PerlAPI::rx_ok(\"a", 1)`, "1,1,0,0"},
+		{"invariant characters", `join ",", map { PerlAPI::invariant($_) ? 1 : 0 } 0x41, 0x7F, 0x80, 0xE9, 0x2622, 0x122`, "1,1,0,0,0,0"},
+		{"case-insensitive comparison", `join "|", PerlAPI::fold_eq("DNS", "dns"), PerlAPI::fold_eq("dns", "url"), PerlAPI::fold_eq(pack("C", 0xC9), pack("C", 0xE9))`, "1,1,0|0,0,1|0,1,1"},
+		// the code of a case runs in an eval itself (PL_in_eval is
+		// EVAL_INEVAL when the inner one starts)
+		{"a string eval", `eval q{ PerlAPI::eval_context() }`, "entereval,1"},
+		{"an eval block", `eval { PerlAPI::eval_context() }`, "entertry,1"},
+	})
+}
+
+// A JMPENV of native code catches what ends the code it calls (a die of
+// the interpreter, a croak of native code), lets it clean up, and
+// JMPENV_JUMP goes on with the same exception; code that returns goes
+// through once.
+func TestNativeJumpEnvironment(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the code returns", `PerlAPI::guard_count(); my $v = 0; PerlAPI::guarded(sub { $v = 42 }); join ",", $v, PerlAPI::guard_count()`, "42,1"},
+		{"a die", `PerlAPI::guard_count(); my $ok = eval { PerlAPI::guarded(sub { die "boom\n" }); 1 }; join ",", $ok ? "returned" : "died", $@, PerlAPI::guard_count()`, "died,boom\n,1"},
+		{"an exception object", `PerlAPI::guard_count(); eval { PerlAPI::guarded(sub { die { code => 7 } }) }; join ",", ref $@, $@->{code}, PerlAPI::guard_count()`, "HASH,7,1"},
+		{"a croak of native code", `PerlAPI::guard_count(); eval { PerlAPI::guarded(sub { PerlAPI::croak_now("native") }) }; join ",", $@ =~ /^native at / ? "croaked" : $@, PerlAPI::guard_count()`, "croaked,1"},
+		{"nested", `PerlAPI::guard_count(); eval { PerlAPI::guarded(sub { PerlAPI::guarded(sub { die "inner\n" }) }) }; join ",", $@, PerlAPI::guard_count()`, "inner\n,2"},
+		{"caught by an eval inside", `PerlAPI::guard_count(); PerlAPI::guarded(sub { eval { die "x\n" }; }); join ",", $@, PerlAPI::guard_count()`, "x\n,1"},
+	})
+}
+
+// Module state is the static my_cxt, as with perl without MULTIPLICITY;
+// CvAUTOLOAD_on and CvAUTOLOAD_off change the sub's flag; Time::HiRes's C
+// hook is in PL_modglobal once Time::HiRes is loaded, and not before, and
+// native code can call it.
+func TestNativeModuleStateAndSubFlags(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"my_cxt", `my $a = PerlAPI::counted(); my $b = PerlAPI::counted(); $b - $a`, "1"},
+		{"CvAUTOLOAD", `sub flagged {} join ",", map { $_ ? 1 : 0 } PerlAPI::autoload_flag(\&flagged, 1), PerlAPI::autoload_flag(\&flagged, 0)`, "1,0"},
+		{"Time::HiRes's hook", `my $loaded = $INC{"Time/HiRes.pm"} ? "loaded" : "not loaded"; my $before = PerlAPI::hires_hook(); require Time::HiRes; join ",", $loaded, $before, PerlAPI::hires_hook()`, "not loaded,absent,called"},
+	})
+}
