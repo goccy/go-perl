@@ -445,16 +445,15 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 
 // boot brings the instance's wasm module up and obtains the interpreter
 // handle — via the copy-on-write snapshot when possible, privately otherwise.
+// The first instance of a process starts on memory of its own (see
+// sharedSnapshot).
 func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
-	if snap := sharedSnapshot(opts.StdlibDir, opts.SiteDir, opts.Env); snap.err == nil {
-		ceiling := snapshotCeiling
-		if opts.MaxMemoryBytes > 0 {
-			const wasmPage = 65536
-			max := opts.MaxMemoryBytes / wasmPage * wasmPage
-			if max < ceiling && uint64(max) >= snap.img.Size() {
-				ceiling = max
-			}
-		}
+	snap := sharedSnapshot(opts.StdlibDir, opts.SiteDir, opts.Env)
+	if snap == nil {
+		return p.bootOwn(opts, wasi)
+	}
+	if snap.err == nil {
+		ceiling := memoryCeiling(opts, snap.img.Size())
 		mem, err := snap.img.Memory(ceiling)
 		if err == nil {
 			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
@@ -466,6 +465,41 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 		// Mapping failed (exotic platform / fd exhaustion): boot privately.
 	}
 	return p.bootPrivate(opts, wasi)
+}
+
+// memoryCeiling is the length of the mapping an instance's memory is: the
+// snapshot ceiling, or the memory cap of opts rounded down to a wasm page
+// when that is lower and still holds least (the memory the instance starts
+// with). The mapping is the growth cap too.
+func memoryCeiling(opts InstanceOptions, least uint64) int {
+	ceiling := snapshotCeiling
+	if opts.MaxMemoryBytes > 0 {
+		const wasmPage = 65536
+		max := opts.MaxMemoryBytes / wasmPage * wasmPage
+		if max < ceiling && uint64(max) >= least {
+			ceiling = max
+		}
+	}
+	return ceiling
+}
+
+// bootOwn starts the instance on memory of its own: a private mapping that
+// keeps one address for the instance's life (native code holds pointers
+// into it) and holds the data segments of a module constructed for the
+// purpose. Nothing is imaged first; the instance's first fork images its
+// memory (base.ForkMemory with the image AnonymousMemory returned).
+func (p *Perl) bootOwn(opts InstanceOptions, wasi *base.WasiStubs) error {
+	from := wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
+	img, mem, err := base.AnonymousMemory(from, memoryCeiling(opts, wasm2go.InitialMemoryBytes))
+	if err != nil {
+		// No mapping to be had: memory of the Go heap, which moves when
+		// it grows past what was reserved.
+		return p.bootPrivate(opts, wasi)
+	}
+	p.m.g = wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes)
+	p.mapped = mem
+	p.image = (&memoryImage{img: img}).retain()
+	return p.start(opts)
 }
 
 // bootPrivate is the no-snapshot path: run the reactor initializer and
@@ -486,7 +520,12 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 			wasm2go.SetMaxMemory(p.m.g, max)
 		}
 	}
+	return p.start(opts)
+}
 
+// start runs the reactor initializer and perl_new on the instance's fresh
+// module.
+func (p *Perl) start(opts InstanceOptions) (err error) {
 	// Run the reactor _initialize + wasmify init under a recover so a C++
 	// static-initializer trap surfaces as an error.
 	func() {
