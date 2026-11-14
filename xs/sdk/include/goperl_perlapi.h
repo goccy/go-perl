@@ -880,8 +880,8 @@ typedef uint64_t U64;
 #define NV_EPSILON DBL_EPSILON
 #include <limits.h>
 
-#define PTR2nat(p) ((PTRV)(p))
-#define PTR2NV(p) ((NV)PTR2nat(p))
+#define PTR2nat(p) ((PTRV)PTR2IV(p))
+#define PTR2NV(p) ((NV)PTR2IV(p))
 #define DPTR2FPTR(t, p) ((t)PTR2nat(p))
 #define FPTR2DPTR(t, p) ((t)PTR2nat(p))
 

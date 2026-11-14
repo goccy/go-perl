@@ -4887,6 +4887,31 @@ XS(XS_PerlAPI_sorted_ivs) {
     free(v);
     XSRETURN(items);
 }
+/* An op as a number, as B has it. op_of_b(op): the name of the op of a
+ * B::OP object, and whether the op is that number again (PTR2IV).
+ * next_op_object(): a B::OP object of the op after the call, made the way
+ * a typemap of B::OP makes one. */
+XS(XS_PerlAPI_op_of_b) {
+    dXSARGS;
+    if (items != 1 || !SvROK(ST(0))) croak_xs_usage(cv, "op");
+    {
+        const IV n = SvIV(SvRV(ST(0)));
+        OP *const o = INT2PTR(OP *, n);
+        ST(0) = sv_2mortal(newSVpvf("%s:%s", OP_NAME(o), PTR2IV(o) == n ? "same" : "other"));
+        XSRETURN(1);
+    }
+}
+XS(XS_PerlAPI_next_op_object) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        SV *const obj = sv_newmortal();
+        sv_setiv(newSVrv(obj, "B::OP"), PTR2IV(PL_op->op_next));
+        ST(0) = obj;
+        XSRETURN(1);
+    }
+}
+
 /* same_interp(): whether the interpreter (PERL_GET_CONTEXT) is the one the
  * first call saw. */
 static PerlInterpreter *PerlAPI_first_interp;
@@ -5078,6 +5103,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
     newXS_deffile("PerlAPI::sorted_ivs", XS_PerlAPI_sorted_ivs);
     newXS_deffile("PerlAPI::same_interp", XS_PerlAPI_same_interp);
+    newXS_deffile("PerlAPI::op_of_b", XS_PerlAPI_op_of_b);
+    newXS_deffile("PerlAPI::next_op_object", XS_PerlAPI_next_op_object);
     newXS_deffile("PerlAPI::destructor_found", XS_PerlAPI_destructor_found);
     newXS_deffile("PerlAPI::show", XS_PerlAPI_show);
     newXS_deffile("PerlAPI::observe", XS_PerlAPI_observe);

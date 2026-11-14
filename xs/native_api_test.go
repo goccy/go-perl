@@ -55,6 +55,18 @@ func TestNativeCodeWithoutContextArgument(t *testing.T) {
 	})
 }
 
+// An op is a number as on perl: its address in the interpreter, which is
+// the number of its B::OP object. A module takes the op of a B object
+// (INT2PTR of its number) and makes a B object of an op (PTR2IV).
+func TestNativeOpAsNumber(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the op of a B object", `use B; my $start = B::svref_2object(sub { my $x = shift; $x })->START; PerlAPI::op_of_b($start) . "|" . $start->name`, "nextstate:same|nextstate"},
+		{"a B object of an op", `use B; my $o = PerlAPI::next_op_object(); ref($o) . ":" . $o->name`, "B::OP:padsv_store"},
+	})
+}
+
 // A callback a module makes without G_EVAL leaves $@ as it was when the
 // code it called returns normally: only a call that asks for G_EVAL
 // empties it.

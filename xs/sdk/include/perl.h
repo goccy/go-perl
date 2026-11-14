@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 24u
+#define GOPERL_XS_ABI 25u
 
 /* Signal actions of the process.
  *
@@ -532,8 +532,7 @@ typedef union {
     U8 op_savefree; \
     U8 op_static; \
     U8 op_folded; \
-    uint64_t gop; /* guest OP token (0 = module-built scratch op) */ \
-    struct goperl_op_base *gop_base; /* write-back baseline */
+    uint64_t gop; /* guest OP token (0 = module-built scratch op) */
 struct op {
     BASEOP
     OP *op_first; /* UNOP view */
@@ -3264,9 +3263,44 @@ static SV *goperl_sv_setref_pv(goperl_frame_t *f, SV *rv,
     goperl_sv_setref_pv(_gof, (SV *)(rv), (classname), (void *)(ptr))
 #define sv_setref_iv(rv, classname, iv) \
     goperl_sv_setref_iv(_gof, (SV *)(rv), (classname), (int64_t)(iv))
-#define INT2PTR(type, iv) ((type)(uintptr_t)(iv))
-#define PTR2IV(p) ((IV)(intptr_t)(p))
-#define PTR2UV(p) ((UV)(uintptr_t)(p))
+/* A pointer as a number and back. An op is a number as it is on perl: its
+ * address in the interpreter, which is also the number of the B::OP object
+ * of the op (B is the interpreter's). So a module that keeps an op as a
+ * number, or takes the op of a B object (B::Utils, Devel::Cover's report),
+ * gets the op's shadow back from INT2PTR. An op of a module's own that the
+ * interpreter has no copy of (one on the C stack) is its address here.
+ * Defined below, with the op shadows. */
+static IV goperl_op_number(const OP *o);
+static OP *goperl_op_of_number(IV iv);
+#ifdef __cplusplus
+extern "C++" {
+template <class T> static inline IV goperl_ptr_number(T p) { return (IV)(intptr_t)p; }
+static inline IV goperl_ptr_number(OP *o) { return goperl_op_number(o); }
+static inline IV goperl_ptr_number(const OP *o) { return goperl_op_number(o); }
+template <class T> struct goperl_number_ptr {
+    static T of(IV iv) { return (T)(uintptr_t)iv; }
+};
+template <> struct goperl_number_ptr<OP *> {
+    static OP *of(IV iv) { return goperl_op_of_number(iv); }
+};
+template <> struct goperl_number_ptr<const OP *> {
+    static const OP *of(IV iv) { return goperl_op_of_number(iv); }
+};
+}
+#define GOPERL_PTR_NUMBER(p) goperl_ptr_number(p)
+#define INT2PTR(type, iv) (goperl_number_ptr<type>::of((IV)(iv)))
+#else
+#define GOPERL_PTR_NUMBER(p)                                        \
+    _Generic((p), OP *: goperl_op_number((const OP *)(uintptr_t)(p)), \
+             const OP *: goperl_op_number((const OP *)(uintptr_t)(p)), \
+             default: (IV)(intptr_t)(p))
+#define INT2PTR(type, iv)                                           \
+    _Generic((type)0, OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)), \
+             const OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)), \
+             default: (type)(uintptr_t)(iv))
+#endif
+#define PTR2IV(p) GOPERL_PTR_NUMBER(p)
+#define PTR2UV(p) ((UV)GOPERL_PTR_NUMBER(p))
 
 /* ---- interpreter variables ---------------------------------------------- */
 
@@ -4894,6 +4928,8 @@ typedef struct goperl_opreg_ent {
     U8 active;
     U16 ext; /* a persistent one: the bytes of the module's struct past OP */
     uint32_t gen; /* the generation its links were described in */
+    struct goperl_op_base *base; /* what was written back last (a write-back
+                                  * baseline: see goperl_op_base_capture) */
     void *aux_own; /* the aux of the op in this process's layout (a signature's
                     * parameters), which lasts as long as the shadow: code
                     * keeps the op and reads its aux in a later call */
@@ -5018,8 +5054,8 @@ static void goperl_opreg_sync(goperl_frame_t *f, goperl_opreg_t *r) {
         r->count--;
         e->op.gop = 0; /* nothing of it is written back any more */
         if (e->active || e->persist) continue; /* given up when the list is */
-        free(e->op.gop_base);
-        e->op.gop_base = 0;
+        free(e->base);
+        e->base = 0;
         free(e->aux_own);
         e->aux_own = 0;
         e->next = r->spare;
@@ -5034,8 +5070,8 @@ static void goperl_opreg_clear(void) {
     if (!r) return;
     for (goperl_opreg_ent_t *e = r->active; e;) {
         goperl_opreg_ent_t *next = e->active_next;
-        free(e->op.gop_base);
-        e->op.gop_base = 0;
+        free(e->base);
+        e->base = 0;
         e->active = 0;
         e->active_next = 0;
         if (!e->op.gop && !e->persist) { /* its op was freed meanwhile */
@@ -5216,6 +5252,24 @@ static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
 }
 
+/* An op as a number: its address in the interpreter (see PTR2IV). */
+static IV goperl_op_number(const OP *o) {
+    return !o ? 0 : o->gop ? (IV)o->gop : (IV)(intptr_t)o;
+}
+/* The op of a number. A number is all PTR2IV leaves of an op, so which op
+ * it names is told by where it points: below the end of the interpreter's
+ * memory it is the address of one of the interpreter's ops, anywhere else
+ * that of an op here (a module's own, which the interpreter has no copy
+ * of). An op that became a number some other way than as an op (through a
+ * void *) is the address of its shadow here, which is taken for the
+ * interpreter's when it lies below that end. */
+static OP *goperl_op_of_number(IV iv) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (!iv) return 0;
+    if (!f || (UV)iv >= (UV)f->memcap) return (OP *)(intptr_t)iv;
+    return goperl_op_shadow(f, (uint64_t)(UV)iv);
+}
+
 /* The shadow of an op with what is below it, as the interpreter has it
  * now (asked once for every entry of native code). */
 static OP *goperl_op_shadow_full(goperl_frame_t *f, uint64_t tok) {
@@ -5271,7 +5325,7 @@ __attribute__((weak, visibility("hidden"))) OP goperl_nullcop_v = {
     0, 0, 0, 0, OP_NEXTSTATE, 0, 0, 0, /* base scalars */
     1 /* gop_full */, 1 /* gop_iscop */, 0 /* moresib */, 12 /* a COP */,
     0, 0, 0, 0, 0 /* the flag bits */, 0 /* gop */,
-    0 /* gop_base */, 0 /* op_first */, {0}, 0 /* op_redoop */,
+    0 /* op_first */, {0}, 0 /* op_redoop */,
     0 /* cop_line */, 0 /* cop_hints */, 0 /* cop_warnings */, "", "main"};
 static COP *goperl_curcop(goperl_frame_t *f) {
     uint64_t tok = goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_CURCOP, 0,
@@ -6633,7 +6687,7 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 #define IV_MIN ((IV)INT64_MIN)
 #endif
 #define Gconvert(x, n, t, b) snprintf((b), 64, "%.*g", (int)(n), (double)(x))
-#define PTR2ul(p) ((unsigned long)(uintptr_t)(p))
+#define PTR2ul(p) ((unsigned long)GOPERL_PTR_NUMBER(p))
 #define safecalloc(n, sz) calloc((size_t)(n), (size_t)(sz))
 #define SVfARG(sv) ((SV *)(sv))
 #define SvIOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_IOKp) != 0)
@@ -8113,7 +8167,7 @@ static int goperl_is_utf8_string(const U8 *s, STRLEN len) {
  *     before every guest call and at plugin exit.
  *   - the new-op constructors build REAL guest ops immediately and return
  *     shadows. Field writes land on the shadow; every shadow carries a
- *     baseline copy (gop_base) and dirty fields are written back to the
+ *     baseline copy (the registry entry's base) and dirty fields are written back to the
  *     guest at the next optree sync point (a constructor consuming the op,
  *     or plugin exit).
  *   - an op_ppaddr write pointing at a module function makes that ONE op
@@ -8541,10 +8595,10 @@ enum {
 };
 
 static void goperl_op_base_capture(OP *o) {
-    if (!o->gop_base)
-        o->gop_base = (struct goperl_op_base *)calloc(
-            1, sizeof(struct goperl_op_base));
-    struct goperl_op_base *b = o->gop_base;
+    goperl_opreg_ent_t *const e = GOPERL_OPENT(o);
+    if (!e->base)
+        e->base = (struct goperl_op_base *)calloc(1, sizeof(struct goperl_op_base));
+    struct goperl_op_base *b = e->base;
     b->op_next = o->op_next;
     b->op_sibparent = o->op_sibparent;
     b->op_moresib = o->op_moresib;
@@ -8580,7 +8634,7 @@ static uint32_t goperl_op_tok32(goperl_frame_t *f, OP *kid) {
 }
 
 static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
-    struct goperl_op_base *b = o->gop_base;
+    struct goperl_op_base *b = GOPERL_OPENT(o)->base;
     if (!o->gop || !b) return;
     /* in a module's own op struct only the links it has are links */
     const int links = GOPERL_OPENT(o)->persist ? goperl_raw_links(o) : 2;
@@ -9653,7 +9707,7 @@ static UV goperl_utf8_cp(goperl_frame_t *f, const U8 *p, const U8 *e) {
 
 /* ---- assorted compat the parse dists use -------------------------------- */
 
-#define NUM2PTR(type, num) ((type)(uintptr_t)(num))
+#define NUM2PTR(type, num) INT2PTR(type, num)
 #define PerlMemShared_malloc(size) malloc(size)
 #define PerlMemShared_calloc(count, size) calloc((count), (size))
 #define PerlMemShared_free(p) free(p)
@@ -10283,7 +10337,7 @@ __goperl_shared_clone(void *dst_raw, const void *src_raw) {
                 c->active = 0;
                 c->gen = 0;
                 c->aux_own = 0;
-                c->op.gop_base = 0;
+                c->base = 0;
                 c->op.gop_full = 0;
                 c->op.op_next = c->op.op_sibparent = 0;
                 const int links = goperl_raw_links_by(sh, &c->op);
