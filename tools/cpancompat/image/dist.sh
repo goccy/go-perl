@@ -29,7 +29,8 @@
 # CPAN clients keep their build directories (~/.cpan/build, ~/.cpanm/work):
 # what a distribution installs can point into its build directory (an
 # RPATH, a pkg-config file that names it), and the distributions that use
-# it later find it there.
+# it later find it there. A build directory nothing installed refers to is
+# removed when the distribution is done.
 #
 # The orchestration is a shell script on purpose: it must not depend on the
 # perl under measurement behaving.
@@ -119,6 +120,20 @@ for ext in .tar.gz .tgz .tar.bz2 .tbz .tar.xz .tar .zip; do
 done
 build=$(mktemp -d "/work/$base-XXXXXX") || exit 1
 mkdir -p "$stage$dest"
+# The build directory stays only when what the distribution installed
+# refers to it; otherwise nothing can use it and it goes when the
+# distribution is done, whatever its outcome (kept, every build directory
+# of a run fills tens of gigabytes). The installed files are other
+# programs' output (binaries with an RPATH, pkg-config and Alien files), so
+# a reference is found by searching them for the directory's path.
+remove_unreferenced_build() {
+    cd /
+    if [ -d "$stage$dest" ] && grep -rqaF -- "$build" "$stage$dest" 2>/dev/null; then
+        return
+    fi
+    rm -rf "$build"
+}
+trap remove_unreferenced_build EXIT
 case "$archive" in
     *.zip) phase unpack 300 unzip -q "$archive" -d "$build" ;;
     *) phase unpack 300 tar -xf "$archive" -C "$build" ;;
