@@ -1421,7 +1421,12 @@ static __attribute__((unused)) UNOP_AUX_item **goperl_multideref_pc_ref(goperl_f
 /* PL_statcache, what the last stat found and -X _ reads, as a struct stat
  * of this process: read from the interpreter when native code first looks
  * at it after an operation, and what native code stored into it goes back
- * before the next one (EV fills it with what its own stat found). */
+ * before the next one (EV fills it with what its own stat found). A field
+ * native code stored into keeps what it stored until it has gone back, also
+ * when an operation runs in between: in `PL_statcache.st_size =
+ * SvIV(sv);` the compiler may take the field's address before SvIV runs
+ * (gcc does), and the store then comes after the operation. The fields
+ * nothing stored into are read again after an operation. */
 typedef struct goperl_statcache {
     struct stat st;   /* as native code sees it */
     struct stat seen; /* as it was read */
@@ -1429,6 +1434,38 @@ typedef struct goperl_statcache {
 } goperl_statcache_t;
 #define goperl_statcache_v (*(goperl_statcache_t **)&GOPERL_SHARED->statcache)
 #define GOPERL_STATCACHE_WORDS 13
+/* The fields of a struct stat as the interpreter exchanges them. */
+static __attribute__((unused)) void goperl_statcache_words(const struct stat *st, uint64_t *w) {
+    w[0] = (uint64_t)st->st_dev;
+    w[1] = (uint64_t)st->st_ino;
+    w[2] = (uint64_t)st->st_mode;
+    w[3] = (uint64_t)st->st_nlink;
+    w[4] = (uint64_t)st->st_uid;
+    w[5] = (uint64_t)st->st_gid;
+    w[6] = (uint64_t)st->st_rdev;
+    w[7] = (uint64_t)(int64_t)st->st_size;
+    w[8] = (uint64_t)(int64_t)st->st_atime;
+    w[9] = (uint64_t)(int64_t)st->st_mtime;
+    w[10] = (uint64_t)(int64_t)st->st_ctime;
+    w[11] = (uint64_t)(int64_t)st->st_blksize;
+    w[12] = (uint64_t)(int64_t)st->st_blocks;
+}
+static __attribute__((unused)) void goperl_statcache_fill(struct stat *st, const uint64_t *w) {
+    memset(st, 0, sizeof *st);
+    st->st_dev = (dev_t)w[0];
+    st->st_ino = (ino_t)w[1];
+    st->st_mode = (mode_t)w[2];
+    st->st_nlink = (nlink_t)w[3];
+    st->st_uid = (uid_t)w[4];
+    st->st_gid = (gid_t)w[5];
+    st->st_rdev = (dev_t)w[6];
+    st->st_size = (off_t)(int64_t)w[7];
+    st->st_atime = (time_t)(int64_t)w[8];
+    st->st_mtime = (time_t)(int64_t)w[9];
+    st->st_ctime = (time_t)(int64_t)w[10];
+    st->st_blksize = (blksize_t)(int64_t)w[11];
+    st->st_blocks = (blkcnt_t)(int64_t)w[12];
+}
 static __attribute__((unused)) struct stat *goperl_statcache_ref(goperl_frame_t *f) {
     goperl_statcache_t *c = goperl_statcache_v;
     if (!c) {
@@ -1437,43 +1474,35 @@ static __attribute__((unused)) struct stat *goperl_statcache_ref(goperl_frame_t 
         goperl_statcache_v = c;
     }
     if (c->gen != GOPERL_SHARED->gen + 1) {
-        uint64_t w[GOPERL_STATCACHE_WORDS];
-        memcpy(w, goperl_guest_mem(f, goperl_xs_op(f, GOPERL_OP_INTERNAL,
-                                                   (uint64_t)GOPERL_INT_STATCACHE << 32, 0, 0, 0)),
-               sizeof w);
-        memset(&c->st, 0, sizeof c->st);
-        c->st.st_dev = (dev_t)w[0];
-        c->st.st_ino = (ino_t)w[1];
-        c->st.st_mode = (mode_t)w[2];
-        c->st.st_nlink = (nlink_t)w[3];
-        c->st.st_uid = (uid_t)w[4];
-        c->st.st_gid = (gid_t)w[5];
-        c->st.st_rdev = (dev_t)w[6];
-        c->st.st_size = (off_t)(int64_t)w[7];
-        c->st.st_atime = (time_t)(int64_t)w[8];
-        c->st.st_mtime = (time_t)(int64_t)w[9];
-        c->st.st_ctime = (time_t)(int64_t)w[10];
-        c->st.st_blksize = (blksize_t)(int64_t)w[11];
-        c->st.st_blocks = (blkcnt_t)(int64_t)w[12];
-        c->seen = c->st;
+        uint64_t now[GOPERL_STATCACHE_WORDS], mine[GOPERL_STATCACHE_WORDS],
+            was[GOPERL_STATCACHE_WORDS];
+        memcpy(now, goperl_guest_mem(f, goperl_xs_op(f, GOPERL_OP_INTERNAL,
+                                                     (uint64_t)GOPERL_INT_STATCACHE << 32, 0, 0, 0)),
+               sizeof now);
+        goperl_statcache_words(&c->st, mine);
+        goperl_statcache_words(&c->seen, was);
+        goperl_statcache_fill(&c->seen, now);
+        /* a field stored into since it was read, not gone back yet */
+        for (int i = 0; i < GOPERL_STATCACHE_WORDS; i++)
+            if (mine[i] != was[i]) now[i] = mine[i];
+        goperl_statcache_fill(&c->st, now);
         c->gen = GOPERL_SHARED->gen + 1;
     }
     return &c->st;
 }
 static void goperl_statcache_writeback(goperl_frame_t *f) {
     goperl_statcache_t *c = goperl_statcache_v;
-    if (!c || c->gen != GOPERL_SHARED->gen + 1 || !memcmp(&c->st, &c->seen, sizeof c->st))
-        return;
-    const uint64_t w[GOPERL_STATCACHE_WORDS] = {
-        (uint64_t)c->st.st_dev, (uint64_t)c->st.st_ino, (uint64_t)c->st.st_mode,
-        (uint64_t)c->st.st_nlink, (uint64_t)c->st.st_uid, (uint64_t)c->st.st_gid,
-        (uint64_t)c->st.st_rdev, (uint64_t)(int64_t)c->st.st_size,
-        (uint64_t)(int64_t)c->st.st_atime, (uint64_t)(int64_t)c->st.st_mtime,
-        (uint64_t)(int64_t)c->st.st_ctime, (uint64_t)(int64_t)c->st.st_blksize,
-        (uint64_t)(int64_t)c->st.st_blocks};
+    if (!c) return;
+    uint64_t mine[GOPERL_STATCACHE_WORDS], was[GOPERL_STATCACHE_WORDS];
+    goperl_statcache_words(&c->st, mine);
+    goperl_statcache_words(&c->seen, was);
+    if (!memcmp(mine, was, sizeof mine)) return;
+    /* the fields nothing stored into, as the interpreter has them now */
+    goperl_statcache_ref(f);
+    goperl_statcache_words(&c->st, mine);
     c->seen = c->st;
     goperl_xs_op(f, GOPERL_OP_INTERNAL, (uint64_t)GOPERL_INT_STATCACHE << 32, 1,
-                 (const char *)w, sizeof w);
+                 (const char *)mine, sizeof mine);
 }
 #define PL_statcache (*goperl_statcache_ref(_gof))
 
