@@ -1614,6 +1614,19 @@ XS(XS_PerlAPI_method_twice) {
     }
 }
 
+/* Whether an object derives from a class, asked by the name of its stash,
+ * as Object::Pad asks it of the class of a method (sv_derived_from_hv). */
+XS(XS_PerlAPI_derived_from_stash) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "object, class");
+    {
+        HV *const stash = gv_stashsv(ST(1), 0);
+        if (!stash) XSRETURN_PV("no stash");
+        XSRETURN_IV(sv_derived_from_pvn(ST(0), HvNAME(stash), HvNAMELEN(stash),
+                                        HvNAMEUTF8(stash) ? SVf_UTF8 : 0) ? 1 : 0);
+    }
+}
+
 /* Calls code with $_ set to a name, the way DBI runs a callback: the SV in
  * $_ is swapped for another and put back, never written to. Returns what
  * the code left in its $_. */
@@ -3690,6 +3703,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::display", XS_PerlAPI_display);
     newXS_deffile("PerlAPI::method_cache_gen", XS_PerlAPI_method_cache_gen);
     newXS_deffile("PerlAPI::method_twice", XS_PerlAPI_method_twice);
+    newXS_deffile("PerlAPI::derived_from_stash", XS_PerlAPI_derived_from_stash);
     newXS_deffile("PerlAPI::with_topic", XS_PerlAPI_with_topic);
     newXS_deffile("PerlAPI::leave_errno", XS_PerlAPI_leave_errno);
     newXS_deffile("PerlAPI::errno_of_the_program", XS_PerlAPI_errno_of_the_program);

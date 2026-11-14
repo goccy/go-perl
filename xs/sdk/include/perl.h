@@ -5970,6 +5970,8 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
 static HV *goperl_gv_stashsv(goperl_frame_t *f, SV *name, I32 flags) {
     uint64_t len = 0;
     const char *p = goperl_direct_sv_pv(f, GOPERL_TOK(name), &len);
+    /* the name is characters when the SV is (perl's gv_stashsv) */
+    if (SvUTF8(name)) flags |= SVf_UTF8;
     return (HV *)GOPERL_SV(goperl_do_op(f, GOPERL_OP_GV_STASHPV,
                                         (uint64_t)(int64_t)flags, 0, p, len));
 }
@@ -9044,6 +9046,15 @@ static UV goperl_utf8_cp(goperl_frame_t *f, const U8 *p, const U8 *e) {
 static int goperl_sv_classify(goperl_frame_t *f, SV *sv, int mode, U32 flags,
                               const char *name, STRLEN len, SV *namesv) {
     /* b layout (shared with the guest): len<<32 | flags<<8 | mode */
+    if (mode == 0 && (flags & SVf_UTF8)) {
+        /* a name of characters: the 24 bits of flags there hold no
+         * SVf_UTF8, an SV of the name does (sv_derived_from_pvn and _sv
+         * are one function in perl) */
+        SV *const n = GOPERL_SV(goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, (uint64_t)len, name, (uint64_t)len));
+        goperl_do_op(f, GOPERL_OP_SV_MORTAL, GOPERL_TOK(n), 0, 0, 0);
+        goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, GOPERL_TOK(n), 0, 0, 0);
+        return goperl_sv_classify(f, sv, 1, flags & ~SVf_UTF8, 0, 0, n);
+    }
     if (mode == 0)
         return (int)goperl_do_op(f, GOPERL_OP_SV_CLASSIFY, GOPERL_TOK(sv),
                                  ((uint64_t)(uint32_t)len << 32) |

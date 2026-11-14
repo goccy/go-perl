@@ -125,6 +125,8 @@ package GenChild; our @ISA = ("GenParent"); package main; 1;`
 		{"unchanged while nothing is redefined", `GenChild->m; my $a = PerlAPI::method_cache_gen("GenChild"); GenChild->m; $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "same"},
 		{"a method of the parent is replaced", `my $a = PerlAPI::method_cache_gen("GenChild"); { no warnings; *GenParent::m = sub { 2 }; } $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "moved"},
 		{"GvCV of an inherited method, from the method cache too", `package GenKid; our @ISA = ("GenOther"); package main; PerlAPI::method_twice("GenKid", "m")`, "same sub"},
+		{"a class whose name is UTF-8", "use utf8; package Pàckagé { sub hello { 1 } } PerlAPI::method_twice(\"Pàckagé\", \"hello\")", "same sub"},
+		{"derived from a class whose name is UTF-8", "use utf8; PerlAPI::derived_from_stash(bless({}, \"Sĉ\"), \"Sĉ\") . PerlAPI::derived_from_stash(bless({}, \"Sà\"), \"Sà\") . PerlAPI::derived_from_stash(bless({}, \"Sà\"), \"Sĉ\")", "110"},
 		{"@ISA changes", `my $a = PerlAPI::method_cache_gen("GenChild"); @GenChild::ISA = ("GenOther"); $a == PerlAPI::method_cache_gen("GenChild") ? "same" : "moved"`, "moved"},
 	})
 }
