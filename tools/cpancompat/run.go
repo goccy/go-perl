@@ -44,7 +44,9 @@ const (
 	// that prints without end).
 	outcomeOutputLimit = "output_limit"
 	// outcomeBlocked: a distribution this one needs could not be
-	// installed, so it was not attempted (or not attempted again).
+	// installed: one it needs to be configured (it was not attempted),
+	// one its configuration asked for (it was not attempted again), or a
+	// static requirement when its configuration failed.
 	outcomeBlocked = "blocked"
 	// outcomeDriverFailed: the run left no usable record (the container
 	// could not start, or the helper that reads the configured
@@ -403,17 +405,16 @@ func (r *runner) ensureNode(name string) (*node, error) {
 func sameCycle(a, b *dist) bool { return a.Cycle != 0 && a.Cycle == b.Cycle }
 
 // release makes a node whose needs have all finished runnable, or settles
-// it as blocked when one of them is not installed.
+// it as blocked when a distribution it needs to configure is not installed.
+//
+// The other static requirements, the ones the graph was built from, do not
+// settle it: a release whose configuration is dynamic computes its own while
+// it is configured (MYMETA), and those can leave out what it needs only on
+// other systems (Apache-Test 1.43 lists Win32::Process). settle blocks it
+// on the computed requirements that are not met. Configure requirements
+// are static by the CPAN::Meta specification.
 func (r *runner) release(n *node) error {
-	var blocked []string
-	for _, need := range n.d.Needs {
-		m := r.nodes[need]
-		if m != nil && m.res != nil && !m.res.Installed && !sameCycle(n.d, m.d) {
-			blocked = append(blocked, need)
-		}
-	}
-	if len(blocked) > 0 {
-		sort.Strings(blocked)
+	if blocked := r.notInstalledNeeds(n, true); len(blocked) > 0 {
 		res := r.newResult(n.d, n.attempts)
 		res.Outcome = outcomeBlocked
 		res.BlockedBy = blocked
@@ -421,6 +422,34 @@ func (r *runner) release(n *node) error {
 	}
 	heap.Push(&r.ready, n)
 	return nil
+}
+
+// notInstalledNeeds returns, sorted, the distributions n needs by its static
+// requirements that finished without being installed; with configureOnly,
+// only the ones it needs to be configured. A distribution of n's own
+// dependency cycle is left out: n could not wait for it.
+func (r *runner) notInstalledNeeds(n *node, configureOnly bool) []string {
+	var configure map[string]bool
+	if configureOnly {
+		configure = map[string]bool{}
+		for _, q := range n.d.Requires {
+			if q.Phase == "configure" && q.Relationship == "requires" && q.Dist != "" {
+				configure[q.Dist] = true
+			}
+		}
+	}
+	var out []string
+	for _, need := range n.d.Needs {
+		if configureOnly && !configure[need] {
+			continue
+		}
+		m := r.nodes[need]
+		if m != nil && m.res != nil && !m.res.Installed && !sameCycle(n.d, m.d) {
+			out = append(out, need)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *runner) newResult(d *dist, attempts int) *result {
@@ -566,6 +595,16 @@ func timeoutOr(p phaseRecord, outcome string) string {
 // settle takes a distribution back from its worker: it either waits for
 // the requirements its configuration revealed, or its result is final.
 func (r *runner) settle(n *node, res *result) error {
+	if res.Outcome == outcomeConfigureFailed {
+		// A configure script commonly loads what the distribution needs
+		// without declaring it for configuration, so a failure there is
+		// put down to a static requirement that is not installed. Its
+		// phases stay in the record.
+		if blocked := r.notInstalledNeeds(n, false); len(blocked) > 0 {
+			res.Outcome = outcomeBlocked
+			res.BlockedBy = blocked
+		}
+	}
 	if res.Outcome == outcomeUnmet && n.attempts < maxAttempts {
 		wait := map[string]bool{}
 		final := false
