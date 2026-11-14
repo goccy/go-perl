@@ -64,6 +64,45 @@ func TestReleaseBlocksOnlyOnConfigureRequirements(t *testing.T) {
 	}
 }
 
+func TestEnsureNodeReleasesEachNodeOnce(t *testing.T) {
+	// Scheduling A adds A, B and W. B needs, to be configured, C, which
+	// an earlier run did not install, so releasing B settles it as
+	// blocked; W waited only for B, so recording B releases W. W must
+	// not be released again as one of the nodes that wait for nothing.
+	results, err := os.Create(filepath.Join(t.TempDir(), "results.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer results.Close()
+	r := &runner{
+		dists: map[string]*dist{
+			"A": {Dist: "A", Needs: []string{"W", "B"}},
+			"B": {Dist: "B", Needs: []string{"C"}, Requires: []requirement{
+				{Module: "C", Phase: "configure", Relationship: "requires", Dist: "C"},
+			}},
+			"C": {Dist: "C"},
+			"W": {Dist: "W", Needs: []string{"B"}},
+		},
+		previous: map[string]*result{"C": {Dist: "C", Outcome: outcomeBuildFailed}},
+		nodes:    map[string]*node{},
+		waiters:  map[string][]*node{},
+		results:  results,
+	}
+	if _, err := r.ensureNode("A"); err != nil {
+		t.Fatal(err)
+	}
+	ready := map[string]int{}
+	for _, n := range r.ready {
+		ready[n.d.Dist]++
+	}
+	if !reflect.DeepEqual(ready, map[string]int{"W": 1}) {
+		t.Errorf("ready: %v; want W once", ready)
+	}
+	if res := r.nodes["B"].res; res == nil || res.Outcome != outcomeBlocked {
+		t.Errorf("B settled as %+v; want blocked", res)
+	}
+}
+
 func TestSettlePutsConfigureFailureDownToMissingNeeds(t *testing.T) {
 	r, n := blockingRunner(t, "Runtime")
 	res := &result{Dist: "Dependent", Outcome: outcomeConfigureFailed}

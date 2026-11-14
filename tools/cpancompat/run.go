@@ -390,11 +390,18 @@ func (r *runner) ensureNode(name string) (*node, error) {
 			r.waiters[need] = append(r.waiters[need], n)
 		}
 	}
+	// The ones waiting for nothing are taken before any is released: a
+	// release can settle a node, and recording it releases the nodes that
+	// waited only for it, which must not be released a second time here.
+	var free []*node
 	for _, n := range added {
 		if len(n.waiting) == 0 {
-			if err := r.release(n); err != nil {
-				return nil, err
-			}
+			free = append(free, n)
+		}
+	}
+	for _, n := range free {
+		if err := r.release(n); err != nil {
+			return nil, err
 		}
 	}
 	return r.nodes[name], nil

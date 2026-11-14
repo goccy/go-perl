@@ -1,6 +1,8 @@
 # Prints, as one JSON object, the requirements of the configured
 # distribution in the current directory that the installed modules do not
-# meet: {"unmet":[{"module":..., "wanted":..., "have":...}, ...]}.
+# meet: {"unmet":[{"module":..., "wanted":..., "have":...}, ...]}, and exits
+# 3 when there is one, so that the distribution is not built against what it
+# lacks.
 #
 # The requirements are the ones the distribution computed while it was
 # configured (MYMETA), which can differ from the static ones the dependency
@@ -36,3 +38,4 @@ if ($file) {
     }
 }
 print JSON::PP->new->canonical->encode({ unmet => \@unmet }), "\n";
+exit(@unmet ? 3 : 0);
