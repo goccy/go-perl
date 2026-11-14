@@ -1,7 +1,7 @@
 #!/bin/sh
-# Runs once while the image is built: makes gperl the perl command of the
-# machine, the way `gperl xs build` arranges it for the build of one
-# distribution.
+# Runs once while the image is built, as the user distributions are tested
+# as (user.sh): makes gperl the perl command of the machine, the way
+# `gperl xs build` arranges it for the build of one distribution.
 set -e
 G=/opt/gperl
 mkdir -p $G/proj $G/fakearchlib $G/local/lib/perl5 $G/local/bin

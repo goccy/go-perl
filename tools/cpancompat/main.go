@@ -21,7 +21,12 @@
 //	cpancompat run     configure, build, test and install distributions on
 //	                   go-perl, in dependency order, one container each;
 //	                   results accumulate in runs/<name>/results.jsonl and
-//	                   an interrupted run continues where it stopped
+//	                   an interrupted run continues where it stopped. The
+//	                   containers run CPAN code, which may be malicious: as
+//	                   an unprivileged user without capabilities, with no
+//	                   writable directory of this machine, kept from the
+//	                   LAN and the hosts around them, and without network
+//	                   while they test
 //	cpancompat report  summarize a run: outcomes, and coverage against the
 //	                   distributions that pass on perl
 //

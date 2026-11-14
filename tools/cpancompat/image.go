@@ -25,24 +25,16 @@ func buildImage(dataDir, gperl, perlImage, tag string) error {
 		return fmt.Errorf("image: give either a gperl binary (-gperl) or a perl image (-perl-image)")
 	}
 	ctx := filepath.Join(dataDir, "image-context")
-	if err := os.RemoveAll(ctx); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(ctx, 0o755); err != nil {
-		return err
-	}
 	entries, err := imageFiles.ReadDir("image")
 	if err != nil {
 		return err
 	}
+	var names []string
 	for _, e := range entries {
-		data, err := imageFiles.ReadFile("image/" + e.Name())
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(ctx, e.Name()), data, 0o644); err != nil {
-			return err
-		}
+		names = append(names, e.Name())
+	}
+	if err := writeContext(ctx, names...); err != nil {
+		return err
 	}
 	args := []string{"build", "-t", tag}
 	if perlImage != "" {
@@ -54,6 +46,27 @@ func buildImage(dataDir, gperl, perlImage, tag string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// writeContext makes dir a build context holding the named files of the
+// embedded image directory.
+func writeContext(dir string, names ...string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range names {
+		data, err := imageFiles.ReadFile("image/" + name)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyFile(from, to string, mode os.FileMode) error {

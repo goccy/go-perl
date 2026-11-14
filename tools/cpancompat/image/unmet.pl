@@ -1,8 +1,9 @@
 # Prints, as one JSON object, the requirements of the configured
 # distribution in the current directory that the installed modules do not
-# meet: {"unmet":[{"module":..., "wanted":..., "have":...}, ...]}, and exits
-# 3 when there is one, so that the distribution is not built against what it
-# lacks.
+# meet: {"unmet":[{"module":..., "wanted":..., "have":...}, ...]}. It
+# exits 0 whenever it could tell: a distribution whose requirements are not
+# all met is still built and tested, as CPAN.pm does (it warns and goes on);
+# the driver puts a failure down to what it lacked.
 #
 # The requirements are the ones the distribution computed while it was
 # configured (MYMETA), which can differ from the static ones the dependency
@@ -38,4 +39,3 @@ if ($file) {
     }
 }
 print JSON::PP->new->canonical->encode({ unmet => \@unmet }), "\n";
-exit(@unmet ? 3 : 0);

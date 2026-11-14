@@ -18,7 +18,8 @@ import (
 // The outcome of running one distribution's own build and test suite on
 // the interpreter.
 const (
-	// outcomePass: the test phase ended successfully.
+	// outcomePass: the test phase ended successfully. A distribution that
+	// passes is a pass even when requirements it named were not met.
 	outcomePass = "pass"
 	// outcomeFail: the distribution built and its test phase failed.
 	outcomeFail = "fail"
@@ -26,27 +27,36 @@ const (
 	outcomeUnpackFailed = "unpack_failed"
 	// outcomeNoBuildScript: neither Makefile.PL nor Build.PL.
 	outcomeNoBuildScript = "no_build_script"
-	// outcomeConfigureFailed: Makefile.PL / Build.PL failed.
+	// outcomeConfigureFailed: Makefile.PL / Build.PL did not write the
+	// Makefile / Build, and exited with an error. (One that wrote it is
+	// gone on from whatever its exit status, as CPAN clients do.)
 	outcomeConfigureFailed = "configure_failed"
 	// outcomeDeclined: the build script ended successfully without
 	// producing a Makefile / Build: it does not support this platform.
 	outcomeDeclined = "declined"
-	// outcomeUnmet: a requirement the distribution computed while it was
-	// configured cannot be met (perl itself, a module the index does not
-	// know, or one whose distribution does not provide what is asked).
+	// outcomeUnmet: the distribution did not pass, and a requirement it
+	// computed while it was configured cannot be met (perl itself, a
+	// module the index does not know, one of its own, or one whose
+	// distribution is installed and does not provide what is asked). It
+	// was built and tested anyway; OwnOutcome is how that went.
 	outcomeUnmet = "prerequisites_unmet"
 	// outcomeBuildFailed: make / Build failed.
 	outcomeBuildFailed = "build_failed"
-	// outcomeTimeout: a phase ran out of time.
+	// outcomeTimeout: a phase ran out of time (the exit status of its
+	// time limit says so).
 	outcomeTimeout = "timeout"
 	// outcomeOutputLimit: a phase was stopped because its output passed
 	// the limit (a script that prompts in a loop on a closed stdin, a test
 	// that prints without end).
 	outcomeOutputLimit = "output_limit"
-	// outcomeBlocked: a distribution this one needs could not be
-	// installed: one it needs to be configured (it was not attempted),
-	// one its configuration asked for (it was not attempted again), or a
-	// static requirement when its configuration failed.
+	// outcomeBlocked: the distribution did not pass, and a distribution
+	// providing a module it lacked was not installed when it ran: one
+	// providing a requirement it computed while it was configured, or,
+	// when its configuration failed (and so computed none), one it needs
+	// by its static requirements. It was run anyway, and OwnOutcome is
+	// how that went; BlockedBy names those distributions. A distribution
+	// left waiting for distributions that never finished is blocked by
+	// them without having been run.
 	outcomeBlocked = "blocked"
 	// outcomeDriverFailed: the run left no usable record (the container
 	// could not start, or the helper that reads the configured
@@ -99,13 +109,20 @@ type result struct {
 	Shipped bool `json:"shipped,omitempty"`
 	// Installed: distributions that need this one can be attempted. A
 	// distribution is installed whenever it builds, whatever its tests say.
-	Installed bool               `json:"installed"`
-	Phases    []phaseRecord      `json:"phases,omitempty"`
-	Tests     []testFile         `json:"tests,omitempty"`
+	Installed bool          `json:"installed"`
+	Phases    []phaseRecord `json:"phases,omitempty"`
+	Tests     []testFile    `json:"tests,omitempty"`
+	// Unmet are the requirements the installed modules did not meet when
+	// the distribution was configured.
 	Unmet     []unmetRequirement `json:"unmet,omitempty"`
 	BlockedBy []string           `json:"blocked_by,omitempty"`
-	// Attempts counts the container runs: a distribution is run again
-	// after the requirements it discovered while configuring are installed.
+	// OwnOutcome is the outcome of the distribution's own configure, build
+	// and tests when Outcome puts it down to what it lacked (blocked,
+	// prerequisites_unmet): it was run all the same.
+	OwnOutcome string `json:"own_outcome,omitempty"`
+	// Attempts counts the container runs: a distribution that did not pass
+	// while requirements it computed when it was configured were unmet is
+	// run again once the distributions providing them have finished.
 	Attempts    int    `json:"attempts"`
 	Seconds     int    `json:"seconds"`
 	Interpreter string `json:"interpreter,omitempty"`
@@ -126,8 +143,8 @@ type runOptions struct {
 	wall        time.Duration
 }
 
-// maxAttempts bounds how often a distribution is configured again because
-// configuring it revealed further requirements.
+// maxAttempts bounds how often a distribution is run again because it
+// lacked requirements whose distributions had not finished.
 const maxAttempts = 4
 
 // node is one distribution in the schedule. Only the coordinating
@@ -158,8 +175,12 @@ type runner struct {
 
 	runDir   string
 	archives string
-	volume   string
-	results  *os.File
+	// volume is the run's install tree, shared by its containers;
+	// buildVolume holds their build directories, which are kept as CPAN
+	// clients keep theirs.
+	volume      string
+	buildVolume string
+	results     *os.File
 }
 
 // attempted is what a worker hands back.
@@ -202,6 +223,7 @@ func runSurvey(opts runOptions) error {
 		archives: filepath.Join(opts.dataDir, "archives"),
 		volume:   "cpancompat-" + opts.run,
 	}
+	r.buildVolume = r.volume + "-build"
 	all, err := readDists(filepath.Join(opts.dataDir, "dists.jsonl"))
 	if err != nil {
 		return err
@@ -239,8 +261,13 @@ func runSurvey(opts runOptions) error {
 		return err
 	}
 	defer r.results.Close()
-	if out, err := exec.Command("docker", "volume", "create", r.volume).CombinedOutput(); err != nil {
-		return fmt.Errorf("docker volume create: %v: %s", err, out)
+	for _, v := range []string{r.volume, r.buildVolume} {
+		if out, err := exec.Command("docker", "volume", "create", v).CombinedOutput(); err != nil {
+			return fmt.Errorf("docker volume create: %v: %s", err, out)
+		}
+	}
+	if err := guardNetwork(opts.dataDir); err != nil {
+		return err
 	}
 
 	targets, err := r.targets(all)
@@ -254,12 +281,17 @@ func runSurvey(opts runOptions) error {
 	}
 	fmt.Fprintf(os.Stderr, "cpancompat: %d distributions selected, %d scheduled with what they need, %d already recorded\n",
 		len(targets), r.total, r.done)
+	return r.schedule(r.attempt)
+}
 
+// schedule runs the scheduled distributions, at most -jobs at once, each by
+// attempt (on a goroutine of its own), until every one is settled.
+func (r *runner) schedule(attempt func(d *dist, attempts, seq int) *result) error {
 	finished := make(chan attempted)
 	active := 0
 	sequence := 0
 	for {
-		for active < opts.jobs && r.ready.Len() > 0 {
+		for active < r.opts.jobs && r.ready.Len() > 0 {
 			n := heap.Pop(&r.ready).(*node)
 			active++
 			sequence++
@@ -268,10 +300,13 @@ func runSurvey(opts runOptions) error {
 			}
 			n.attempts++
 			go func(n *node, attempts, seq int) {
-				finished <- attempted{n, r.attempt(n.d, attempts, seq)}
+				finished <- attempted{n, attempt(n.d, attempts, seq)}
 			}(n, n.attempts, sequence)
 		}
 		if active == 0 {
+			if r.resume() {
+				continue
+			}
 			break
 		}
 		a := <-finished
@@ -283,9 +318,61 @@ func runSurvey(opts runOptions) error {
 	return r.recordStuck()
 }
 
-// recordStuck settles, once nothing runs or can run, what is left: it waits
-// for something that never finished, distributions that need each other.
-// Each is blocked by the ones it waited for.
+// resume ends a standstill: nothing runs or can run, and distributions wait
+// for one another, the members of a dependency cycle, or by requirements
+// only their configuration revealed. Waiting for a distribution that has
+// run before no longer helps: whatever its earlier runs built is installed.
+// So the distributions that have run and wait only for such ones are run
+// again (each now finds what the others built); when there are none, the
+// ones that have not run and wait only for such ones are run. It reports
+// whether it released any, which it always does at a standstill: the ones
+// that have not run wait only by static requirements, which do not form
+// cycles. Every run counts towards maxAttempts, after which a distribution
+// no longer waits, so standstills end.
+func (r *runner) resume() bool {
+	var again, first []*node
+	for _, n := range r.nodes {
+		if n.res != nil || len(n.waiting) == 0 {
+			continue
+		}
+		onlyRun := true
+		for provider := range n.waiting {
+			if r.nodes[provider].attempts == 0 {
+				onlyRun = false
+				break
+			}
+		}
+		switch {
+		case !onlyRun:
+		case n.attempts > 0:
+			again = append(again, n)
+		default:
+			first = append(first, n)
+		}
+	}
+	if len(again) == 0 {
+		again = first
+	}
+	for _, n := range again {
+		for provider := range n.waiting {
+			kept := r.waiters[provider][:0]
+			for _, w := range r.waiters[provider] {
+				if w != n {
+					kept = append(kept, w)
+				}
+			}
+			r.waiters[provider] = kept
+		}
+		n.waiting = map[string]bool{}
+		r.release(n)
+	}
+	return len(again) > 0
+}
+
+// recordStuck settles, once nothing runs or can run and resume released
+// nothing, what is left: distributions that wait for something that never
+// finished. Each is blocked by the ones it waited for. (resume always
+// releases some at a standstill, so nothing should be left.)
 func (r *runner) recordStuck() error {
 	var stuck []string
 	for name, n := range r.nodes {
@@ -401,18 +488,9 @@ func (r *runner) ensureNode(name string) (*node, error) {
 			r.waiters[need] = append(r.waiters[need], n)
 		}
 	}
-	// The ones waiting for nothing are taken before any is released: a
-	// release can settle a node, and recording it releases the nodes that
-	// waited only for it, which must not be released a second time here.
-	var free []*node
 	for _, n := range added {
 		if len(n.waiting) == 0 {
-			free = append(free, n)
-		}
-	}
-	for _, n := range free {
-		if err := r.release(n); err != nil {
-			return nil, err
+			r.release(n)
 		}
 	}
 	return r.nodes[name], nil
@@ -422,45 +500,18 @@ func (r *runner) ensureNode(name string) (*node, error) {
 // indirectly: neither can wait for the other.
 func sameCycle(a, b *dist) bool { return a.Cycle != 0 && a.Cycle == b.Cycle }
 
-// release makes a node whose needs have all finished runnable, or settles
-// it as blocked when a distribution it needs to configure is not installed.
-//
-// The other static requirements, the ones the graph was built from, do not
-// settle it: a release whose configuration is dynamic computes its own while
-// it is configured (MYMETA), and those can leave out what it needs only on
-// other systems (Apache-Test 1.43 lists Win32::Process). settle blocks it
-// on the computed requirements that are not met. Configure requirements
-// are static by the CPAN::Meta specification.
-func (r *runner) release(n *node) error {
-	if blocked := r.notInstalledNeeds(n, true); len(blocked) > 0 {
-		res := r.newResult(n.d, n.attempts)
-		res.Outcome = outcomeBlocked
-		res.BlockedBy = blocked
-		return r.record(n, res)
-	}
-	heap.Push(&r.ready, n)
-	return nil
-}
+// release makes a node whose needs have all finished runnable, whatever they
+// did: a distribution whose requirements are not all met is still
+// configured, built and tested, as CPAN.pm does (it warns and goes on), and
+// settle puts a failure down to what it lacked.
+func (r *runner) release(n *node) { heap.Push(&r.ready, n) }
 
 // notInstalledNeeds returns, sorted, the distributions n needs by its static
-// requirements that finished without being installed; with configureOnly,
-// only the ones it needs to be configured. A distribution of n's own
-// dependency cycle is left out: n could not wait for it.
-func (r *runner) notInstalledNeeds(n *node, configureOnly bool) []string {
-	var configure map[string]bool
-	if configureOnly {
-		configure = map[string]bool{}
-		for _, q := range n.d.Requires {
-			if q.Phase == "configure" && q.Relationship == "requires" && q.Dist != "" {
-				configure[q.Dist] = true
-			}
-		}
-	}
+// requirements that finished without being installed. A distribution of n's
+// own dependency cycle is left out: n could not wait for it.
+func (r *runner) notInstalledNeeds(n *node) []string {
 	var out []string
 	for _, need := range n.d.Needs {
-		if configureOnly && !configure[need] {
-			continue
-		}
 		m := r.nodes[need]
 		if m != nil && m.res != nil && !m.res.Installed && !sameCycle(n.d, m.d) {
 			out = append(out, need)
@@ -481,6 +532,14 @@ func (r *runner) newResult(d *dist, attempts int) *result {
 
 // attempt runs the distribution's container once and returns what it
 // found. It runs on a worker goroutine and changes nothing shared.
+//
+// The container runs code from CPAN, which may be malicious: it gets no
+// writable directory of this machine, only the archives read-only, and runs
+// as an unprivileged user without capabilities, unable to gain any. It
+// writes its records into its own /out, which is copied out once it has
+// ended (copyOut). Its network reaches the internet but not the LAN, the
+// VM's host or the VM (guardNetwork), and is taken away before its test
+// phase, when dist.sh asks for that (converse).
 func (r *runner) attempt(d *dist, attempts, seq int) *result {
 	res := r.newResult(d, attempts)
 	res.Shipped = bundled(d, r.provided)
@@ -492,11 +551,9 @@ func (r *runner) attempt(d *dist, attempts, seq int) *result {
 	if _, err := fetchArchive(r.opts.dataDir, d); err != nil {
 		return fail(err)
 	}
-	out := filepath.Join(r.runDir, "work", d.Dist)
+	work := filepath.Join(r.runDir, "work")
+	out := filepath.Join(work, d.Dist)
 	if err := os.RemoveAll(out); err != nil {
-		return fail(err)
-	}
-	if err := os.MkdirAll(out, 0o755); err != nil {
 		return fail(err)
 	}
 	mode := "build"
@@ -504,23 +561,48 @@ func (r *runner) attempt(d *dist, attempts, seq int) *result {
 		mode = "shipped"
 	}
 	name := fmt.Sprintf("cpancompat-%s-%d", r.opts.run, seq)
+	// A container of that name is one an interrupted driver left.
+	_ = exec.Command("docker", "rm", "--force", name).Run()
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.wall)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--name", name,
+	// With an init process as PID 1: xvfb-run, which the test phase runs
+	// under, waits for a signal from the X server that a shell running as
+	// PID 1 never gets.
+	cmd := exec.CommandContext(ctx, "docker", "run", "--init", "--name", name, "--network", surveyNetwork,
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--cpus", r.opts.cpus, "--memory", r.opts.memory, "--pids-limit", "2048",
 		"-v", r.volume+":/opt/gperl/local",
+		"-v", r.buildVolume+":/work",
 		"-v", r.archives+":/archives:ro",
-		"-v", out+":/out",
 		r.opts.image, "bash", "/opt/cpancompat/dist.sh", "/archives/"+d.Path, mode)
 	cmd.Cancel = func() error { return exec.Command("docker", "kill", name).Run() }
-	log, err := os.Create(filepath.Join(out, "container.log"))
+	// What docker run prints goes to container.log once the records are
+	// copied out: the directory is the container's until then.
+	log, err := os.CreateTemp(work, "."+d.Dist+".container.log.")
 	if err != nil {
 		return fail(err)
 	}
-	cmd.Stdout, cmd.Stderr = log, log
-	runErr := cmd.Run()
+	defer os.Remove(log.Name())
+	cmd.Stderr = log
+	requests, err := cmd.StdoutPipe()
+	if err != nil {
+		return fail(err)
+	}
+	runErr := cmd.Start()
+	if runErr == nil {
+		converse(requests, log, func() { takeOffline(name, log) })
+		runErr = cmd.Wait()
+	}
 	if err := log.Close(); err != nil {
 		return fail(err)
+	}
+	copyErr := copyOut(name, out)
+	_ = exec.Command("docker", "rm", "--force", name).Run()
+	if err := os.Rename(log.Name(), filepath.Join(out, "container.log")); err != nil {
+		return fail(err)
+	}
+	if copyErr != nil {
+		return fail(copyErr)
 	}
 
 	if res.Phases, err = readJSONLines[phaseRecord](filepath.Join(out, "phases.jsonl")); err != nil {
@@ -550,7 +632,7 @@ func (r *runner) attempt(d *dist, attempts, seq int) *result {
 // wallTimeout tells that the whole container was ended for running too
 // long.
 func outcomeOf(res *result, wallTimeout bool) (outcome string, installed bool) {
-	for _, p := range res.Phases {
+	for i, p := range res.Phases {
 		failed := p.Status != 0
 		switch p.Phase {
 		case "unpack":
@@ -561,17 +643,25 @@ func outcomeOf(res *result, wallTimeout bool) (outcome string, installed bool) {
 			if p.NoBuildScript {
 				return outcomeNoBuildScript, false
 			}
-			if failed {
+			// A configure script that wrote the build script is gone on
+			// from whatever its exit status, so a failed one is the last
+			// phase only when it did not write it.
+			if failed && i == len(res.Phases)-1 {
 				return timeoutOr(p, outcomeConfigureFailed), false
 			}
 		case "declined":
 			return outcomeDeclined, false
 		case "prerequisites":
+			// The helper that reads the configured requirements failed;
+			// what it finds unmet does not stop the distribution.
 			if failed {
-				if len(res.Unmet) > 0 {
-					return outcomeUnmet, false
-				}
 				return timeoutOr(p, outcomeDriverFailed), false
+			}
+		case "offline":
+			// The container could not be taken off its network before
+			// its test phase, which then did not run.
+			if failed {
+				return outcomeDriverFailed, false
 			}
 		case "build":
 			if failed {
@@ -610,68 +700,94 @@ func timeoutOr(p phaseRecord, outcome string) string {
 	return outcome
 }
 
-// settle takes a distribution back from its worker: it either waits for
-// the requirements its configuration revealed, or its result is final.
+// settle takes a distribution back from its worker. One that did not pass
+// while requirements it computed when it was configured were unmet waits for
+// the distributions providing them that have not finished, and is run again
+// once they have, so that they are installed first when they can be; it
+// does not wait for one that finished without being installed. Otherwise
+// its result is final, and a failure is put down to what it lacked.
 func (r *runner) settle(n *node, res *result) error {
-	if res.Outcome == outcomeConfigureFailed {
-		// A configure script commonly loads what the distribution needs
-		// without declaring it for configuration, so a failure there is
-		// put down to a static requirement that is not installed. Its
-		// phases stay in the record.
-		if blocked := r.notInstalledNeeds(n, false); len(blocked) > 0 {
-			res.Outcome = outcomeBlocked
-			res.BlockedBy = blocked
-		}
+	providers, err := r.providers(n, res)
+	if err != nil {
+		return err
 	}
-	if res.Outcome == outcomeUnmet && n.attempts < maxAttempts {
+	if res.Outcome != outcomePass && res.Outcome != outcomeDriverFailed && n.attempts < maxAttempts {
 		wait := map[string]bool{}
-		final := false
-		// By distribution: several unmet modules can come from one.
-		blocked := map[string]bool{}
-		for _, u := range res.Unmet {
-			provider, known := r.byModule[u.Module]
-			if !known || provider == n.d.Dist {
-				// perl itself, a module no distribution provides, or
-				// one this distribution should have brought.
-				final = true
-				continue
+		for _, provider := range providers {
+			if r.nodes[provider].res == nil {
+				wait[provider] = true
 			}
-			m, err := r.ensureNode(provider)
-			if err != nil {
-				return err
-			}
-			if m == nil {
-				final = true
-				continue
-			}
-			if m.res != nil {
-				// Finished already: it is not installed, or what it
-				// installs does not meet the requirement.
-				if !m.res.Installed {
-					blocked[provider] = true
-				}
-				final = true
-				continue
-			}
-			wait[provider] = true
 		}
-		if !final && len(wait) > 0 {
+		if len(wait) > 0 {
 			n.waiting = wait
 			for provider := range wait {
 				r.waiters[provider] = append(r.waiters[provider], n)
 			}
 			return nil
 		}
-		if len(blocked) > 0 {
-			res.Outcome = outcomeBlocked
-			res.BlockedBy = nil
-			for provider := range blocked {
-				res.BlockedBy = append(res.BlockedBy, provider)
-			}
-			sort.Strings(res.BlockedBy)
+	}
+	r.attribute(n, res, providers)
+	return r.record(n, res)
+}
+
+// providers returns, sorted and once each, the distributions providing the
+// modules res found unmet, scheduled (with what they need) when they were
+// not yet. Perl itself, a module the index does not know and one of the
+// distribution's own have no provider to wait for.
+func (r *runner) providers(n *node, res *result) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, u := range res.Unmet {
+		provider, known := r.byModule[u.Module]
+		if !known || provider == n.d.Dist || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		m, err := r.ensureNode(provider)
+		if err != nil {
+			return nil, err
+		}
+		if m != nil {
+			out = append(out, provider)
 		}
 	}
-	return r.record(n, res)
+	sort.Strings(out)
+	return out, nil
+}
+
+// attribute puts a final result that is not a pass down to what the
+// distribution lacked, keeping its own outcome in OwnOutcome. It is blocked
+// by the providers of its unmet modules that were not installed, and, when
+// its configuration failed (so that it computed no requirements), by the
+// distributions its static requirements name that were not installed: a
+// configure script commonly loads what the distribution needs without
+// declaring it for configuration. With none of those but unmet modules all
+// the same, its requirements could not be met.
+func (r *runner) attribute(n *node, res *result, providers []string) {
+	if res.Outcome == outcomePass || res.Outcome == outcomeDriverFailed {
+		return
+	}
+	blockers := map[string]bool{}
+	for _, provider := range providers {
+		if m := r.nodes[provider]; m.res == nil || !m.res.Installed {
+			blockers[provider] = true
+		}
+	}
+	if res.Outcome == outcomeConfigureFailed {
+		for _, need := range r.notInstalledNeeds(n) {
+			blockers[need] = true
+		}
+	}
+	switch {
+	case len(blockers) > 0:
+		res.OwnOutcome, res.Outcome, res.BlockedBy = res.Outcome, outcomeBlocked, nil
+		for provider := range blockers {
+			res.BlockedBy = append(res.BlockedBy, provider)
+		}
+		sort.Strings(res.BlockedBy)
+	case len(res.Unmet) > 0:
+		res.OwnOutcome, res.Outcome = res.Outcome, outcomeUnmet
+	}
 }
 
 // record makes a result final: it is written out, and the distributions
@@ -694,6 +810,9 @@ func (r *runner) record(n *node, res *result) error {
 	if len(res.BlockedBy) > 0 {
 		detail = " by " + strings.Join(res.BlockedBy, ", ")
 	}
+	if res.OwnOutcome != "" {
+		detail += " (ran: " + res.OwnOutcome + ")"
+	}
 	fmt.Fprintf(os.Stderr, "[%d/%d] %-20s %s (%ds)%s\n", r.done, r.total, res.Outcome, n.d.Dist, res.Seconds, detail)
 
 	waiters := r.waiters[n.d.Dist]
@@ -706,9 +825,7 @@ func (r *runner) record(n *node, res *result) error {
 		if len(w.waiting) > 0 {
 			continue
 		}
-		if err := r.release(w); err != nil {
-			return err
-		}
+		r.release(w)
 	}
 	return nil
 }

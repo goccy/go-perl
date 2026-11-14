@@ -6,6 +6,38 @@
 build-essential ca-certificates curl git patch pkg-config unzip bzip2 xz-utils
 cmake graphviz protobuf-compiler
 
+# More tools that build scripts and test suites run, as CPAN Testers
+# machines commonly have them: GNU libtool for bundled autotools builds
+# (Alien-libtickit, Linux-Seccomp), file (libtool's configure, and tests
+# that run it: Alien-SNMP, GraphViz-Graph, Lingua-YALI, Data-Table-Text),
+# a Fortran compiler for ExtUtils::F77 (ExtUtils-F77, PDL-Opt-QP), rsync,
+# ip and ping (File-Rsync, Sys-HostIP, Net-Address-Ethernet,
+# Net-Ping-External), vim (Text-VimColor, and vi for Proc-InvokeEditor),
+# pdfimages (PDF-GetImages), node (Alien-Nodejs uses the system one),
+# tclsh (Tcl), an English word list (Text-Aspell, and Dezi through
+# LucyX::Suggester), and a virtual X display for the test phase (xvfb-run,
+# with xauth; Test-NeedsDisplay, Tk widgets, Prima, ...).
+#
+# The cost of libtool: with Debian's libtool, Alien::libtool is a system
+# install, and Alien-SeqAlignment-parasail's autoreconf through the
+# share-built Alien::automake (Debian's automake is too old for it) then
+# misses libtool.m4 ("Libtool library used but 'LIBTOOL' is undefined");
+# without the package it passes. libtool gains more than that one:
+# Alien-libtickit and the Tickit distributions behind it, and
+# Sys-Linux-Syscall-Execve.
+libtool libtool-bin file gfortran rsync iproute2 iputils-ping vim
+poppler-utils nodejs tcl xvfb xauth aspell-en
+
+# setcap, with which user.sh takes the file capabilities off programs (they
+# cannot be run in a container without capabilities).
+libcap2-bin
+
+# Locales named *.UTF-8 (en_US.UTF-8, fr_FR.UTF-8, ...): the base image has
+# only C.utf8, which distributions looking for a "UTF-8" locale do not
+# accept (SWISH-3 and what depends on it, Unicode-Block,
+# Zonemaster-Backend).
+locales-all
+
 # The network databases (/etc/services, /etc/protocols, ...): the official
 # perl image's base has them and debian:bookworm-slim does not, so
 # getservbyname and getprotobyname answered differently in the two images.
@@ -24,7 +56,7 @@ libgdk-pixbuf-2.0-dev librsvg2-dev libpoppler-glib-dev libharfbuzz-dev
 libfreetype-dev libfontconfig-dev libgtk-3-dev libgtk2.0-dev libvte-2.91-dev
 libgoocanvas-2.0-dev libnotify-dev libsoup2.4-dev libwxgtk3.2-dev
 libx11-dev libxft-dev libxt-dev libxtst-dev
-libpq-dev libmariadb-dev libmariadb-dev-compat libmemcached-dev libhiredis-dev
+libpq-dev libmariadb-dev libmemcached-dev libhiredis-dev
 libreadline-dev libncurses-dev libtickit-dev libtermkey-dev libunibilium-dev
 libvterm-dev
 libxslt1-dev libmagic-dev libidn11-dev libidn2-dev libicu-dev libyajl-dev
@@ -45,3 +77,19 @@ libasound2-dev libpulse-dev libopenal-dev libsdl2-dev
 libusb-dev libudev-dev libsystemd-dev libdbus-1-dev libcap-dev libacl1-dev
 libattr1-dev libselinux1-dev libblkid-dev libmount-dev libfuse-dev
 libnl-3-dev libnetfilter-queue-dev libpcsclite-dev libsane-dev
+liblmdb-dev liblzo2-dev librados-dev libradosstriper-dev firebird-dev
+libasyncns-dev libhdf4-dev libblas-dev liblapack-dev libcaca-dev
+unixodbc-dev libfreexl-dev libdvdread-dev libprotoc-dev libunbound-dev
+libyaz-dev libplplot-dev libefl-all-dev libcmark-dev libqrencode-dev
+librpm-dev libwebkit2gtk-4.1-dev libglfw3-dev python3-dev tcl-dev
+
+# The embedded Firebird engine DBD::FirebirdEmbedded's tests open.
+firebird3.0-server-core
+
+# The MySQL 8 client library is not a Debian package (bookworm has
+# MariaDB's): mysql.sh installs Oracle's. MariaDB's library stays
+# (libmariadb-dev, mariadb_config) for the distributions that bind to it;
+# its MySQL compatibility layer, libmariadb-dev-compat, is left out: its
+# /usr/include/mysql is a link to MariaDB's headers, which Oracle's would
+# be written over, and its mysql_config, libmysqlclient.so and
+# mysqlclient.pc name MariaDB's library under MySQL's names.
