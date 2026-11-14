@@ -5,6 +5,7 @@
 #include "perl.h"
 #include "XSUB.h"
 #include "patchlevel.h"
+#include <perlio.h>
 
 /* The sizes config.h gives are numbers, as perl's are: a module compares
  * them in the preprocessor (Compress::LZF: #if Size_t_size > 4). */
@@ -18,6 +19,7 @@
 #endif
 
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* The names of the value flags set on an SV, from the real flag word. */
@@ -833,6 +835,144 @@ XS(XS_PerlAPI_release_pair) {
         Safefree(SvPVX(sv));
         SvPVX(sv) = NULL;
         ST(0) = sv_2mortal(newSVpv(SvPVX(sv) ? "still set" : "empty", 0));
+        XSRETURN(1);
+    }
+}
+
+/* ---- structures of the module's own kept as values ------------------------ */
+
+/* A structure of the module's own, in memory mapped for it, so that its
+ * address is as wide as the addresses of this process are. */
+typedef struct {
+    U32 magic;
+    IV value;
+} kept_struct;
+#define KEPT_MAGIC 0x4b505453u
+static kept_struct *kept_structs(pTHX_ IV n) {
+    static kept_struct *block;
+    static IV used;
+    const IV room = 4096;
+    kept_struct *s;
+    if (!block) {
+        block = (kept_struct *)mmap(NULL, sizeof(kept_struct) * (size_t)room,
+                                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (block == (kept_struct *)MAP_FAILED) croak("mmap failed");
+    }
+    if (used + n > room) croak("out of kept structures");
+    s = block + used;
+    used += n;
+    return s;
+}
+static IV kept_value(pTHX_ SV *sv) {
+    const kept_struct *const s = (const kept_struct *)sv;
+    if (!s || s->magic != KEPT_MAGIC) croak("not a kept structure");
+    return s->value;
+}
+
+/* kept_array(n): an array of n structures of the module's own, the first
+ * half pushed, the rest stored at their index (structures, not values:
+ * the array is kept as long as the program runs, as Object::Pad keeps its
+ * arrays of method descriptions). */
+XS(XS_PerlAPI_kept_array) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        kept_struct *const s = kept_structs(aTHX_ n);
+        AV *const av = newAV();
+        IV i;
+        for (i = 0; i < n; i++) {
+            s[i].magic = KEPT_MAGIC;
+            s[i].value = i;
+            if (i < n / 2)
+                av_push(av, (SV *)&s[i]);
+            else
+                av_store(av, i, (SV *)&s[i]);
+        }
+        ST(0) = sv_2mortal(newRV_noinc((SV *)av));
+        XSRETURN(1);
+    }
+}
+
+/* kept_array_sums(ref): the sum of the values of the structures, read
+ * through AvARRAY, through av_fetch and through a copy that AvARRAY
+ * stores (a slot it is given back to). */
+XS(XS_PerlAPI_kept_array_sums) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        AV *const av = (AV *)SvRV(ST(0));
+        const SSize_t n = av_count(av);
+        IV a = 0, b = 0, c = 0;
+        SSize_t i;
+        AV *const copy = newAV();
+        SV **arr;
+        for (i = 0; i < n; i++) a += kept_value(aTHX_ AvARRAY(av)[i]);
+        for (i = 0; i < n; i++) b += kept_value(aTHX_ *av_fetch(av, i, 0));
+        av_extend(copy, n);
+        arr = AvARRAY(av);
+        for (i = 0; i < n; i++) AvARRAY(copy)[i] = arr[i];
+        AvFILLp(copy) = n - 1;
+        for (i = 0; i < n; i++) c += kept_value(aTHX_ AvARRAY(copy)[i]);
+        /* the structures are no values for the copy to release */
+        for (i = 0; i < n; i++) AvARRAY(copy)[i] = &PL_sv_undef;
+        AvFILLp(copy) = -1;
+        SvREFCNT_dec((SV *)copy);
+        ST(0) = sv_2mortal(newSVpvf("%" IVdf ",%" IVdf ",%" IVdf, a, b, c));
+        XSRETURN(1);
+    }
+}
+
+/* kept_hash(n): a hash of n structures of the module's own under the keys
+ * k0 .. k<n-1>, half stored by hv_store, the rest by hv_store_ent. */
+XS(XS_PerlAPI_kept_hash) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        kept_struct *const s = kept_structs(aTHX_ n);
+        HV *const hv = newHV();
+        IV i;
+        for (i = 0; i < n; i++) {
+            char key[32];
+            const int klen = snprintf(key, sizeof key, "k%" IVdf, i);
+            s[i].magic = KEPT_MAGIC;
+            s[i].value = i;
+            if (i < n / 2) {
+                if (!hv_store(hv, key, klen, (SV *)&s[i], 0)) croak("hv_store failed");
+            } else {
+                SV *const keysv = sv_2mortal(newSVpvn(key, klen));
+                if (!hv_store_ent(hv, keysv, (SV *)&s[i], 0)) croak("hv_store_ent failed");
+            }
+        }
+        ST(0) = sv_2mortal(newRV_noinc((SV *)hv));
+        XSRETURN(1);
+    }
+}
+
+/* kept_hash_sums(ref, n): the sum of the values of the structures, read
+ * through hv_fetch, hv_fetch_ent and an iteration of the hash. */
+XS(XS_PerlAPI_kept_hash_sums) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "ref, n");
+    {
+        HV *const hv = (HV *)SvRV(ST(0));
+        const IV n = SvIV(ST(1));
+        IV a = 0, b = 0, c = 0, i;
+        HE *he;
+        for (i = 0; i < n; i++) {
+            char key[32];
+            const int klen = snprintf(key, sizeof key, "k%" IVdf, i);
+            SV **svp = hv_fetch(hv, key, klen, 0);
+            SV *const keysv = sv_2mortal(newSVpvn(key, klen));
+            HE *const ent = hv_fetch_ent(hv, keysv, 0, 0);
+            if (!svp || !ent) croak("no entry for %s", key);
+            a += kept_value(aTHX_ *svp);
+            b += kept_value(aTHX_ HeVAL(ent));
+        }
+        hv_iterinit(hv);
+        while ((he = hv_iternext(hv))) c += kept_value(aTHX_ HeVAL(he));
+        ST(0) = sv_2mortal(newSVpvf("%" IVdf ",%" IVdf ",%" IVdf, a, b, c));
         XSRETURN(1);
     }
 }
@@ -2644,6 +2784,25 @@ static OP *PerlAPI_on_new_sprintf(pTHX_ OP *o) {
     return o;
 }
 
+/* An op checker for negation whose pp function sets $? to 99, saved: the
+ * save is the interpreter's, undone when the scope the op runs in ends (the
+ * sub's), not when the pp function returns. */
+static Perl_check_t PerlAPI_negate_hook_before;
+static IV PerlAPI_negates_seen;
+static OP *PerlAPI_pp_negate_status(pTHX) {
+    SAVEI32(PL_statusvalue);
+    PL_statusvalue = 99;
+    return PL_ppaddr[OP_NEGATE](aTHX);
+}
+static OP *PerlAPI_on_new_negate(pTHX_ OP *o) {
+    o = PerlAPI_negate_hook_before(aTHX_ o);
+    if (o->op_type == OP_NEGATE) {
+        o->op_ppaddr = PerlAPI_pp_negate_status;
+        PerlAPI_negates_seen++;
+    }
+    return o;
+}
+
 /* hooks(what, on): installs or removes one of the hooks above and returns
  * its counter. */
 XS(XS_PerlAPI_hooks) {
@@ -2682,6 +2841,14 @@ XS(XS_PerlAPI_hooks) {
                 PerlAPI_rpeep_before = NULL;
             }
             counter = PerlAPI_njoins_seen;
+        } else if (strEQ(what, "status")) {
+            if (on) {
+                wrap_op_checker(OP_NEGATE, PerlAPI_on_new_negate, &PerlAPI_negate_hook_before);
+            } else if (PerlAPI_negate_hook_before) {
+                PL_check[OP_NEGATE] = PerlAPI_negate_hook_before;
+                PerlAPI_negate_hook_before = NULL;
+            }
+            counter = PerlAPI_negates_seen;
         } else if (strEQ(what, "linklist")) {
             if (on) {
                 PerlAPI_linklist_seen = 0;
@@ -3616,6 +3783,434 @@ XS(XS_PerlAPI_set_signal_aside) {
     }
 }
 
+/* ---- the compiler's structures (goperl_compiler.h) ---------------------- */
+
+/* status_saved(n): $? is n until the scope that called this ends, as a
+ * save of an interpreter variable made by native code is the interpreter's
+ * to undo (no ENTER/LEAVE of the XSUB's own). */
+XS(XS_PerlAPI_status_saved) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    SAVEI32(PL_statusvalue);
+    PL_statusvalue = (I32)SvIV(ST(0));
+    XSRETURN_EMPTY;
+}
+
+/* status_left(n): $? is n while a scope of the XSUB's own is open, and what
+ * it was afterwards (LEAVE_SCOPE undoes the saves above an index). */
+XS(XS_PerlAPI_status_left) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const I32 base = PL_savestack_ix;
+        IV inside;
+        SAVEI32(PL_statusvalue);
+        PL_statusvalue = (I32)SvIV(ST(0));
+        inside = (IV)PL_statusvalue;
+        LEAVE_SCOPE(base);
+        ST(0) = sv_2mortal(newSViv(inside * 1000 + (IV)PL_statusvalue));
+        XSRETURN(1);
+    }
+}
+
+/* pad_first(): the value at index 1 of the values of the pad in use. */
+XS(XS_PerlAPI_pad_first) {
+    dXSARGS;
+    if (items != 0) croak_xs_usage(cv, "");
+    ST(0) = PAD_SVl(1) ? PAD_SVl(1) : &PL_sv_undef;
+    XSRETURN(1);
+}
+
+/* own_pad(sub, xsub): what index 1 of PL_curpad holds once it is given
+ * values in this module's own memory, as Object::Pad's constructor gives
+ * its field hooks a pad of their own: after an operation of the
+ * interpreter's, inside a sub the interpreter runs (whose pad is its own),
+ * inside an XSUB it calls (which has the pad of its caller), after both,
+ * and after the scope ends. */
+XS(XS_PerlAPI_own_pad) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sub, xsub");
+    {
+        SV *const sub = ST(0), *const xsub = ST(1);
+        SV *const out = sv_2mortal(newSVpvs(""));
+        SV *const mine = sv_2mortal(newSVpvs("mine"));
+        SV *got;
+        int n;
+        ENTER;
+        SAVETMPS; /* the subs it calls free only temporaries made after this */
+        SAVEVPTR(PL_curpad);
+        Newx(PL_curpad, 3, SV *);
+        SAVEFREEPV(PL_curpad);
+        PAD_SVl(0) = 0;
+        PAD_SVl(1) = mine;
+        PAD_SVl(2) = 0;
+        sv_catsv(out, PAD_SVl(1)); /* a temporary would give its string away to sv_setsv */
+        {
+            dSP;
+            PUSHMARK(SP);
+            PUTBACK;
+            n = call_sv(sub, G_SCALAR);
+            SPAGAIN;
+            got = n ? POPs : &PL_sv_undef;
+            sv_catpvf(out, ",%" SVf, SVfARG(got));
+            PUSHMARK(SP);
+            PUTBACK;
+            n = call_sv(xsub, G_SCALAR);
+            SPAGAIN;
+            got = n ? POPs : &PL_sv_undef;
+            sv_catpvf(out, ",%" SVf, SVfARG(got));
+            PUTBACK;
+        }
+        sv_catpvf(out, ",%" SVf, SVfARG(PAD_SVl(1)));
+        FREETMPS;
+        LEAVE;
+        sv_catpvf(out, ",%s", PL_curpad && PAD_SVl(1) == mine ? "mine" : "theirs");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* names_of_a_sub_that_goes(code): the number of named entries of the pad
+ * of the sub the code makes, which is freed afterwards, while the module
+ * goes on with operations that take the memory the sub had (strings of
+ * the size of its structures, holding addresses beyond the interpreter's
+ * memory). */
+XS(XS_PerlAPI_names_of_a_sub_that_goes) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        IV named = 0, i;
+        static const char fill[] =
+            "\002\000\000\000\360\360\360\360\002\000\000\000\002\000\000\000"
+            "\360\360\360\360\360\360\360\360\360\360\360\360\360\360\360\360"
+            "\360\360\360\360\360\360\360\360";
+        ENTER;
+        SAVETMPS;
+        {
+            CV *const sub = (CV *)SvRV(eval_pv(SvPV_nolen(ST(0)), TRUE));
+            PADNAMELIST *const pnl = PadlistNAMES(CvPADLIST(sub));
+            for (i = 1; i <= PadnamelistMAX(pnl); i++) {
+                PADNAME *const pn = PadnamelistARRAY(pnl)[i];
+                if (pn && PadnameLEN(pn)) named++;
+            }
+        }
+        FREETMPS;
+        LEAVE;
+        {
+            AV *const keep = (AV *)sv_2mortal((SV *)newAV());
+            for (i = 0; i < 4000; i++) {
+                SV *const sv = newSVpvn(fill, 20 + (size_t)(i % 5) * 4);
+                SvREFCNT_dec(sv);
+                if (i % 2) av_push(keep, newSVpvn(fill, 20 + (size_t)(i % 7) * 4));
+            }
+        }
+        ST(0) = sv_2mortal(newSViv(named));
+        XSRETURN(1);
+    }
+}
+
+/* pad_names(code): the names of the sub's pad, in order, with the COP
+ * sequence range of each named one; with a second argument, the first
+ * name that has that one is renamed (a new pad name of the interpreter's
+ * takes its place in the list, as Object::Pad unshares a captured field)
+ * and its range is set to [1, 2^31]. */
+XS(XS_PerlAPI_pad_names) {
+    dXSARGS;
+    if (items < 1 || items > 3) croak_xs_usage(cv, "code [, from, to]");
+    {
+        CV *code = (CV *)SvRV(ST(0));
+        PADLIST *pl = CvPADLIST(code);
+        PADNAMELIST *pnl = PadlistNAMES(pl);
+        PADNAME **names = PadnamelistARRAY(pnl);
+        SV *out = sv_2mortal(newSVpvs(""));
+        SSize_t i;
+        if (items == 3) {
+            STRLEN flen, tlen;
+            const char *from = SvPV(ST(1), flen);
+            const char *to = SvPV(ST(2), tlen);
+            for (i = 1; i <= PadnamelistMAX(pnl); i++) {
+                PADNAME *pn = names[i];
+                if (!pn || PadnameLEN(pn) != flen || memNE(PadnamePV(pn), from, flen))
+                    continue;
+                {
+                    PADNAME *renamed = newPADNAMEpvn(to, tlen);
+                    PadnameREFCNT_dec(names[i]);
+                    names[i] = renamed;
+                    COP_SEQ_RANGE_LOW(renamed) = 1;
+                    COP_SEQ_RANGE_HIGH(renamed) = 0x80000000u;
+                }
+                break;
+            }
+        }
+        for (i = 1; i <= PadnamelistMAX(PadlistNAMES(CvPADLIST(code))); i++) {
+            PADNAME *pn = PadnamelistARRAY(PadlistNAMES(CvPADLIST(code)))[i];
+            if (!pn || !PadnameLEN(pn)) continue;
+            sv_catpvf(out, "%s%.*s[%u,%u]", SvCUR(out) ? " " : "", (int)PadnameLEN(pn),
+                      PadnamePV(pn), (unsigned)COP_SEQ_RANGE_LOW(pn),
+                      (unsigned)COP_SEQ_RANGE_HIGH(pn));
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* sub_fields(code [, file]): the outer sequence number, whether the sub is
+ * marked lexical, and its file; with a file the sub is given that file
+ * (CvFILE is assigned) and the lexical mark, and its outer sequence number
+ * goes up by one. */
+XS(XS_PerlAPI_sub_fields) {
+    dXSARGS;
+    if (items < 1 || items > 2) croak_xs_usage(cv, "code [, file]");
+    {
+        CV *code = (CV *)SvRV(ST(0));
+        if (items == 2) {
+            CvFILE(code) = savepv(SvPV_nolen(ST(1)));
+            CvFLAGS(code) |= CVf_LEXICAL;
+            CvOUTSIDE_SEQ(code) = CvOUTSIDE_SEQ(code) + 1;
+        }
+        ST(0) = sv_2mortal(newSVpvf("%u:%s:%s", (unsigned)CvOUTSIDE_SEQ(code),
+                                    CvLEXICAL(code) ? "lexical" : "-", CvFILE(code)));
+        XSRETURN(1);
+    }
+}
+
+/* copy_sub(code): a new sub with the ops, the pad names and the outer
+ * scope of the sub, made the way cv_copy_flags of Object::Pad and
+ * Future::AsyncAwait makes one: the name of a sub that has one of its own
+ * goes into the body (SvANY's xcv_hek), a padlist of pad_new with PL_compcv
+ * saved, its lexicals new, what it captured shared. */
+XS(XS_PerlAPI_copy_sub) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        CV *orig = (CV *)SvRV(ST(0));
+        CV *copy = MUTABLE_CV(newSV_type(SVt_PVCV));
+        PADNAMELIST *padnames;
+        SV **origpad;
+        SSize_t fpad, padix;
+        CvFLAGS(copy) = CvFLAGS(orig) & ~CVf_CVGV_RC;
+        CvFILE(copy) = CvDYNFILE(orig) ? savepv(CvFILE(orig)) : CvFILE(orig);
+        if (CvNAMED(orig)) {
+            ((XPVCV *)MUTABLE_PTR(SvANY(copy)))->xcv_gv_u.xcv_hek =
+                share_hek_hek(CvNAME_HEK(orig));
+            CvNAMED_on(copy);
+        } else {
+            CvGV_set(copy, CvGV(orig));
+        }
+        CvSTASH_set(copy, CvSTASH(orig));
+        OP_REFCNT_LOCK;
+        CvROOT(copy) = OpREFCNT_inc(CvROOT(orig));
+        OP_REFCNT_UNLOCK;
+        CvSTART(copy) = CvSTART(orig);
+        CvOUTSIDE(copy) = MUTABLE_CV(SvREFCNT_inc(CvOUTSIDE(orig)));
+        CvOUTSIDE_SEQ(copy) = CvOUTSIDE_SEQ(orig);
+        ENTER;
+        SAVESPTR(PL_compcv);
+        PL_compcv = copy;
+        SAVESPTR(PL_comppad_name);
+        PL_comppad_name = PadlistNAMES(CvPADLIST(orig));
+        CvPADLIST_set(copy, pad_new(padnew_CLONE | padnew_SAVE));
+        CvPADLIST(copy)->xpadl_id = CvPADLIST(orig)->xpadl_id;
+        padnames = PadlistNAMES(CvPADLIST(orig));
+        fpad = AvFILLp(PadlistARRAY(CvPADLIST(orig))[1]);
+        origpad = AvARRAY(PadlistARRAY(CvPADLIST(orig))[1]);
+        av_fill(PL_comppad, fpad);
+        PL_curpad = AvARRAY(PL_comppad);
+        for (padix = 1; padix <= fpad; padix++) {
+            PADNAME *pn = padix <= PadnamelistMAX(padnames) ? PadnamelistARRAY(padnames)[padix] : NULL;
+            const bool lexical = pn && PadnameLEN(pn) && !PadnameOUTER(pn) &&
+                                 PadnamePV(pn)[0] != '&';
+            if (lexical && PadnamePV(pn)[0] == '@')
+                PL_curpad[padix] = MUTABLE_SV(newAV());
+            else if (lexical && PadnamePV(pn)[0] == '%')
+                PL_curpad[padix] = MUTABLE_SV(newHV());
+            else if (lexical)
+                PL_curpad[padix] = newSV(0);
+            else if (!origpad[padix])
+                PL_curpad[padix] = NULL;
+            else if (SvPADTMP(origpad[padix])) {
+                PL_curpad[padix] = newSVsv(origpad[padix]);
+                SvPADTMP_on(PL_curpad[padix]);
+            } else
+                PL_curpad[padix] = SvREFCNT_inc(origpad[padix]);
+        }
+        LEAVE;
+        ST(0) = sv_2mortal(newRV_noinc((SV *)copy));
+        XSRETURN(1);
+    }
+}
+
+/* hint(key): the value of the key in the hints of the calling statement
+ * (%^H at its compilation), "absent" when it is not there; and whether
+ * that hash says it exists. */
+XS(XS_PerlAPI_hint) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "key");
+    {
+        STRLEN len;
+        const char *key = SvPV(ST(0), len);
+        COPHH *hh = CopHINTHASH_get(PL_curcop);
+        SV *val = cophh_fetch_pvn(hh, key, len, 0, 0);
+        const bool exists = cophh_exists_pvn(hh, key, len, 0, 0);
+        SV *out;
+        if (val == &PL_sv_placeholder) out = newSVpvs("absent");
+        else out = newSVsv(val);
+        sv_catpv(out, exists ? ":exists" : ":-");
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
+/* run_list(values...): the values, as a list op made of constants returns
+ * them when its ops are run on the stack of this XSUB (exec_optree_list of
+ * Object::Pad); then the number of values left above the mark. */
+XS(XS_PerlAPI_run_list) {
+    dXSARGS;
+    {
+        OP *list = newLISTOP(OP_LIST, 0, NULL, NULL);
+        AV *got;
+        I32 nargs, i;
+        for (i = 0; i < items; i++)
+            list = op_append_elem(OP_LIST, list, newSVOP(OP_CONST, 0, newSVsv(ST(i))));
+        list->op_flags |= OPf_WANT_LIST;
+        ENTER;
+        SAVETMPS;
+        SAVEVPTR(PL_op);
+        PL_op = LINKLIST(list);
+        list->op_next = NULL;
+        SP = PL_stack_base + ax - 1;
+        PUSHMARK(SP);
+        PUTBACK;
+        CALLRUNOPS(aTHX);
+        SPAGAIN;
+        nargs = (I32)(SP - PL_stack_base - TOPMARK);
+        got = newAV();
+        for (i = 0; i < nargs; i++) av_push(got, newSVsv(SP[i - nargs + 1]));
+        POPMARK;
+        FREETMPS;
+        LEAVE;
+        op_free(list);
+        SP = PL_stack_base + ax - 1;
+        XPUSHs(sv_2mortal(newRV_noinc((SV *)got)));
+        XPUSHs(sv_2mortal(newSViv(nargs)));
+        PUTBACK;
+        return;
+    }
+}
+
+/* fields_object(class, values...): a new object of the class whose fields
+ * are the values, made the way Object::Pad makes one of :repr(pvobj) (an
+ * array of fields of native code's own, its number less one, zeroed and
+ * filled); fields_of(object): its fields. */
+XS(XS_PerlAPI_fields_object) {
+    dXSARGS;
+    if (items < 1) croak_xs_usage(cv, "class, values...");
+    {
+        HV *stash = gv_stashsv(ST(0), GV_ADD);
+        SV *obj = newSV_type(SVt_PVOBJ);
+        const U32 count = (U32)(items - 1);
+        SV *self;
+        U32 i;
+        Newx(ObjectFIELDS(obj), count, SV *);
+        ObjectMAXFIELD(obj) = (SSize_t)count - 1;
+        Zero(ObjectFIELDS(obj), count, SV *);
+        for (i = 0; i < count; i++) ObjectFIELDS(obj)[i] = newSVsv(ST(1 + i));
+        self = sv_2mortal(newRV_noinc(obj));
+        sv_bless(self, stash);
+        ST(0) = self;
+        XSRETURN(1);
+    }
+}
+XS(XS_PerlAPI_fields_of) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "object");
+    {
+        SV *obj = SvRV(ST(0));
+        SV *out = sv_2mortal(newSVpvs(""));
+        SSize_t i;
+        if (SvTYPE(obj) != SVt_PVOBJ) croak("not an object of fields");
+        for (i = 0; i <= ObjectMAXFIELD(obj); i++)
+            sv_catpvf(out, "%s%" SVf, i ? "," : "", SVfARG(ObjectFIELDS(obj)[i]));
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* statement_line(): the line of a statement op made, with a parser made
+ * for it the way Object::Pad makes one when there is none (newSTATEOP needs
+ * one); whether there was a parser before, and whether there is one after
+ * the scope that made it. */
+XS(XS_PerlAPI_statement_line) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        OP *o;
+        IV line;
+        const bool had = PL_parser != NULL;
+        ENTER;
+        if (!PL_parser) {
+            SAVEVPTR(PL_parser);
+            Newxz(PL_parser, 1, yy_parser);
+            SAVEFREEPV(PL_parser);
+            PL_parser->copline = NOLINE;
+            PL_parser->preambling = NOLINE;
+        }
+        o = newSTATEOP(0, NULL, NULL);
+        line = (IV)CopLINE((COP *)o);
+        op_free(o);
+        LEAVE;
+        EXTEND(SP, 3);
+        ST(0) = sv_2mortal(newSViv(line));
+        ST(1) = had ? &PL_sv_yes : &PL_sv_no;
+        ST(2) = PL_parser ? &PL_sv_yes : &PL_sv_no;
+        XSRETURN(3);
+    }
+}
+
+/* stash_hek(object): croaks with the name of the object's class, in a
+ * message made with HEKf. */
+XS(XS_PerlAPI_stash_hek) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "object");
+    croak("class %" HEKf " says hello", HEKfARG(HvNAME_HEK(SvSTASH(SvRV(ST(0))))));
+}
+
+/* buckets(hash): "none" for a hash without buckets (pp_defined's test),
+ * else the number of entries the chains of its buckets hold and their keys
+ * in order; PerlIO_debug is called on the way, which the interpreter's
+ * build answers as perl's does without -Di (nothing). */
+XS(XS_PerlAPI_buckets) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hashref");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        HE **buckets = HvARRAY(hv);
+        AV *keys;
+        SV *out;
+        STRLEN i;
+        I32 n = 0;
+        PerlIO_debug("buckets of %p\n", (void *)hv);
+        if (!buckets) {
+            ST(0) = sv_2mortal(newSVpvs("none"));
+            XSRETURN(1);
+        }
+        keys = (AV *)sv_2mortal((SV *)newAV());
+        for (i = 0; i <= HvMAX(hv); i++) {
+            HE *he;
+            for (he = buckets[i]; he; he = HeNEXT(he)) {
+                av_push(keys, newSVsv(HeSVKEY_force(he)));
+                n++;
+            }
+        }
+        sortsv(AvARRAY(keys), av_count(keys), Perl_sv_cmp);
+        out = newSVpvf("%d", (int)n);
+        for (i = 0; i < (STRLEN)av_count(keys); i++)
+            sv_catpvf(out, ":%" SVf, SVfARG(*av_fetch(keys, (SSize_t)i, 0)));
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
 XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
@@ -3668,6 +4263,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::keep_pair", XS_PerlAPI_keep_pair);
     newXS_deffile("PerlAPI::kept_pair", XS_PerlAPI_kept_pair);
     newXS_deffile("PerlAPI::release_pair", XS_PerlAPI_release_pair);
+    newXS_deffile("PerlAPI::kept_array", XS_PerlAPI_kept_array);
+    newXS_deffile("PerlAPI::kept_array_sums", XS_PerlAPI_kept_array_sums);
+    newXS_deffile("PerlAPI::kept_hash", XS_PerlAPI_kept_hash);
+    newXS_deffile("PerlAPI::kept_hash_sums", XS_PerlAPI_kept_hash_sums);
     newXS_deffile("PerlAPI::wide_values", XS_PerlAPI_wide_values);
     newXS_deffile("PerlAPI::wide_made", XS_PerlAPI_wide_made);
     newXS_deffile("PerlAPI::read_host_descriptor", XS_PerlAPI_read_host_descriptor);
@@ -3793,5 +4392,20 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::fd_close", XS_PerlAPI_fd_close);
     newXS_deffile("PerlAPI::fd_line", XS_PerlAPI_fd_line);
     newXS_deffile("PerlAPI::fd_import_write", XS_PerlAPI_fd_import_write);
+    newXS_deffile("PerlAPI::status_saved", XS_PerlAPI_status_saved);
+    newXS_deffile("PerlAPI::status_left", XS_PerlAPI_status_left);
+    newXS_deffile("PerlAPI::pad_names", XS_PerlAPI_pad_names);
+    newXS_deffile("PerlAPI::names_of_a_sub_that_goes", XS_PerlAPI_names_of_a_sub_that_goes);
+    newXS_deffile("PerlAPI::pad_first", XS_PerlAPI_pad_first);
+    newXS_deffile("PerlAPI::own_pad", XS_PerlAPI_own_pad);
+    newXS_deffile("PerlAPI::sub_fields", XS_PerlAPI_sub_fields);
+    newXS_deffile("PerlAPI::copy_sub", XS_PerlAPI_copy_sub);
+    newXS_deffile("PerlAPI::hint", XS_PerlAPI_hint);
+    newXS_deffile("PerlAPI::run_list", XS_PerlAPI_run_list);
+    newXS_deffile("PerlAPI::fields_object", XS_PerlAPI_fields_object);
+    newXS_deffile("PerlAPI::fields_of", XS_PerlAPI_fields_of);
+    newXS_deffile("PerlAPI::statement_line", XS_PerlAPI_statement_line);
+    newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
+    newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

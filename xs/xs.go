@@ -52,7 +52,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 20
+const abiVersion = 21
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -169,6 +169,9 @@ type cFrame struct {
 	// entryJB is the SDK's: the catch point of its XSUB entry while no
 	// XSUB has taken that activation over.
 	entryJB uintptr
+	// foreign is the instance's goperl_foreign_t: the pointers of native
+	// code's own its arrays and hashes keep (see foreign.go).
+	foreign uintptr
 
 	// Go-only:
 	p *internal.Perl
@@ -176,7 +179,7 @@ type cFrame struct {
 
 // newFrame returns a frame of this instance with no stack yet.
 func (s *state) newFrame() *cFrame {
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw}
+	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, foreign: s.foreignTab}
 	if mem := s.p.RawMemory(); cap(mem) > 0 {
 		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
 		f.memCap = uint64(cap(mem))
@@ -218,6 +221,9 @@ type cAPI struct {
 	cvSetXsub uintptr
 	// v20: a pointer of the module's own in the buffer slot of an SV.
 	pvHost uintptr
+	// v21: the number that stands for a pointer of the module's own in
+	// the instance's arrays and hashes.
+	foreignIn uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -290,6 +296,12 @@ type state struct {
 	// its SV and counts again only for an SV at the same address that is
 	// given such a pointer, which overwrites it.
 	pvHost map[uint64]uintptr
+	// foreignTab is the instance's table of the pointers of native code's
+	// own its arrays and hashes keep (goperl_foreign_t, C heap), with the
+	// number of each pointer and the room of the table (see foreign.go).
+	foreignTab uintptr
+	foreignIdx map[uint64]uint32
+	foreignCap int
 
 	// sharedRaw is this instance's C shared-state block (goperl_shared_t):
 	// scope bookkeeping, save stacks, and mirrors, aliased by every loaded
@@ -386,6 +398,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		cloneHookSet:  true,
 	}
 	pokeBytes(cs.sharedRaw, make([]byte, sharedBlockSize))
+	cs.foreignTab, cs.foreignIdx, cs.foreignCap = newForeignTable(clone, s)
 	for cv, slot := range s.cvAny {
 		own := cMalloc(8)
 		cMemcpy(own, slot, 8)
@@ -501,6 +514,7 @@ func stateFor(p *internal.Perl) *state {
 			sharedRaw:   cMalloc(sharedBlockSize),
 		}
 		pokeBytes(s.sharedRaw, make([]byte, sharedBlockSize))
+		s.foreignTab, s.foreignIdx, s.foreignCap = newForeignTable(p, nil)
 		states[p] = s
 	}
 	return s
@@ -1763,6 +1777,13 @@ func buildVtable() {
 			return 0
 		}
 		return stateFor(f.p).pvHostSlot(uint64(sv), create != 0)
+	})
+	vtable.foreignIn = purego.NewCallback(func(fr, ptr uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		return uintptr(stateFor(f.p).foreignNumber(uint64(ptr)))
 	})
 	vtable.cvSetXsub = purego.NewCallback(func(fr, cv, fn uintptr) uintptr {
 		f := lookupFrame(fr)

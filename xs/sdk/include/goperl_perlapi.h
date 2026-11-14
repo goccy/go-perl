@@ -191,7 +191,46 @@ static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) __attribute__((unused));
 /* perl's own malloc, which a module built with -Dmalloc=Perl_malloc
  * -Dfree=Perl_mfree (MakeMaker's PERL_EXTMALLOC_DEF) calls for all of its
  * memory: the C library's. (A macro is not expanded inside its own
- * expansion, so `free` here is the function.) */
+ * expansion, so `free` here is the function.) A source file that does not
+ * include perl.h calls them as functions, which every module has: one
+ * copy in the module (weak), each calling the C library's (the names of
+ * the C library's functions are the module's -D names everywhere else). */
+#if defined(malloc) || defined(calloc) || defined(realloc) || defined(free)
+#define GOPERL_LIBC_ALLOC_RENAMED 1
+#endif
+#pragma push_macro("malloc")
+#pragma push_macro("calloc")
+#pragma push_macro("realloc")
+#pragma push_macro("free")
+#undef malloc
+#undef calloc
+#undef realloc
+#undef free
+#ifdef __cplusplus
+extern "C" {
+#endif
+#ifdef GOPERL_LIBC_ALLOC_RENAMED
+/* the system's header declared them under the -D names */
+void *malloc(size_t);
+void *calloc(size_t, size_t);
+void *realloc(void *, size_t);
+void free(void *);
+#endif
+__attribute__((weak, visibility("hidden"))) void *(Perl_malloc)(size_t n) { return malloc(n); }
+__attribute__((weak, visibility("hidden"))) void *(Perl_calloc)(size_t n, size_t size) {
+    return calloc(n, size);
+}
+__attribute__((weak, visibility("hidden"))) void *(Perl_realloc)(void *p, size_t n) {
+    return realloc(p, n);
+}
+__attribute__((weak, visibility("hidden"))) void (Perl_mfree)(void *p) { free(p); }
+#ifdef __cplusplus
+}
+#endif
+#pragma pop_macro("free")
+#pragma pop_macro("realloc")
+#pragma pop_macro("calloc")
+#pragma pop_macro("malloc")
 #ifndef Perl_malloc
 #define Perl_malloc(n) malloc(n)
 #endif
@@ -277,6 +316,8 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
                  ((uint64_t)6 /* GOPERL_SVSLOT_LEN */ << 32) | (uint32_t)tok, len,
                  0, 0);
 }
+static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
+static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     switch (field) {
     case GOPERL_LV_IV:
@@ -320,6 +361,15 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CV_OUTSIDE << 32) | (uint32_t)tok,
                             0, 0, 0);
+    case GOPERL_LV_CVFLAGS:
+    case GOPERL_LV_CVROOT:
+    case GOPERL_LV_CVSTART:
+    case GOPERL_LV_CVOUTSIDE_SEQ:
+    case GOPERL_LV_CVPADLIST:
+    case GOPERL_LV_CVDEPTH:
+    case GOPERL_LV_CVFILE:
+    case GOPERL_LV_OBJMAXFIELD:
+        return goperl_cvfield_load(f, tok, field);
     default:
         return goperl_do_op(f, GOPERL_OP_GV_CALL,
                             ((uint64_t)GOPERL_GVCALL_CVGEN << 32) | (uint32_t)tok,
@@ -391,6 +441,16 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_CVOUTSIDE: /* FIELD 16: the plain store */
         goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)16 << 32) | (uint32_t)tok,
                      (uint32_t)val, 0, 0);
+        break;
+    case GOPERL_LV_CVFLAGS:
+    case GOPERL_LV_CVROOT:
+    case GOPERL_LV_CVSTART:
+    case GOPERL_LV_CVOUTSIDE_SEQ:
+    case GOPERL_LV_CVPADLIST:
+    case GOPERL_LV_CVDEPTH:
+    case GOPERL_LV_CVFILE:
+    case GOPERL_LV_OBJMAXFIELD:
+        goperl_cvfield_store(f, tok, field, val);
         break;
     default:
         goperl_xs_op(f, GOPERL_OP_GV_CALL,
@@ -838,9 +898,11 @@ static char *goperl_savesvpv(goperl_frame_t *f, SV *sv) {
 #define SVf_THINKFIRST \
     (SVf_READONLY | SVf_PROTECT | SVf_ROK | SVf_FAKE | SVs_RMG | SVf_IsCOW)
 
+/* The flag word after the change, as the value of perl's macros is (they
+ * are assignments to SvFLAGS: `RETVAL = SvREADONLY_on(sv)`). */
 #define GOPERL_FLAGS_CHANGE(sv, set, clear)                               \
-    ((void)goperl_op0(GOPERL_OP_SV_FLAGS, GOPERL_TOK(sv),                 \
-                      ((uint64_t)(U32)(clear) << 32) | (U32)(set)))
+    ((U32)goperl_op0(GOPERL_OP_SV_FLAGS, GOPERL_TOK(sv),                  \
+                     ((uint64_t)(U32)(clear) << 32) | (U32)(set)))
 
 #define SvOOK(sv) (SvFLAGS(sv) & SVf_OOK)
 #define sv_backoff(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_BACKOFF, sv, 0))
@@ -1649,7 +1711,7 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_rs (*goperl_plsv_ref(_gof, GOPERL_PL_RS))
 #define PL_beginav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_BEGINAV))
 #define PL_unitcheckav (*(AV **)goperl_plsv_ref(_gof, GOPERL_PL_UNITCHECKAV))
-#define PL_strtab ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_STRTAB)))
+#define PL_strtab (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_STRTAB))
 #define PL_sv_zero (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_ZERO)))
 #define PL_sv_placeholder (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_PLACEHOLDER)))
 #define PL_in_eval ((U8)GOPERL_PLVAR(GOPERL_PL_IN_EVAL))
@@ -1805,14 +1867,14 @@ static void goperl_require_pv(goperl_frame_t *f, const char *pv) {
 typedef char goperl_iv_is_pointer_width
     [(sizeof(IV) == sizeof(void *) && sizeof(long) == sizeof(void *)) ? 1 : -1]
     __attribute__((unused));
-#define SAVEIV(i) goperl_hostsave_ptr(_gof, (void **)&(i))
-#define SAVELONG(l) goperl_hostsave_ptr(_gof, (void **)&(l))
-#define SAVESTRLEN(l) goperl_hostsave_ptr(_gof, (void **)&(l))
-#define SAVEPPTR(p) goperl_hostsave_ptr(_gof, (void **)&(p))
-#define save_int(p) goperl_hostsave_i32(_gof, (int32_t *)(p))
-#define save_I32(p) goperl_hostsave_i32(_gof, (int32_t *)(p))
-#define save_long(p) goperl_hostsave_ptr(_gof, (void **)(p))
-#define save_iv(p) goperl_hostsave_ptr(_gof, (void **)(p))
+#define SAVEIV(i) goperl_save_int8(_gof, (void *)&(i))
+#define SAVELONG(l) goperl_save_int8(_gof, (void *)&(l))
+#define SAVESTRLEN(l) goperl_save_int8(_gof, (void *)&(l))
+#define SAVEPPTR(p) goperl_save_vptr(_gof, (void **)&(p))
+#define save_int(p) goperl_save_i32(_gof, (int32_t *)(p))
+#define save_I32(p) goperl_save_i32(_gof, (int32_t *)(p))
+#define save_long(p) goperl_save_int8(_gof, (void *)(p))
+#define save_iv(p) goperl_save_int8(_gof, (void *)(p))
 
 /* ---- number scanning (numeric.c) ------------------------------------------ */
 
@@ -2985,119 +3047,15 @@ static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
     goperl_newunop_aux(_gof, (type), (flags), (OP *)(first), (UNOP_AUX_item *)(aux))
 #define UNOP_AUX_item_sv(item) ((item)->sv)
 
-/* ---- pads ----------------------------------------------------------------------
- * A pad is an array (PAD is AV), so its values are reached as an array's
- * are. A padlist, a list of pad names and a pad name are the interpreter's
- * own structures: tokens here, whose arrays are copied out when they are
- * asked for (good until the outermost native call returns). */
-typedef struct goperl_padlist PADLIST;
-typedef struct goperl_padnamelist PADNAMELIST;
-typedef struct goperl_padname PADNAME;
-typedef AV PAD;
+/* ---- pads: goperl_compiler.h ---------------------------------------------------- */
 #define GOPERL_PL_CURPAD 69
 #define GOPERL_PL_COMPPAD 70
 #define GOPERL_PL_COMPPAD_NAME 71
-enum {
-    GOPERL_PAD_CV_PADLIST = 6,
-    GOPERL_PAD_PADLIST = 7,
-    GOPERL_PAD_NAMELIST = 8,
-    GOPERL_PAD_NAME = 9,
-    GOPERL_PAD_SAVE_CLEARSV = 10
-};
-#define PL_comppad ((PAD *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_COMPPAD)))
-#define PL_comppad_name \
-    ((PADNAMELIST *)(uintptr_t)GOPERL_PLVAR(GOPERL_PL_COMPPAD_NAME))
-/* The pad that is in use, as an array of its values: stores through it go
- * to the pad (see AvARRAY). */
-#define PL_curpad AvARRAY(PL_comppad)
-#undef PAD_SVl
-#define PAD_SVl(ix) (PL_curpad[ix])
-#define PadARRAY(pad) AvARRAY(pad)
-#define PadMAX(pad) AvFILLp(pad)
-#define CvPADLIST(cv)                                        \
-    ((PADLIST *)(uintptr_t)goperl_op0(GOPERL_OP_PAD, GOPERL_PAD_CV_PADLIST, \
-                                      GOPERL_TOK(cv)))
-/* The fields of a padlist or of a list of names: [0] and [1] two numbers,
- * the entries after them. */
-static const uint32_t *goperl_pad_words(goperl_frame_t *f, int sel, const void *tok)
-    __attribute__((unused));
-static const uint32_t *goperl_pad_words(goperl_frame_t *f, int sel, const void *tok) {
-    const uint32_t *w = (const uint32_t *)goperl_guest_mem(
-        f, goperl_do_op(f, GOPERL_OP_PAD, (uint64_t)sel, (uint64_t)(uintptr_t)tok, 0, 0));
-    if (!w) goperl_croakf(f, "no such pad structure");
-    return w;
-}
-static void **goperl_pad_entries(goperl_frame_t *f, int sel, const void *tok)
-    __attribute__((unused));
-static void **goperl_pad_entries(goperl_frame_t *f, int sel, const void *tok) {
-    const uint32_t *w = goperl_pad_words(f, sel, tok);
-    const int32_t n = (int32_t)w[0] + 1;
-    void **out = (void **)goperl_arena_alloc(sizeof(void *) * (size_t)(n > 0 ? n : 1));
-    if (!out) goperl_croakf(f, "Out of memory!");
-    for (int32_t i = 0; i < n; i++) out[i] = (void *)(uintptr_t)w[2 + i];
-    return out;
-}
-#define PadlistARRAY(pl) \
-    ((PAD **)goperl_pad_entries(_gof, GOPERL_PAD_PADLIST, (pl)))
-#define PadlistMAX(pl) \
-    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_PADLIST, (pl))[0])
-#define PadlistNAMES(pl) \
-    ((PADNAMELIST *)(uintptr_t)goperl_pad_words(_gof, GOPERL_PAD_PADLIST, (pl))[1])
-#define PadlistNAMESARRAY(pl) PadnamelistARRAY(PadlistNAMES(pl))
-#define PadlistNAMESMAX(pl) PadnamelistMAX(PadlistNAMES(pl))
-#define PadnamelistARRAY(pnl) \
-    ((PADNAME **)goperl_pad_entries(_gof, GOPERL_PAD_NAMELIST, (pnl)))
-#define PadnamelistMAX(pnl) \
-    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_NAMELIST, (pnl))[0])
-#define PadnamelistMAXNAMED(pnl) \
-    ((SSize_t)(int32_t)goperl_pad_words(_gof, GOPERL_PAD_NAMELIST, (pnl))[1])
-#define padnamelist_fetch(pnl, key)                                  \
-    ({ PADNAMELIST *const goperl_pnl_ = (pnl);                       \
-       const SSize_t goperl_key_ = (key);                            \
-       goperl_key_ > PadnamelistMAX(goperl_pnl_)                     \
-           ? (PADNAME *)0                                            \
-           : PadnamelistARRAY(goperl_pnl_)[goperl_key_]; })
-/* [pv][len][flags][refcnt][low][high][ourstash][type] */
-#define GOPERL_PADNAME(pn) goperl_pad_words(_gof, GOPERL_PAD_NAME, (pn))
-#define PadnamePV(pn)                                                \
-    ({ const uint32_t goperl_pv_ = GOPERL_PADNAME(pn)[0];            \
-       goperl_pv_ ? (char *)goperl_guest_mem(_gof, goperl_pv_) : (char *)0; })
-#define PadnameLEN(pn) ((STRLEN)GOPERL_PADNAME(pn)[1])
-#define PadnameUTF8(pn) 1
-#define PadnameSV(pn) \
-    newSVpvn_flags(PadnamePV(pn), PadnameLEN(pn), SVs_TEMP | SVf_UTF8)
-#define PadnameFLAGS(pn) ((U8)GOPERL_PADNAME(pn)[2])
-#define PadnameREFCNT(pn) ((U32)GOPERL_PADNAME(pn)[3])
-#define COP_SEQ_RANGE_LOW(pn) ((U32)GOPERL_PADNAME(pn)[4])
-#define COP_SEQ_RANGE_HIGH(pn) ((U32)GOPERL_PADNAME(pn)[5])
-#define PadnameOURSTASH(pn) ((HV *)GOPERL_SV(GOPERL_PADNAME(pn)[6]))
-#define PadnameTYPE(pn) ((HV *)GOPERL_SV(GOPERL_PADNAME(pn)[7]))
-#define PadnameIsOUR(pn) cBOOL(GOPERL_PADNAME(pn)[6])
-#define PadnameHasTYPE(pn) cBOOL(GOPERL_PADNAME(pn)[7])
-#define PadnameOUTER(pn) (PadnameFLAGS(pn) & PADNAMEf_OUTER)
-#define PadnameIsSTATE(pn) (PadnameFLAGS(pn) & PADNAMEf_STATE)
-#define PadnameLVALUE(pn) (PadnameFLAGS(pn) & PADNAMEf_LVALUE)
-#define PadnameIsFIELD(pn) (PadnameFLAGS(pn) & PADNAMEf_FIELD)
-#define PadnameIN_SCOPE(pn, seq) \
-    (COP_SEQ_RANGE_LOW(pn) != PERL_PADSEQ_INTRO && COP_SEQ_RANGE_LOW(pn) < (seq) && \
-     (seq) <= COP_SEQ_RANGE_HIGH(pn))
-#define PERL_PADSEQ_INTRO U32_MAX
-/* save_clearsv is given the address of a value of the pad in use: of the
- * array PL_curpad is. */
-static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) __attribute__((unused));
-static void goperl_save_clearsv(goperl_frame_t *f, SV **svp) {
-    SV **pad = PL_curpad;
-    const ptrdiff_t ix = svp - pad;
-    if (ix < 0 || ix > (ptrdiff_t)goperl_av_slots(f, GOPERL_TOK(PL_comppad)))
-        goperl_croakf(f, "save_clearsv of a value that is not of the pad in use");
-    goperl_do_op(f, GOPERL_OP_PAD, GOPERL_PAD_SAVE_CLEARSV, (uint64_t)ix, 0, 0);
-}
-#define save_clearsv(svp) goperl_save_clearsv(_gof, (SV **)(svp))
+#define KEY_sigvar 0xFFFF
 #define SvPADSTALE_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_PADSTALE, 0)
 #define SvPADSTALE_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_PADSTALE)
 #define SvPADTMP_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_PADTMP, 0)
 #define SvPADTMP_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_PADTMP)
-#define KEY_sigvar 0xFFFF
 
 
 #define CvCLONE_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_CLONE, 0)
@@ -3353,5 +3311,7 @@ static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g) {
 static I32 goperl_sv_cmp_locale_fn(pTHX_ SV *a, SV *b) {
     return sv_cmp_locale(a, b);
 }
+
+#include "goperl_compiler.h"
 
 #endif /* GOPERL_XS_SDK_PERLAPI_H */

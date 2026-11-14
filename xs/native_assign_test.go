@@ -84,6 +84,31 @@ func TestNativeStructureBehindAnSV(t *testing.T) {
 	})
 }
 
+// A module keeps pointers to structures of its own in an array or a hash,
+// as if they were values (Object::Pad keeps its method descriptions so):
+// they are what it reads back through AvARRAY, av_fetch, hv_fetch,
+// hv_fetch_ent and an iteration, what it gives another array through
+// AvARRAY, and what it reads in a copy of the interpreter.
+func TestNativeStructuresKeptAsValues(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"in an array", `our @kept; push @kept, PerlAPI::kept_array(100); PerlAPI::kept_array_sums($kept[-1])`, "4950,4950,4950"},
+		{"in a hash", `our @kept; push @kept, PerlAPI::kept_hash(50); PerlAPI::kept_hash_sums($kept[-1], 50)`, "1225,1225,1225"},
+	})
+	if r, err := p.Eval(context.Background(), `our ($across_a, $across_h) = (PerlAPI::kept_array(10), PerlAPI::kept_hash(10)); 1`); err != nil || r.Error != nil {
+		t.Fatalf("setup: err=%v error=%v", err, r.Error)
+	}
+	clone, err := p.Clone()
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	defer clone.Close()
+	runEvalCases(t, clone, []evalCase{
+		{"in a copy of the interpreter", `PerlAPI::kept_array_sums($main::across_a) . ";" . PerlAPI::kept_hash_sums($main::across_h, 10)`, "45,45,45;45,45,45"},
+	})
+}
+
 // A warning of a category is given the way the interpreter gives its own:
 // Perl_warner always, Perl_ck_warner where the category is enabled,
 // Perl_ck_warner_d unless it is disabled, and as an exception where the

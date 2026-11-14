@@ -268,6 +268,21 @@ func (p *Perl) RawMemory() []byte {
 	return wasm2go.Memory(p.m.g)
 }
 
+// LimitMemory keeps the instance's linear memory below limit bytes from
+// now on: its growth stops there. It reports false when the memory is
+// already bigger.
+func (p *Perl) LimitMemory(limit uint64) bool {
+	const wasmPage = 65536
+	limit = limit / wasmPage * wasmPage
+	if p.m.g.MemSize.Load() > limit {
+		return false
+	}
+	if p.m.g.MaxMem == 0 || p.m.g.MaxMem > limit {
+		wasm2go.SetMaxMemory(p.m.g, limit)
+	}
+	return true
+}
+
 // MemorySize returns the size of the instance's linear memory in bytes: what
 // the guest has grown it to, which is its peak, since a linear memory never
 // shrinks. (RawMemory is as long as the mapping the instance lives in.)
