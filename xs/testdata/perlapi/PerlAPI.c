@@ -4912,6 +4912,31 @@ XS(XS_PerlAPI_next_op_object) {
     }
 }
 
+/* utf8_chars(bytes): for each place a character starts, the lengths
+ * isUTF8_CHAR, isC9_STRICT_UTF8_CHAR and isSTRICT_UTF8_CHAR give there
+ * (n/c9/strict, the next place one byte on when the first is 0), and
+ * whether is_utf8_string takes the whole. */
+XS(XS_PerlAPI_utf8_chars) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "bytes");
+    {
+        STRLEN len;
+        const U8 *p = (const U8 *)SvPV(ST(0), len);
+        const U8 *const e = p + len;
+        SV *const out = sv_2mortal(newSVpvs(""));
+        const int whole = is_utf8_string(p, len) ? 1 : 0;
+        while (p < e) {
+            const STRLEN n = isUTF8_CHAR(p, e);
+            sv_catpvf(out, "%d/%d/%d ", (int)n, (int)isC9_STRICT_UTF8_CHAR(p, e),
+                      (int)isSTRICT_UTF8_CHAR(p, e));
+            p += n ? n : 1;
+        }
+        sv_catpvf(out, "%s", whole ? "whole" : "not");
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* same_interp(): whether the interpreter (PERL_GET_CONTEXT) is the one the
  * first call saw. */
 static PerlInterpreter *PerlAPI_first_interp;
@@ -5103,6 +5128,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
     newXS_deffile("PerlAPI::sorted_ivs", XS_PerlAPI_sorted_ivs);
     newXS_deffile("PerlAPI::same_interp", XS_PerlAPI_same_interp);
+    newXS_deffile("PerlAPI::utf8_chars", XS_PerlAPI_utf8_chars);
     newXS_deffile("PerlAPI::op_of_b", XS_PerlAPI_op_of_b);
     newXS_deffile("PerlAPI::next_op_object", XS_PerlAPI_next_op_object);
     newXS_deffile("PerlAPI::destructor_found", XS_PerlAPI_destructor_found);

@@ -8120,28 +8120,86 @@ static char *goperl_savepvn(const char *p, size_t n) {
 #define memEQ(a, b, n) (memcmp((a), (b), (n)) == 0)
 #define strEQ(a, b) (strcmp((a), (b)) == 0)
 
-/* UTF-8 validation, host-side (pure function). */
+/* perl's extended UTF-8, as utf8.h has it. A character is well-formed when
+ * its start byte says how many bytes it has (2 to 7, or 13 for 0xFF) and
+ * that many are there, the rest of them continuation bytes, and it is not
+ * longer than its code point needs (an overlong); its code point may be a
+ * surrogate, a non-character or above Unicode, up to UV_MAX. Returns the
+ * length of the character at s (whose end is e), or 0 when the bytes there
+ * are not a whole well-formed character. The code point goes to *cp. */
+static STRLEN goperl_utf8_char(const U8 *s, const U8 *e, UV *cp) {
+    if (s >= e) return 0;
+    const U8 c = s[0];
+    STRLEN n;
+    if (c < 0x80) {
+        *cp = c;
+        return 1;
+    }
+    if (c < 0xC2) return 0; /* a continuation byte, or an overlong of two */
+    if (c < 0xE0) n = 2;
+    else if (c < 0xF0) n = 3;
+    else if (c < 0xF8) n = 4;
+    else if (c < 0xFC) n = 5;
+    else if (c < 0xFE) n = 6;
+    else if (c == 0xFE) n = 7;
+    else n = 13;
+    if ((STRLEN)(e - s) < n) return 0;
+    for (STRLEN k = 1; k < n; k++)
+        if ((s[k] & 0xC0) != 0x80) return 0;
+    /* an overlong: the code point would fit the form one byte shorter */
+    if ((c == 0xE0 && s[1] < 0xA0) || (c == 0xF0 && s[1] < 0x90) ||
+        (c == 0xF8 && s[1] < 0x88) || (c == 0xFC && s[1] < 0x84) ||
+        (c == 0xFE && s[1] < 0x82))
+        return 0;
+    if (c == 0xFF) {
+        /* 72 bits: the top 36 zero is an overlong, any of the top 8 set is
+         * above UV_MAX */
+        int top = 0;
+        for (STRLEN k = 1; k <= 6; k++) top |= s[k] & 0x3F;
+        if (!top || (s[1] & 0x3F) || (s[2] & 0x30)) return 0;
+    }
+    UV v = n == 13 ? 0 : (UV)(c & (0x7F >> n));
+    for (STRLEN k = 1; k < n; k++) v = (v << 6) | (UV)(s[k] & 0x3F);
+    *cp = v;
+    return n;
+}
+static STRLEN goperl_isutf8_char(const U8 *s, const U8 *e) __attribute__((unused));
+static STRLEN goperl_isutf8_char(const U8 *s, const U8 *e) {
+    UV cp;
+    return goperl_utf8_char(s, e, &cp);
+}
+/* Unicode's own: no surrogate, no code point above Unicode, and (strict)
+ * no non-character. */
+static STRLEN goperl_isutf8_char_unicode(const U8 *s, const U8 *e, int strict)
+    __attribute__((unused));
+static STRLEN goperl_isutf8_char_unicode(const U8 *s, const U8 *e, int strict) {
+    UV cp;
+    const STRLEN n = goperl_utf8_char(s, e, &cp);
+    if (!n || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+    if (strict && ((cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) == 0xFFFE))
+        return 0;
+    return n;
+}
+#define isUTF8_CHAR(s, e) goperl_isutf8_char((const U8 *)(s), (const U8 *)(e))
+#define is_utf8_char_buf(s, e) isUTF8_CHAR((s), (e))
+#define isSTRICT_UTF8_CHAR(s, e) \
+    goperl_isutf8_char_unicode((const U8 *)(s), (const U8 *)(e), 1)
+#define isC9_STRICT_UTF8_CHAR(s, e) \
+    goperl_isutf8_char_unicode((const U8 *)(s), (const U8 *)(e), 0)
+
+/* Whether the bytes are well-formed perl extended UTF-8 throughout. */
 static int goperl_is_utf8_string(const U8 *s, STRLEN len)
     __attribute__((unused));
 static int goperl_is_utf8_string(const U8 *s, STRLEN len) {
-    STRLEN i = 0;
-    while (i < len) {
-        U8 c = s[i];
-        STRLEN n;
-        if (c < 0x80) n = 1;
-        else if ((c & 0xE0) == 0xC0) n = 2;
-        else if ((c & 0xF0) == 0xE0) n = 3;
-        else if ((c & 0xF8) == 0xF0) n = 4;
-        else return 0;
-        if (i + n > len) return 0;
-        for (STRLEN k = 1; k < n; k++)
-            if ((s[i + k] & 0xC0) != 0x80) return 0;
-        if (n == 2 && c < 0xC2) return 0; /* overlong */
-        i += n;
+    const U8 *const e = s + len;
+    while (s < e) {
+        const STRLEN n = goperl_isutf8_char(s, e);
+        if (!n) return 0;
+        s += n;
     }
     return 1;
 }
-#define is_utf8_string(s, len) goperl_is_utf8_string((s), (len))
+#define is_utf8_string(s, len) goperl_is_utf8_string((const U8 *)(s), (len))
 
 /* Thread-clone stubs: go-perl builds without ithreads, so CLONE hooks are
  * never invoked; these only need to compile (CLONE_PARAMS is defined above

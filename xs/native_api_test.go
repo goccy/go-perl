@@ -55,6 +55,26 @@ func TestNativeCodeWithoutContextArgument(t *testing.T) {
 	})
 }
 
+// The characters of perl's extended UTF-8: what isUTF8_CHAR takes includes
+// surrogates, non-characters and code points above Unicode, in the long
+// forms perl has for those (five bytes and more), and not overlongs; the
+// strict forms take Unicode's own (C9: non-characters too).
+func TestNativeExtendedUTF8Characters(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"ASCII and two bytes", `PerlAPI::utf8_chars(pack("H*", "41c3a9"))`, "1/1/1 2/2/2 whole"},
+		{"a surrogate", `PerlAPI::utf8_chars(pack("H*", "eda080"))`, "3/0/0 whole"},
+		{"a non-character", `PerlAPI::utf8_chars(pack("H*", "efbfbf"))`, "3/3/0 whole"},
+		{"above Unicode", `PerlAPI::utf8_chars(pack("H*", "f4908080"))`, "4/0/0 whole"},
+		{"five bytes", `PerlAPI::utf8_chars(pack("H*", "f888808080"))`, "5/0/0 whole"},
+		{"thirteen bytes", `PerlAPI::utf8_chars(pack("H*", "ff808080808081808080808080"))`, "13/0/0 whole"},
+		{"what perl encodes", `no warnings; my $s = chr(0x7FFFFFFF) . chr(0x10FFFF); utf8::encode($s); PerlAPI::utf8_chars($s)`, "6/0/0 4/4/0 whole"},
+		{"overlongs", `PerlAPI::utf8_chars(pack("H*", "c1bfe09fbf"))`, "0/0/0 0/0/0 0/0/0 0/0/0 0/0/0 not"},
+		{"cut short", `PerlAPI::utf8_chars(pack("H*", "e282"))`, "0/0/0 0/0/0 not"},
+	})
+}
+
 // An op is a number as on perl: its address in the interpreter, which is
 // the number of its B::OP object. A module takes the op of a B object
 // (INT2PTR of its number) and makes a B object of an op (PTR2IV).
