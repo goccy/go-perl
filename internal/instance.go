@@ -466,20 +466,18 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 	return p.bootPrivate(opts, wasi)
 }
 
-// memoryCeiling is the length of the mapping an instance's memory is: the
-// snapshot ceiling, or the memory cap of opts rounded down to a wasm page
-// when that is lower and still holds least (the memory the instance starts
-// with). The mapping is the growth cap too.
+// memoryCeiling is the limit of an instance's linear memory: the memory
+// cap of opts rounded down to a wasm page, or defaultMemoryCeiling without
+// one (or with one below least, the memory the instance starts with). It
+// is the length of the mapping the instance's memory is, and its growth
+// cap, however the instance gets its memory.
 func memoryCeiling(opts InstanceOptions, least uint64) int {
-	ceiling := snapshotCeiling
 	if opts.MaxMemoryBytes > 0 {
-		const wasmPage = 65536
-		max := opts.MaxMemoryBytes / wasmPage * wasmPage
-		if max < ceiling && uint64(max) >= least {
-			ceiling = max
+		if max := opts.MaxMemoryBytes / wasmPage * wasmPage; uint64(max) >= least {
+			return max
 		}
 	}
-	return ceiling
+	return defaultMemoryCeiling
 }
 
 // bootOwn starts the instance on memory of its own: a private mapping that
@@ -510,15 +508,9 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
-	// instead of growing the host process unbounded. Round down to a wasm
-	// page; ignore values below the module's initial memory.
-	if opts.MaxMemoryBytes > 0 {
-		const wasmPage = 65536
-		max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage
-		if max >= uint64(len(wasm2go.Memory(p.m.g))) {
-			wasm2go.SetMaxMemory(p.m.g, max)
-		}
-	}
+	// instead of growing the host process unbounded: the same limit as an
+	// instance on a mapping has.
+	wasm2go.SetMaxMemory(p.m.g, uint64(memoryCeiling(opts, uint64(len(wasm2go.Memory(p.m.g))))))
 	return p.start(opts)
 }
 

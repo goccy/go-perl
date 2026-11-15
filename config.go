@@ -80,7 +80,9 @@ type Config struct {
 	// A guest allocation that would grow memory past this limit fails
 	// (memory.grow returns -1) instead of growing the host process unbounded.
 	// Rounded down to a multiple of the 64 KiB wasm page size; values below
-	// the module's initial memory are ignored.
+	// the module's initial memory are ignored. Without one the limit is
+	// 8 GiB. The memory is reserved as address space of that size, not
+	// resident memory: pages the program never writes cost nothing.
 	MaxMemoryBytes int
 	// MemoryReserveBytes, when > 0, is the initial linear-memory slice
 	// capacity reserved for this instance. Reserving capacity up front makes
