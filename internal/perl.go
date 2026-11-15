@@ -1341,45 +1341,37 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 
 // SV micro-operations the host-side SDK vtable is built from. The full op
 // table lives in perl.cc (and mirrors the GOPERL_OP_* enum in the go-perl
-// native SDK header); representative entries:
+// native SDK header). An operation takes three u64 operands a, b and c and
+// a string s; a token (an address of the linear memory) is always an
+// operand of its own, whole. It answers a u64; an operation that answers
+// two values leaves the second in the operation box (result2, see
+// perl_xs_opbox), where the host reads it right after the operation.
+// Representative entries:
 //
 //	1  SV_IV       a=sv                  -> IV (as u64)
-//	2  SV_PV       a=sv                  -> (ptr
-//
-// <
-// <
-// 32)|len into linear memory
-//
+//	2  SV_PV       a=sv                  -> ptr into linear memory; second: len
 //	3  NEW_IV      a=iv                  -> new SV token
 //	4  NEW_PVN     s=bytes b=len         -> new SV token
 //	5  SV_MORTAL   a=sv                  -> sv (now mortal)
 //	...
 //	23-64          sv_setsv/setiv/setnv/catsv families, NV ops, AV/HV entry
 //	               and iterator ops, ENTER/LEAVE/SAVETMPS/FREETMPS
-//	65 CALL_SV     a=flags
-//
-// <
-// <
-// 32|sv, s+b=packed u32 arg tokens
-//
-//	-> died
+//	65 CALL_SV     a=sv, c=flags, s+b=the arguments, a u64 word each
+//	               -> mortal-AV token of results; second: died
 //
 // <
 // <
 // 63 | count
-// <
-// <
-// 32 | mortal-AV token of results
 //
-//	66 CALL_METHOD like CALL_SV but s = "name\0" + packed tokens
+//	66 CALL_METHOD like CALL_SV but s = "name\0" + the arguments
 //	68 SAVE_OP     scope-save PL_op (the SAVEOP() macro)
 //	69 RUN_PP_SCRATCH a=op_flags
 //
 // <
 // <
-// 32|op_type, s+b=arg tokens: run one pp
+// 32|op_type, s+b=the arguments as words:
 //
-//	               function on a scratch OP in list context
+//	               run one pp function on a scratch OP in list context
 //	70-72          host-side MAGIC anchor attach / id lookup / unattach
 //	73-74,80       PL_* interpreter-variable get/set and local'ised hooks
 //	98-100         pp-hook table, RUN_ORIGINAL, save-stack destructors
@@ -1400,13 +1392,14 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 //	               behavioral (tie) magic
 //
 // Unknown ops return 0.
-func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, error) {
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, op)
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
-	buf = pbAppendString(buf, 5, s)
+	buf = pbAppendUint64(buf, 5, c)
+	buf = pbAppendString(buf, 6, s)
 	resp, err := invokeMethod(0, 24, buf, wasm2go.Inv_0_24)
 	if err != nil {
 		return 0, err
@@ -1426,21 +1419,23 @@ func PerlXsOp() (uint32, error) {
 // perl_xs_helper without the bridge's encoding, for the operations native
 // code makes by the million: perl_xs_opbox answers the address of the
 // instance's operation box, a struct goperl_opbox in linear memory
-// ([a][b][result] as u64, [op] as i32, [slen] as u32, then the slen bytes
-// of s: 32 bytes before s, GOPERL_OPBOX_STR bytes of room for s). The
-// host writes an operation's arguments there and calls perl_xs_op, which
-// runs it as perl_xs_helper does (s NUL-terminated) and leaves its result
-// in the box; it answers 0, so that the bridge sends nothing back. A
-// string longer than the box holds goes through perl_xs_helper. The box is
-// free again once perl_xs_op has returned: an operation that leads to
-// native code (magic, a callback) has the operations of that code use it
-// meanwhile, after this one has taken its arguments out.
-func PerlXsOpbox(h uint64) (uint32, error) {
+// ([a][b][c][result][result2] as u64, [op] as i32, [slen] as u32, then the
+// slen bytes of s: 48 bytes before s, GOPERL_OPBOX_STR bytes of room for
+// s). The host writes an operation's arguments there and calls perl_xs_op,
+// which runs it as perl_xs_helper does (s NUL-terminated) and leaves its
+// result in the box; it answers 0, so that the bridge sends nothing back. A
+// string longer than the box holds goes through perl_xs_helper. Either way
+// the second value of an operation that answers two is in result2 when the
+// operation has returned. The box is free again once the operation has
+// returned: an operation that leads to native code (magic, a callback) has
+// the operations of that code use it meanwhile, after this one has taken
+// its arguments out.
+func PerlXsOpbox(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	resp, err := invokeMethod(0, 26, buf, wasm2go.Inv_0_26)
 	if err != nil {
 		return 0, err
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
