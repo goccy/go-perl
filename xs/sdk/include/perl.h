@@ -422,6 +422,9 @@ typedef struct goperl_frame goperl_frame_t;
 #define aTHX_
 #define dTHX dNOOP
 #define dTHXa(a) dNOOP
+/* the context of the system interface, which a perl without
+ * PERL_IMPLICIT_SYS does not have (Tk's Event.xs declares it) */
+#define dTHXs dNOOP
 #define aTHXa(a) NOOP
 #define _gof goperl_cur_frame_v
 #define pTHX_1 1

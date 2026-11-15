@@ -5272,6 +5272,7 @@ XS(XS_PerlAPI_pv_display) {
 /* uni_display_flags(): the values of UNI_DISPLAY_QQ and UNI_DISPLAY_REGEX. */
 XS(XS_PerlAPI_uni_display_flags) {
     dXSARGS;
+    dTHXs; /* as Tk's Event.xs declares it */
     PERL_UNUSED_VAR(items);
     ST(0) = sv_2mortal(newSVpvf("%d,%d", UNI_DISPLAY_QQ, UNI_DISPLAY_REGEX));
     XSRETURN(1);
