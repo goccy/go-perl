@@ -303,7 +303,13 @@ enum {
     regexp_amg, max_amg_code
 };
 #define AMGf_noright 1
+#define AMGf_noleft 2
+#define AMGf_assign 4 /* the operator has a mutator form ($x .= ...) */
 #define AMGf_unary 8
+#define AMGf_numeric 0x0010
+#define AMGf_want_list 0x0040
+#define AMGf_numarg 0x0080
+#define AMGf_force_scalar 0x0100
 
 /* scope.h */
 #define SAVEf_KEEPOLDELEM 2
@@ -2280,10 +2286,25 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
                     spec[sn++] = *fmt++;
             }
         }
-        int goperl_lmod = 0; /* 0 none, 1 l, 2 ll, 3 z, 4 h */
+        int goperl_lmod = 0; /* 0 none, 1 l, 2 ll (or perl's q), 3 z, 4 h, 5 t,
+                              * 6 j, 7 L */
         if (fmt[0] == 'l' && fmt[1] == 'l') {
             goperl_lmod = 2;
             spec[sn++] = *fmt++;
+            spec[sn++] = *fmt++;
+        } else if (*fmt == 'q') {
+            goperl_lmod = 2;
+            spec[sn++] = 'l';
+            spec[sn++] = 'l';
+            fmt++;
+        } else if (*fmt == 't') {
+            goperl_lmod = 5;
+            spec[sn++] = *fmt++;
+        } else if (*fmt == 'j') {
+            goperl_lmod = 6;
+            spec[sn++] = *fmt++;
+        } else if (*fmt == 'L') {
+            goperl_lmod = 7;
             spec[sn++] = *fmt++;
         } else if (*fmt == 'l') {
             goperl_lmod = 1;
@@ -2306,6 +2327,8 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             if (goperl_lmod == 2) GOPERL_TEXT_CONV(t, spec, app, long long);
             else if (goperl_lmod == 1) GOPERL_TEXT_CONV(t, spec, app, long);
             else if (goperl_lmod == 3) GOPERL_TEXT_CONV(t, spec, app, size_t);
+            else if (goperl_lmod == 5) GOPERL_TEXT_CONV(t, spec, app, ptrdiff_t);
+            else if (goperl_lmod == 6) GOPERL_TEXT_CONV(t, spec, app, intmax_t);
             else GOPERL_TEXT_CONV(t, spec, app, int);
             break;
         case 'u':
@@ -2314,7 +2337,8 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         case 'X':
             if (goperl_lmod == 2) GOPERL_TEXT_CONV(t, spec, app, unsigned long long);
             else if (goperl_lmod == 1) GOPERL_TEXT_CONV(t, spec, app, unsigned long);
-            else if (goperl_lmod == 3) GOPERL_TEXT_CONV(t, spec, app, size_t);
+            else if (goperl_lmod == 3 || goperl_lmod == 5) GOPERL_TEXT_CONV(t, spec, app, size_t);
+            else if (goperl_lmod == 6) GOPERL_TEXT_CONV(t, spec, app, uintmax_t);
             else GOPERL_TEXT_CONV(t, spec, app, unsigned int);
             break;
         case 'c':
@@ -2343,7 +2367,8 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         case 'F':
         case 'g':
         case 'G':
-            GOPERL_TEXT_CONV(t, spec, app, double);
+            if (goperl_lmod == 7) GOPERL_TEXT_CONV(t, spec, app, long double);
+            else GOPERL_TEXT_CONV(t, spec, app, double);
             break;
         default: {
             char unknown[8];

@@ -1151,6 +1151,9 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
 
 #define mg_get(sv) ((int)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_MG_GET, sv, 0))
 #define mg_clear(sv) ((int)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_MG_CLEAR, sv, 0))
+/* Every magic of the SV goes, the svt_free of each running (native code's
+ * too: its MAGICs go with the interpreter's anchor of them). */
+#define mg_free(sv) ((int)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_MG_FREE, sv, 0))
 #define mg_magical(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_MG_MAGICAL, sv, 0))
 #define mg_size(sv) ((U32)GOPERL_SVCALL(GOPERL_SVCALL_MG_SIZE, sv, 0))
 #define SvGETMAGIC(sv) \

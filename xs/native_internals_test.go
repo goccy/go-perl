@@ -214,6 +214,19 @@ func TestNativeFormatOfAnAddress(t *testing.T) {
 	perlAPIInstance(t, p)
 	runEvalCases(t, p, []evalCase{
 		{"%p", `PerlAPI::format_address()`, "abc|0xabc|   abc"},
+		{"the length modifiers t, j, q and L", `PerlAPI::format_lengths()`, "-5|7|9|1.5|5"},
+	})
+}
+
+// The AMGf_ flags of amagic_call are perl's: with AMGf_assign, the
+// mutator form of an operator is called when the class has one.
+func TestNativeOverloadedAssignment(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const cat = `package CatOp { use overload '.' => sub { my ($x, $y) = @_; CatOp->new(${$x} . "[$y]") }, '.=' => sub { ${$_[0]} .= "{$_[1]}"; $_[0] }, '""' => sub { ${$_[0]} }; sub new { my $s = $_[1]; bless \$s } } `
+	runEvalCases(t, p, []evalCase{
+		{"with AMGf_assign", cat + `my $r = PerlAPI::concat_assign(CatOp->new("v"), 1); defined $r ? "$r" : "undef"`, "v{0}"},
+		{"without", cat + `my $r = PerlAPI::concat_assign(CatOp->new("v"), 0); defined $r ? "$r" : "undef"`, "v[0]"},
 	})
 }
 

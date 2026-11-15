@@ -155,6 +155,8 @@ func TestNativeMagicSetHookCroaks(t *testing.T) {
 	runEvalCases(t, p, []evalCase{
 		{"refused", `my $v = "ok"; PerlAPI::refuse_set(\$v, "bad"); my $after = 0; my $r = eval { $v = "bad"; $after = 1; 1 }; join ",", $r ? "returned" : "died", $@ =~ /^refused: bad at / ? "message" : $@, $after, $v`, "died,message,0,bad"},
 		{"accepted", `my $v = "ok"; PerlAPI::refuse_set(\$v, "bad"); $v = "good"; $v`, "good"},
+		// mg_free takes every magic away, native code's too
+		{"freed", `my $v = "ok"; PerlAPI::refuse_set(\$v, "bad"); PerlAPI::free_magic(\$v); $v = "bad"; $v`, "bad"},
 	})
 }
 

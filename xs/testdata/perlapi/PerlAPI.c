@@ -5353,6 +5353,37 @@ XS(XS_PerlAPI_format_address) {
     XSRETURN(1);
 }
 
+/* format_lengths(): perl's formats with the length modifiers t, j, q and
+ * L (PDL's messages give sizes with %td). */
+XS(XS_PerlAPI_format_lengths) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("%td|%jd|%qd|%Lg|%tu", (ptrdiff_t)-5, (intmax_t)7,
+                                (long long)9, (long double)1.5, (ptrdiff_t)5));
+    XSRETURN(1);
+}
+
+/* free_magic(\$v): mg_free of the variable. */
+XS(XS_PerlAPI_free_magic) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "scalarref");
+    mg_free(SvRV(ST(0)));
+    XSRETURN_EMPTY;
+}
+
+/* concat_assign(obj, assign): amagic_call of the overloaded . of obj with
+ * 0; with AMGf_assign, perl takes the mutator form .= when there is one
+ * (as PDL's zeroes does on a piddle in place). */
+XS(XS_PerlAPI_concat_assign) {
+    dXSARGS;
+    SV *r;
+    if (items != 2) croak_xs_usage(cv, "obj, assign");
+    r = amagic_call(ST(0), sv_2mortal(newSViv(0)), concat_amg,
+                    SvTRUE(ST(1)) ? AMGf_assign : 0);
+    ST(0) = r ? r : &PL_sv_undef;
+    XSRETURN(1);
+}
+
 /* require_file(name): perl_require_pv, the old name of require_pv, of the
  * file name. */
 XS(XS_PerlAPI_require_file) {
@@ -5367,6 +5398,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     PERL_UNUSED_VAR(items);
     newXS_deffile("PerlAPI::require_file", XS_PerlAPI_require_file);
     newXS_deffile("PerlAPI::format_address", XS_PerlAPI_format_address);
+    newXS_deffile("PerlAPI::concat_assign", XS_PerlAPI_concat_assign);
+    newXS_deffile("PerlAPI::free_magic", XS_PerlAPI_free_magic);
+    newXS_deffile("PerlAPI::format_lengths", XS_PerlAPI_format_lengths);
     newXS_deffile("PerlAPI::pending", XS_PerlAPI_pending);
     newXS_deffile("PerlAPI::refuse_set", XS_PerlAPI_refuse_set);
     newXS_deffile("PerlAPI::enable_infix", XS_PerlAPI_enable_infix);
