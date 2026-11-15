@@ -2987,7 +2987,10 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
 #define SvPOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_POKp) != 0)
 #define SvNIOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NIOKp) != 0)
 #define SvIsUV(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISUV) != 0)
-#define SvUTF8(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_UTF8) != 0)
+/* SvUTF8 is the flag itself, as on perl: code passes it on in the flags of
+ * a call (gv_stashpvn(name, len, GV_ADD | SvUTF8(sv)), newSVpvn_flags(p,
+ * len, SvUTF8(sv) | SVs_TEMP)). */
+#define SvUTF8(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_UTF8) ? (U32)SVf_UTF8 : (U32)0)
 #define SvREADONLY(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_READONLY) != 0)
 #define SvOBJECT(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_OBJECT) != 0)
 #define SvRMAGICAL(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_RMAGICAL) != 0)
@@ -7932,27 +7935,86 @@ static pid_t goperl_getpid(void) {
                              (uint32_t)GOPERL_TOK(sv),              \
                          0))
 #define AMG_CALLun(sv, meth) AMG_CALLunary((sv), meth##_amg)
-/* require through the guest (Perl_load_module's common use). */
+/* load_module is perl's `use NAME VERSION LIST` made at once (`no` with
+ * PERL_LOADMOD_DENY, `use NAME ()` with PERL_LOADMOD_NOIMPORT): the module
+ * is required, asked for the version, and its import (unimport) is called
+ * with the arguments, which end at a NULL. Called while code is compiled
+ * (Quote::Code loads charnames as it reads "\N{...}"), the import changes
+ * the hints of that code, as a BEGIN block's would. The name, the version
+ * and the arguments are the call's: their references are released. An op
+ * tree for the import (PERL_LOADMOD_IMPORT_OPS) is not taken: the call
+ * dies. */
 static void goperl_load_module(goperl_frame_t *f, U32 flags, SV *name,
-                               SV *ver, ...) {
-    (void)flags;
-    (void)ver;
+                               SV *ver, va_list *args) {
     uint64_t len = 0;
     const char *p = goperl_direct_sv_pv(f, GOPERL_TOK(name), &len);
     char buf[512];
+    SV *list[64];
+    int n = 0;
+    if (flags & PERL_LOADMOD_IMPORT_OPS)
+        goperl_croakf(f, "load_module with an op tree for the import "
+                         "(PERL_LOADMOD_IMPORT_OPS) is not supported");
+    if (!(flags & PERL_LOADMOD_NOIMPORT)) {
+        SV *sv;
+        while ((sv = va_arg(*args, SV *)) != NULL) {
+            if (n == (int)(sizeof list / sizeof list[0]))
+                goperl_croakf(f, "load_module: more than %d import arguments",
+                              (int)(sizeof list / sizeof list[0]));
+            list[n++] = sv;
+        }
+    }
+    if (len > sizeof buf - 16)
+        goperl_croakf(f, "load_module: a module name of %llu bytes",
+                      (unsigned long long)len);
     snprintf(buf, sizeof buf, "require %.*s", (int)len, p ? p : "");
     goperl_do_op(f, GOPERL_OP_EVAL_PV, 1, 0, buf, strlen(buf));
+    if (ver) {
+        dSP;
+        ENTER;
+        SAVETMPS;
+        PUSHMARK(SP);
+        XPUSHs(name);
+        XPUSHs(ver);
+        PUTBACK;
+        call_method("VERSION", G_VOID | G_DISCARD);
+        FREETMPS;
+        LEAVE;
+    }
+    if (!(flags & PERL_LOADMOD_NOIMPORT)) {
+        const char *const method = (flags & PERL_LOADMOD_DENY) ? "unimport" : "import";
+        dSP;
+        ENTER;
+        SAVETMPS;
+        PUSHMARK(SP);
+        XPUSHs(name);
+        for (int i = 0; i < n; i++) XPUSHs(list[i]);
+        PUTBACK;
+        /* perl's method lookup makes a missing import (unimport) one that
+         * does nothing, as `use` has it */
+        call_method(method, G_VOID | G_DISCARD);
+        FREETMPS;
+        LEAVE;
+    }
+    for (int i = 0; i < n; i++) SvREFCNT_dec(list[i]);
+    if (ver) SvREFCNT_dec(ver);
+    SvREFCNT_dec(name);
 }
 /* Functions with perl's prototypes: the module names are variadic. */
 static void Perl_load_module(pTHX_ U32 flags, SV *name, SV *ver, ...)
     __attribute__((unused));
 static void Perl_load_module(pTHX_ U32 flags, SV *name, SV *ver, ...) {
-    goperl_load_module(goperl_cur_frame_v, flags, name, ver);
+    va_list args;
+    va_start(args, ver);
+    goperl_load_module(goperl_cur_frame_v, flags, name, ver, &args);
+    va_end(args);
 }
 static void load_module(U32 flags, SV *name, SV *ver, ...)
     __attribute__((unused));
 static void load_module(U32 flags, SV *name, SV *ver, ...) {
-    goperl_load_module(goperl_cur_frame_v, flags, name, ver);
+    va_list args;
+    va_start(args, ver);
+    goperl_load_module(goperl_cur_frame_v, flags, name, ver, &args);
+    va_end(args);
 }
 
 #define PL_sv_arenaroot ((SV *)0)

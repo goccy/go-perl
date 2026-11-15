@@ -5305,6 +5305,131 @@ XS(XS_PerlAPI_free_hook_found) {
     XSRETURN(1);
 }
 
+/* pad_switch(sub): the pad of sub made the one in use for a scope, as
+ * Exporter::Lexical makes the pad of the sub being compiled the one in use:
+ * PL_comppad saved and set, and only then PL_curpad saved and set. Answers
+ * the number of the pad's values. */
+XS(XS_PerlAPI_pad_switch) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sub");
+    {
+        PADLIST *const pl = CvPADLIST((CV *)SvRV(ST(0)));
+        IV n;
+        ENTER;
+        SAVESPTR(PL_comppad_name); PL_comppad_name = PadlistNAMES(pl);
+        SAVESPTR(PL_comppad);      PL_comppad      = PadlistARRAY(pl)[1];
+        SAVESPTR(PL_curpad);       PL_curpad       = PadARRAY(PL_comppad);
+        n = AvFILLp(PL_comppad) + 1;
+        LEAVE;
+        ST(0) = sv_2mortal(newSViv(n));
+    }
+    XSRETURN(1);
+}
+
+/* number_kinds(...): what looks_like_number says of each argument: 0 for
+ * no number, else the letters of grok_number's flags (u: an integer that
+ * fits a UV, f: not an integer, n: negative, i: infinite), x when none of
+ * them is set (a value that holds a number and no string). */
+XS(XS_PerlAPI_number_kinds) {
+    dXSARGS;
+    SV *const out = sv_2mortal(newSVpvs(""));
+    I32 i;
+    for (i = 0; i < items; i++) {
+        const I32 n = looks_like_number(ST(i));
+        if (i) sv_catpvs(out, ",");
+        if (!n) {
+            sv_catpvs(out, "0");
+            continue;
+        }
+        if (n & IS_NUMBER_IN_UV) sv_catpvs(out, "u");
+        if (n & IS_NUMBER_NOT_INT) sv_catpvs(out, "f");
+        if (n & IS_NUMBER_NEG) sv_catpvs(out, "n");
+        if (n & IS_NUMBER_INFINITY) sv_catpvs(out, "i");
+        if (!(n & (IS_NUMBER_IN_UV | IS_NUMBER_NOT_INT | IS_NUMBER_NEG | IS_NUMBER_INFINITY)))
+            sv_catpvs(out, "x");
+    }
+    ST(0) = out;
+    XSRETURN(1);
+}
+
+/* utf8_passed_on(sv): SvUTF8 given on in the flags of calls, as Sub::Name
+ * and Sub::Metadata give it: a copy of the string, and the name of the
+ * stash of that name. */
+XS(XS_PerlAPI_utf8_passed_on) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *const sv = ST(0);
+        STRLEN len;
+        const char *const p = SvPV(sv, len);
+        SV *const copy = newSVpvn_flags(p, len, SvUTF8(sv) | SVs_TEMP);
+        HV *const st = gv_stashpvn(p, len, GV_ADD | SvUTF8(sv));
+        ST(0) = copy;
+        ST(1) = sv_2mortal(newSVpvn_flags(HvNAME(st), HvNAMELEN(st), HvNAMEUTF8(st) ? SVf_UTF8 : 0));
+        ST(2) = sv_2mortal(newSViv(SvUTF8(sv) == SVf_UTF8));
+    }
+    XSRETURN(3);
+}
+
+/* names_with_nul(): names whose bytes include a NUL: the stash "Nul\0Stash"
+ * made with gv_stashpvn, a glob named "na\0me" in it made with
+ * gv_init_pvn (a reference to it), and a string with "x\0y" put in with
+ * sv_insert. */
+XS(XS_PerlAPI_names_with_nul) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        HV *const st = gv_stashpvn("Nul\0Stash", 9, GV_ADD);
+        GV *const gv = (GV *)newSV(0);
+        SV *const s = sv_2mortal(newSVpvs("ab"));
+        gv_init_pvn(gv, st, "na\0me", 5, GV_ADDMULTI);
+        sv_insert(s, 1, 0, "x\0y", 3);
+        ST(0) = sv_2mortal(newRV_noinc((SV *)gv));
+        ST(1) = s;
+    }
+    XSRETURN(2);
+}
+
+/* load_with(flags, name, version, args...): load_module with copies of the
+ * arguments (up to two after the version; an undefined version is none). */
+XS(XS_PerlAPI_load_with) {
+    dXSARGS;
+    if (items < 3 || items > 5) croak_xs_usage(cv, "flags, name, version, ...");
+    {
+        const U32 flags = (U32)SvUV(ST(0));
+        SV *const name = newSVsv(ST(1));
+        SV *const ver = SvOK(ST(2)) ? newSVsv(ST(2)) : NULL;
+        if (items == 3) load_module(flags, name, ver, NULL);
+        else if (items == 4) load_module(flags, name, ver, newSVsv(ST(3)), NULL);
+        else load_module(flags, name, ver, newSVsv(ST(3)), newSVsv(ST(4)), NULL);
+    }
+    XSRETURN_EMPTY;
+}
+
+/* lexical_import(name, sub): Exporter::Lexical's: the sub becomes the
+ * lexical sub &name of the code being compiled. */
+XS(XS_PerlAPI_lexical_import) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "name, sub");
+    {
+        SV *const name = ST(0);
+        SV *const sub = SvRV(ST(1));
+        PADLIST *pl;
+        PADOFFSET off;
+        if (!PL_compcv) croak("lexical_import can only be called at compile time");
+        pl = CvPADLIST(PL_compcv);
+        ENTER;
+        SAVESPTR(PL_comppad_name); PL_comppad_name = PadlistNAMES(pl);
+        SAVESPTR(PL_comppad);      PL_comppad      = PadlistARRAY(pl)[1];
+        SAVESPTR(PL_curpad);       PL_curpad       = PadARRAY(PL_comppad);
+        off = pad_add_name_sv(sv_2mortal(newSVpvf("&%" SVf, SVfARG(name))), padadd_STATE, 0, 0);
+        SvREFCNT_dec(PL_curpad[off]);
+        PL_curpad[off] = SvREFCNT_inc(sub);
+        LEAVE;
+    }
+    XSRETURN_EMPTY;
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -5937,5 +6062,11 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::uni_display_flags", XS_PerlAPI_uni_display_flags);
     newXS_deffile("PerlAPI::attach_free_hook", XS_PerlAPI_attach_free_hook);
     newXS_deffile("PerlAPI::free_hook_found", XS_PerlAPI_free_hook_found);
+    newXS_deffile("PerlAPI::pad_switch", XS_PerlAPI_pad_switch);
+    newXS_deffile("PerlAPI::lexical_import", XS_PerlAPI_lexical_import);
+    newXS_deffile("PerlAPI::number_kinds", XS_PerlAPI_number_kinds);
+    newXS_deffile("PerlAPI::utf8_passed_on", XS_PerlAPI_utf8_passed_on);
+    newXS_deffile("PerlAPI::names_with_nul", XS_PerlAPI_names_with_nul);
+    newXS_deffile("PerlAPI::load_with", XS_PerlAPI_load_with);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

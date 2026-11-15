@@ -118,6 +118,62 @@ func TestNativeFreeHookFindsItsMagic(t *testing.T) {
 	})
 }
 
+// Native code that makes another pad the one in use for a scope, saving
+// PL_comppad, setting it, and only then saving PL_curpad (Exporter::
+// Lexical), leaves the pad and the values of the code that called it when
+// the scope ends: the caller's lexicals are its own again, and a lexical
+// sub given to the code being compiled is there.
+func TestNativePadMadeTheOneInUse(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the pad of another sub", `my $x = "mine"; my @a = (1, 2); my $s = sub { my ($y, $z) = (3, 4); $y + $z }; my $n = PerlAPI::pad_switch($s); join ",", $n > 2 ? "pad" : $n, $x, @a, $s->()`, "pad,mine,1,2,7"},
+		{"a lexical sub at compile time", `sub lexfoo { "global" } my $r = eval q{ my $before = "kept"; BEGIN { PerlAPI::lexical_import("lexfoo", sub { "lexical" }) } 1; join ",", lexfoo(), $before } || $@; join ",", $r, lexfoo()`, "lexical,kept,global"},
+	})
+}
+
+// looks_like_number answers as perl's does: grok_number's flags for a
+// string (Number::Closest::XS takes "1.3" for a fraction by them), the
+// flags of the numbers a value holds otherwise.
+func TestNativeLooksLikeNumberFlags(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"strings and numbers", `PerlAPI::number_kinds("12", "1.3", "-5", "abc", "Inf", 12, 1.5)`, "u,uf,un,0,fi,x,x"},
+	})
+}
+
+// SvUTF8 is SVf_UTF8 when set, so that code that passes it on in the flags
+// of a call gets characters (Sub::Name, Sub::Metadata), and a name may hold
+// NULs: a stash, a glob and an inserted string keep all their bytes.
+func TestNativeNamesAsGiven(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"characters", `my $s = "Snow\x{2603}Man"; my ($copy, $stash, $flag) = PerlAPI::utf8_passed_on($s); join ",", $copy eq $s ? "copy" : "copy differs", $stash eq $s ? "stash" : "stash differs", $flag, exists $main::{"Snow\x{2603}Man::"} ? "exists" : "missing"`, "copy,stash,1,exists"},
+		{"bytes", `my ($copy, $stash, $flag) = PerlAPI::utf8_passed_on("caf\xe9"); join ",", length $copy, $stash eq "caf\xe9" ? "stash" : "stash differs", $flag`, "4,stash,0"},
+		{"with NULs", `my ($gv, $s) = PerlAPI::names_with_nul(); join ",", (exists $main::{"Nul\0Stash::"} ? "stash" : "no stash"), length(*{$gv}{NAME}), *{$gv}{NAME} eq "na\0me" ? "glob" : "glob differs", length $s, $s eq "ax\0yb" ? "insert" : "insert differs"`, "stash,5,glob,5,insert"},
+	})
+}
+
+// load_module is `use NAME VERSION LIST`: the import gets the arguments,
+// and while code is compiled it changes that code's hints (Quote::Code
+// loads charnames as it reads "\N{...}"); PERL_LOADMOD_NOIMPORT leaves the
+// import out, PERL_LOADMOD_DENY calls unimport, and a version the module
+// does not have dies.
+func TestNativeLoadModule(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the import's arguments", `BEGIN { PerlAPI::load_with(0, "constant", undef, "LOADED_C", 42) } LOADED_C()`, "42"},
+		{"the hints of the code compiled", `my $in = eval q{ BEGIN { PerlAPI::load_with(0, "integer", undef) } 7 / 2 }; my $out = 7 / 2; "$in,$out"`, "3,3.5"},
+		{"charnames", `my $r = eval q{ my $h; BEGIN { PerlAPI::load_with(0, "charnames", undef, ":full"); $h = exists $^H{charnames} ? "set" : "unset" } $h }; $r // $@`, "set"},
+		{"no import", `my $in = eval q{ BEGIN { PerlAPI::load_with(2, "integer", undef) } 7 / 2 }; $in`, "3.5"},
+		{"unimport", `my $in = eval q{ use integer; BEGIN { PerlAPI::load_with(1, "integer", undef) } 7 / 2 }; $in`, "3.5"},
+		{"a version", `BEGIN { PerlAPI::load_with(0, "constant", "1.0", "VERSIONED_C", 7) } my $r = eval q{ BEGIN { PerlAPI::load_with(0, "constant", "99", "TOO_NEW_C", 1) } 1 }; join ",", VERSIONED_C(), defined $r ? "loaded" : ($@ =~ /version 99 required/ ? "too new" : $@)`, "7,too new"},
+	})
+}
+
 // pv_uni_display is perl's: with UNI_DISPLAY_QQ a backslash and the
 // controls that have a mnemonic are escaped, a double quote is not; the
 // flags have utf8.h's values.
