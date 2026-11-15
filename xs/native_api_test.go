@@ -41,6 +41,21 @@ func TestNativeModuleSetsASignalAside(t *testing.T) {
 	}
 }
 
+// A croak leaves the thread's alternate signal stack as it was: the next
+// signal, which the runtime takes on that stack, does not end the process.
+// On macOS on arm64 longjmp put back whether the thread was on that stack
+// from words of the buffer setjmp never writes, so a croak whose catch
+// point's buffer held all ones marked the thread as on it, and the runtime's
+// next preemption signal ended the process ("non-Go code set up signal
+// handler without SA_ONSTACK flag").
+func TestNativeCroakLeavesTheSignalStackAlone(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"after a croak caught by XCPT", `PerlAPI::alt_stack_after_croak()`, "0"},
+	})
+}
+
 // A module compiles and runs as against perl built without MULTIPLICITY,
 // as perl's default build is: what it declares for such a perl has no
 // context argument (an XSUB, a function of its own), and a function

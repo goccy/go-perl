@@ -567,7 +567,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
     goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
     goperl_frame_enter(f);
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         size_t ml = strlen(f->err);
         if (ml > respcap - 1) ml = respcap - 1;
         resp[0] = 0;

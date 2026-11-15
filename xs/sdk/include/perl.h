@@ -99,6 +99,26 @@
 #include <netdb.h>
 #include <sys/file.h>
 
+/* The catch points of native code (an XSUB's entry, XCPT, JMPENV, the
+ * loader's other entries) and the jump to them. On macOS they are _setjmp
+ * and _longjmp, which keep no signal state. setjmp and longjmp there also
+ * keep and put back the signal mask and whether the thread runs on its
+ * alternate signal stack, and on arm64 setjmp leaves the words longjmp takes
+ * the second from as they were: a croak marked the thread as running on
+ * that stack whenever they held an odd number, and the next signal with
+ * SA_ONSTACK (the Go runtime's preemption) was delivered on the stack the
+ * thread was running on, which the Go runtime refuses ("non-Go code set up
+ * signal handler without SA_ONSTACK flag"). perl's own catch points keep no
+ * signal state either (JMPENV_PUSH is sigsetjmp(env, 0)), nor do setjmp
+ * and longjmp on Linux. */
+#if defined(__APPLE__)
+#define GOPERL_SETJMP(jb) _setjmp(jb)
+#define GOPERL_LONGJMP(jb, v) _longjmp((jb), (v))
+#else
+#define GOPERL_SETJMP(jb) setjmp(jb)
+#define GOPERL_LONGJMP(jb, v) longjmp((jb), (v))
+#endif
+
 #define GOPERL_XS_ABI 32u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
@@ -2072,7 +2092,7 @@ static void goperl_jump_out(goperl_frame_t *f) {
         goperl_xs_op(f, GOPERL_OP_HOOK, 5, 0, 0, 0);
         f->failed = failed;
     }
-    longjmp(*(jmp_buf *)f->jb, 1);
+    GOPERL_LONGJMP(*(jmp_buf *)f->jb, 1);
 }
 
 /* The interpreter left an operation by a non-local exit (it died inside
@@ -4483,7 +4503,7 @@ static void goperl_pio_set_ptrcnt(goperl_frame_t *f, const void *h,
 #define XCPT_TRY_START                               \
     goperl_xcpt_prev = _gof->jb;                     \
     _gof->jb = (void *)&goperl_xcpt_jb;              \
-    goperl_xcpt_rc = setjmp(goperl_xcpt_jb);         \
+    goperl_xcpt_rc = GOPERL_SETJMP(goperl_xcpt_jb);  \
     if (goperl_xcpt_rc == 0)
 #define XCPT_TRY_END                                 \
     _gof->jb = goperl_xcpt_prev;                     \
@@ -4531,7 +4551,7 @@ typedef struct goperl_jmpenv {
         cur_env.je_prev = _gof->jb;                    \
         cur_env.je_failed = 0;                         \
         _gof->jb = (void *)&cur_env.je_buf;            \
-        if (setjmp(cur_env.je_buf)) {                  \
+        if (GOPERL_SETJMP(cur_env.je_buf)) {           \
             cur_env.je_ret = 3;                        \
             cur_env.je_failed = _gof->failed;          \
             _gof->failed = 0;                          \
@@ -4660,7 +4680,7 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
         (frame)->native_call = 1;                          \
         (frame)->hostsave_base = goperl_entry_base;        \
         (frame)->jb = (void *)&_gof_jb;                    \
-        if (setjmp(_gof_jb)) {                             \
+        if (GOPERL_SETJMP(_gof_jb)) {                      \
             /* xs_leave unwinds the host saves itself, after reading \
              * the frame to return to: that link is one of them */  \
             goperl_xs_leave(frame);                        \
@@ -5880,7 +5900,7 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
         goperl_cur_frame_v = prev_frame;
         return;
     }
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         /* the destructor died: the frame keeps the failure, which the
          * loader hands to the interpreter, and the scope's end dies with
          * it there */
@@ -5946,7 +5966,7 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
     goperl_frame_enter(f);
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         fprintf(stderr, "goperl native XS: croak in magic hook: %s\n", f->err);
         f->failed = 0;
         f->jb = prev_jb;
@@ -6090,7 +6110,7 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     goperl_opreg_enter();
     f->native_call = 1;
     f->hostsave_base = goperl_hostsave_n;
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
         free(f->st_seen);
         f->st_seen = 0;
@@ -9624,7 +9644,7 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
     f->hostsave_base = goperl_hostsave_n;
     goperl_opreg_enter();
     f->native_call = 1;
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
         goperl_xs_depth_v--;
         goperl_cur_frame_v = prev_frame;
@@ -9906,7 +9926,7 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     goperl_opreg_enter();
     f->native_call = 1;
     f->hostsave_base = goperl_hostsave_n;
-    if (setjmp(jb)) {
+    if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
         goperl_xs_leave(f);
         return 0;

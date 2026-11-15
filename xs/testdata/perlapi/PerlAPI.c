@@ -3919,6 +3919,34 @@ XS(XS_PerlAPI_set_signal_aside) {
     }
 }
 
+/* A croak caught by XCPT whose buffer held all ones before (as one on a
+ * stack that held them does): whether the thread is marked as running on
+ * its alternate signal stack after it (1), or not (0); -1 when the system
+ * cannot say. A thread left so marked is put back (a jump from a buffer of
+ * zeros does it on macOS), so that the next signal does not end the
+ * process. */
+static __attribute__((noinline)) int perlapi_croak_caught(pTHX) {
+    dXCPT;
+    stack_t ss;
+    memset(goperl_xcpt_jb, 0xff, sizeof goperl_xcpt_jb);
+    XCPT_TRY_START { croak("caught"); } XCPT_TRY_END
+    if (sigaltstack(NULL, &ss) != 0) return -1;
+    if (!(ss.ss_flags & SS_ONSTACK)) return 0;
+    {
+        jmp_buf zeros;
+        memset(zeros, 0, sizeof zeros);
+        if (setjmp(zeros) == 0) longjmp(zeros, 1);
+    }
+    return 1;
+}
+
+XS(XS_PerlAPI_alt_stack_after_croak) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(perlapi_croak_caught(aTHX)));
+    XSRETURN(1);
+}
+
 /* ---- the compiler's structures (goperl_compiler.h) ---------------------- */
 
 /* status_saved(n): $? is n until the scope that called this ends, as a
@@ -6158,6 +6186,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     }
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
+    newXS_deffile("PerlAPI::alt_stack_after_croak", XS_PerlAPI_alt_stack_after_croak);
     newXS_deffile("PerlAPI::fd_of", XS_PerlAPI_fd_of);
     newXS_deffile("PerlAPI::fd_state", XS_PerlAPI_fd_state);
     newXS_deffile("PerlAPI::fd_write", XS_PerlAPI_fd_write);
