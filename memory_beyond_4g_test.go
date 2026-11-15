@@ -1,16 +1,11 @@
 package perl_test
 
 import (
-	"bufio"
-	"encoding/binary"
-	"os"
 	"runtime"
-	"strconv"
-	"strings"
-	"syscall"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 )
 
 // The interpreter's memory goes beyond 4 GiB: a string longer than 4 GiB
@@ -29,7 +24,7 @@ func TestMemoryBeyondFourGigabytes(t *testing.T) {
 	if runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
 		t.Skip("a 32-bit host has no room for the memory")
 	}
-	if mem := hostMemory(); mem < 16<<30 {
+	if mem, ok := internal.HostMemory(); !ok || mem < 16<<30 {
 		t.Skipf("the host has %d bytes of memory", mem)
 	}
 	r := runProgram(t, perl.Config{MaxMemoryBytes: 6 << 30}, perl.Program{Code: code(
@@ -52,44 +47,6 @@ func TestMemoryBeyondFourGigabytes(t *testing.T) {
 		"element=value 2000000 hash=value 200000 count=200000\n"+
 		"pack p=value 1000\n"+
 		"freed\n")
-}
-
-// hostMemory is the memory the host gives this process, in bytes: the
-// machine's, or a container's limit when that is lower; 0 when it cannot
-// be told.
-func hostMemory() uint64 {
-	switch runtime.GOOS {
-	case "darwin":
-		v, err := syscall.Sysctl("hw.memsize")
-		if err != nil {
-			return 0
-		}
-		b := []byte(v)
-		// the value is the 8 bytes of a uint64; Sysctl drops a trailing NUL
-		for len(b) < 8 {
-			b = append(b, 0)
-		}
-		return binary.LittleEndian.Uint64(b)
-	case "linux":
-		var total uint64
-		if f, err := os.Open("/proc/meminfo"); err == nil {
-			s := bufio.NewScanner(f)
-			for s.Scan() {
-				if fields := strings.Fields(s.Text()); len(fields) >= 2 && fields[0] == "MemTotal:" {
-					kb, _ := strconv.ParseUint(fields[1], 10, 64)
-					total = kb << 10
-				}
-			}
-			f.Close()
-		}
-		if b, err := os.ReadFile("/sys/fs/cgroup/memory.max"); err == nil {
-			if limit, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil && limit < total {
-				total = limit
-			}
-		}
-		return total
-	}
-	return 0
 }
 
 // An instance limited to the host's memory runs.

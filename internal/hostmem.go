@@ -25,6 +25,12 @@ func hostMemory() (size uint64, ok bool) {
 	return hostMemoryOf(runtime.GOOS, os.DirFS("/"), sysctlValue)
 }
 
+// HostMemory is hostMemory, for the tests of the packages that embed the
+// interpreter: a test that writes gigabytes runs where the host has them.
+func HostMemory() (size uint64, ok bool) {
+	return hostMemory()
+}
+
 // hostMemoryOf is hostMemory for the system goos, with its files under
 // root and its sysctl values from sysctl: the machine's memory is
 // hw.memsize on darwin, hw.physmem on FreeBSD and DragonFly, hw.physmem64
