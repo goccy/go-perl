@@ -48,7 +48,9 @@ import (
 // keeps the mapping, its address and its sharing intact for the instance's
 // whole life). Virtual and sparse: pages never written are never resident,
 // and the runtime maps them without charging them against the commit limit
-// until they are written, so a machine with less memory maps it as well.
+// until they are written (under Linux's strict overcommit policy, until
+// the memory grows to them: the mapping is accessible only as far as the
+// memory's size), so a machine with less memory maps it as well.
 // 8 GiB, as llama-wasm declares for its memory64 module.
 const defaultMemoryCeiling = 8 << 30
 
