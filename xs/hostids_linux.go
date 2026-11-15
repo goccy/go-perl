@@ -15,6 +15,8 @@ package xs
 
 import (
 	"errors"
+	"fmt"
+	"runtime"
 	"syscall"
 	"unsafe"
 
@@ -32,16 +34,37 @@ type libcIDs struct{}
 
 // libcCall calls the C library function name, whose result is 0 or -1 with
 // errno. An id of -1 (leave alone) is the id type's all-ones value.
+//
+// errno is the calling thread's, and purego does not collect it on Linux
+// (it does on darwin): the call and the reading of errno, at the address
+// __errno_location gives, run on one locked OS thread, and the C library's
+// memcpy reads it (Go code does not dereference the C library's memory).
 func libcCall(name string, args ...uintptr) error {
 	fn, err := purego.Dlsym(purego.RTLD_DEFAULT, name)
 	if err != nil {
 		return errors.ErrUnsupported
 	}
-	result, _, errno := purego.SyscallN(fn, args...)
-	if int32(result) != 0 {
-		return syscall.Errno(errno)
+	errnoLocation, err := purego.Dlsym(purego.RTLD_DEFAULT, "__errno_location")
+	if err != nil {
+		return errors.ErrUnsupported
 	}
-	return nil
+	memcpy, err := purego.Dlsym(purego.RTLD_DEFAULT, "memcpy")
+	if err != nil {
+		return errors.ErrUnsupported
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	result, _, _ := purego.SyscallN(fn, args...)
+	if int32(result) == 0 {
+		return nil
+	}
+	at, _, _ := purego.SyscallN(errnoLocation)
+	var errno int32
+	purego.SyscallN(memcpy, uintptr(unsafe.Pointer(&errno)), at, unsafe.Sizeof(errno))
+	if errno == 0 {
+		return fmt.Errorf("%s failed without an errno", name)
+	}
+	return syscall.Errno(errno)
 }
 
 func id(n int) uintptr { return uintptr(uint32(int32(n))) }
