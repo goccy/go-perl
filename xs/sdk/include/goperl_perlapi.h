@@ -3319,8 +3319,8 @@ static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
 }
 #define newUNOP_AUX(type, flags, first, aux) \
     goperl_newunop_aux(_gof, (type), (flags), (OP *)(first), (UNOP_AUX_item *)(aux))
-/* An SV in an item fills its low half (the interpreter's pointers are 32
- * bits wide, and a module's own items hold the same handles). */
+/* An SV in an item is an address of the interpreter's (below 4 GiB), and
+ * a module's own items hold the same handles. */
 #define UNOP_AUX_item_sv(item) GOPERL_SV((uint32_t)(item)->uv)
 
 /* ---- pads: goperl_compiler.h ---------------------------------------------------- */
@@ -3554,31 +3554,53 @@ static void goperl_cv_name_hek_set(goperl_frame_t *f, CV *cv, HEK *hek) {
     goperl_cv_name_hek_set(_gof, (CV *)(cv), (HEK *)(hek))
 
 
-static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g) {
-    if (!g) return 0;
-    const size_t n_positional = g[1], n_named = g[2];
+/* The op_multiparam_aux of an op of the interpreter's (at g in its memory)
+ * as a block of this process's. It is read field by field where it is: the
+ * interpreter is LP64 like the host, so its structure has the layout the
+ * SDK's has here, which the assertions below pin (perl.cc asserts the same
+ * offsets of the interpreter's); the pointers in it are the interpreter's
+ * addresses. */
+#define GOPERL_MPA_OFF(field) ((uint32_t)offsetof(struct op_multiparam_aux, field))
+#define GOPERL_MPN_OFF(field) ((uint32_t)offsetof(struct op_multiparam_named_aux, field))
+typedef char goperl_multiparam_aux_layout
+    [(GOPERL_MPA_OFF(min_args) == 0 && GOPERL_MPA_OFF(n_positional) == 8 &&
+      GOPERL_MPA_OFF(n_named) == 16 && GOPERL_MPA_OFF(slurpy) == 24 &&
+      GOPERL_MPA_OFF(slurpy_padix) == 32 && GOPERL_MPA_OFF(param_padix) == 40 &&
+      GOPERL_MPA_OFF(named) == 48 && GOPERL_MPN_OFF(padix) == 0 &&
+      GOPERL_MPN_OFF(namepv) == 8 && GOPERL_MPN_OFF(namelen) == 16 &&
+      GOPERL_MPN_OFF(namehash) == 24 && sizeof(struct op_multiparam_named_aux) == 32)
+         ? 1 : -1] __attribute__((unused));
+static void *goperl_multiparam_aux(goperl_frame_t *f, uint64_t g64) {
+    if (!g64) return 0;
+    const uint32_t g = (uint32_t)g64;
+    const size_t n_positional = (size_t)goperl_g64(f, g + GOPERL_MPA_OFF(n_positional));
+    const size_t n_named = (size_t)goperl_g64(f, g + GOPERL_MPA_OFF(n_named));
     struct op_multiparam_aux *aux = (struct op_multiparam_aux *)malloc(
         sizeof(*aux) + n_positional * sizeof(PADOFFSET) +
         n_named * sizeof(struct op_multiparam_named_aux));
     if (!aux) goperl_croakf(f, "out of memory for the parameters of a signature");
-    aux->min_args = g[0];
+    aux->min_args = (size_t)goperl_g64(f, g + GOPERL_MPA_OFF(min_args));
     aux->n_positional = n_positional;
     aux->n_named = n_named;
-    aux->slurpy = (char)(g[3] & 0xFF);
-    aux->slurpy_padix = (PADOFFSET)g[4];
+    aux->slurpy = *(const char *)(f->membase + g + GOPERL_MPA_OFF(slurpy));
+    aux->slurpy_padix = (PADOFFSET)goperl_g64(f, g + GOPERL_MPA_OFF(slurpy_padix));
     aux->param_padix = (PADOFFSET *)(aux + 1);
     aux->named = (struct op_multiparam_named_aux *)(aux->param_padix + n_positional);
-    const uint32_t *padix = (const uint32_t *)goperl_guest_mem(f, g[5]);
+    const uint32_t padix = (uint32_t)goperl_g64(f, g + GOPERL_MPA_OFF(param_padix));
     for (size_t i = 0; padix && i < n_positional; i++)
-        aux->param_padix[i] = (PADOFFSET)padix[i];
-    const uint32_t *named = (const uint32_t *)goperl_guest_mem(f, g[6]);
+        aux->param_padix[i] =
+            (PADOFFSET)goperl_g64(f, padix + GOPERL_GUEST_PTRSIZE * (uint32_t)i);
+    const uint32_t named = (uint32_t)goperl_g64(f, g + GOPERL_MPA_OFF(named));
     for (size_t i = 0; named && i < n_named; i++) {
-        const uint32_t *n = named + i * 5;
-        aux->named[i].padix = (PADOFFSET)n[0];
-        aux->named[i].namepv = (const char *)goperl_guest_mem(f, n[1]);
-        aux->named[i].namelen = (STRLEN)n[2];
-        aux->named[i].namehash = n[3];
-        aux->named[i].is_required = (n[4] & 1) != 0;
+        const uint32_t n = named + (uint32_t)(i * sizeof(struct op_multiparam_named_aux));
+        aux->named[i].padix = (PADOFFSET)goperl_g64(f, n + GOPERL_MPN_OFF(padix));
+        aux->named[i].namepv =
+            (const char *)goperl_guest_mem(f, goperl_g64(f, n + GOPERL_MPN_OFF(namepv)));
+        aux->named[i].namelen = (STRLEN)goperl_g64(f, n + GOPERL_MPN_OFF(namelen));
+        aux->named[i].namehash = goperl_g32(f, n + GOPERL_MPN_OFF(namehash));
+        /* the bit field is the lowest bit of the byte after namehash */
+        aux->named[i].is_required =
+            (*(const U8 *)(f->membase + n + GOPERL_MPN_OFF(namehash) + 4) & 1) != 0;
     }
     if (!named) aux->named = 0;
     return aux;

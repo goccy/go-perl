@@ -65,16 +65,6 @@ enum {
                  ((uint64_t)(sel) << 32) | (uint32_t)(uint64_t)(tok),       \
                  (uint64_t)(b), (const char *)(s), (uint64_t)(slen))
 
-/* The interpreter's memory, read and written where it is: a word of four
- * bytes at an address of it, and a byte. */
-static inline __attribute__((unused)) uint32_t goperl_g32(const goperl_frame_t *f, uint32_t g) {
-    uint32_t v;
-    memcpy(&v, f->membase + g, 4);
-    return v;
-}
-static inline __attribute__((unused)) void goperl_g32_set(goperl_frame_t *f, uint32_t g, uint32_t v) {
-    memcpy(f->membase + g, &v, 4);
-}
 
 /* What this SDK keeps per interpreter for the compiler's structures (the
  * shared block holds the pointer). */
@@ -366,8 +356,10 @@ static __attribute__((unused)) const uint32_t *goperl_pad_layout(goperl_frame_t 
         const uint32_t *w = (const uint32_t *)goperl_guest_mem(
             f, goperl_xs_op(f, GOPERL_OP_INTERNAL, (uint64_t)GOPERL_INT_LAYOUT << 32, 0, 0, 0));
         if (!w) goperl_croakf(f, "the interpreter did not describe its pads");
-        /* every count and index the structures hold is four bytes there */
-        if (w[20] != 4 || w[21] != 4 || w[22] != 4)
+        /* every count, index and pointer the structures hold (SSize_t,
+         * PADOFFSET, a pointer) is a word of the interpreter's width */
+        if (w[20] != GOPERL_GUEST_PTRSIZE || w[21] != GOPERL_GUEST_PTRSIZE ||
+            w[22] != GOPERL_GUEST_PTRSIZE)
             goperl_croakf(f, "the pads of the interpreter have a layout this SDK does not read");
         memcpy(c->layout, w, sizeof(c->layout));
         c->have_layout = 1;
@@ -454,12 +446,12 @@ static __attribute__((unused)) void goperl_padent_refresh(goperl_frame_t *f, gop
     switch (e->kind) {
     case GOPERL_PADK_NAME: {
         struct padname *pn = &e->u.pn;
-        const uint32_t pv = goperl_g32(f, t + L[GOPERL_LAY_PN_PV]);
+        const uint64_t pv = goperl_g64(f, t + L[GOPERL_LAY_PN_PV]);
         pn->xpadn_pv = pv ? (char *)(f->membase + pv) : 0;
-        pn->xpadn_ourstash = (HV *)GOPERL_SV(goperl_g32(f, t + L[GOPERL_LAY_PN_OURSTASH]));
+        pn->xpadn_ourstash = (HV *)GOPERL_SV(goperl_g64(f, t + L[GOPERL_LAY_PN_OURSTASH]));
         pn->xpadn_type_u.xpadn_typestash =
-            (HV *)GOPERL_SV(goperl_g32(f, t + L[GOPERL_LAY_PN_TYPE]));
-        pn->xpadn_fieldinfo = (struct padname_fieldinfo *)(uintptr_t)goperl_g32(
+            (HV *)GOPERL_SV(goperl_g64(f, t + L[GOPERL_LAY_PN_TYPE]));
+        pn->xpadn_fieldinfo = (struct padname_fieldinfo *)(uintptr_t)goperl_g64(
             f, t + L[GOPERL_LAY_PN_FIELDINFO]);
         pn->xpadn_low = goperl_g32(f, t + L[GOPERL_LAY_PN_LOW]);
         pn->xpadn_high = goperl_g32(f, t + L[GOPERL_LAY_PN_HIGH]);
@@ -472,18 +464,20 @@ static __attribute__((unused)) void goperl_padent_refresh(goperl_frame_t *f, gop
     }
     case GOPERL_PADK_NAMELIST: {
         struct padnamelist *pnl = &e->u.pnl;
-        const int32_t fill = (int32_t)goperl_g32(f, t + L[GOPERL_LAY_PNL_FILL]);
-        const int32_t max = (int32_t)goperl_g32(f, t + L[GOPERL_LAY_PNL_MAX]);
-        e->arr_g = goperl_g32(f, t + L[GOPERL_LAY_PNL_ALLOC]);
+        const int32_t fill = (int32_t)(int64_t)goperl_g64(f, t + L[GOPERL_LAY_PNL_FILL]);
+        const int32_t max = (int32_t)(int64_t)goperl_g64(f, t + L[GOPERL_LAY_PNL_MAX]);
+        e->arr_g = (uint32_t)goperl_g64(f, t + L[GOPERL_LAY_PNL_ALLOC]);
         const int32_t n = (max > fill ? max : fill) + 1;
         goperl_padent_room(f, e, n, (void ***)&pnl->xpadnl_alloc);
         pnl->xpadnl_fill = fill;
         pnl->xpadnl_max = max;
-        pnl->xpadnl_max_named = goperl_g32(f, t + L[GOPERL_LAY_PNL_MAX_NAMED]);
+        pnl->xpadnl_max_named = (PADOFFSET)goperl_g64(f, t + L[GOPERL_LAY_PNL_MAX_NAMED]);
         pnl->xpadnl_refcnt = goperl_g32(f, t + L[GOPERL_LAY_PNL_REFCNT]);
         /* the entries in use; the ones above are NULL until stored into */
         for (int32_t i = 0; i < e->cap; i++) {
-            const uint32_t pt = (i <= fill && e->arr_g) ? goperl_g32(f, e->arr_g + 4 * (uint32_t)i) : 0;
+            const uint32_t pt = (i <= fill && e->arr_g)
+                                    ? (uint32_t)goperl_g64(f, e->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i)
+                                    : 0;
             e->arr_seen[i] = pt;
             pnl->xpadnl_alloc[i] = goperl_padname_shadow(f, pt);
         }
@@ -493,14 +487,16 @@ static __attribute__((unused)) void goperl_padent_refresh(goperl_frame_t *f, gop
     }
     case GOPERL_PADK_PADLIST: {
         struct padlist *pl = &e->u.pl;
-        const int32_t max = (int32_t)goperl_g32(f, t + L[GOPERL_LAY_PL_MAX]);
-        e->arr_g = goperl_g32(f, t + L[GOPERL_LAY_PL_ARR]);
+        const int32_t max = (int32_t)(int64_t)goperl_g64(f, t + L[GOPERL_LAY_PL_MAX]);
+        e->arr_g = (uint32_t)goperl_g64(f, t + L[GOPERL_LAY_PL_ARR]);
         goperl_padent_room(f, e, max + 1, (void ***)&pl->xpadl_arr.xpadlarr_alloc);
         pl->xpadl_max = max;
         pl->xpadl_id = goperl_g32(f, t + L[GOPERL_LAY_PL_ID]);
         pl->xpadl_outid = goperl_g32(f, t + L[GOPERL_LAY_PL_OUTID]);
         for (int32_t i = 0; i < e->cap; i++) {
-            const uint32_t pt = (i <= max && e->arr_g) ? goperl_g32(f, e->arr_g + 4 * (uint32_t)i) : 0;
+            const uint32_t pt = (i <= max && e->arr_g)
+                                    ? (uint32_t)goperl_g64(f, e->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i)
+                                    : 0;
             e->arr_seen[i] = pt;
             /* entry 0 is the list of names (PadlistNAMES), the others pads */
             pl->xpadl_arr.xpadlarr_alloc[i] =
@@ -525,17 +521,17 @@ static __attribute__((unused)) void goperl_padent_store(goperl_frame_t *f, goper
             if (pn->xpadn_pv && !g)
                 goperl_croakf(f, "a pad name was given a name that is not in the "
                                  "interpreter's memory");
-            goperl_g32_set(f, t + L[GOPERL_LAY_PN_PV], (uint32_t)g);
+            goperl_g64_set(f, t + L[GOPERL_LAY_PN_PV], g);
         }
         if (pn->xpadn_ourstash != s->xpadn_ourstash)
-            goperl_g32_set(f, t + L[GOPERL_LAY_PN_OURSTASH],
-                           (uint32_t)GOPERL_TOK(pn->xpadn_ourstash));
+            goperl_g64_set(f, t + L[GOPERL_LAY_PN_OURSTASH],
+                             (uint32_t)GOPERL_TOK(pn->xpadn_ourstash));
         if (pn->xpadn_type_u.xpadn_typestash != s->xpadn_type_u.xpadn_typestash)
-            goperl_g32_set(f, t + L[GOPERL_LAY_PN_TYPE],
-                           (uint32_t)GOPERL_TOK(pn->xpadn_type_u.xpadn_typestash));
+            goperl_g64_set(f, t + L[GOPERL_LAY_PN_TYPE],
+                             (uint32_t)GOPERL_TOK(pn->xpadn_type_u.xpadn_typestash));
         if (pn->xpadn_fieldinfo != s->xpadn_fieldinfo)
-            goperl_g32_set(f, t + L[GOPERL_LAY_PN_FIELDINFO],
-                           (uint32_t)(uintptr_t)pn->xpadn_fieldinfo);
+            goperl_g64_set(f, t + L[GOPERL_LAY_PN_FIELDINFO],
+                             (uint32_t)(uintptr_t)pn->xpadn_fieldinfo);
         if (pn->xpadn_low != s->xpadn_low)
             goperl_g32_set(f, t + L[GOPERL_LAY_PN_LOW], pn->xpadn_low);
         if (pn->xpadn_high != s->xpadn_high)
@@ -559,15 +555,15 @@ static __attribute__((unused)) void goperl_padent_store(goperl_frame_t *f, goper
                              "padnamelist_store makes room in it");
         }
         if (pnl->xpadnl_fill != s->xpadnl_fill)
-            goperl_g32_set(f, t + L[GOPERL_LAY_PNL_FILL], (uint32_t)pnl->xpadnl_fill);
+            goperl_g64_set(f, t + L[GOPERL_LAY_PNL_FILL], (uint64_t)(int64_t)pnl->xpadnl_fill);
         if (pnl->xpadnl_max_named != s->xpadnl_max_named)
-            goperl_g32_set(f, t + L[GOPERL_LAY_PNL_MAX_NAMED], (uint32_t)pnl->xpadnl_max_named);
+            goperl_g64_set(f, t + L[GOPERL_LAY_PNL_MAX_NAMED], (uint64_t)pnl->xpadnl_max_named);
         if (pnl->xpadnl_refcnt != s->xpadnl_refcnt)
             goperl_g32_set(f, t + L[GOPERL_LAY_PNL_REFCNT], pnl->xpadnl_refcnt);
         for (int32_t i = 0; i < e->nseen && i <= pnl->xpadnl_max; i++) {
             const uint32_t now = goperl_padstruct_tok(pnl->xpadnl_alloc[i]);
             if (now == e->arr_seen[i]) continue;
-            goperl_g32_set(f, e->arr_g + 4 * (uint32_t)i, now);
+            goperl_g64_set(f, e->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i, now);
             e->arr_seen[i] = now;
         }
         *s = *pnl;
@@ -587,7 +583,7 @@ static __attribute__((unused)) void goperl_padent_store(goperl_frame_t *f, goper
             void *const p = (void *)pl->xpadl_arr.xpadlarr_alloc[i];
             const uint32_t now = i == 0 ? goperl_padstruct_tok(p) : (uint32_t)GOPERL_TOK(p);
             if (now == e->arr_seen[i]) continue;
-            goperl_g32_set(f, e->arr_g + 4 * (uint32_t)i, now);
+            goperl_g64_set(f, e->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i, now);
             e->arr_seen[i] = now;
         }
         *s = *pl;
@@ -1091,7 +1087,7 @@ static __attribute__((unused)) void goperl_objbody_read(goperl_frame_t *f, goper
     b->arr_g = (uint32_t)(r >> 32);
     b->len = b->arr_g ? n : 0;
     for (int32_t i = 0; i < b->len; i++)
-        b->slots[i] = b->shadow[i] = goperl_g32(f, b->arr_g + 4 * (uint32_t)i);
+        b->slots[i] = b->shadow[i] = goperl_g64(f, b->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i);
     m->val = m->shadow;
 }
 /* The pending number of fields less one of the object, or the
@@ -1124,7 +1120,7 @@ static __attribute__((unused)) void goperl_objbody_store(goperl_frame_t *f, gope
         const uint32_t arr = (uint32_t)GOPERL_INTERNAL(f, GOPERL_INT_OBJ_FIELDS_NEW, m->svtok,
                                                        (uint64_t)(max + 1));
         for (int64_t i = 0; arr && i <= max; i++)
-            goperl_g32_set(f, arr + 4 * (uint32_t)i, (uint32_t)own[i]);
+            goperl_g64_set(f, arr + GOPERL_GUEST_PTRSIZE * (uint32_t)i, (uint32_t)own[i]);
         free((void *)own);
         goperl_objbody_read(f, m);
         return;
@@ -1134,7 +1130,7 @@ static __attribute__((unused)) void goperl_objbody_store(goperl_frame_t *f, gope
     for (int32_t i = 0; i < b->len; i++) {
         if (b->slots[i] == b->shadow[i]) continue;
         b->shadow[i] = b->slots[i];
-        goperl_g32_set(f, b->arr_g + 4 * (uint32_t)i, (uint32_t)b->slots[i]);
+        goperl_g64_set(f, b->arr_g + GOPERL_GUEST_PTRSIZE * (uint32_t)i, (uint32_t)b->slots[i]);
     }
 }
 #define ObjectFIELDS(obj) \
@@ -1361,8 +1357,8 @@ static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
     if (!out) goperl_croakf(f, "Out of memory!");
     for (uint32_t i = 0; i < n; i++) {
         HE **link = &out[i];
-        for (uint32_t he = goperl_g32(f, arr + 4 * i); he;
-             he = goperl_g32(f, he + L[GOPERL_LAY_HE_NEXT])) {
+        for (uint32_t he = (uint32_t)goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i); he;
+             he = (uint32_t)goperl_g64(f, he + L[GOPERL_LAY_HE_NEXT])) {
             HE *const shadow = goperl_he_shadow(f, hv, he);
             shadow->hent_next = 0;
             *link = shadow;
@@ -1899,12 +1895,13 @@ static __attribute__((unused)) UV goperl_case_utf8(goperl_frame_t *f, int which,
 #define PL_origargc ((int)GOPERL_PLVAR(GOPERL_PL_ORIGARGC))
 static __attribute__((unused)) char **goperl_origargv(goperl_frame_t *f) {
     const int argc = (int)goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_ORIGARGC, 0, 0, 0);
-    const uint32_t *g = (const uint32_t *)goperl_guest_mem(
-        f, goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_ORIGARGV, 0, 0, 0));
+    const uint64_t g = goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_ORIGARGV, 0, 0, 0);
     if (!g || argc < 0) return 0;
     char **v = (char **)goperl_arena_alloc(sizeof(char *) * (size_t)(argc + 1));
     if (!v) goperl_croakf(f, "Out of memory!");
-    for (int i = 0; i < argc; i++) v[i] = (char *)goperl_guest_mem(f, g[i]);
+    for (int i = 0; i < argc; i++)
+        v[i] = (char *)goperl_guest_mem(
+            f, goperl_g64(f, (uint32_t)g + GOPERL_GUEST_PTRSIZE * (uint32_t)i));
     v[argc] = 0;
     return v;
 }

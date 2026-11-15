@@ -3,8 +3,8 @@
  *
  * This is NOT perl's own perl.h. The real header exposes the interpreter's
  * struct layouts and lets XS macros compile into direct memory access; that
- * can never match go-perl, whose interpreter lives in a wasm32 linear memory
- * (4-byte pointers, offsets as handles). Here every SV is an opaque token
+ * can never match go-perl, whose interpreter lives in a wasm64 linear memory
+ * (offsets as handles). Here every SV is an opaque token
  * and every operation is a call through a vtable the loader injects at
  * dlopen time (__goperl_xs_init). Anything this SDK does not cover fails AT
  * COMPILE TIME — never silently at runtime.
@@ -99,7 +99,13 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 28u
+#define GOPERL_XS_ABI 29u
+
+/* The width of a pointer, a size_t and an SSize_t of the interpreter, as
+ * its structures hold them in its memory: it is LP64 (wasm64), like the
+ * hosts the SDK supports. Its addresses are below 4 GiB (its memory is no
+ * bigger), so one is handed over as a 32-bit token. */
+#define GOPERL_GUEST_PTRSIZE 8
 
 /* Signal actions of the process.
  *
@@ -507,16 +513,15 @@ typedef struct op UNOP_AUX;
 typedef OP *(*Perl_ppaddr_t)(pTHX);
 /* An item of an op's auxiliary data. The items of an op of the
  * interpreter's (a multideref's) are its memory, where an item is as wide
- * as here (an IV is 64 bits there too) but a pointer or a pad offset fills
- * only the low half of it: pad_offset is that half, and UNOP_AUX_item_sv
- * reads an SV from it. */
+ * as here and a pad offset is too (both are LP64); a pointer there is an
+ * address of the interpreter's, which UNOP_AUX_item_sv reads an SV from. */
 typedef union {
     SV *sv;
     UV uv;
     IV iv;
     char *pv;
     SSize_t ssize;
-    U32 pad_offset;
+    UV pad_offset;
 } UNOP_AUX_item;
 /* BASEOP mirrors real perl's role: a dist declaring its own op struct
  * (struct myop { BASEOP OP *op_first; OP *op_other; ... }) gets the same
@@ -833,6 +838,28 @@ static inline __attribute__((unused)) void *goperl_guest_mem(
     if (!gptr) return 0;
     if (f->membase && gptr < f->memcap) return f->membase + gptr;
     GOPERL_KEEP_ERRNO(void *, goperl_api_v->guest_mem(f, gptr));
+}
+/* The interpreter's memory, read and written where it is: a word of four
+ * bytes at an address of it (a U32, an I32, an int), a word of eight bytes
+ * (a pointer stored there, a size_t, an SSize_t: GOPERL_GUEST_PTRSIZE), and
+ * a byte. The interpreter's addresses are below 4 GiB, so an address read
+ * as a word is a token. */
+typedef char goperl_guest_ptrsize_is_8[GOPERL_GUEST_PTRSIZE == 8 ? 1 : -1] __attribute__((unused));
+static inline __attribute__((unused)) uint32_t goperl_g32(const goperl_frame_t *f, uint32_t g) {
+    uint32_t v;
+    memcpy(&v, f->membase + g, 4);
+    return v;
+}
+static inline __attribute__((unused)) void goperl_g32_set(goperl_frame_t *f, uint32_t g, uint32_t v) {
+    memcpy(f->membase + g, &v, 4);
+}
+static inline __attribute__((unused)) uint64_t goperl_g64(const goperl_frame_t *f, uint32_t g) {
+    uint64_t v;
+    memcpy(&v, f->membase + g, 8);
+    return v;
+}
+static inline __attribute__((unused)) void goperl_g64_set(goperl_frame_t *f, uint32_t g, uint64_t v) {
+    memcpy(f->membase + g, &v, 8);
 }
 static inline __attribute__((unused)) uint64_t goperl_api_new_xs(
     goperl_frame_t *f, const char *name, void *xsub) {
@@ -1909,8 +1936,9 @@ enum {
 
 #define GOPERL_TOK(sv) ((uint64_t)(uintptr_t)(sv))
 /* A word of the interpreter's answers that are laid out as words in its
- * memory: an address of that memory, or a value that travels with one. It
- * is as wide as the interpreter's addresses. */
+ * memory: an address of that memory, or a value that travels with one, in
+ * 32 bits. An address fits one: the interpreter's memory is at most 4 GiB
+ * (GOPERL_GUEST_PTRSIZE). */
 typedef uint32_t goperl_gword_t;
 #define GOPERL_SV(tok) ((SV *)(uintptr_t)(tok))
 
@@ -2096,10 +2124,10 @@ static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...) {
  * perl lets a module keep a pointer to a structure of its own where an
  * array or a hash keeps its values, as if it were a value (Object::Pad
  * keeps the descriptions of its methods and fields in arrays that way, and
- * never lets perl treat them as values). A slot of the interpreter's holds
- * 32 bits, a pointer of this process more. Every value of the
- * interpreter's is an address below 4 GiB, so a wider one is such a
- * pointer: it is stored as a number the loader gives it, from a range at
+ * never lets perl treat them as values). A value crosses to the
+ * interpreter in 32 bits (every value of the interpreter's is an address
+ * below 4 GiB), a pointer of this process is wider, so a wider one is such
+ * a pointer: it is stored as a number the loader gives it, from a range at
  * the top of the 32-bit space that is no address of the interpreter's
  * memory nor of this process's, and that number is read back as the
  * pointer. */
@@ -3766,8 +3794,9 @@ static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
     const uint64_t where = goperl_xs_op(
         f, GOPERL_OP_SV_CALL, ((uint64_t)59 << 32) | (uint32_t)m->svtok, 0, 0, 0);
     int32_t len = (int32_t)(uint32_t)where;
-    const uint32_t *const guest =
-        len > 0 ? (const uint32_t *)goperl_guest_mem(f, where >> 32) : 0;
+    /* the slots are SV pointers of the interpreter's: words of its width */
+    const uint64_t *const guest =
+        len > 0 ? (const uint64_t *)goperl_guest_mem(f, where >> 32) : 0;
     if (!guest) len = 0;
     int32_t slots = goperl_av_slots(f, m->svtok);
     if (slots < len) slots = len;
@@ -5302,7 +5331,7 @@ static OP *goperl_op_link(goperl_frame_t *f, goperl_opreg_t *r, uint32_t tok) {
  * which is padix, the address of the name, its length, its hash and the
  * required bit). The copy is the caller's to free. */
 struct op_multiparam_aux;
-static void *goperl_multiparam_aux(goperl_frame_t *f, const uint32_t *g);
+static void *goperl_multiparam_aux(goperl_frame_t *f, uint64_t g);
 
 /* One record of the interpreter's answer becomes the state of its shadow. */
 static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
@@ -5371,8 +5400,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
                    : 0;
     if (w[GOPERL_OPREC_AUX] && o->op_type == OP_MULTIPARAM) {
         free(e->aux_own);
-        e->aux_own = goperl_multiparam_aux(
-            f, (const uint32_t *)goperl_guest_mem(f, w[GOPERL_OPREC_AUX]));
+        e->aux_own = goperl_multiparam_aux(f, w[GOPERL_OPREC_AUX]);
         o->op_aux = (UNOP_AUX_item *)e->aux_own;
     } else if (w[GOPERL_OPREC_AUX]) {
         /* the items of a multideref, which are the interpreter's memory */

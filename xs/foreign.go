@@ -16,9 +16,10 @@ import (
 // perl lets a module keep a pointer to a structure of its own where an
 // array or a hash keeps its values, as if it were a value (Object::Pad
 // keeps the descriptions of its methods and fields that way, and never
-// lets perl treat them as values). A slot of the interpreter's holds 32
-// bits; a pointer of this process is wider. Such a pointer is kept in the
-// slot as a number of a range at the top of the 32-bit space, which is no
+// lets perl treat them as values). A value crosses to the interpreter in
+// 32 bits (every address of the interpreter's is below 4 GiB); a pointer of
+// this process is wider. Such a pointer is kept in the slot as a number of
+// a range at the top of the 32-bit space, which is no
 // address of the interpreter's memory (its growth stops below the range)
 // and none of this process's (the range is taken here, inaccessible, for
 // as long as the process runs). The number foreignBase + 4*i stands for the
