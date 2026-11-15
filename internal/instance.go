@@ -472,14 +472,14 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 // one (or with one below least, the memory the instance starts with). It
 // is the length of the mapping the instance's memory is, and its growth
 // cap, however the instance gets its memory.
-func memoryCeiling(opts InstanceOptions, least uint64) int {
+func memoryCeiling(opts InstanceOptions, least uint64) uint64 {
 	switch {
 	case opts.MaxMemoryBytes == HostMemoryLimit:
 		if size, ok := hostMemory(); ok && size/wasmPage*wasmPage >= least {
-			return int(size / wasmPage * wasmPage)
+			return size / wasmPage * wasmPage
 		}
 	case opts.MaxMemoryBytes > 0:
-		if max := opts.MaxMemoryBytes / wasmPage * wasmPage; uint64(max) >= least {
+		if max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage; max >= least {
 			return max
 		}
 	}
@@ -516,7 +516,7 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 	// Cap linear-memory growth so a runaway allocation fails in the guest
 	// instead of growing the host process unbounded: the same limit as an
 	// instance on a mapping has.
-	wasm2go.SetMaxMemory(p.m.g, uint64(memoryCeiling(opts, uint64(len(wasm2go.Memory(p.m.g))))))
+	wasm2go.SetMaxMemory(p.m.g, memoryCeiling(opts, uint64(len(wasm2go.Memory(p.m.g)))))
 	return p.start(opts)
 }
 
