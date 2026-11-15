@@ -5202,6 +5202,59 @@ XS(XS_PerlAPI_stdio_release) {
     }
 }
 
+/* build_map(n): a hash of n keys built the way YAML::Syck's loader builds
+ * one from a mapping of string scalars: for each pair a key and a value
+ * made with newSVpvn, a mortal copy of the value (newSVsv), the key's
+ * string looked at, the pair stored with hv_store_ent and the value's
+ * count raised, the two made at first given back. Answers a reference to
+ * the hash. */
+XS(XS_PerlAPI_build_map) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        HV *map = newHV();
+        char key[64];
+        for (IV i = 0; i < n; i++) {
+            const int klen = snprintf(key, sizeof key, "a key of some length %ld", (long)i);
+            SV *k = newSVpvn(key, (STRLEN)klen);
+            SV *v0 = newSVpvn("", 0);
+            SV *v = sv_2mortal(newSVsv(v0));
+            STRLEN len;
+            (void)SvPV(k, len);
+            if (hv_store_ent(map, k, v, 0) != NULL) SvREFCNT_inc(v);
+            SvREFCNT_dec(k);
+            SvREFCNT_dec(v0);
+        }
+        ST(0) = sv_2mortal(newRV_noinc((SV *)map));
+        XSRETURN(1);
+    }
+}
+
+/* store_fetch(hash, key): stores "stored:<key length>" under the key with
+ * hv_store and answers a copy of what hv_fetch finds under it then (the
+ * key travels with each operation; a tied hash runs Perl code, which may
+ * call native code, inside the set magic and the get magic). */
+XS(XS_PerlAPI_store_fetch) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "hash, key");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        STRLEN len;
+        const char *k = SvPV(ST(1), len);
+        SV *val = newSVpvf("stored:%lu", (unsigned long)len);
+        SV **v = hv_store(hv, k, (I32)len, val, 0);
+        /* a tied hash took no value: the value has the element's magic,
+         * whose set runs STORE (perlguts) */
+        SvSETMAGIC(val);
+        if (!v) SvREFCNT_dec(val);
+        v = hv_fetch(hv, k, (I32)len, 0);
+        if (v) SvGETMAGIC(*v);
+        ST(0) = v ? sv_2mortal(newSVsv(*v)) : &PL_sv_undef;
+        XSRETURN(1);
+    }
+}
+
 /* pv_display(string, flags): pv_uni_display of the string's bytes. */
 XS(XS_PerlAPI_pv_display) {
     dXSARGS;
@@ -5850,6 +5903,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::names_and_offsets", XS_PerlAPI_names_and_offsets);
     newXS_deffile("PerlAPI::stdio_of", XS_PerlAPI_stdio_of);
     newXS_deffile("PerlAPI::stdio_release", XS_PerlAPI_stdio_release);
+    newXS_deffile("PerlAPI::build_map", XS_PerlAPI_build_map);
+    newXS_deffile("PerlAPI::store_fetch", XS_PerlAPI_store_fetch);
     newXS_deffile("PerlAPI::pv_display", XS_PerlAPI_pv_display);
     newXS_deffile("PerlAPI::uni_display_flags", XS_PerlAPI_uni_display_flags);
     Perl_xs_boot_epilog(aTHX_ ax);

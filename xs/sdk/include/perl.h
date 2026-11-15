@@ -665,6 +665,10 @@ typedef struct goperl_api {
      * instance's arrays and hashes (see goperl_value_in); 0 when it cannot
      * be kept. */
     uint64_t (*foreign_in)(goperl_frame_t *, uint64_t ptr);
+    /* v27: run the operation whose arguments are in the frame's operation
+     * box (see goperl_xs_op); 1 when it returned (the result is in the
+     * box), 0 when it failed (the frame says how). */
+    uint64_t (*xs_op_box)(goperl_frame_t *);
 } goperl_api_t;
 #define GOPERL_SHARED_RESERVED 262144
 
@@ -734,6 +738,8 @@ struct goperl_frame {
                      * of a module built before the entry existed ends at
                      * pad5 for that module, which never looks here */
     const goperl_foreign_t *foreign; /* the instance's (goperl_value_in) */
+    uint64_t opbox; /* the address of the instance's operation box in its
+                     * memory, 0 when it has none (see goperl_xs_op) */
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) ---------
@@ -784,17 +790,48 @@ typedef struct goperl_process {
         (call);                      \
         errno = goperl_e_;           \
     } while (0)
+/* The operation box of an instance (perl-wasm's struct goperl_opbox): an
+ * operation's arguments, written here into the interpreter's memory, and
+ * its result, which the interpreter leaves there. An operation goes
+ * through it with nothing encoded or allocated on the way; a string longer
+ * than the box holds goes through the loader's encoding instead. */
+#define GOPERL_OPBOX_STR 4096
+typedef struct goperl_opbox {
+    uint64_t a;
+    uint64_t b;
+    uint64_t result;
+    int32_t op;
+    uint32_t slen;
+    char s[GOPERL_OPBOX_STR];
+} goperl_opbox_t;
+static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
+    goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, const char *s,
+    uint32_t slen) {
+    goperl_opbox_t *const box = (goperl_opbox_t *)(f->membase + f->opbox);
+    box->a = a;
+    box->b = b;
+    box->op = op;
+    box->slen = slen;
+    if (slen) memcpy(box->s, s, slen);
+    return goperl_api_v->xs_op_box(f) ? box->result : 0;
+}
 static inline __attribute__((unused)) uint64_t goperl_xs_op(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, const char *s,
     uint64_t slen) {
+    if (f->opbox && slen <= GOPERL_OPBOX_STR)
+        GOPERL_KEEP_ERRNO(uint64_t, goperl_xs_op_box(f, op, a, b, s, (uint32_t)slen));
     GOPERL_KEEP_ERRNO(uint64_t, goperl_api_v->xs_op(f, op, a, b, s, slen));
 }
 /* Where an address of the interpreter's memory is in this process. No
  * address (0) is none here either: the interpreter answers a question
- * about something that does not exist with 0. */
+ * about something that does not exist with 0. The memory never moves in
+ * the range reserved for it (membase, memcap), so an address in that range
+ * is turned here; the loader turns any other (and fails the frame: no
+ * address of the interpreter's lies outside it). */
 static inline __attribute__((unused)) void *goperl_guest_mem(
     goperl_frame_t *f, uint64_t gptr) {
     if (!gptr) return 0;
+    if (f->membase && gptr < f->memcap) return f->membase + gptr;
     GOPERL_KEEP_ERRNO(void *, goperl_api_v->guest_mem(f, gptr));
 }
 static inline __attribute__((unused)) uint64_t goperl_api_new_xs(

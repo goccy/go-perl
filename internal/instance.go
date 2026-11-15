@@ -53,6 +53,8 @@ const (
 	midRunProgram       = 22
 	midSetGoDispatcher  = 23
 	midXSHelper         = 24
+	midXSOp             = 25
+	midXSOpBox          = 26
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package

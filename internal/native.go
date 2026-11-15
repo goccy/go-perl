@@ -226,6 +226,37 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
+// XSOpBox answers the address of the instance's operation box in linear
+// memory (pl.h perl_xs_opbox): native code writes an operation's arguments
+// there itself, has XSOpRun run it, and reads its result there, with
+// nothing encoded or allocated on the way.
+func (p *Perl) XSOpBox() (uint32, error) {
+	buf := pbAppendUint64(nil, 1, p.h)
+	resp, err := p.m.invoke(0, midXSOpBox, buf, wasm2go.Inv_0_26)
+	if err != nil {
+		return 0, err
+	}
+	if e := pbExtractError(resp); e != nil {
+		return 0, e
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
+// XSOpRun runs the operation whose arguments are in the operation box, as
+// XSHelperOp runs one; its result is in the box when it returns nil.
+func (p *Perl) XSOpRun() error {
+	parked := false
+	_, err := p.m.invoke(0, midXSOp, nil, func(g *base.Module, req, n wptr) (int64, error) {
+		r, err := wasm2go.Inv_0_25(g, req, n)
+		parked = p.parkGuestJump()
+		return r, err
+	})
+	if parked {
+		return ErrGuestJump
+	}
+	return err
+}
+
 // RawMemory exposes the instance's linear memory. Native XSUBs read guest
 // strings in place through pointers computed against this slice's base, so
 // it must not be captured across calls that could grow the memory; on the

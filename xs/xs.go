@@ -173,6 +173,10 @@ type cFrame struct {
 	// foreign is the instance's goperl_foreign_t: the pointers of native
 	// code's own its arrays and hashes keep (see foreign.go).
 	foreign uintptr
+	// opbox is the address of the instance's operation box in its linear
+	// memory (internal.Perl.XSOpBox), 0 when there is none: the SDK writes
+	// an operation's arguments there and has xsOpBox run it.
+	opbox uint64
 
 	// Go-only:
 	p *internal.Perl
@@ -180,7 +184,7 @@ type cFrame struct {
 
 // newFrame returns a frame of this instance with no stack yet.
 func (s *state) newFrame() *cFrame {
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, foreign: s.foreignTab}
+	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, foreign: s.foreignTab, opbox: s.opbox}
 	if mem := s.p.RawMemory(); cap(mem) > 0 {
 		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
 		f.memCap = uint64(cap(mem))
@@ -225,6 +229,9 @@ type cAPI struct {
 	// v21: the number that stands for a pointer of the module's own in
 	// the instance's arrays and hashes.
 	foreignIn uintptr
+	// v27: run the operation in the frame's operation box; 1 when it
+	// returned, 0 when it failed (the frame says how).
+	xsOpBox uintptr
 }
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
@@ -303,6 +310,10 @@ type state struct {
 	foreignTab uintptr
 	foreignIdx map[uint64]uint32
 	foreignCap int
+	// opbox is the address of the instance's operation box in its linear
+	// memory (see cFrame.opbox): asked of the interpreter once, as the
+	// interrupt flag's is, since only the interpreter knows it.
+	opbox uint64
 
 	// sharedRaw is this instance's C shared-state block (goperl_shared_t):
 	// scope bookkeeping, save stacks, and mirrors, aliased by every loaded
@@ -397,6 +408,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		hookFns:       make(map[int32]uintptr, len(s.hookFns)),
 		perOpFns:      make(map[uint64]uintptr, len(s.perOpFns)),
 		sharedRaw:     cMalloc(sharedBlockSize),
+		opbox:         s.opbox, // the copy's memory has it where the original's has it
 		sharedClone:   s.sharedClone,
 		sharedRelease: s.sharedRelease,
 		keywordInvoke: s.keywordInvoke,
@@ -532,6 +544,11 @@ func stateFor(p *internal.Perl) *state {
 		}
 		pokeBytes(s.sharedRaw, make([]byte, sharedBlockSize))
 		s.foreignTab, s.foreignIdx, s.foreignCap = newForeignTable(p, nil)
+		// without a box (an interpreter built before it) every operation
+		// goes through XSHelperOp
+		if box, err := p.XSOpBox(); err == nil {
+			s.opbox = uint64(box)
+		}
 		states[p] = s
 	}
 	return s
@@ -1854,6 +1871,28 @@ func buildVtable() {
 			return 0
 		}
 		return stateFor(f.p).pvHostSlot(uint64(sv), create != 0)
+	})
+	vtable.xsOpBox = purego.NewCallback(func(fr uintptr) uintptr {
+		f := lookupFrame(fr)
+		if f == nil {
+			return 0
+		}
+		err := f.p.XSOpRun()
+		if errors.Is(err, internal.ErrGuestJump) {
+			// as in xsOp: the interpreter is unwinding to a catch point
+			// of its own, and the native call ends here
+			if f.failed == 0 {
+				f.failed = failedJump
+				f.err[0] = 0
+			}
+			return 0
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "goperl xs: op in the box failed: %v\n", err)
+			f.fail(fmt.Sprintf("xs op: %v", err))
+			return 0
+		}
+		return 1
 	})
 	vtable.foreignIn = purego.NewCallback(func(fr, ptr uintptr) uintptr {
 		f := lookupFrame(fr)

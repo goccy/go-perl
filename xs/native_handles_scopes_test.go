@@ -86,6 +86,22 @@ func TestNativeStdioStreamOfAHandle(t *testing.T) {
 	})
 }
 
+// An operation's arguments reach the interpreter whole whatever their size
+// (a string longer than the operation box goes the loader's way), and an
+// operation that runs Perl code which calls native code (a tied hash's
+// STORE and FETCH) gets its own result back after the operations of that
+// code.
+func TestNativeOperationArguments(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a short key", `my %h; PerlAPI::store_fetch(\%h, "k" x 10) . ":" . join(",", map { length } keys %h)`, "stored:10:10"},
+		{"a key as long as the box", `my %h; PerlAPI::store_fetch(\%h, "k" x 4096)`, "stored:4096"},
+		{"a key longer than the box", `my %h; my $r = PerlAPI::store_fetch(\%h, "k" x 10000); $r . ":" . (exists $h{"k" x 10000} ? "there" : "missing")`, "stored:10000:there"},
+		{"native code inside the operation", `package NestTie { sub TIEHASH { bless {}, shift } sub STORE { my ($s, $k, $v) = @_; $s->{$k} = $v . ":" . PerlAPI::numcmp(2, 1) } sub FETCH { my ($s, $k) = @_; $s->{$k} . ":" . PerlAPI::numcmp(1, 2) } } tie my %h, "NestTie"; PerlAPI::store_fetch(\%h, "key")`, "stored:3:1:-1"},
+	})
+}
+
 // pv_uni_display is perl's: with UNI_DISPLAY_QQ a backslash and the
 // controls that have a mnemonic are escaped, a double quote is not; the
 // flags have utf8.h's values.

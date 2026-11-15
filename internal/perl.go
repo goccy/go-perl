@@ -1409,3 +1409,34 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, err
 	}
 	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
+
+func PerlXsOp() (uint32, error) {
+	buf := pbNewBuf()
+	resp, err := invokeMethod(0, 25, buf, wasm2go.Inv_0_25)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
+// perl_xs_helper without the bridge's encoding, for the operations native
+// code makes by the million: perl_xs_opbox answers the address of the
+// instance's operation box, a struct goperl_opbox in linear memory
+// ([a][b][result] as u64, [op] as i32, [slen] as u32, then the slen bytes
+// of s: 32 bytes before s, GOPERL_OPBOX_STR bytes of room for s). The
+// host writes an operation's arguments there and calls perl_xs_op, which
+// runs it as perl_xs_helper does (s NUL-terminated) and leaves its result
+// in the box; it answers 0, so that the bridge sends nothing back. A
+// string longer than the box holds goes through perl_xs_helper. The box is
+// free again once perl_xs_op has returned: an operation that leads to
+// native code (magic, a callback) has the operations of that code use it
+// meanwhile, after this one has taken its arguments out.
+func PerlXsOpbox(h uint64) (uint32, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	resp, err := invokeMethod(0, 26, buf, wasm2go.Inv_0_26)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
