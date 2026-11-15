@@ -33,6 +33,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -44,8 +45,17 @@ import (
 // snapshot is mapped at, in bytes — the growth cap too (NewFromSnapshot sets
 // MaxMem to the mapping length, and MemoryGrow refuses to grow past it before
 // it could reallocate, which keeps the mmap and its sharing intact for the
-// instance's whole life). Virtual, sparse: unused pages never become resident.
-const snapshotCeiling = 512 << 20
+// instance's whole life). It is as much as a wasm32 memory may grow to (the
+// runtime's hard cap, just under 4 GiB): perl on the host has no limit of
+// its own below the machine's memory, and a program's memory must not run
+// out earlier here. Virtual and sparse: unused pages never become resident,
+// and the runtime maps them without charging them against the commit limit
+// until they are written. An instance whose options cap its memory lower is
+// mapped at that cap instead (memoryCeiling).
+var snapshotCeiling = int(min(base.WasmMemHardCap(), uint64(math.MaxInt)) / wasmPageBytes * wasmPageBytes)
+
+// wasmPageBytes is the size of a page of wasm linear memory.
+const wasmPageBytes = 65536
 
 type perlSnapshot struct {
 	img *base.SharedImage
