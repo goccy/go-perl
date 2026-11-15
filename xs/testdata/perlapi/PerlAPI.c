@@ -5406,6 +5406,40 @@ XS(XS_PerlAPI_load_with) {
     XSRETURN_EMPTY;
 }
 
+/* keep_fetched(array, hash, keys): the SV** results of av_fetch for every
+ * element of the array, then of hv_fetch for each of the keys in the hash,
+ * all kept and read after the last fetch, as Number::Closest::XS keeps the
+ * slots of the closest elements while it fetches the rest: the values
+ * joined with ",", the array's and the hash's parts joined with "|". */
+XS(XS_PerlAPI_keep_fetched) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "array, hash, keys");
+    {
+        AV *const av = (AV *)SvRV(ST(0));
+        HV *const hv = (HV *)SvRV(ST(1));
+        AV *const keys = (AV *)SvRV(ST(2));
+        const SSize_t na = av_len(av) + 1, nk = av_len(keys) + 1;
+        SV ***kept;
+        SV *const out = sv_2mortal(newSVpvs(""));
+        SSize_t i;
+        Newx(kept, na + nk, SV **);
+        for (i = 0; i < na; i++) kept[i] = av_fetch(av, i, 0);
+        for (i = 0; i < nk; i++) {
+            STRLEN len;
+            const char *const k = SvPV(*av_fetch(keys, i, 0), len);
+            kept[na + i] = hv_fetch(hv, k, (I32)len, 0);
+        }
+        for (i = 0; i < na + nk; i++) {
+            if (i == na) sv_catpvs(out, "|");
+            else if (i) sv_catpvs(out, ",");
+            if (kept[i]) sv_catsv(out, *kept[i]);
+        }
+        Safefree(kept);
+        ST(0) = out;
+    }
+    XSRETURN(1);
+}
+
 /* lexical_import(name, sub): Exporter::Lexical's: the sub becomes the
  * lexical sub &name of the code being compiled. */
 XS(XS_PerlAPI_lexical_import) {
@@ -6068,5 +6102,6 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::utf8_passed_on", XS_PerlAPI_utf8_passed_on);
     newXS_deffile("PerlAPI::names_with_nul", XS_PerlAPI_names_with_nul);
     newXS_deffile("PerlAPI::load_with", XS_PerlAPI_load_with);
+    newXS_deffile("PerlAPI::keep_fetched", XS_PerlAPI_keep_fetched);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

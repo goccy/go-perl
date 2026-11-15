@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 28u
+#define GOPERL_XS_ABI 29u
 
 /* Signal actions of the process.
  *
@@ -691,6 +691,14 @@ typedef struct goperl_foreign {
 #define GOPERL_XS_MARKS 64
 #define GOPERL_XS_TMPS 16
 
+/* Slots of SV** results beyond the frame's own (see goperl_tmp_slot): a
+ * block of them, after the one made before it. */
+#define GOPERL_TMP_BLOCK 256
+typedef struct goperl_tmpblock {
+    struct goperl_tmpblock *prev;
+    uint64_t slot[GOPERL_TMP_BLOCK];
+} goperl_tmpblock_t;
+
 struct goperl_frame {
     const goperl_api_t *api; /* +0 */
     const char *subname;     /* +8   fully qualified, for usage croaks */
@@ -701,7 +709,7 @@ struct goperl_frame {
     int32_t markidx;         /* +40 */
     int32_t hostsave_base;   /* +44  host save-stack depth at XSUB entry */
     int32_t hook_dirty;      /* +48  bit0 diehook, bit1 warnhook pending */
-    int32_t tmpidx;          /* +52  rotating slot cursor */
+    int32_t tmpidx;          /* +52  the SV** result slots handed out */
     uint64_t hook_val[2];    /* +56  pending hook assignments */
     uint64_t imm[3];         /* +72  cached &PL_sv_undef/yes/no tokens */
     OP *plop;                /* +96  PL_op host shadow */
@@ -714,7 +722,7 @@ struct goperl_frame {
     int64_t stcap;           /* +136 its capacity in slots */
     uint64_t st[GOPERL_XS_STACK];   /* +144 the initial stack (tokens) */
     int32_t marks[GOPERL_XS_MARKS]; /* mark offsets into st */
-    uint64_t tmp[GOPERL_XS_TMPS];   /* slots backing SV**-returning macros */
+    uint64_t tmp[GOPERL_XS_TMPS];   /* the first slots of SV** results */
     char err[512];
     int32_t xerrno; /* 0, or 1 + the errno the XSUB left, in the
                      * interpreter's numbering (see goperl_errno_leave) */
@@ -743,6 +751,9 @@ struct goperl_frame {
     const goperl_foreign_t *foreign; /* the instance's (goperl_value_in) */
     uint64_t opbox; /* the address of the instance's operation box in its
                      * memory, 0 when it has none (see goperl_xs_op) */
+    goperl_tmpblock_t *tmp_more; /* the last block of SV** result slots
+                                  * beyond tmp (malloc'd; the loader frees
+                                  * the blocks when the frame ends) */
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) ---------
@@ -3175,6 +3186,33 @@ static SV *goperl_amagic_deref_call(goperl_frame_t *f, SV *ref, int method) {
     ((void)goperl_op0(GOPERL_OP_AV_EXTEND, GOPERL_TOK(av), (uint64_t)(int64_t)(n)))
 #define av_fill(av, n) \
     ((void)goperl_op0(GOPERL_OP_AV_FILL, GOPERL_TOK(av), (uint64_t)(int64_t)(n)))
+/* The slot an SV** result (av_fetch, hv_fetch, av_store, ...) points at:
+ * one of its own for every result, which holds its value until the native
+ * call returns, as perl's points into the array or hash for as long as
+ * that is not changed (Number::Closest::XS keeps the slots of the closest
+ * elements while it fetches the rest). The first slots are the frame's
+ * own, the next ones are in blocks the loader frees with the frame. */
+static SV **goperl_tmp_slot(goperl_frame_t *f, uint64_t tok) {
+    const int32_t i = f->tmpidx;
+    uint64_t *slot;
+    if (i < GOPERL_XS_TMPS) {
+        slot = &f->tmp[i];
+    } else {
+        const int32_t off = (i - GOPERL_XS_TMPS) % GOPERL_TMP_BLOCK;
+        if (i == INT32_MAX) goperl_croakf(f, "Out of memory!");
+        if (off == 0) {
+            goperl_tmpblock_t *b = (goperl_tmpblock_t *)malloc(sizeof(goperl_tmpblock_t));
+            if (!b) goperl_croakf(f, "Out of memory!");
+            b->prev = f->tmp_more;
+            f->tmp_more = b;
+        }
+        slot = &f->tmp_more->slot[off];
+    }
+    f->tmpidx = i + 1;
+    *slot = tok;
+    return (SV **)slot;
+}
+
 /* av_store returns the slot when the array took the value and NULL when
  * it did not (a tied array hands it to STORE): callers release the value
  * themselves on NULL, so the result has to tell the two apart. */
@@ -3187,18 +3225,10 @@ static SV **goperl_av_store(goperl_frame_t *f, AV *av, SSize_t i, SV *sv) {
     tok = goperl_value_out(f, goperl_do_op(f, GOPERL_OP_AV_FETCH, GOPERL_TOK(av),
                                            (uint64_t)(int64_t)i, 0, 0));
     if (tok != GOPERL_TOK(sv)) return 0;
-    uint64_t *slot = &f->tmp[(f->tmpidx++) % GOPERL_XS_TMPS];
-    *slot = tok;
-    return (SV **)slot;
+    return goperl_tmp_slot(f, tok);
 }
 #define av_store(av, i, sv) \
     goperl_av_store(_gof, (AV *)(av), (SSize_t)(i), (SV *)(sv))
-
-static SV **goperl_tmp_slot(goperl_frame_t *f, uint64_t tok) {
-    uint64_t *slot = &f->tmp[(f->tmpidx++) % GOPERL_XS_TMPS];
-    *slot = tok;
-    return (SV **)slot;
-}
 
 static SV **goperl_av_fetch(goperl_frame_t *f, AV *av, SSize_t i, I32 lval) {
     uint64_t tok = goperl_value_out(

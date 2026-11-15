@@ -53,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 28
+const abiVersion = 29
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -177,6 +177,10 @@ type cFrame struct {
 	// memory (internal.Perl.XSOpBox), 0 when there is none: the SDK writes
 	// an operation's arguments there and has xsOpBox run it.
 	opbox uint64
+	// tmpMore is the SDK's last block of SV** result slots beyond tmp
+	// (goperl_tmpblock_t: the block before it, then the slots), which the
+	// SDK mallocs and releaseStack frees with the frame.
+	tmpMore uintptr
 
 	// Go-only:
 	p *internal.Perl
@@ -2099,13 +2103,19 @@ func (f *cFrame) stackAt(i int) uint64 {
 	return binary.LittleEndian.Uint64(copyIn(f.stBase+uintptr(i)*8, 8))
 }
 
-// releaseStack frees the stack when it is a heap block (the loader's for a
-// long argument list, or the one the SDK moved it to).
+// releaseStack frees what the frame holds on the C heap when it ends: the
+// stack when it is a heap block (the loader's for a long argument list, or
+// the one the SDK moved it to), and the SDK's blocks of SV** result slots.
 func (f *cFrame) releaseStack() {
 	if f.stBase != 0 && !f.inlineStack() {
 		cFree(f.stBase)
 		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
 		f.stCap = maxStack
+	}
+	for f.tmpMore != 0 {
+		b := f.tmpMore
+		f.tmpMore = uintptr(binary.LittleEndian.Uint64(copyIn(b, 8)))
+		cFree(b)
 	}
 }
 

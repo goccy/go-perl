@@ -174,6 +174,21 @@ func TestNativeLoadModule(t *testing.T) {
 	})
 }
 
+// Every SV** result (av_fetch, hv_fetch) holds its value until the native
+// call returns, however many the call asks for: code that keeps more than
+// the frame's own slots and reads them after the last fetch
+// (Number::Closest::XS keeping the closest elements of a long array) reads
+// what it fetched.
+func TestNativeFetchedSlotsKept(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a few", `PerlAPI::keep_fetched([1 .. 3], {a => "x"}, ["a"])`, "1,2,3|x"},
+		{"more than a block", `my @a = map { "e$_" } 1 .. 600; my %h = map { ("k$_" => "v$_") } 1 .. 300; my $r = PerlAPI::keep_fetched(\@a, \%h, [map { "k$_" } 1 .. 300]); $r eq join(",", @a) . "|" . join(",", map { "v$_" } 1 .. 300) ? "all" : substr($r, 0, 80)`, "all"},
+		{"in turn", `my $ok = 0; for my $n (1 .. 50) { $ok++ if PerlAPI::keep_fetched([1 .. 40], {}, []) eq join(",", 1 .. 40) } $ok`, "50"},
+	})
+}
+
 // pv_uni_display is perl's: with UNI_DISPLAY_QQ a backslash and the
 // controls that have a mnemonic are escaped, a double quote is not; the
 // flags have utf8.h's values.
