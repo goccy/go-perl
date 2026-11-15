@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 30u
+#define GOPERL_XS_ABI 31u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -3363,13 +3363,18 @@ static SV *goperl_sv_setref_pv(goperl_frame_t *f, SV *rv,
     goperl_sv_setref_pv(_gof, (SV *)(rv), (classname), (void *)(ptr))
 #define sv_setref_iv(rv, classname, iv) \
     goperl_sv_setref_iv(_gof, (SV *)(rv), (classname), (int64_t)(iv))
-/* A pointer as a number and back. An op is a number as it is on perl: its
- * address in the interpreter, which is also the number of the B::OP object
- * of the op (B is the interpreter's). So a module that keeps an op as a
- * number, or takes the op of a B object (B::Utils, Devel::Cover's report),
- * gets the op's shadow back from INT2PTR. An op of a module's own that the
- * interpreter has no copy of (one on the C stack) is its address here.
- * Defined below, with the op shadows. */
+/* A pointer as a number and back. An op of the interpreter's is a number
+ * as on perl, its address in the interpreter, with GOPERL_OP_NUMBER_TAG set:
+ * the number of the op's B::OP object too (B is the interpreter's, and
+ * gives the same numbers). So a module that keeps an op as a number, or
+ * takes the op of a B object (B::Utils, Devel::Cover's report), gets the
+ * op's shadow back from INT2PTR. An op of a module's own that the
+ * interpreter has no copy of (one on the C stack, in the C heap) is its
+ * address here, made a number by PTR2IV or by a cast, as is a shadow cast
+ * to a number: no address of this process has the tag, wherever the
+ * process puts its memory, so INT2PTR tells the two apart by the number
+ * alone. Defined below, with the op shadows. */
+#define GOPERL_OP_NUMBER_TAG ((UV)1 << 62)
 static IV goperl_op_number(const OP *o);
 static OP *goperl_op_of_number(IV iv);
 #ifdef __cplusplus
@@ -5458,22 +5463,20 @@ static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
 }
 
-/* An op as a number: its address in the interpreter (see PTR2IV). */
+/* An op as a number: its address in the interpreter with the tag, or for
+ * an op of the module's own its address here (see PTR2IV). */
 static IV goperl_op_number(const OP *o) {
-    return !o ? 0 : o->gop ? (IV)o->gop : (IV)(intptr_t)o;
+    return !o ? 0 : o->gop ? (IV)(o->gop | GOPERL_OP_NUMBER_TAG) : (IV)(intptr_t)o;
 }
-/* The op of a number. A number is all PTR2IV leaves of an op, so which op
- * it names is told by where it points: below the end of the interpreter's
- * memory it is the address of one of the interpreter's ops, anywhere else
- * that of an op here (a module's own, which the interpreter has no copy
- * of). An op that became a number some other way than as an op (through a
- * void *) is the address of its shadow here, which is taken for the
- * interpreter's when it lies below that end. */
+/* The op of a number (see PTR2IV): with the tag, the interpreter's op at
+ * the rest of the number, as its shadow; without it, the op at that address
+ * here (a module's own, or a shadow that was cast to a number). Outside a
+ * call of native code there is no interpreter to ask: no op. */
 static OP *goperl_op_of_number(IV iv) {
     goperl_frame_t *const f = goperl_cur_frame_v;
     if (!iv) return 0;
-    if (!f || (UV)iv >= (UV)f->memcap) return (OP *)(intptr_t)iv;
-    return goperl_op_shadow(f, (uint64_t)(UV)iv);
+    if (!((UV)iv & GOPERL_OP_NUMBER_TAG)) return (OP *)(intptr_t)iv;
+    return f ? goperl_op_shadow(f, (uint64_t)((UV)iv & ~GOPERL_OP_NUMBER_TAG)) : 0;
 }
 
 /* The shadow of an op with what is below it, as the interpreter has it
