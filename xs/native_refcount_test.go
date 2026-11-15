@@ -16,6 +16,26 @@ func TestNativeRefcountOfAModulesOwnStructure(t *testing.T) {
 	})
 }
 
+// sv_ref names what a reference points to (its class, or its type) in the
+// SV it is given, or in a new mortal when it is given none, as perl's makes
+// one; a value is freed once, as perl frees it, when the temporaries of the
+// statement go (Object::Pad's __CLASS__ puts the name into a mortal of its
+// own).
+func TestNativeNameOfAReferent(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	for _, into := range []string{"1", "0"} {
+		runEvalCases(t, p, []evalCase{
+			{"into " + into, `my $w = ""; local $SIG{__WARN__} = sub { $w .= $_[0] };
+				my $o = bless {}, "Some::Class";
+				my @n = map { PerlAPI::ref_name($o, ` + into + `) } 1 .. 3;
+				push @n, PerlAPI::ref_name([], ` + into + `);
+				my @more = map { "x$_" } 1 .. 8;
+				"@n|$w"`, "Some::Class Some::Class Some::Class ARRAY|"},
+		})
+	}
+}
+
 // newXS without a name makes an anonymous sub: it is installed in no glob
 // (nothing is redefined when a second one is made), the caller owns the one
 // reference to it, and each has its own XSANY. A module builds its closures

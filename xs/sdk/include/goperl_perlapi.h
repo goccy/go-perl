@@ -1449,15 +1449,16 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
 static SV *goperl_sv_ref(goperl_frame_t *f, SV *dst, const SV *sv, int ob)
     __attribute__((unused));
 static SV *goperl_sv_ref(goperl_frame_t *f, SV *dst, const SV *sv, int ob) {
+    /* the interpreter's sv_ref(NULL, ...): a new mortal with the name */
     SV *r = GOPERL_SV(goperl_do_op(
         f, GOPERL_OP_SV_CALL,
         ((uint64_t)GOPERL_SVCALL_REF << 32) | (uint32_t)GOPERL_TOK(sv),
         (uint64_t)ob, 0, 0));
     if (!dst) return r;
-    /* the interpreter fills the caller's SV; here the fresh one is copied
-     * into it and released */
+    /* perl fills the caller's SV; here the name is copied into it, and the
+     * mortal goes with the other temporaries (it is not the caller's to
+     * release) */
     goperl_do_op(f, GOPERL_OP_SV_SETSV, GOPERL_TOK(dst), GOPERL_TOK(r), 0, 0);
-    goperl_do_op(f, GOPERL_OP_SV_REFCNT_DEC, GOPERL_TOK(r), 0, 0, 0);
     return dst;
 }
 #define sv_does_pvn(sv, name, len, flags) \

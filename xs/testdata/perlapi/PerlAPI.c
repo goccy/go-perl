@@ -4371,6 +4371,25 @@ XS(XS_PerlAPI_stash_hek) {
     croak("class %" HEKf " says hello", HEKfARG(HvNAME_HEK(SvSTASH(SvRV(ST(0))))));
 }
 
+/* ref_name(ref, into): what sv_ref names the referent of ref as (its class,
+ * or its type), put into a new mortal of the caller's when into is true (as
+ * Object::Pad's __CLASS__ does), else the mortal sv_ref makes. */
+XS(XS_PerlAPI_ref_name) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "ref, into");
+    {
+        SV *name;
+        if (SvTRUE(ST(1))) {
+            name = sv_newmortal();
+            sv_ref(name, SvRV(ST(0)), TRUE);
+        } else {
+            name = sv_ref(NULL, SvRV(ST(0)), TRUE);
+        }
+        ST(0) = name;
+        XSRETURN(1);
+    }
+}
+
 /* buckets(hash): "none" for a hash without buckets (pp_defined's test),
  * else the number of entries the chains of its buckets hold and their keys
  * in order; PerlIO_debug is called on the way, which the interpreter's
@@ -6115,6 +6134,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::merged_lists", XS_PerlAPI_merged_lists);
     newXS_deffile("PerlAPI::folded_operand", XS_PerlAPI_folded_operand);
     newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
+    newXS_deffile("PerlAPI::ref_name", XS_PerlAPI_ref_name);
     newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
     newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
     newXS_deffile("PerlAPI::caller_gimme_list", XS_PerlAPI_caller_gimme_list);
