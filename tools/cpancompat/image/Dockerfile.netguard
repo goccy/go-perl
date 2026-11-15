@@ -1,9 +1,0 @@
-# The network helper the driver runs, with the host's network and
-# CAP_NET_ADMIN, when it starts a run: netguard.sh puts the rules in place
-# that keep the survey containers from the LAN, the VM's host and the VM.
-# It runs no CPAN code.
-FROM debian:bookworm-slim
-RUN apt-get update \
- && apt-get install -y --no-install-recommends iptables \
- && rm -rf /var/lib/apt/lists/*
-COPY netguard.sh /opt/netguard.sh
