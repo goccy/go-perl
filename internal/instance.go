@@ -467,12 +467,18 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 }
 
 // memoryCeiling is the limit of an instance's linear memory: the memory
-// cap of opts rounded down to a wasm page, or defaultMemoryCeiling without
+// cap of opts rounded down to a wasm page, the host's memory for
+// HostMemoryLimit (when it can be told), or defaultMemoryCeiling without
 // one (or with one below least, the memory the instance starts with). It
 // is the length of the mapping the instance's memory is, and its growth
 // cap, however the instance gets its memory.
 func memoryCeiling(opts InstanceOptions, least uint64) int {
-	if opts.MaxMemoryBytes > 0 {
+	switch {
+	case opts.MaxMemoryBytes == HostMemoryLimit:
+		if size, ok := hostMemory(); ok && size/wasmPage*wasmPage >= least {
+			return int(size / wasmPage * wasmPage)
+		}
+	case opts.MaxMemoryBytes > 0:
 		if max := opts.MaxMemoryBytes / wasmPage * wasmPage; uint64(max) >= least {
 			return max
 		}

@@ -91,3 +91,11 @@ func hostMemory() uint64 {
 	}
 	return 0
 }
+
+// An instance limited to the host's memory runs.
+func TestHostMemoryLimitedInstance(t *testing.T) {
+	r := runProgram(t, perl.Config{MaxMemoryBytes: perl.HostMemoryLimit}, perl.Program{Code: code(
+		`my @a = map { $_ * 2 } 1 .. 100_000; print scalar(@a), " $a[-1]\n";`,
+	)}, "")
+	r.want(t, 0, "100000 200000\n")
+}
