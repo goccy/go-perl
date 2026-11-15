@@ -4061,7 +4061,7 @@ static __attribute__((unused)) char **goperl_op_mask_ref(goperl_frame_t *f) {
         s->val = (uint64_t)(uintptr_t)goperl_guest_mem(
             f, goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_OP_MASK, 0, 0, 0));
         s->shadow = s->val;
-        s->live = 1;
+        goperl_plshadow_set_live(s);
     }
     return (char **)&s->val;
 }

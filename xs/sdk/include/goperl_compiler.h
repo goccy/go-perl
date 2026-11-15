@@ -724,7 +724,7 @@ static __attribute__((unused)) PADNAMELIST **goperl_comppad_name_ref(goperl_fram
         const uint64_t tok = goperl_do_op(f, GOPERL_OP_PLVAR_GET,
                                           (uint64_t)GOPERL_PL_COMPPAD_NAME, 0, 0, 0);
         s->val = s->shadow = (uint64_t)(uintptr_t)goperl_padnamelist_shadow(f, tok);
-        s->live = 1;
+        goperl_plshadow_set_live(s);
     }
     return (PADNAMELIST **)&s->val;
 }
@@ -751,7 +751,7 @@ static __attribute__((unused)) SV ***goperl_curpad_ref(goperl_frame_t *f, const 
         pad ? (SV **)(uintptr_t)*goperl_lv_ref(f, (SV *)pad, GOPERL_LV_AVBODY, site, frame)
             : (SV **)0;
     s->val = s->shadow = (uint64_t)(uintptr_t)body;
-    s->live = 1;
+    goperl_plshadow_set_live(s);
     return (SV ***)&s->val;
 }
 #undef PL_curpad
@@ -1418,7 +1418,7 @@ static __attribute__((unused)) UNOP_AUX_item **goperl_multideref_pc_ref(goperl_f
         s->val = (uint64_t)(uintptr_t)goperl_guest_mem(
             f, goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_MULTIDEREF_PC, 0, 0, 0));
         s->shadow = s->val;
-        s->live = 1;
+        goperl_plshadow_set_live(s);
     }
     return (UNOP_AUX_item **)&s->val;
 }
@@ -1654,7 +1654,7 @@ static __attribute__((unused)) runops_proc_t *goperl_runops_ref(goperl_frame_t *
         s->val = (uint64_t)(uintptr_t)(id ? (runops_proc_t)goperl_fn_of(f, id)
                                           : goperl_fntab(f)->interp_loop);
         s->shadow = s->val;
-        s->live = 1;
+        goperl_plshadow_set_live(s);
     }
     return (runops_proc_t *)&s->val;
 }

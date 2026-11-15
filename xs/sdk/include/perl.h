@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 27u
+#define GOPERL_XS_ABI 28u
 
 /* Signal actions of the process.
  *
@@ -1522,6 +1522,9 @@ typedef struct goperl_shared {
                   * runs as its own, by id (goperl_compiler.h) */
     void *pio_views; /* goperl_pio_slot_t: the views of handles made for the
                       * native call (perliol.h), in the arena */
+    uint64_t plshadow_live[2]; /* the slots of plshadow handed out, a bit
+                                * each: what the flush before every
+                                * operation looks at */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -3617,15 +3620,30 @@ typedef char goperl_plshadow_fits
  * interpreter (goperl_compiler.h). */
 static int goperl_plshadow_out(goperl_frame_t *f, int id, goperl_plshadow_t *s, uint64_t *out);
 static void goperl_curpad_own_flush(goperl_frame_t *f);
+/* A slot is handed out: the flush before every operation looks at it from
+ * now on. */
+static inline __attribute__((unused)) void goperl_plshadow_set_live(goperl_plshadow_t *s) {
+    goperl_shared_t *const sh = GOPERL_SHARED;
+    const size_t id = (size_t)(s - (goperl_plshadow_t *)sh->plshadow);
+    s->live = 1;
+    sh->plshadow_live[id >> 6] |= (uint64_t)1 << (id & 63);
+}
 static void goperl_plshadow_flush(goperl_frame_t *f) {
     goperl_curpad_own_flush(f);
-    for (int i = 0; i < GOPERL_PLSHADOW_MAX; i++) {
-        goperl_plshadow_t *s = &goperl_plshadow_v[i];
-        if (s->live && s->val != s->shadow) {
-            uint64_t out = 0;
-            if (!goperl_plshadow_out(f, i, s, &out)) continue;
-            s->shadow = s->val;
-            goperl_xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)i, out, 0, 0);
+    /* the frame's instance block, looked up once: this runs before every
+     * operation, over the slots handed out */
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    goperl_plshadow_t *const tab = (goperl_plshadow_t *)sh->plshadow;
+    for (int w = 0; w < 2; w++) {
+        for (uint64_t m = sh->plshadow_live[w]; m; m &= m - 1) {
+            const int i = w * 64 + __builtin_ctzll(m);
+            goperl_plshadow_t *s = &tab[i];
+            if (s->live && s->val != s->shadow) {
+                uint64_t out = 0;
+                if (!goperl_plshadow_out(f, i, s, &out)) continue;
+                s->shadow = s->val;
+                goperl_xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)i, out, 0, 0);
+            }
         }
     }
 }
@@ -3692,7 +3710,7 @@ static IV *goperl_plint_ref(goperl_frame_t *f, int id) {
         s->val = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)id, 0,
                                      0, 0);
         s->shadow = s->val;
-        s->live = 1;
+        goperl_plshadow_set_live(s);
     }
     return (IV *)&s->val;
 }
