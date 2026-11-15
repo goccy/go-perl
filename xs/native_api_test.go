@@ -56,6 +56,27 @@ func TestNativeCroakLeavesTheSignalStackAlone(t *testing.T) {
 	})
 }
 
+// A module's own setjmp and longjmp, and sigsetjmp keeping the signal mask
+// with siglongjmp, keep whether the thread runs on its alternate signal
+// stack as it was when the buffer was set: off on the thread's own stack
+// (after a croak, too), so that the runtime's next signal does not end the
+// process, and on inside a handler that runs on the alternate stack, so
+// that a signal within the handler is not delivered onto the stack the
+// handler is using. On macOS on arm64 longjmp took that state from a word
+// of the buffer setjmp does not write; a buffer that held all ones marked
+// the thread as on the alternate stack.
+func TestNativeOwnJumpsKeepTheSignalStackState(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"setjmp on the thread's stack after a croak", `PerlAPI::own_jumps("setjmp", "thread")`, "0"},
+		{"sigsetjmp on the thread's stack after a croak", `PerlAPI::own_jumps("sigsetjmp", "thread")`, "0"},
+		{"setjmp in a handler on the alternate stack", `PerlAPI::own_jumps("setjmp", "handler")`, "1/0"},
+		{"sigsetjmp in a handler on the alternate stack", `PerlAPI::own_jumps("sigsetjmp", "handler")`, "1/0"},
+		{"the interpreter afterwards", `join ",", map { $_ * 2 } 1 .. 3`, "2,4,6"},
+	})
+}
+
 // Native code that follows an address of the interpreter's that its memory
 // does not hold — past the memory's size but inside the range reserved for
 // the memory (whose pages past the size are not readable), past that

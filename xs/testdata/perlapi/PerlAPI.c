@@ -3929,19 +3929,28 @@ XS(XS_PerlAPI_set_signal_aside) {
  * cannot say. A thread left so marked is put back (a jump from a buffer of
  * zeros does it on macOS), so that the next signal does not end the
  * process. */
-static __attribute__((noinline)) int perlapi_croak_caught(pTHX) {
-    dXCPT;
+/* Whether the thread is marked as running on its alternate signal stack
+ * (1) or not (0), -1 when the system cannot say; a thread marked so while
+ * it runs on its own stack (off) is put back first, by a jump of the C
+ * library's own setjmp and longjmp from a buffer of zeros (on macOS), so
+ * that the next signal does not end the process. */
+static int perlapi_on_alt_stack(int off) {
     stack_t ss;
-    memset(goperl_xcpt_jb, 0xff, sizeof goperl_xcpt_jb);
-    XCPT_TRY_START { croak("caught"); } XCPT_TRY_END
     if (sigaltstack(NULL, &ss) != 0) return -1;
     if (!(ss.ss_flags & SS_ONSTACK)) return 0;
-    {
+    if (off) {
         jmp_buf zeros;
         memset(zeros, 0, sizeof zeros);
-        if (setjmp(zeros) == 0) longjmp(zeros, 1);
+        if ((setjmp)(zeros) == 0) longjmp(zeros, 1);
     }
     return 1;
+}
+
+static __attribute__((noinline)) int perlapi_croak_caught(pTHX) {
+    dXCPT;
+    memset(goperl_xcpt_jb, 0xff, sizeof goperl_xcpt_jb);
+    XCPT_TRY_START { croak("caught"); } XCPT_TRY_END
+    return perlapi_on_alt_stack(1);
 }
 
 XS(XS_PerlAPI_alt_stack_after_croak) {
@@ -3949,6 +3958,66 @@ XS(XS_PerlAPI_alt_stack_after_croak) {
     PERL_UNUSED_VAR(items);
     ST(0) = sv_2mortal(newSViv(perlapi_croak_caught(aTHX)));
     XSRETURN(1);
+}
+
+/* A module's own setjmp and longjmp (or sigsetjmp keeping the mask and
+ * siglongjmp) on a buffer that held all ones before, as one on a stack that
+ * held them does; returns whether the thread is marked as running on its
+ * alternate signal stack right after the jump. */
+static __attribute__((noinline)) int perlapi_own_jump(int sig_kind, int off) {
+    if (sig_kind) {
+        sigjmp_buf jb;
+        memset(jb, 0xff, sizeof jb);
+        if (sigsetjmp(jb, 1) == 0) siglongjmp(jb, 1);
+    } else {
+        jmp_buf jb;
+        memset(jb, 0xff, sizeof jb);
+        if (setjmp(jb) == 0) longjmp(jb, 1);
+    }
+    return perlapi_on_alt_stack(off);
+}
+
+static volatile sig_atomic_t perlapi_jump_kind, perlapi_in_handler;
+
+static void perlapi_jump_handler(int sig) {
+    PERL_UNUSED_VAR(sig);
+    perlapi_in_handler = perlapi_own_jump(perlapi_jump_kind, 0);
+}
+
+/* own_jumps(kind, where): the state own_jump leaves, kind "setjmp" or
+ * "sigsetjmp", where "thread" (on the thread's own stack, after a croak
+ * the XCPT catch point caught; want 0) or "handler" (inside a handler of
+ * the module's own, which runs on the alternate stack, for SIGUSR2 raised
+ * on this thread; want 1). After the handler the thread must be back off
+ * that stack: "handler" gives the state inside, then "/", then the state
+ * after the handler returned. */
+XS(XS_PerlAPI_own_jumps) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "kind, where");
+    {
+        const int sig_kind = strEQ(SvPV_nolen(ST(0)), "sigsetjmp");
+        SV *out;
+        if (strEQ(SvPV_nolen(ST(1)), "thread")) {
+            dXCPT;
+            XCPT_TRY_START { croak("caught"); } XCPT_TRY_END
+            out = newSViv(perlapi_own_jump(sig_kind, 1));
+        } else {
+            struct sigaction act, old;
+            int after;
+            memset(&act, 0, sizeof act);
+            act.sa_handler = perlapi_jump_handler;
+            sigemptyset(&act.sa_mask);
+            perlapi_jump_kind = sig_kind;
+            perlapi_in_handler = -2;
+            if (sigaction(SIGUSR2, &act, &old) != 0) croak("sigaction: %s", strerror(errno));
+            raise(SIGUSR2);
+            after = perlapi_on_alt_stack(1);
+            sigaction(SIGUSR2, &old, NULL);
+            out = newSVpvf("%d/%d", (int)perlapi_in_handler, after);
+        }
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
 }
 
 /* guest_byte(addr): the byte at addr in the interpreter's memory, reached
@@ -6235,6 +6304,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
     newXS_deffile("PerlAPI::alt_stack_after_croak", XS_PerlAPI_alt_stack_after_croak);
+    newXS_deffile("PerlAPI::own_jumps", XS_PerlAPI_own_jumps);
     newXS_deffile("PerlAPI::guest_byte", XS_PerlAPI_guest_byte);
     newXS_deffile("PerlAPI::grown_buffers", XS_PerlAPI_grown_buffers);
     newXS_deffile("PerlAPI::fd_of", XS_PerlAPI_fd_of);

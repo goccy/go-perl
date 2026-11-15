@@ -119,6 +119,35 @@
 #define GOPERL_LONGJMP(jb, v) longjmp((jb), (v))
 #endif
 
+/* A module's own setjmp, and sigsetjmp asked to keep the signal mask, on
+ * macOS on arm64. longjmp there (and siglongjmp of such a buffer) puts back
+ * whether the thread runs on its alternate signal stack from bit 0 of the
+ * buffer's word 47, which setjmp does not write: a jump from a buffer that
+ * held an odd number there (one on a stack that held it) marked the thread
+ * as on that stack while it ran on its own, and the next signal with
+ * SA_ONSTACK, the Go runtime's preemption among them, ended the process.
+ * So the word gets the thread's state as sigaltstack reports it before the
+ * C library's setjmp runs, which is what setjmp keeps on every other
+ * system: right on the thread's own stack and in a handler running on the
+ * alternate one. The call stays a call of setjmp itself, so the compiler
+ * treats it as one; only its argument is the buffer after the store.
+ * (setjmp)(jb) is the C library's alone. */
+#if defined(__APPLE__) && defined(__aarch64__)
+#define GOPERL_JB_ONSTACK_WORD 47
+static inline int *goperl_jb_onstack(int *jb) {
+    stack_t ss;
+    jb[GOPERL_JB_ONSTACK_WORD] =
+        sigaltstack(NULL, &ss) == 0 && (ss.ss_flags & SS_ONSTACK) ? 1 : 0;
+    return jb;
+}
+static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
+    return savemask ? goperl_jb_onstack(jb) : jb;
+}
+#define setjmp(jb) setjmp(goperl_jb_onstack(jb))
+#define sigsetjmp(jb, savemask) \
+    sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
+#endif
+
 #define GOPERL_XS_ABI 33u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
