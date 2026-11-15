@@ -116,9 +116,10 @@ func TestForkChildKeepsNativeStateTheParentReleased(t *testing.T) {
 }
 
 // The program ends while a fork child is inside native code that does not
-// return. The host cannot interrupt native code, and the end of the program
+// return: it makes a read that the end's signal interrupts again, as C
+// libraries do, so the host cannot end the call. The end of the program
 // does not wait for it: the child is ended all the same, and runs no Perl
-// code once its native call does return.
+// code once its native call does return, and its goroutine goes then.
 func TestProgramEndsWhileAChildIsInNativeCode(t *testing.T) {
 	so := buildPerlAPI(t)
 	stdlib, err := perl.ExtractStdlib()

@@ -1143,13 +1143,17 @@ XS(XS_PerlAPI_copy_integer) {
 /* ---- native code that blocks ------------------------------------------------ */
 
 /* Reads one byte from a descriptor of the host process with the C library,
- * for as long as that takes, and returns what read returned. */
+ * for as long as that takes — a read a signal interrupts is made again, as
+ * C libraries do — and returns what read returned. */
 XS(XS_PerlAPI_read_host_descriptor) {
     dXSARGS;
     if (items != 1) croak_xs_usage(cv, "fd");
     {
         char byte;
-        ssize_t n = read((int)SvIV(ST(0)), &byte, 1);
+        ssize_t n;
+        do
+            n = read((int)SvIV(ST(0)), &byte, 1);
+        while (n < 0 && errno == EINTR);
         ST(0) = sv_2mortal(newSViv((IV)n));
         XSRETURN(1);
     }
