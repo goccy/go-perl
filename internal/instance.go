@@ -152,8 +152,8 @@ type Perl struct {
 	// host-side magic of the variable (reserved callback method id -8).
 	magicLocal func(id uint32, sv uint64)
 	// dtorFire handles save-stack destructors registered by native modules
-	// (reserved callback method id -4).
-	dtorFire func(id uint32)
+	// (reserved callback method id -4); its result is the response.
+	dtorFire func(id uint32) []byte
 	// perlioHook handles PerlIO layer-slot dispatch for layers a native
 	// module registered (reserved callback method id -6).
 	perlioHook func(req []byte) []byte

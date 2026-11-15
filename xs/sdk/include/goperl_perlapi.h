@@ -319,7 +319,8 @@ enum {
     GOPERL_GVCALL_CV_OUTSIDE = 35,
     GOPERL_GVCALL_CV_PROTO = 36,
     GOPERL_GVCALL_CVGEN_SET = 16,
-    GOPERL_GVCALL_STASH_SET = 17
+    GOPERL_GVCALL_STASH_SET = 17,
+    GOPERL_GVCALL_IO_SET = 18
 };
 
 /* What the interpreter holds in a field that is an lvalue (see
@@ -500,6 +501,18 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
                             ((uint64_t)GOPERL_GVCALL_FLAGS << 32) | (uint32_t)tok, 0, 0, 0);
     case GOPERL_LV_HVRITER: /* FIELD 2 */
         return goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)2 << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_IOIFP:
+        return goperl_do_op(f, GOPERL_OP_PERLIO,
+                            ((uint64_t)GOPERL_PIO_IFP << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_IOOFP:
+        return goperl_do_op(f, GOPERL_OP_PERLIO,
+                            ((uint64_t)GOPERL_PIO_OFP << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_IOTYPE:
+        return (uint64_t)(unsigned char)goperl_do_op(f, GOPERL_OP_SV_CALL, ((uint64_t)GOPERL_SVCALL_IO_TYPE << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_IOFLAGS:
+        return (uint64_t)(U8)goperl_do_op(f, GOPERL_OP_SV_CALL, ((uint64_t)GOPERL_SVCALL_IO_FLAGS << 32) | (uint32_t)tok, 0, 0, 0);
+    case GOPERL_LV_GVIO:
+        return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 6, 0, 0);
     case GOPERL_LV_HVEITER: /* FIELD 4 */
         return (uint64_t)(uintptr_t)goperl_eiter_shadow(
             f, tok, goperl_do_op(f, GOPERL_OP_FIELD, ((uint64_t)4 << 32) | (uint32_t)tok, 0, 0, 0));
@@ -606,6 +619,25 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_HVEITER: /* FIELD 5: the entry the shadow stands for */
         goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)5 << 32) | (uint32_t)tok,
                      val ? ((HE *)(uintptr_t)val)->goperl_tok : 0, 0, 0);
+        break;
+    case GOPERL_LV_IOIFP: /* FIELD 20 */
+    case GOPERL_LV_IOOFP: /* FIELD 21 */
+        goperl_xs_op(f, GOPERL_OP_FIELD,
+                     ((uint64_t)(field == GOPERL_LV_IOIFP ? 20 : 21) << 32) | (uint32_t)tok,
+                     goperl_pio_tok(f, (const void *)(uintptr_t)val), 0, 0);
+        break;
+    case GOPERL_LV_IOTYPE: /* FIELD 22 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)22 << 32) | (uint32_t)tok,
+                     (uint64_t)(unsigned char)val, 0, 0);
+        break;
+    case GOPERL_LV_IOFLAGS: /* FIELD 23 */
+        goperl_xs_op(f, GOPERL_OP_FIELD, ((uint64_t)23 << 32) | (uint32_t)tok,
+                     (uint64_t)(U8)val, 0, 0);
+        break;
+    case GOPERL_LV_GVIO:
+        goperl_xs_op(f, GOPERL_OP_GV_CALL,
+                     ((uint64_t)GOPERL_GVCALL_IO_SET << 32) | (uint32_t)tok,
+                     (uint32_t)val, 0, 0);
         break;
     default:
         goperl_xs_op(f, GOPERL_OP_GV_CALL,
@@ -1395,6 +1427,11 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
     ((I32)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_CMP, a, GOPERL_SV_PAIR(flags, b)))
 #define sv_eq_flags(a, b, flags) \
     ((I32)GOPERL_SVCALL(GOPERL_SVCALL_EQ, a, GOPERL_SV_PAIR(flags, b)))
+/* The numeric comparison of perl 5.44 (overloading included; SV_GMAGIC
+ * runs get magic). */
+#define sv_numcmp_flags(a, b, flags) \
+    ((I32)(int64_t)GOPERL_SVCALL(62 /* GOPERL_SVCALL_NUMCMP */, a, GOPERL_SV_PAIR(flags, b)))
+#define sv_numcmp(a, b) sv_numcmp_flags((a), (b), SV_GMAGIC)
 #define sv_dec(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_DEC, sv, 0))
 #define sv_len_utf8(sv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_LEN_UTF8, sv, 0))
 #define sv_utf8_encode(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_UTF8_ENCODE, sv, 0))
@@ -1522,8 +1559,12 @@ static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok) {
     ((AV *)GOPERL_SV(GOPERL_SVCALL(GOPERL_SVCALL_MRO_LINEAR_ISA, stash, 0)))
 #define mro_method_changed_in(stash) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_MRO_METHOD_CHANGED, stash, 0))
-#define IoTYPE(io) ((char)GOPERL_SVCALL(GOPERL_SVCALL_IO_TYPE, io, 0))
-#define IoFLAGS(io) ((U8)GOPERL_SVCALL(GOPERL_SVCALL_IO_FLAGS, io, 0))
+/* The type character and the flags of an IO are lvalues (`IoTYPE(io) =
+ * '<'`, `IoFLAGS(io) |= IOf_FLUSH`), as its handles are (perl.h). */
+#define IoTYPE(io) \
+    (*(char *)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOTYPE, GOPERL_LV_AT))
+#define IoFLAGS(io) \
+    (*(U8 *)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOFLAGS, GOPERL_LV_AT))
 #define IoLINES(io) ((IV)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_IO_LINES, io, 0))
 
 /* ---- do_openn: the open behind perl's open function ----------------------- */
@@ -1683,7 +1724,10 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvAVn(gv) ((AV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_AVN, gv, 0)))
 #define GvHVn(gv) ((HV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_HVN, gv, 0)))
 #define GvIOn(gv) ((IO *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_ION, gv, 0)))
-#define GvIOp(gv) ((IO *)GvIO(gv))
+/* The IO of a glob is an lvalue (`GvIOp(gv) = newIO()`): the plain store
+ * of gv.h. */
+#define GvIOp(gv) \
+    (*(IO **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVIO, GOPERL_LV_AT))
 #define GvFORM(gv) ((CV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_FORM, gv, 0)))
 #define GvCV_set(gv, cv) \
     ((void)GOPERL_GVCALL(GOPERL_GVCALL_CV_SET, gv, (uint32_t)GOPERL_TOK(cv)))
@@ -2860,6 +2904,31 @@ static void *goperl_svany(goperl_frame_t *f, SV *sv) {
 #define RX_MINLEN(rx) (ReANY(rx)->minlen)
 #define RX_MINLENRET(rx) (ReANY(rx)->minlenret)
 #define RX_GOFS(rx) (ReANY(rx)->gofs)
+/* The macros of regexp.h that take the body (a regexp, from ReANY), and
+ * the offsets as perl 5.38 and later name them. */
+#define RXp_ENGINE(prog) ((prog)->engine)
+#define RXp_EXTFLAGS(prog) ((prog)->extflags)
+#define RXp_COMPFLAGS(prog) ((prog)->compflags)
+#define RXp_NPARENS(prog) ((prog)->nparens)
+#define RXp_LASTPAREN(prog) ((prog)->lastparen)
+#define RXp_LASTCLOSEPAREN(prog) ((prog)->lastcloseparen)
+#define RXp_OFFSp(prog) ((prog)->offs)
+#define RXp_OFFS_START(prog, n) (RXp_OFFSp(prog)[(n)].start)
+#define RXp_OFFS_END(prog, n) (RXp_OFFSp(prog)[(n)].end)
+#define RXp_OFFS_VALID(prog, n) \
+    (RXp_OFFSp(prog)[(n)].end != -1 && RXp_OFFSp(prog)[(n)].start != -1)
+#define RXp_SUBBEG(prog) ((prog)->subbeg)
+#define RXp_SUBLEN(prog) ((prog)->sublen)
+#define RXp_SUBOFFSET(prog) ((prog)->suboffset)
+#define RXp_SUBCOFFSET(prog) ((prog)->subcoffset)
+#define RXp_MINLEN(prog) ((prog)->minlen)
+#define RXp_MINLENRET(prog) ((prog)->minlenret)
+#define RXp_GOFS(prog) ((prog)->gofs)
+#define RXp_PAREN_NAMES(prog) ((prog)->paren_names)
+#define RX_OFFSp(rx) RXp_OFFSp(ReANY(rx))
+#define RX_OFFS_START(rx, n) RXp_OFFS_START(ReANY(rx), (n))
+#define RX_OFFS_END(rx, n) RXp_OFFS_END(ReANY(rx), (n))
+#define RX_OFFS_VALID(rx, n) RXp_OFFS_VALID(ReANY(rx), (n))
 #define RX_UTF8(rx) SvUTF8((SV *)(rx))
 #define RX_MATCH_UTF8(rx) cBOOL(RX_EXTFLAGS(rx) & RXf_MATCH_UTF8)
 #define get_regex_charset(flags) \
@@ -3186,6 +3255,14 @@ static void goperl_lex_start(goperl_frame_t *f, SV *line, void *rsfp, U32 flags)
     ((void)goperl_op0(GOPERL_OP_CALL,                               \
                       ((uint64_t)13 << 32) | (uint32_t)(c)->gop, 1))
 #define SAVECOPFILE(c) SAVECOPFILE_FREE(c)
+/* The stash of a COP, saved the same way (CALL 13 with 2): the scope's end
+ * puts it back in the interpreter's COP and in its copy here. */
+#define SAVECOPSTASH_FREE(c)                                        \
+    ({ COP *const goperl_scsf_c_ = (c);                              \
+       (void)goperl_op0(GOPERL_OP_CALL,                              \
+                        ((uint64_t)13 << 32) | (uint32_t)goperl_scsf_c_->gop, 2); \
+       goperl_hostsave_ptr(_gof, (void **)&goperl_scsf_c_->cop_stashpv); })
+#define SAVECOPSTASH(c) SAVECOPSTASH_FREE(c)
 
 /* ---- a few more fields --------------------------------------------------------- */
 

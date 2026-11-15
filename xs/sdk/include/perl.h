@@ -99,7 +99,7 @@
 #include <netdb.h>
 #include <sys/file.h>
 
-#define GOPERL_XS_ABI 26u
+#define GOPERL_XS_ABI 27u
 
 /* Signal actions of the process.
  *
@@ -188,6 +188,10 @@ static inline void (*goperl_signal(int sig, void (*handler)(int)))(int) {
 #ifndef _
 #define _(args) args
 #endif
+/* More of what perl.h keeps for modules written for old compilers (Tk's
+ * Event.xs picks the ANSI form of a variadic function by STANDARD_C). */
+#define CAN_PROTOTYPE
+#define STANDARD_C
 
 typedef int32_t I32;
 typedef uint32_t U32;
@@ -1562,6 +1566,14 @@ typedef struct goperl_shared {
 #define GOPERL_LV_GVFLAGS 30
 #define GOPERL_LV_HVRITER 31
 #define GOPERL_LV_HVEITER 32
+/* The handles, the type character and the flags of an IO (IoIFP, IoOFP,
+ * IoTYPE, IoFLAGS), and the IO of a glob (GvIOp): the plain stores of
+ * sv.h and gv.h, which count no reference. */
+#define GOPERL_LV_IOIFP 33
+#define GOPERL_LV_IOOFP 34
+#define GOPERL_LV_IOTYPE 35
+#define GOPERL_LV_IOFLAGS 36
+#define GOPERL_LV_GVIO 37
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
 #define GOPERL_LV_IS_BODY(field) \
     ((field) == GOPERL_LV_CVBODY || (field) == GOPERL_LV_OBJFIELDS)
@@ -1856,6 +1868,10 @@ enum {
 #endif
 
 #define GOPERL_TOK(sv) ((uint64_t)(uintptr_t)(sv))
+/* A word of the interpreter's answers that are laid out as words in its
+ * memory: an address of that memory, or a value that travels with one. It
+ * is as wide as the interpreter's addresses. */
+typedef uint32_t goperl_gword_t;
 #define GOPERL_SV(tok) ((SV *)(uintptr_t)(tok))
 
 /* ---- the guest-op funnel: every operation flushes host state first ------ */
@@ -2808,6 +2824,8 @@ static SV *goperl_newSV_type(goperl_frame_t *f, svtype t) {
     return sv;
 }
 #define newSV_type(t) goperl_newSV_type(_gof, (t))
+/* An IO, as sv.h makes one (blessed into IO::File by the upgrade). */
+#define newIO() ((IO *)newSV_type(SVt_PVIO))
 
 static SV *goperl_newSVpvs_flags_(goperl_frame_t *f, const char *s,
                                   STRLEN len, U32 flags) {
@@ -4072,7 +4090,10 @@ enum {
     GOPERL_PIO_SET_PTRCNT = 29,
     GOPERL_PIO_FILL = 30,
     GOPERL_PIO_APPLY_LAYERS = 31,
-    GOPERL_PIO_LAYERS = 32
+    GOPERL_PIO_LAYERS = 32,
+    GOPERL_PIO_FIND_FILE = 33,
+    GOPERL_PIO_EXPORT_FILE = 34,
+    GOPERL_PIO_RELEASE_FILE = 35
 };
 #define GOPERL_PIO_READ_MAX 65536
 #define GOPERL_PL_ERRNO 60
@@ -4452,6 +4473,9 @@ static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
 #define CAT2(a, b) CAT2_(a, b)
 #define STRINGIFY_(n) #n
 #define STRINGIFY(n) STRINGIFY_(n)
+/* The name of the enclosing function, as handy.h gives it. */
+#define FUNCTION__ __func__
+#define SAFE_FUNCTION__ __func__
 #define STR_WITH_LEN(s) ("" s ""), (sizeof(s) - 1)
 #define CALL_FPTR(fptr) (*(fptr))
 
@@ -5737,9 +5761,9 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
         return;
     }
     if (setjmp(jb)) {
-        fprintf(stderr, "goperl native XS: croak in save-stack destructor: %s\n",
-                f->err);
-        f->failed = 0;
+        /* the destructor died: the frame keeps the failure, which the
+         * loader hands to the interpreter, and the scope's end dies with
+         * it there */
         f->jb = prev_jb;
         goperl_cur_frame_v = prev_frame;
         return;
@@ -6963,35 +6987,21 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
 #define MUTABLE_CV(p) ((CV *)(p))
 #define MUTABLE_GV(p) ((GV *)(p))
 #define get_cvs(name, flags) get_cv("" name "", (flags))
-#define UNI_DISPLAY_ISPRINT 0x1
-#define UNI_DISPLAY_BACKSLASH 0x2
-#define UNI_DISPLAY_QQ (UNI_DISPLAY_ISPRINT | UNI_DISPLAY_BACKSLASH)
-/* pv_uni_display: escape a UTF-8 buffer for an error message into dsv. */
+/* The flags of pv_uni_display and sv_uni_display, as utf8.h has them. */
+#define UNI_DISPLAY_ISPRINT 0x0001
+#define UNI_DISPLAY_BACKSLASH 0x0002
+#define UNI_DISPLAY_BACKSPACE 0x0004
+#define UNI_DISPLAY_QQ (UNI_DISPLAY_ISPRINT | UNI_DISPLAY_BACKSLASH | UNI_DISPLAY_BACKSPACE)
+#define UNI_DISPLAY_REGEX (UNI_DISPLAY_ISPRINT | UNI_DISPLAY_BACKSLASH)
+static char *goperl_sv_uni_display(goperl_frame_t *f, SV *dsv, SV *ssv,
+                                   STRLEN pvlim, UV flags);
+/* pv_uni_display: the interpreter's, over a copy of the bytes (a string of
+ * the interpreter's of their length, which sv_uni_display shows). */
 static char *goperl_pv_uni_display(goperl_frame_t *f, SV *dsv, const U8 *spv,
                                    STRLEN len, STRLEN pvlim, U32 flags) {
-    (void)flags;
-    char out[1024];
-    size_t o = 0;
-    STRLEN shown = 0;
-    for (STRLEN i = 0; i < len && o < sizeof out - 8; i++) {
-        U8 c = spv[i];
-        if (shown++ >= pvlim) {
-            memcpy(out + o, "...", 3);
-            o += 3;
-            break;
-        }
-        if (c == '\\' || c == '"') {
-            out[o++] = '\\';
-            out[o++] = (char)c;
-        } else if (c >= 0x20 && c < 0x7f) {
-            out[o++] = (char)c;
-        } else {
-            o += (size_t)snprintf(out + o, sizeof out - o, "\\x{%02x}", c);
-        }
-    }
-    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(dsv), (uint64_t)o, out,
-                 (uint64_t)o);
-    return (char *)goperl_sv_pv_(f, dsv, 0);
+    SV *const tmp = GOPERL_SV(goperl_direct_sv_mortal(
+        f, GOPERL_TOK(goperl_newSVpvn(f, (const char *)spv, len))));
+    return goperl_sv_uni_display(f, dsv, tmp, pvlim, flags);
 }
 #define pv_uni_display(dsv, spv, len, pvlim, flags)                     \
     goperl_pv_uni_display(_gof, (SV *)(dsv), (const U8 *)(spv),         \
@@ -7173,27 +7183,41 @@ static char *goperl_hv_iterkey(goperl_frame_t *f, HE *he, I32 *retlen) {
     ((void)goperl_op0(GOPERL_OP_SV_FORCE_NORMAL, GOPERL_TOK(sv), 0))
 #define sv_force_normal_flags(sv, flags) sv_force_normal(sv)
 
-/* The handles of an IO. */
+/* The handles of an IO, lvalues (`IoIFP(io) = PerlIO_fdopen(fd, "r")`):
+ * the plain store of sv.h, which neither opens nor closes anything. */
 #define IoIFP(io) \
-    ((PerlIO *)(uintptr_t)goperl_pio(_gof, GOPERL_PIO_IFP, (io), 0, 0, 0))
+    (*(PerlIO **)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOIFP, GOPERL_LV_AT))
 #define IoOFP(io) \
-    ((PerlIO *)(uintptr_t)goperl_pio(_gof, GOPERL_PIO_OFP, (io), 0, 0, 0))
+    (*(PerlIO **)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOOFP, GOPERL_LV_AT))
 
-/* ---- stdio streams over handles (PerlIO_findFILE, PerlIO_exportFILE) --------
- * The stream of a handle is a stdio stream whose reads, writes and seeks
- * are that handle's, done in the interpreter: funopen where there is one,
- * fopencookie elsewhere. It is unbuffered, so stdio holds nothing the
- * handle does not have, and the two can be used in turn. It has no
- * descriptor of its own (fileno gives -1).
+/* ---- stdio streams of handles (PerlIO_findFILE, PerlIO_exportFILE) ---------
+ * As perl does, the interpreter flushes the handle, opens a stream on its
+ * descriptor and pushes a :stdio layer with that stream on the handle (the
+ * stream of a :stdio layer the handle has already is the one found). The
+ * stream native code gets is one of this process on the same descriptor,
+ * when the descriptor of that number here is the interpreter's (the same
+ * device and inode: so it is for a program that is the host process):
+ * opened on a duplicate of it, so that giving the stream up closes only
+ * the duplicate, and it shares the file's offset with the handle. Both
+ * streams are unbuffered, so that what the C code and the program write
+ * reaches the descriptor in the order they write it, as through perl's one
+ * stream.
  *
- * The interpreter may die inside one of these callbacks; the C library is
- * on the stack then, so the callback reports failure to it instead of
- * unwinding, and the loader reports the death when the XSUB returns. */
+ * Where the descriptor is not this process's (an interpreter with
+ * descriptors of its own), or the handle has none (an in-memory file), the
+ * stream is one whose reads, writes and seeks are the handle's, done in the
+ * interpreter: funopen where there is one, fopencookie elsewhere. It has no
+ * descriptor (fileno gives -1). The interpreter may die inside one of its
+ * callbacks; the C library is on the stack then, so the callback reports
+ * failure to it instead of unwinding, and the loader reports the death
+ * when the XSUB returns. */
 typedef struct goperl_piofile {
     struct goperl_piofile *next;
     uint64_t tok; /* the handle */
     FILE *fp;
-    int found; /* in the list PerlIO_findFILE answers from */
+    int found;        /* in the list PerlIO_findFILE answers from */
+    int own;          /* fp is on a descriptor (closing it does not free this) */
+    goperl_gword_t gstream; /* the interpreter's stream of the handle's :stdio layer */
 } goperl_piofile_t;
 #define goperl_pio_files_v (*(goperl_piofile_t **)&GOPERL_SHARED->pio_files)
 static uint64_t goperl_piofile_op(goperl_piofile_t *c, int32_t op, uint64_t a,
@@ -7280,6 +7304,45 @@ static int goperl_piofile_seek_cb(void *c, off64_t *off, int whence) {
     return 0;
 }
 #endif
+/* The interpreter's stream of the handle (FIND_FILE or EXPORT_FILE), in
+ * *gstream (0 when there is none); the stream of a descriptor here that is
+ * the same file, or 0. */
+static FILE *goperl_pio_stdio(goperl_frame_t *f, const void *h, int sel,
+                              const char *mode, goperl_gword_t *gstream) {
+    const char *m = mode ? mode : "";
+    const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+        f, goperl_pio(f, sel, h, 0, m, strlen(m) + 1));
+    *gstream = 0;
+    if (!w || (int32_t)w[0] < 0) return 0;
+    *gstream = w[1];
+    /* the 64-bit values are two words, the low one first */
+    const uint64_t dev = ((uint64_t)w[3] << 32) | w[2];
+    const uint64_t ino = ((uint64_t)w[5] << 32) | w[4];
+    const int64_t off = (int64_t)(((uint64_t)w[7] << 32) | w[6]);
+    struct stat st;
+    /* the same file at the same offset (or with none, as a pipe) */
+    if ((!dev && !ino) || fstat((int)w[0], &st) != 0 || (uint64_t)st.st_dev != dev ||
+        (uint64_t)st.st_ino != ino || (int64_t)lseek((int)w[0], 0, SEEK_CUR) != off)
+        return 0;
+    const int fd = dup((int)w[0]);
+    if (fd < 0) return 0;
+    if (!*m) {
+        /* the mode the descriptor was opened with, as perl's
+         * PerlIO_modestr answers for the handle */
+        const int fl = fcntl(fd, F_GETFL);
+        const int acc = fl & O_ACCMODE;
+        m = acc == O_RDONLY   ? "r"
+            : acc == O_WRONLY ? ((fl & O_APPEND) ? "a" : "w")
+                              : ((fl & O_APPEND) ? "a+" : "r+");
+    }
+    FILE *fp = fdopen(fd, m);
+    if (!fp) {
+        close(fd);
+        return 0;
+    }
+    setvbuf(fp, 0, _IONBF, 0);
+    return fp;
+}
 static FILE *goperl_pio_export(goperl_frame_t *f, const void *h,
                                const char *mode, int found)
     __attribute__((unused));
@@ -7289,6 +7352,17 @@ static FILE *goperl_pio_export(goperl_frame_t *f, const void *h,
     goperl_piofile_t *c = (goperl_piofile_t *)calloc(1, sizeof *c);
     if (!c) return 0;
     c->tok = (uint64_t)(uint32_t)(uintptr_t)h;
+    c->fp = goperl_pio_stdio(f, h, found ? GOPERL_PIO_FIND_FILE : GOPERL_PIO_EXPORT_FILE,
+                             found ? 0 : mode, &c->gstream);
+    if (c->fp) {
+        c->own = 1;
+        if (found) {
+            c->found = 1;
+            c->next = goperl_pio_files_v;
+            goperl_pio_files_v = c;
+        }
+        return c->fp;
+    }
 #if defined(__APPLE__)
     (void)mode;
     c->fp = funopen(c, goperl_piofile_read, goperl_piofile_write,
@@ -7313,35 +7387,69 @@ static FILE *goperl_pio_export(goperl_frame_t *f, const void *h,
     }
     return c->fp;
 }
-/* PerlIO_findFILE: the one stream a handle has, made on first use. */
+/* Closes a stream this code made, and the record of it. */
+static void goperl_piofile_free(goperl_piofile_t *c) {
+    const int own = c->own;
+    fclose(c->fp); /* frees c when it is a stream over the handle */
+    if (own) free(c);
+}
+/* PerlIO_findFILE: the stream of the handle's :stdio layer, made on first
+ * use. A stream made before stands for the handle as long as the handle
+ * still has the :stdio layer it was made with (a handle closed and another
+ * opened at its address has not). */
 static FILE *goperl_pio_find(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static FILE *goperl_pio_find(goperl_frame_t *f, const void *h) {
     uint64_t tok = (uint64_t)(uint32_t)(uintptr_t)h;
-    for (goperl_piofile_t *c = goperl_pio_files_v; c; c = c->next)
-        if (c->tok == tok) {
-            if (!goperl_pio(f, GOPERL_PIO_VALID, h, 0, 0, 0)) return 0;
-            clearerr(c->fp);
-            return c->fp;
+    for (goperl_piofile_t **pp = &goperl_pio_files_v; *pp; pp = &(*pp)->next) {
+        goperl_piofile_t *c = *pp;
+        if (c->tok != tok) continue;
+        if (!goperl_pio(f, GOPERL_PIO_VALID, h, 0, 0, 0)) return 0;
+        if (c->gstream) {
+            const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+                f, goperl_pio(f, GOPERL_PIO_FIND_FILE, h, 0, "", 1));
+            if (!w || (int32_t)w[0] < 0 || w[1] != c->gstream) {
+                *pp = c->next;
+                goperl_piofile_free(c);
+                break;
+            }
         }
+        clearerr(c->fp);
+        return c->fp;
+    }
     return goperl_pio_export(f, h, "r+", 1);
 }
-/* Gives up the stream of a handle (PerlIO_releaseFILE, and closing the
- * handle): fp == 0 means whichever stream PerlIO_findFILE made. */
+/* PerlIO_releaseFILE: the stream is given up, and the :stdio layer that
+ * came with it is popped (the handle goes on with the layers below). */
 static void goperl_pio_release(goperl_frame_t *f, const void *h, FILE *fp)
     __attribute__((unused));
 static void goperl_pio_release(goperl_frame_t *f, const void *h, FILE *fp) {
     uint64_t tok = (uint64_t)(uint32_t)(uintptr_t)h;
-    (void)f;
     for (goperl_piofile_t **pp = &goperl_pio_files_v; *pp; pp = &(*pp)->next) {
         goperl_piofile_t *c = *pp;
-        if (c->tok == tok && (!fp || c->fp == fp)) {
+        if (c->tok == tok && c->fp == fp) {
             *pp = c->next;
-            fclose(c->fp); /* frees c */
+            if (c->gstream)
+                goperl_pio(f, GOPERL_PIO_RELEASE_FILE, h, c->gstream, 0, 0);
+            goperl_piofile_free(c);
             return;
         }
     }
     if (fp) fclose(fp);
+}
+/* The handle is closed (PerlIO_close): the stream PerlIO_findFILE made for
+ * it goes; the handle's :stdio layer is closed with the handle. */
+static void goperl_pio_forget(goperl_frame_t *f, const void *h) {
+    uint64_t tok = (uint64_t)(uint32_t)(uintptr_t)h;
+    (void)f;
+    for (goperl_piofile_t **pp = &goperl_pio_files_v; *pp; pp = &(*pp)->next) {
+        goperl_piofile_t *c = *pp;
+        if (c->tok == tok) {
+            *pp = c->next;
+            goperl_piofile_free(c);
+            return;
+        }
+    }
 }
 #define PerlIO_exportFILE(io, mode) goperl_pio_export(_gof, (io), (mode), 0)
 #define PerlIO_findFILE(io) goperl_pio_find(_gof, (io))
@@ -7362,7 +7470,7 @@ static PerlIO *goperl_perlio_open(goperl_frame_t *f, const char *path,
 static int goperl_pio_close(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static int goperl_pio_close(goperl_frame_t *f, const void *h) {
-    goperl_pio_release(f, h, 0);
+    goperl_pio_forget(f, h);
     const int r = (int)(int64_t)goperl_do_op(
         f, GOPERL_OP_PERLIO_CLOSE, (uint64_t)(uint32_t)(uintptr_t)h, 0, 0, 0);
     if (r != 0) goperl_errno_from_interp(f);
@@ -8537,6 +8645,9 @@ typedef struct goperl_parser_state {
 #define goperl_parser_pvg_v (GOPERL_SHARED->parser_pvg)
 
 #define goperl_parser_gen_v (GOPERL_SHARED->parser_gen)
+/* The interpreter variable of the parser: saved, and cleared (the parser
+ * itself is CALL 15's). */
+#define GOPERL_PL_PARSER 94
 static void goperl_parser_pull(goperl_frame_t *f) {
     /* CALL 15: the parser's fields, or nothing when there is no parser */
     const uint32_t *w = (const uint32_t *)goperl_guest_mem(
@@ -8544,6 +8655,9 @@ static void goperl_parser_pull(goperl_frame_t *f) {
     goperl_parser_gen_v = GOPERL_SHARED->gen + 1;
     if (!w) {
         goperl_parser_ptr_v = 0;
+        /* the copy stands for no parser of the interpreter's (see
+         * goperl_parser_push) */
+        if (goperl_parser_state_v) goperl_parser_state_v->seen.linestr = 0;
         return;
     }
     goperl_parser_state_t *st = goperl_parser_state_v;
@@ -8612,6 +8726,20 @@ static void goperl_parser_push(goperl_frame_t *f) {
     goperl_parser_state_t *st = goperl_parser_state_v;
     if (p && (!st || p != &st->parser)) {
         goperl_parser_adopt(f, p);
+        return;
+    }
+    /* The module took the parser away (`SAVEVPTR(PL_parser); PL_parser =
+     * NULL;`, which Devel::CallParser does around building an op, so that
+     * the hooks the op runs do not take it for the lexer's): the
+     * interpreter's goes too. The copy was made since the interpreter last
+     * ran, from a parser it had (the linestr of what was seen is that
+     * parser's); once the interpreter has run, a null copy says nothing of
+     * its parser any more (the scope that saved it may have put it back).
+     * The save itself is the interpreter's (goperl_save_routed). */
+    if (!p && st && st->seen.linestr &&
+        goperl_parser_gen_v == GOPERL_SHARED->gen + 1) {
+        st->seen.linestr = 0;
+        goperl_xs_op(f, GOPERL_OP_PLVAR_SET, GOPERL_PL_PARSER, 0, 0, 0);
         return;
     }
     if (!p || !st) return;
@@ -10633,5 +10761,6 @@ __goperl_shared_release(void *raw) {
 #define Perl_get_context() ((void *)goperl_interp_cur())
 #endif
 #include "goperl_longnames.h"
+#include "goperl_argsassert.h"
 
 #endif /* GOPERL_XS_SDK_PERL_H */

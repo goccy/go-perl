@@ -13,16 +13,17 @@
 #define PERL_API_VERSION 44
 #define PERL_API_SUBVERSION 0
 
-/* The names from before perl 5.6. */
-#define PATCHLEVEL PERL_VERSION
-#define SUBVERSION PERL_SUBVERSION
-
 #endif /* GOPERL_XS_SDK_PATCHLEVEL_H */
 
-/* The patches applied locally to the interpreter (none), for code that
- * includes this header itself; perl.h includes it with
- * PERL_PATCHLEVEL_H_IMPLICIT, as perl's does, and defines no array. */
+/* The patches applied locally to the interpreter (none), and the names
+ * from before perl 5.6, for code that includes this header itself; perl.h
+ * includes it with PERL_PATCHLEVEL_H_IMPLICIT, as perl's does, and gets
+ * neither (code that includes it when PATCHLEVEL is not defined, as
+ * YAML::Safe does, finds the array then). */
 #if !defined(PERL_PATCHLEVEL_H_IMPLICIT) && !defined(LOCAL_PATCH_COUNT)
 static const char *const local_patches[] = {NULL, NULL};
 #define LOCAL_PATCH_COUNT ((int)(sizeof(local_patches) / sizeof(local_patches[0]) - 2))
+#define PATCHLEVEL PERL_VERSION
+#undef SUBVERSION
+#define SUBVERSION PERL_SUBVERSION
 #endif

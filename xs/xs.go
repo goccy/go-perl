@@ -53,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 26
+const abiVersion = 27
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -1055,21 +1055,31 @@ func (s *state) hostCall(req []byte) []byte {
 }
 
 // dtorFired runs a save-stack destructor the guest scope pop released
-// (reserved callback method -4).
-func (s *state) dtorFired(id uint32) {
+// (reserved callback method -4). A destructor that died answers as an XSUB
+// that died does: the interpreter dies with its message, or with the value
+// it threw.
+func (s *state) dtorFired(id uint32) []byte {
 	s.mu.Lock()
 	invoke := s.dtorInvoke
 	s.mu.Unlock()
 	if invoke == 0 {
-		return
+		return []byte{1}
 	}
-	_, fp := s.bootFrame()
+	f, fp := s.bootFrame()
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
 	purego.SyscallN(invoke, fp, uintptr(id))
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
+	defer f.releaseStack()
+	switch {
+	case f.failed == failedThrown:
+		return []byte{respThrow}
+	case f.failed != 0:
+		return append([]byte{0}, f.errString()...)
+	}
+	return []byte{1}
 }
 
 // MAGIC mirror layout (must match struct magic in sdk/include/perl.h):

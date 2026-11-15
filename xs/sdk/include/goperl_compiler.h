@@ -51,8 +51,7 @@ enum {
     GOPERL_CVF_GV_U = 8,
     GOPERL_CVF_OUTSIDE = 9
 };
-/* An interpreter variable that is only ever saved (the parser is CALL 15's). */
-#define GOPERL_PL_PARSER 94
+/* (GOPERL_PL_PARSER, 94, is with the parser's copy in perl.h) */
 /* PL_multideref_pc (an address of the interpreter's memory there, one in
  * this process here) and PL_nomemok. */
 #define GOPERL_PL_MULTIDEREF_PC 95
@@ -1340,6 +1339,13 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
                                      HvNAMEUTF8(goperl_hnh_hv_) != 0, 0)    \
                      : (HEK *)0; })
 #define HvENAME_HEK(hv) HvNAME_HEK(hv)
+/* The name of a glob, as a shared key. */
+#define GvNAME_HEK(gv)                                                      \
+    ({ GV *const goperl_gnh_gv_ = (GV *)(gv);                               \
+       const char *const goperl_gnh_n_ = GvNAME(goperl_gnh_gv_);            \
+       goperl_gnh_n_ ? goperl_hek_of(_gof, goperl_gnh_n_, (I32)GvNAMELEN(goperl_gnh_gv_), \
+                                     GvNAMEUTF8(goperl_gnh_gv_) != 0, 0)    \
+                     : (HEK *)0; })
 
 /* HvARRAY: the buckets of a hash, each the chain of its entries (HE
  * shadows, linked by hent_next), as the interpreter has them when it is

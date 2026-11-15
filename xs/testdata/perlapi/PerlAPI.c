@@ -5030,6 +5030,200 @@ XS(XS_PerlAPI_same_interp) {
     XSRETURN(1);
 }
 
+/* parser_hidden(): built while a file is compiled (from a BEGIN block), an
+ * rv2cv op whose checker is native code, with the parser taken away the
+ * way Devel::CallParser does it (SAVEVPTR(PL_parser); PL_parser = NULL):
+ * answers whether the checker found no parser, and whether the parser is
+ * back after the scope. */
+static Perl_check_t PerlAPI_rv2cv_before;
+static int PerlAPI_rv2cv_saw_parser = -1;
+static OP *PerlAPI_on_new_rv2cv(pTHX_ OP *o) {
+    PerlAPI_rv2cv_saw_parser = PL_parser ? 1 : 0;
+    return PerlAPI_rv2cv_before(aTHX_ o);
+}
+XS(XS_PerlAPI_parser_hidden) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        static int installed;
+        if (!installed) {
+            wrap_op_checker(OP_RV2CV, PerlAPI_on_new_rv2cv, &PerlAPI_rv2cv_before);
+            installed = 1;
+        }
+        const int had = PL_parser != NULL;
+        OP *cvop;
+        ENTER;
+        SAVEVPTR(PL_parser);
+        PL_parser = NULL;
+        PerlAPI_rv2cv_saw_parser = -1;
+        cvop = newCVREF(0, newSVOP(OP_CONST, 0, newSVpvs("PerlAPI::parser_hidden")));
+        LEAVE;
+        op_free(cvop);
+        ST(0) = sv_2mortal(newSVpvf("before:%d checker:%d after:%d", had,
+                                    PerlAPI_rv2cv_saw_parser, PL_parser != NULL));
+        XSRETURN(1);
+    }
+}
+
+/* die_in_destructor(message): a save-stack destructor that croaks with the
+ * message when the scope it was saved in ends. */
+static void PerlAPI_dying_destructor(pTHX_ void *p) {
+    SV *msg = (SV *)p;
+    croak("%" SVf, SVfARG(sv_2mortal(msg)));
+}
+XS(XS_PerlAPI_die_in_destructor) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "message");
+    SAVEDESTRUCTOR_X(PerlAPI_dying_destructor, newSVsv(ST(0)));
+    XSRETURN_EMPTY;
+}
+
+/* io_on_fd(fd, type): a glob whose IO reads a duplicate of the descriptor,
+ * made field by field as Linux::FD and Tickit make one (IoTYPE, IoIFP and
+ * IoOFP assigned), blessed into IO::Handle. */
+XS(XS_PerlAPI_io_on_fd) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "fd, type");
+    {
+        PerlIO *pio = PerlIO_fdopen(dup((int)SvIV(ST(0))), "r");
+        GV *gv = newGVgen("PerlAPI::Handle");
+        SV *ret = newRV_noinc((SV *)gv);
+        IO *io = GvIOn(gv);
+        IoTYPE(io) = *SvPV_nolen(ST(1));
+        IoIFP(io) = pio;
+        IoOFP(io) = pio;
+        IoFLAGS(io) |= IOf_FLUSH;
+        sv_bless(ret, gv_stashpv("IO::Handle", TRUE));
+        ST(0) = sv_2mortal(newSVpvf("%c%d", IoTYPE(io), (IoFLAGS(io) & IOf_FLUSH) ? 1 : 0));
+        ST(1) = sv_2mortal(ret);
+        XSRETURN(2);
+    }
+}
+
+/* glob_with_new_io(): a glob given a new IO with GvIOp, as FCGI gives its
+ * handles one: answers the class the IO is blessed into. */
+XS(XS_PerlAPI_glob_with_new_io) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        GV *gv = newGVgen("PerlAPI::Handle");
+        const int before = GvIOp(gv) != NULL;
+        if (!GvIOp(gv)) GvIOp(gv) = newIO();
+        ST(0) = sv_2mortal(newSVpvf("%d:%s", before, sv_reftype((SV *)GvIOp(gv), TRUE)));
+        SvREFCNT_dec((SV *)gv);
+        XSRETURN(1);
+    }
+}
+
+/* numcmp(a, b): sv_numcmp of the two (overloading included). */
+XS(XS_PerlAPI_numcmp) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "a, b");
+    ST(0) = sv_2mortal(newSViv(sv_numcmp(ST(0), ST(1))));
+    XSRETURN(1);
+}
+
+/* cop_stash_scope(package): the stash of the running statement made the
+ * package's inside a scope that saved it with SAVECOPSTASH_FREE (as
+ * Object::Pad::FieldAttr::Checked does around compiling a check): the
+ * package names inside and after the scope. */
+XS(XS_PerlAPI_cop_stash_scope) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "package");
+    {
+        HV *stash = gv_stashpv(SvPV_nolen(ST(0)), GV_ADD);
+        char inside[64], after[64];
+        ENTER;
+        SAVECOPSTASH_FREE(PL_curcop);
+        CopSTASH_set(PL_curcop, stash);
+        snprintf(inside, sizeof inside, "%s", CopSTASHPV(PL_curcop));
+        LEAVE;
+        snprintf(after, sizeof after, "%s", CopSTASHPV(PL_curcop));
+        ST(0) = sv_2mortal(newSVpvf("%s:%s", inside, after));
+        XSRETURN(1);
+    }
+}
+
+/* A copy of perl's do_ncmp, with the argument checks of proto.h, as
+ * Algorithm::Heapify::XS has one. */
+static I32 PerlAPI_do_ncmp(pTHX_ SV *const left, SV *const right) {
+    PERL_ARGS_ASSERT_DO_NCMP;
+    const NV l = SvNV(left), r = SvNV(right);
+    return (l > r) - (l < r);
+}
+
+/* names_and_offsets(glob, regex, string): GvNAME_HEK of the glob, the name
+ * of this function (FUNCTION__), a comparison through the copy of
+ * do_ncmp, and the offsets of the first group of the regex in the string
+ * after a match (RX_OFFSp, as perl 5.38 and later name them). */
+XS(XS_PerlAPI_names_and_offsets) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "glob, regex, string");
+    {
+        GV *gv = (GV *)SvRV(ST(0));
+        HEK *hek = GvNAME_HEK(gv);
+        REGEXP *rx = SvRX(ST(1));
+        STRLEN len;
+        char *s = SvPV(ST(2), len);
+        const I32 hit = pregexec(rx, s, s + len, s, 0, ST(2), 1);
+        ST(0) = sv_2mortal(newSVpvf("%.*s|%s|%d|%d:%d-%d", (int)HEK_LEN(hek), HEK_KEY(hek),
+                                    FUNCTION__, (int)PerlAPI_do_ncmp(aTHX_ ST(2), ST(2)),
+                                    (int)hit, (int)RX_OFFSp(rx)[1].start,
+                                    (int)RX_OFFSp(rx)[1].end));
+        XSRETURN(1);
+    }
+}
+
+/* stdio_of(handle, text): the stdio stream of the handle (PerlIO_findFILE),
+ * the text written to it with fputs; answers whether the stream has a
+ * descriptor, and whether it is the same stream when asked again. */
+XS(XS_PerlAPI_stdio_of) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "handle, text");
+    {
+        PerlIO *h = IoOFP(sv_2io(ST(0)));
+        FILE *fp = PerlIO_findFILE(h);
+        const int fd = fp ? fileno(fp) : -2;
+        if (fp) fputs(SvPV_nolen(ST(1)), fp);
+        ST(0) = sv_2mortal(newSVpvf("%s:%s", fd >= 0 ? "fd" : fd == -1 ? "nofd" : "none",
+                                    PerlIO_findFILE(h) == fp ? "same" : "other"));
+        XSRETURN(1);
+    }
+}
+
+/* stdio_release(handle): PerlIO_releaseFILE of the handle's stream. */
+XS(XS_PerlAPI_stdio_release) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "handle");
+    {
+        PerlIO *h = IoOFP(sv_2io(ST(0)));
+        PerlIO_releaseFILE(h, PerlIO_findFILE(h));
+        XSRETURN_EMPTY;
+    }
+}
+
+/* pv_display(string, flags): pv_uni_display of the string's bytes. */
+XS(XS_PerlAPI_pv_display) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "string, flags");
+    {
+        STRLEN len;
+        const char *s = SvPV(ST(0), len);
+        SV *out = sv_newmortal();
+        pv_uni_display(out, (const U8 *)s, len, 100, (UV)SvUV(ST(1)));
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* uni_display_flags(): the values of UNI_DISPLAY_QQ and UNI_DISPLAY_REGEX. */
+XS(XS_PerlAPI_uni_display_flags) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("%d,%d", UNI_DISPLAY_QQ, UNI_DISPLAY_REGEX));
+    XSRETURN(1);
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -5647,5 +5841,16 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::recode", XS_PerlAPI_recode);
     newXS_deffile("PerlAPI::own_long_name", XS_PerlAPI_own_long_name);
     newXS_deffile("PerlAPI::any_true", XS_PerlAPI_any_true);
+    newXS_deffile("PerlAPI::parser_hidden", XS_PerlAPI_parser_hidden);
+    newXS_deffile("PerlAPI::die_in_destructor", XS_PerlAPI_die_in_destructor);
+    newXS_deffile("PerlAPI::io_on_fd", XS_PerlAPI_io_on_fd);
+    newXS_deffile("PerlAPI::glob_with_new_io", XS_PerlAPI_glob_with_new_io);
+    newXS_deffile("PerlAPI::numcmp", XS_PerlAPI_numcmp);
+    newXS_deffile("PerlAPI::cop_stash_scope", XS_PerlAPI_cop_stash_scope);
+    newXS_deffile("PerlAPI::names_and_offsets", XS_PerlAPI_names_and_offsets);
+    newXS_deffile("PerlAPI::stdio_of", XS_PerlAPI_stdio_of);
+    newXS_deffile("PerlAPI::stdio_release", XS_PerlAPI_stdio_release);
+    newXS_deffile("PerlAPI::pv_display", XS_PerlAPI_pv_display);
+    newXS_deffile("PerlAPI::uni_display_flags", XS_PerlAPI_uni_display_flags);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

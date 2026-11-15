@@ -31,9 +31,31 @@ XS(XS_LayerView_layers) {
     XSRETURN(1);
 }
 
+/* buffer_sizes(fh): the size of the buffer of each buffered layer, from
+ * the top, read out of the layer as PerlIO::Layers does
+ * (PerlIOSelf(f, PerlIOBuf)->bufsiz), the buffer made first when the layer
+ * has none yet (PerlIO_get_base). */
+XS(XS_LayerView_buffer_sizes) {
+    dXSARGS;
+    PerlIO *l;
+    SV *out;
+    if (items != 1) croak_xs_usage(cv, "fh");
+    out = sv_2mortal(newSVpvs(""));
+    for (l = IoIFP(sv_2io(ST(0))); *l; l = PerlIONext(l)) {
+        PerlIOBuf *b;
+        if (!(PerlIOBase(l)->tab->kind & PERLIO_K_BUFFERED)) continue;
+        b = PerlIOSelf(l, PerlIOBuf);
+        if (!b->bufsiz && !b->buf) PerlIO_get_base(l);
+        sv_catpvf(out, "%s%lu", SvCUR(out) ? "," : "", (unsigned long)b->bufsiz);
+    }
+    ST(0) = out;
+    XSRETURN(1);
+}
+
 XS_EXTERNAL(boot_LayerView) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
     newXS_deffile("LayerView::layers", XS_LayerView_layers);
+    newXS_deffile("LayerView::buffer_sizes", XS_LayerView_buffer_sizes);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

@@ -78,5 +78,10 @@ func TestNativeLayersOfAHandle(t *testing.T) {
 		{"utf8", names + `open my $fh, "<:raw:utf8", our $FILE or die $!; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^\w+/\d/1/} ? "utf8 on the top" : $r`, "same,utf8 on the top"},
 		{"crlf", names + `open my $fh, "<:raw:crlf", our $FILE or die $!; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^crlf/1/\d/1,} ? "crlf on the top" : $r`, "same,crlf on the top"},
 		{"at the end", `open my $fh, "<:raw", our $FILE or die $!; my @l = <$fh>; my $r = LayerView::layers($fh); $r =~ /,(\d)\z/; $1`, "1"},
+		// a buffered layer is a PerlIOBuf to code that reads its buffer:
+		// the size of the buffer it has after reading, or gets when asked
+		// for its base (PerlIO::Layers' get_buffer_sizes)
+		{"buffer after reading", `open my $fh, "<:raw", our $FILE or die $!; my $l = <$fh>; LayerView::buffer_sizes($fh) > 0 ? "sized" : "none"`, "sized"},
+		{"buffer made on asking", `open my $fh, "<:raw", our $FILE or die $!; LayerView::buffer_sizes($fh) > 0 ? "sized" : "none"`, "sized"},
 	})
 }

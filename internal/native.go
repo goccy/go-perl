@@ -160,8 +160,10 @@ func (p *Perl) SetHostCallHandler(fn func(req []byte) []byte) error {
 
 // SetDestructorHandler installs the hook for save-stack destructors
 // registered by native modules: id fires when the guest scope that holds
-// it pops.
-func (p *Perl) SetDestructorHandler(fn func(id uint32)) error {
+// it pops. The hook's result is the response: [1] when the destructor
+// returned, [0]+message or the thrown-value response when it died, which
+// the scope's end dies with in turn.
+func (p *Perl) SetDestructorHandler(fn func(id uint32) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
 	}
@@ -475,7 +477,7 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		fire := d.p.dtorFire
 		d.p.hookMu.RUnlock()
 		if fire != nil && len(req) >= 4 {
-			fire(binary.LittleEndian.Uint32(req))
+			return fire(binary.LittleEndian.Uint32(req)), nil
 		}
 		return []byte{1}, nil
 	}
