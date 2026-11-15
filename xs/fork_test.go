@@ -78,7 +78,10 @@ func TestForkWithNativeState(t *testing.T) {
 }
 
 // The parent of a fork lets go of the native state it shares with its
-// child: the child goes on using the native state it was forked with.
+// child: the child goes on using the native state it was forked with. The
+// parent looks at what was freed while the child still waits for it: a
+// child that has ended has released its copy too, and that release frees
+// the state.
 func TestForkChildKeepsNativeStateTheParentReleased(t *testing.T) {
 	dir := t.TempDir()
 	report := filepath.Join(dir, "report")
@@ -94,8 +97,9 @@ func TestForkChildKeepsNativeStateTheParentReleased(t *testing.T) {
 		`    print $fh PerlAPI::tally_add($box[0], 1), "\n"; close $fh;`,
 		`    exit 0;`,
 		`}`,
-		`@box = (); close $w; close $r;`,
+		`@box = ();`,
 		`print "parent released: ", PerlAPI::tally_freed(), "\n";`,
+		`close $w; close $r;`,
 		// The end of the program would be the end of the child.
 		`waitpid($pid, 0);`,
 	)
