@@ -53,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 32
+const abiVersion = 33
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -149,13 +149,16 @@ type cFrame struct {
 	// xerrno is 0, or 1 + the errno the XSUB left when it returned, in the
 	// interpreter's numbering: the SDK notes it, dispatch hands it over.
 	xerrno int32
-	// memBase and memCap are the interpreter's linear memory as native
-	// code sees it: where it starts and the size of the range reserved
-	// for it. The memory grows inside that range and never moves (the
-	// copy-on-write snapshot path), so a pointer is the interpreter's
-	// exactly when it lies in the range.
+	// memBase and memSize are the interpreter's linear memory as native
+	// code sees it: where it starts, and where the instance keeps its
+	// size (internal.Perl.MemorySizeWord), which native code reads at
+	// every use: the memory grows while the interpreter runs, during a
+	// native call too, and never moves (the copy-on-write snapshot path),
+	// so an address is the interpreter's exactly when it lies below the
+	// size as it is then. The range reserved past the size is not
+	// readable.
 	memBase uintptr
-	memCap  uint64
+	memSize uintptr
 	// The perl stack of a pp function (ppFrame set): st is a copy of the
 	// interpreter's stack and marks of its mark stack, gmarkLo the
 	// interpreter's index of marks[0]. The SDK keeps what the copy was
@@ -196,9 +199,9 @@ type cFrame struct {
 // newFrame returns a frame of this instance with no stack yet.
 func (s *state) newFrame() *cFrame {
 	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, opbox: s.opbox}
+	f.memSize = uintptr(unsafe.Pointer(s.p.MemorySizeWord()))
 	if mem := s.p.RawMemory(); cap(mem) > 0 {
 		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
-		f.memCap = uint64(cap(mem))
 	}
 	return f
 }
@@ -1956,7 +1959,7 @@ func buildVtable() {
 			return 0
 		}
 		mem := f.p.RawMemory()
-		if gptr == 0 || int(gptr) >= len(mem) {
+		if gptr == 0 || uint64(gptr) >= uint64(len(mem)) {
 			f.fail("guest_mem: pointer outside linear memory")
 			return 0
 		}

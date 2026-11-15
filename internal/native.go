@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"unsafe"
 
 	wasm2go "github.com/goccy/perlwasm2go"
 	"github.com/goccy/perlwasm2go/base"
@@ -292,10 +294,24 @@ func (p *Perl) RawMemory() []byte {
 
 // MemorySize returns the size of the instance's linear memory in bytes: what
 // the guest has grown it to, which is its peak, since a linear memory never
-// shrinks. (RawMemory is as long as the mapping the instance lives in.)
+// shrinks. (RawMemory is that long; its capacity is the range reserved for
+// the memory, whose pages past the size are not accessible.)
 func (p *Perl) MemorySize() uint64 {
 	return p.m.g.MemSize.Load()
 }
+
+// MemorySizeWord returns where the instance keeps MemorySize: the word
+// memory.grow stores the new size in, so a reader of it has the size as it
+// is now, for the instance's whole life. Native code bounds the addresses
+// of the interpreter's it turns into its own with it, since the memory
+// grows while the interpreter runs, during a call of native code too.
+func (p *Perl) MemorySizeWord() *uint64 {
+	return (*uint64)(unsafe.Pointer(p.m.g.MemSize))
+}
+
+// An atomic.Uint64 is its 64-bit value and nothing else, so a pointer to
+// one is a pointer to the value (MemorySizeWord).
+var _ = [1]struct{}{}[unsafe.Sizeof(atomic.Uint64{})-8]
 
 // EnsureDispatcher registers this instance's callback handler with the
 // generated bridge machinery and tells the guest its callback id. Runs once

@@ -56,6 +56,29 @@ func TestNativeCroakLeavesTheSignalStackAlone(t *testing.T) {
 	})
 }
 
+// Native code that follows an address of the interpreter's that its memory
+// does not hold — past the memory's size but inside the range reserved for
+// the memory (whose pages past the size are not readable), past that
+// range, at 2^63, at the top of the address space — dies with the SDK's
+// error, which eval catches, and the interpreter goes on: never a fault in
+// native code, which would end the process. An address the memory holds
+// reads what is there, also one the memory grew to hold during the call,
+// and a buffer there that native code frees is the interpreter's to free.
+func TestNativeCodeFollowsAnAddressPastTheMemory(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	cases := []evalCase{
+		{"a string's buffer", `my $s = "perl"; PerlAPI::guest_byte(unpack("Q", pack("p", $s)))`, "112"},
+		{"buffers made during the call", `PerlAPI::grown_buffers(128 << 20)`, "az"},
+	}
+	for _, addr := range []string{"3*2**30", "9*2**30", "2**46", "2**63", "~0"} {
+		cases = append(cases, evalCase{"address " + addr,
+			`eval { PerlAPI::guest_byte(` + addr + `); 1 } ? "read" : $@ =~ /pointer outside linear memory/ ? "error" : $@`, "error"})
+	}
+	cases = append(cases, evalCase{"the interpreter afterwards", `join ",", map { $_ * 2 } 1 .. 3`, "2,4,6"})
+	runEvalCases(t, p, cases)
+}
+
 // A module compiles and runs as against perl built without MULTIPLICITY,
 // as perl's default build is: what it declares for such a perl has no
 // context argument (an XSUB, a function of its own), and a function

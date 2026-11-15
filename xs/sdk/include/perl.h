@@ -119,7 +119,7 @@
 #define GOPERL_LONGJMP(jb, v) longjmp((jb), (v))
 #endif
 
-#define GOPERL_XS_ABI 32u
+#define GOPERL_XS_ABI 33u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -737,9 +737,14 @@ struct goperl_frame {
     char err[512];
     int32_t xerrno; /* 0, or 1 + the errno the XSUB left, in the
                      * interpreter's numbering (see goperl_errno_leave) */
-    char *membase;   /* the interpreter's linear memory: where it starts in */
-    uint64_t memcap; /* this process, and the size of the range reserved
-                      * for it (it grows inside that range, never moves) */
+    char *membase; /* the interpreter's linear memory: where it starts in
+                    * this process (it never moves) */
+    const uint64_t *memsize; /* and where the loader keeps its size, which
+                              * grows while the interpreter runs, also
+                              * during a native call: read it at every use.
+                              * The range reserved past the size holds
+                              * nothing of this process's and is not
+                              * readable. */
     /* The perl stack of a pp function (see goperl_pp_stack_pull): st and
      * marks are a copy of the interpreter's stack and mark stack. */
     int32_t pp_frame;  /* the frame runs a pp function */
@@ -882,15 +887,27 @@ static inline __attribute__((unused)) uint64_t goperl_xs_op(
 }
 /* Where an address of the interpreter's memory is in this process. No
  * address (0) is none here either: the interpreter answers a question
- * about something that does not exist with 0. The memory never moves in
- * the range reserved for it (membase, memcap), so an address in that range
- * is turned here; the loader turns any other (and fails the frame: no
- * address of the interpreter's lies outside it). */
+ * about something that does not exist with 0. The memory never moves, so
+ * an address below its size as it is now is turned here; the loader turns
+ * any other, and fails the frame when the memory does not hold it (a
+ * stray address of native code's: the pages reserved past the size are
+ * not readable). The failure unwinds to the nearest catch point, as a
+ * perl API function's does (goperl_do_opx), so native code never follows
+ * the null pointer the call answers then; without a catch point armed the
+ * caller gets the null pointer and the loader reports the failure. */
+static void goperl_raise(goperl_frame_t *f) __attribute__((noreturn, unused));
 static inline __attribute__((unused)) void *goperl_guest_mem(
     goperl_frame_t *f, uint64_t gptr) {
     if (!gptr) return 0;
-    if (f->membase && gptr < f->memcap) return f->membase + gptr;
-    GOPERL_KEEP_ERRNO(void *, goperl_api_v->guest_mem(f, gptr));
+    if (f->membase && gptr < *f->memsize) return f->membase + gptr;
+    {
+        const int goperl_e_ = errno;
+        const int32_t failed_before = f->failed;
+        void *const p = goperl_api_v->guest_mem(f, gptr);
+        errno = goperl_e_;
+        if (!failed_before && f->failed && f->jb) goperl_raise(f);
+        return p;
+    }
 }
 /* The interpreter's memory, read and written where it is: a word of four
  * bytes at an address of it (a U32, an I32, an int), a word of eight bytes
@@ -8075,7 +8092,7 @@ static void load_module(U32 flags, SV *name, SV *ver, ...) {
 static inline __attribute__((unused)) uint64_t goperl_guest_addr(
     const goperl_frame_t *f, const void *p) {
     const uintptr_t d = (uintptr_t)p - (uintptr_t)f->membase;
-    return (p && d < f->memcap) ? (uint64_t)d : 0;
+    return (p && d < *f->memsize) ? (uint64_t)d : 0;
 }
 static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_safefree(void *p) {
@@ -9144,7 +9161,7 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
             /* a warnings buffer is the interpreter's memory, or one of its
              * two markers, or NULL */
             const uintptr_t d = (uintptr_t)o->cop_warnings - (uintptr_t)f->membase;
-            if (o->cop_warnings && d >= f->memcap)
+            if (o->cop_warnings && d >= *f->memsize)
                 goperl_croakf(f, "cop_warnings was given a buffer that is not "
                                  "the interpreter's");
             goperl_do_op3(f, GOPERL_OP_CALL, o->gop, (uint64_t)(o->cop_warnings ? d : 0),

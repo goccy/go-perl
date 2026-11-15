@@ -3947,6 +3947,50 @@ XS(XS_PerlAPI_alt_stack_after_croak) {
     XSRETURN(1);
 }
 
+/* guest_byte(addr): the byte at addr in the interpreter's memory, reached
+ * as native code reaches what an address of the interpreter's names: the
+ * SDK turns the address into one of this process (goperl_guest_mem, which
+ * every value's accessor goes through). */
+XS(XS_PerlAPI_guest_byte) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "addr");
+    {
+        const unsigned char *const p =
+            (const unsigned char *)goperl_guest_mem(_gof, (uint64_t)SvUV(ST(0)));
+        ST(0) = sv_2mortal(newSVuv(*p));
+        XSRETURN(1);
+    }
+}
+
+/* grown_buffers(n): makes two strings of n bytes, one after the other, for
+ * which the interpreter's memory grows after the call began (the second
+ * lies where the memory had nothing when the call began); writes the first
+ * and last bytes of the second through SvPVX, reads them back, and frees
+ * both buffers as a module frees one of the interpreter's (Safefree of
+ * SvPVX). Returns the two bytes. */
+XS(XS_PerlAPI_grown_buffers) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const STRLEN n = (STRLEN)SvUV(ST(0));
+        SV *const first = sv_2mortal(newSV(n));
+        SV *const second = sv_2mortal(newSV(n));
+        char got[2];
+        SvPVX(second)[0] = 'a';
+        SvPVX(second)[n - 1] = 'z';
+        got[0] = SvPVX(second)[0];
+        got[1] = SvPVX(second)[n - 1];
+        Safefree(SvPVX(first));
+        SvPV_set(first, NULL);
+        SvLEN_set(first, 0);
+        Safefree(SvPVX(second));
+        SvPV_set(second, NULL);
+        SvLEN_set(second, 0);
+        ST(0) = sv_2mortal(newSVpvn(got, 2));
+        XSRETURN(1);
+    }
+}
+
 /* ---- the compiler's structures (goperl_compiler.h) ---------------------- */
 
 /* status_saved(n): $? is n until the scope that called this ends, as a
@@ -6187,6 +6231,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::lexical_keywords", XS_PerlAPI_lexical_keywords);
     newXS_deffile("PerlAPI::set_signal_aside", XS_PerlAPI_set_signal_aside);
     newXS_deffile("PerlAPI::alt_stack_after_croak", XS_PerlAPI_alt_stack_after_croak);
+    newXS_deffile("PerlAPI::guest_byte", XS_PerlAPI_guest_byte);
+    newXS_deffile("PerlAPI::grown_buffers", XS_PerlAPI_grown_buffers);
     newXS_deffile("PerlAPI::fd_of", XS_PerlAPI_fd_of);
     newXS_deffile("PerlAPI::fd_state", XS_PerlAPI_fd_state);
     newXS_deffile("PerlAPI::fd_write", XS_PerlAPI_fd_write);

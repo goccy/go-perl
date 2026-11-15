@@ -2617,7 +2617,7 @@ static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
      * a buffer) */
     const uintptr_t d = (uintptr_t)buffer - (uintptr_t)f->membase;
     uint64_t old = 0;
-    if (buffer && d < f->memcap && buffer != pWARN_ALL && buffer != pWARN_NONE)
+    if (buffer && d < *f->memsize && buffer != pWARN_ALL && buffer != pWARN_NONE)
         old = (uint64_t)d;
     return (char *)goperl_guest_mem(
         f, goperl_do_op3(f, GOPERL_OP_CALL, old, (uint64_t)size, (uint64_t)(GOPERL_CALL_NEW_WARNINGS), bits, (uint64_t)size));
@@ -2850,7 +2850,7 @@ static I32 goperl_pregexec(goperl_frame_t *f, REGEXP *rx, char *stringarg,
     goperl_gword_t w[6];
     const uintptr_t b = (uintptr_t)strbeg - (uintptr_t)f->membase;
     const uintptr_t e = (uintptr_t)strend - (uintptr_t)f->membase;
-    if (b < f->memcap && e < f->memcap) {
+    if (b < *f->memsize && e < *f->memsize) {
         w[0] = (goperl_gword_t)((uintptr_t)stringarg - (uintptr_t)f->membase);
         w[1] = (goperl_gword_t)e;
         w[2] = (goperl_gword_t)b;
@@ -4076,7 +4076,7 @@ static __attribute__((unused)) I32 goperl_regexec_flags(goperl_frame_t *f, REGEX
     const uintptr_t b = (uintptr_t)strbeg - (uintptr_t)f->membase;
     const uintptr_t e = (uintptr_t)strend - (uintptr_t)f->membase;
     if (data) goperl_croakf(f, "CALLREGEXEC: the data argument of the engine is not available to native XS modules");
-    if (b < f->memcap && e < f->memcap) {
+    if (b < *f->memsize && e < *f->memsize) {
         w[0] = (goperl_gword_t)((uintptr_t)stringarg - (uintptr_t)f->membase);
         w[1] = (goperl_gword_t)e;
         w[2] = (goperl_gword_t)b;
