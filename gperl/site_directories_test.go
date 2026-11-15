@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 	"github.com/goccy/go-perl/xs"
 )
 
@@ -61,7 +62,7 @@ func perlVersion(t *testing.T) string {
 func TestSiteDirectoriesAreTheUsers(t *testing.T) {
 	root := userWithEmptyData(t)
 	lib := filepath.Join(root, "site_perl", perlVersion(t))
-	arch := filepath.Join(lib, runtime.GOOS+"_"+runtime.GOARCH)
+	arch := filepath.Join(lib, internal.ArchName())
 	bin := filepath.Join(root, "bin")
 	man1, man3 := filepath.Join(root, "man", "man1"), filepath.Join(root, "man", "man3")
 
@@ -120,7 +121,7 @@ func TestSiteDirectoriesAreTheUsers(t *testing.T) {
 func TestSiteDirectoriesInInc(t *testing.T) {
 	root := userWithEmptyData(t)
 	lib := filepath.Join(root, "site_perl", perlVersion(t))
-	arch := filepath.Join(lib, runtime.GOOS+"_"+runtime.GOARCH)
+	arch := filepath.Join(lib, internal.ArchName())
 	dir := t.TempDir()
 	env := append(os.Environ(), "PERL5LIB="+filepath.Join(dir, "five"))
 	const program = `my ($stdlib) = grep { -e "$_/strict.pm" } @INC; print join("\n", map { $_ eq $stdlib ? "STDLIB" : $_ } @INC), "\n";`
@@ -287,7 +288,7 @@ func TestMakeInstallOfANativeModuleGoesToTheSiteDirectories(t *testing.T) {
 	hostXSToolchain(t)
 	root := userWithEmptyData(t)
 	lib := filepath.Join(root, "site_perl", perlVersion(t))
-	arch := filepath.Join(lib, runtime.GOOS+"_"+runtime.GOARCH)
+	arch := filepath.Join(lib, internal.ArchName())
 	env, shim := siteInstallEnv(t, true)
 
 	source, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))

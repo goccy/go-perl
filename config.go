@@ -2,7 +2,11 @@ package perl
 
 // Config configures a new Perl instance's sandbox.
 
-import "io"
+import (
+	"io"
+
+	"github.com/goccy/go-perl/internal"
+)
 
 // Config configures a new Perl instance created by New. The zero value is a
 // usable, FULLY SANDBOXED interpreter: a private in-memory filesystem
@@ -12,6 +16,15 @@ import "io"
 // spawns, no fork, no system logger, and an identity of its own instead of
 // the host process's.
 // Each capability is granted explicitly by setting its field.
+// HostMemoryLimit, as Config.MaxMemoryBytes, caps the instance's linear
+// memory at the memory the host gives the process: the machine's memory
+// (darwin hw.memsize; FreeBSD and DragonFly hw.physmem; OpenBSD and NetBSD
+// hw.physmem64; Linux MemTotal of /proc/meminfo), or the memory limit of
+// the control group (container) the process is in when that is lower
+// (Linux: cgroup v2 memory.max, v1 memory.limit_in_bytes). Where neither
+// can be read (other systems), the limit is the default, 8 GiB.
+const HostMemoryLimit = internal.HostMemoryLimit
+
 type Config struct {
 	// StdlibDir is the path INSIDE the instance's filesystem (Config.FS)
 	// holding the Perl standard library (the assembled lib/ tree). It is
@@ -80,7 +93,10 @@ type Config struct {
 	// A guest allocation that would grow memory past this limit fails
 	// (memory.grow returns -1) instead of growing the host process unbounded.
 	// Rounded down to a multiple of the 64 KiB wasm page size; values below
-	// the module's initial memory are ignored.
+	// the module's initial memory are ignored. HostMemoryLimit caps it at
+	// the host's memory. Without one the limit is 8 GiB. The memory is
+	// reserved as address space of the limit's size, not resident memory:
+	// pages the program never writes cost nothing.
 	MaxMemoryBytes int
 	// MemoryReserveBytes, when > 0, is the initial linear-memory slice
 	// capacity reserved for this instance. Reserving capacity up front makes

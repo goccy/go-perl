@@ -114,7 +114,7 @@ type Perl struct {
 	// intrAddr is the linear-memory offset of the interpreter's interrupt-flag
 	// word, resolved once at New so a context cancellation can fire without
 	// taking the instance lock a running Eval holds.
-	intrAddr uint32
+	intrAddr uint64
 	// mapped is the copy-on-write mapping this instance lives in when it was
 	// built from the process snapshot; unmapped on Close. nil for instances
 	// that booted privately.
@@ -339,7 +339,7 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	}
 	var addrErr error
 	base.AccessMemory(m.g, func(mem []byte) {
-		if uint64(addr)+4 > uint64(len(mem)) {
+		if addr+4 > uint64(len(mem)) {
 			addrErr = fmt.Errorf("interrupt address %#x out of range (memory is %d bytes)", addr, len(mem))
 		}
 	})
@@ -466,20 +466,24 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 	return p.bootPrivate(opts, wasi)
 }
 
-// memoryCeiling is the length of the mapping an instance's memory is: the
-// snapshot ceiling, or the memory cap of opts rounded down to a wasm page
-// when that is lower and still holds least (the memory the instance starts
-// with). The mapping is the growth cap too.
-func memoryCeiling(opts InstanceOptions, least uint64) int {
-	ceiling := snapshotCeiling
-	if opts.MaxMemoryBytes > 0 {
-		const wasmPage = 65536
-		max := opts.MaxMemoryBytes / wasmPage * wasmPage
-		if max < ceiling && uint64(max) >= least {
-			ceiling = max
+// memoryCeiling is the limit of an instance's linear memory: the memory
+// cap of opts rounded down to a wasm page, the host's memory for
+// HostMemoryLimit (when it can be told), or defaultMemoryCeiling without
+// one (or with one below least, the memory the instance starts with). It
+// is the length of the mapping the instance's memory is, and its growth
+// cap, however the instance gets its memory.
+func memoryCeiling(opts InstanceOptions, least uint64) uint64 {
+	switch {
+	case opts.MaxMemoryBytes == HostMemoryLimit:
+		if size, ok := hostMemory(); ok && size/wasmPage*wasmPage >= least {
+			return size / wasmPage * wasmPage
+		}
+	case opts.MaxMemoryBytes > 0:
+		if max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage; max >= least {
+			return max
 		}
 	}
-	return ceiling
+	return defaultMemoryCeiling
 }
 
 // bootOwn starts the instance on memory of its own: a private mapping that
@@ -510,15 +514,9 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
-	// instead of growing the host process unbounded. Round down to a wasm
-	// page; ignore values below the module's initial memory.
-	if opts.MaxMemoryBytes > 0 {
-		const wasmPage = 65536
-		max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage
-		if max >= uint64(len(wasm2go.Memory(p.m.g))) {
-			wasm2go.SetMaxMemory(p.m.g, max)
-		}
-	}
+	// instead of growing the host process unbounded: the same limit as an
+	// instance on a mapping has.
+	wasm2go.SetMaxMemory(p.m.g, memoryCeiling(opts, uint64(len(wasm2go.Memory(p.m.g)))))
 	return p.start(opts)
 }
 
@@ -867,16 +865,14 @@ func (i *memoryImage) release() {
 func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
 
 // perlNew starts the interpreter with its library in stdlibDir and, when
-// siteDir is not empty, its site directories under siteDir. The
-// architecture-specific one among them holds native modules, which are
-// loaded into this process: it is named after this machine.
+// siteDir is not empty, its site directories under siteDir, telling it the
+// name of the architecture (ArchName): the host's, for which the native
+// modules a program loads into this process are built.
 func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
 	buf = pbAppendString(buf, 2, siteDir)
-	if siteDir != "" {
-		buf = pbAppendString(buf, 3, ArchTag())
-	}
+	buf = pbAppendString(buf, 3, ArchName())
 	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
@@ -889,7 +885,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 
 // interruptAddr fetches the address of this instance's interrupt-flag word in
 // linear memory.
-func (p *Perl) interruptAddr() (uint32, error) {
+func (p *Perl) interruptAddr() (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
@@ -899,7 +895,7 @@ func (p *Perl) interruptAddr() (uint32, error) {
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // fireInterrupt stores 1 into the interrupt-flag word. It does not take the

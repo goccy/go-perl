@@ -13,6 +13,10 @@
 //	                                ./local/xs; gperl run and built binaries
 //	                                load them automatically
 //
+// GPERL_MAX_MEMORY limits the interpreter's memory, for gperl run and for
+// the binaries gperl build makes: a size in bytes (with K, M, G or T), or
+// "host" for the memory the host gives the process; 8 GiB when unset.
+//
 // Every subcommand is a thin wrapper over the github.com/goccy/go-perl/gperl
 // library, so applications can drive the same functionality programmatically.
 
@@ -40,6 +44,10 @@ func usage() {
   gperl run [perl switches] [script] [args...]
   gperl build [-o out] script.pl
   gperl xs build [-C dir] dist [dist...]
+
+environment:
+  GPERL_MAX_MEMORY   the interpreter's memory limit: bytes (with K, M, G or T),
+                     or host for the host's memory; 8G when unset
 `)
 	os.Exit(2)
 }

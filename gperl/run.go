@@ -36,11 +36,16 @@ func init() { internal.KeepRuntimeDescriptorsHigh() }
 // program is the host process: its pid, user and signals are the
 // process's own, and it logs to the host's system logger. Its site
 // directories — where `make install` puts modules, and where every run
-// finds them — are under a directory of the user's: see siteDir.
+// finds them — are under a directory of the user's: see siteDir. Its
+// memory limit is GPERL_MAX_MEMORY's (see memoryLimitEnv).
 func HostConfig() (perl.Config, error) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
 		return perl.Config{}, fmt.Errorf("extract embedded stdlib: %w", err)
+	}
+	maxMemory, err := parseMemoryLimit(os.Getenv(memoryLimitEnv))
+	if err != nil {
+		return perl.Config{}, err
 	}
 	return perl.Config{
 		FS:          goperlfs.NewHostFS(),
@@ -55,6 +60,7 @@ func HostConfig() (perl.Config, error) {
 		InheritDescriptors: true,
 		Syslog:             true,
 		NativeModules:      true,
+		MaxMemoryBytes:     maxMemory,
 	}, nil
 }
 

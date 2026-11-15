@@ -5060,6 +5060,53 @@ XS(XS_PerlAPI_op_of_b) {
         XSRETURN(1);
     }
 }
+/* own_op_numbers(): ops of the module's own, on the C stack, in the C heap
+ * and in pages mapped where the system lets them be (asked for at 1, 5, 6
+ * and 7 GiB), each made a number and back, with PTR2IV and INT2PTR and with
+ * plain casts: for each, [where, its address, whether INT2PTR of PTR2IV's
+ * number is the op, whether INT2PTR of the cast number is]. */
+XS(XS_PerlAPI_own_op_numbers) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        static const uintptr_t at[] = {(uintptr_t)1 << 30, (uintptr_t)5 << 30,
+                                       (uintptr_t)6 << 30, (uintptr_t)7 << 30};
+        enum { NAT = sizeof at / sizeof at[0], PAGE = 65536 };
+        OP on_stack;
+        OP *ops[2 + NAT];
+        const char *where[2 + NAT];
+        void *pages[NAT];
+        size_t n = 0, i;
+        Zero(&on_stack, 1, OP);
+        ops[n] = &on_stack;
+        where[n++] = "stack";
+        ops[n] = (OP *)calloc(1, sizeof(OP));
+        where[n++] = "heap";
+        for (i = 0; i < NAT; i++) {
+            void *const p = mmap((void *)at[i], PAGE, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANON, -1, 0);
+            pages[i] = p == MAP_FAILED ? NULL : p;
+            if (pages[i]) {
+                ops[n] = (OP *)pages[i];
+                where[n++] = "mapped";
+            }
+        }
+        SP -= items;
+        for (i = 0; i < n; i++) {
+            OP *const o = ops[i];
+            AV *const row = newAV();
+            av_push(row, newSVpv(where[i], 0));
+            av_push(row, newSVuv((UV)(uintptr_t)o));
+            av_push(row, newSViv(INT2PTR(OP *, PTR2IV(o)) == o));
+            av_push(row, newSViv(INT2PTR(OP *, (IV)(intptr_t)o) == o));
+            XPUSHs(sv_2mortal(newRV_noinc((SV *)row)));
+        }
+        free(ops[1]);
+        for (i = 0; i < NAT; i++)
+            if (pages[i]) munmap(pages[i], PAGE);
+        PUTBACK;
+    }
+}
 XS(XS_PerlAPI_next_op_object) {
     dXSARGS;
     PERL_UNUSED_VAR(items);
@@ -5966,6 +6013,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::number_kind", XS_PerlAPI_number_kind);
     newXS_deffile("PerlAPI::rethrow_errsv", XS_PerlAPI_rethrow_errsv);
     newXS_deffile("PerlAPI::pointer_roundtrip", XS_PerlAPI_pointer_roundtrip);
+    newXS_deffile("PerlAPI::own_op_numbers", XS_PerlAPI_own_op_numbers);
     newXS_deffile("PerlAPI::other_names", XS_PerlAPI_other_names);
     newXS_deffile("PerlAPI::scan_a_version", XS_PerlAPI_scan_a_version);
     newXS_deffile("PerlAPI::generated_globs", XS_PerlAPI_generated_globs);

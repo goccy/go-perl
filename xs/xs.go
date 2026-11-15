@@ -53,7 +53,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 29
+const abiVersion = 32
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -106,6 +106,16 @@ const gvCallCvNative = 37
 // svCallMagicIsValue is the SV_CALL selector that asks whether a magic type
 // is value magic (GOPERL_SVCALL_MAGIC_IS_VALUE in perl-wasm).
 const svCallMagicIsValue = 55
+
+// opboxOffResult2 is where the box holds the second value of an operation
+// that answers two (result2 of perl-wasm's struct goperl_opbox).
+const opboxOffResult2 = 32
+
+// opboxResult2 is the second value of the operation that has just answered,
+// in the box at opbox of the instance's memory mem.
+func opboxResult2(mem []byte, opbox uint64) uint64 {
+	return binary.LittleEndian.Uint64(mem[opbox+opboxOffResult2:])
+}
 
 // cFrame mirrors goperl_frame_t in sdk/include/perl.h (ABI). The trailing Go
 // fields are invisible to C, which only knows the leading portion.
@@ -170,12 +180,9 @@ type cFrame struct {
 	// entryJB is the SDK's: the catch point of its XSUB entry while no
 	// XSUB has taken that activation over.
 	entryJB uintptr
-	// foreign is the instance's goperl_foreign_t: the pointers of native
-	// code's own its arrays and hashes keep (see foreign.go).
-	foreign uintptr
 	// opbox is the address of the instance's operation box in its linear
-	// memory (internal.Perl.XSOpBox), 0 when there is none: the SDK writes
-	// an operation's arguments there and has xsOpBox run it.
+	// memory (internal.Perl.XSOpBox): the SDK writes an operation's
+	// operands there and has xsOpBox run it, and reads its results there.
 	opbox uint64
 	// tmpMore is the SDK's last block of SV** result slots beyond tmp
 	// (goperl_tmpblock_t: the block before it, then the slots), which the
@@ -188,7 +195,7 @@ type cFrame struct {
 
 // newFrame returns a frame of this instance with no stack yet.
 func (s *state) newFrame() *cFrame {
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, foreign: s.foreignTab, opbox: s.opbox}
+	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, opbox: s.opbox}
 	if mem := s.p.RawMemory(); cap(mem) > 0 {
 		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
 		f.memCap = uint64(cap(mem))
@@ -230,9 +237,6 @@ type cAPI struct {
 	cvSetXsub uintptr
 	// v20: a pointer of the module's own in the buffer slot of an SV.
 	pvHost uintptr
-	// v21: the number that stands for a pointer of the module's own in
-	// the instance's arrays and hashes.
-	foreignIn uintptr
 	// v27: run the operation in the frame's operation box; 1 when it
 	// returned, 0 when it failed (the frame says how).
 	xsOpBox uintptr
@@ -308,12 +312,6 @@ type state struct {
 	// its SV and counts again only for an SV at the same address that is
 	// given such a pointer, which overwrites it.
 	pvHost map[uint64]uintptr
-	// foreignTab is the instance's table of the pointers of native code's
-	// own its arrays and hashes keep (goperl_foreign_t, C heap), with the
-	// number of each pointer and the room of the table (see foreign.go).
-	foreignTab uintptr
-	foreignIdx map[uint64]uint32
-	foreignCap int
 	// opbox is the address of the instance's operation box in its linear
 	// memory (see cFrame.opbox): asked of the interpreter once, as the
 	// interrupt flag's is, since only the interpreter knows it.
@@ -434,7 +432,6 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 			return errors.New("xs: out of memory copying the native modules' state")
 		}
 	}
-	cs.foreignTab, cs.foreignIdx, cs.foreignCap = newForeignTable(clone, s)
 	for cv, slot := range s.cvAny {
 		own := cMalloc(8)
 		cMemcpy(own, slot, 8)
@@ -547,11 +544,9 @@ func stateFor(p *internal.Perl) *state {
 			sharedRaw:   cMalloc(sharedBlockSize),
 		}
 		pokeBytes(s.sharedRaw, make([]byte, sharedBlockSize))
-		s.foreignTab, s.foreignIdx, s.foreignCap = newForeignTable(p, nil)
-		// without a box (an interpreter built before it) every operation
-		// goes through XSHelperOp
+		// the box is required (loaderState says so when there is none)
 		if box, err := p.XSOpBox(); err == nil {
-			s.opbox = uint64(box)
+			s.opbox = box
 		}
 		states[p] = s
 	}
@@ -600,7 +595,13 @@ func loaderState(p *internal.Perl) (*state, error) {
 	if libcErr != nil {
 		return nil, libcErr
 	}
-	return stateFor(p), nil
+	s := stateFor(p)
+	if s.opbox == 0 {
+		// the second value of an operation that answers two is only ever
+		// in the box
+		return nil, errors.New("xs: the interpreter has no operation box")
+	}
+	return s, nil
 }
 
 // open dlopens a native XS module built against the SDK, injects the
@@ -805,7 +806,7 @@ func (s *state) registerNative(name string, anonymous bool, fn uintptr) (uint64,
 	if anonymous {
 		unnamed = 1
 	}
-	cvTok, err := s.p.XSHelperOp(opNewXS, uint64(uint32(id)), unnamed, name)
+	cvTok, err := s.p.XSHelperOp(opNewXS, uint64(uint32(id)), unnamed, 0, name)
 	if err != nil {
 		return 0, err
 	}
@@ -837,24 +838,35 @@ func (s *state) setNative(cv uint64, fn uintptr) error {
 	id := int32(len(s.fns) - 1)
 	s.cvFn[cv] = fn
 	s.mu.Unlock()
-	_, err := s.p.XSHelperOp(opGvCall, uint64(gvCallCvNative)<<32|cv, uint64(uint32(id)), "")
+	_, err := s.p.XSHelperOp(opGvCall, cv, uint64(uint32(id)), gvCallCvNative, "")
 	return err
 }
 
-// dispatch handles one native XSUB call: payload [u32 fn_id][u32 cv]
-// [u32 items][u32 tokens...]; response [1][u32 nret][u32 tokens...] or
-// [0]+message.
+// The requests and responses of the reserved callback method ids are made
+// of 64-bit words (an address of the interpreter's memory is one, whole):
+// a request is a string of words (a keyword's ends in the bytes of the
+// word), a response a status byte and then words, or the message of a
+// failure (see perl-wasm's perl.cc).
+
+// wordAt is the i-th 64-bit word of a request.
+func wordAt(req []byte, i int) uint64 {
+	return binary.LittleEndian.Uint64(req[8*i:])
+}
+
+// dispatch handles one native XSUB call: request [fn_id][cv][items]
+// [svs...]; response [1][nret][svs...] or [0]+message.
 func (s *state) dispatch(req []byte) []byte {
 	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
-	if len(req) < 12 {
+	if len(req) < 3*8 {
 		return fail("native XS dispatch: short payload")
 	}
-	id := int32(binary.LittleEndian.Uint32(req[0:]))
-	cvTok := uint64(binary.LittleEndian.Uint32(req[4:]))
-	items := int(binary.LittleEndian.Uint32(req[8:]))
-	if len(req) < 12+4*items {
+	id := int32(int64(wordAt(req, 0)))
+	cvTok := wordAt(req, 1)
+	nitems := wordAt(req, 2)
+	if nitems > uint64(len(req)/8) || len(req) < 8*(3+int(nitems)) {
 		return fail("native XS dispatch: truncated payload")
 	}
+	items := int(nitems)
 	s.mu.Lock()
 	var fn, subname uintptr
 	if id >= 0 && int(id) < len(s.fns) {
@@ -878,7 +890,7 @@ func (s *state) dispatch(req []byte) []byte {
 	f.markidx = 0
 	f.initStack(items)
 	for i := 0; i < items; i++ {
-		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[12+4*i:])))
+		f.setStack(1+i, wordAt(req, 3+i))
 	}
 	f.psp = f.stBase + uintptr(items)*8
 	fp := pinFrame(f)
@@ -908,7 +920,7 @@ func (s *state) dispatch(req []byte) []byte {
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	if f.xerrno != 0 {
 		// What the C code left in errno is what $! says after the call.
-		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), ""); err != nil {
+		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), 0, ""); err != nil {
 			return fail("native XS dispatch: " + err.Error())
 		}
 	}
@@ -925,14 +937,14 @@ func (s *state) dispatch(req []byte) []byte {
 		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d)", top))
 	}
 	n := top // ax == 1: return values are st[1..top]
-	resp := make([]byte, 5+4*n)
+	resp := make([]byte, 1+8+8*n)
 	resp[0] = 1
-	binary.LittleEndian.PutUint32(resp[1:], uint32(n))
+	binary.LittleEndian.PutUint64(resp[1:], uint64(n))
 	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint32(resp[5+4*i:], uint32(f.stackAt(1+i)))
+		binary.LittleEndian.PutUint64(resp[1+8+8*i:], f.stackAt(1+i))
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[xsub] %s returns %d: % x\n", cString(subname), n, resp[5:])
+		fmt.Fprintf(os.Stderr, "[xsub] %s returns %d: % x\n", cString(subname), n, resp[1+8:])
 	}
 	return resp
 }
@@ -953,25 +965,26 @@ func (s *state) bootFrame() (*cFrame, uintptr) {
 const ppMarksMax = 32
 
 // ppHook runs a module's pp function for one guest op execution (reserved
-// callback method -3). Payload: [u32 op][u32 op_type] and the perl stack as
-// the interpreter has it: [u32 depth][i32 top mark][u32 n][n marks, the top
-// ones from the lowest][depth values from index 1]. Response: [1][u32
-// next_op] and, when the function changed its copy of the stack, what it
-// became (the SDK builds that part: see goperl_pp_state_build); or
-// [0]+message.
+// callback method -3). Request: [op][op_type] and the perl stack as the
+// interpreter has it: [depth][top mark][n][n marks, the top ones from the
+// lowest][depth values from index 1]. Response: [1][next_op] and, when the
+// function changed its copy of the stack, what it became (the SDK builds
+// that part: see goperl_pp_state_build); or [0]+message.
 func (s *state) ppHook(req []byte) []byte {
 	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
-	if len(req) < 20 {
+	if len(req) < 5*8 {
 		return fail("pp hook: short payload")
 	}
-	opTok := uint64(binary.LittleEndian.Uint32(req[0:]))
-	opType := int32(binary.LittleEndian.Uint32(req[4:]))
-	depth := int(binary.LittleEndian.Uint32(req[8:]))
-	topMark := int32(binary.LittleEndian.Uint32(req[12:]))
-	nmarks := int(binary.LittleEndian.Uint32(req[16:]))
-	if depth < 0 || nmarks < 0 || nmarks > ppMarksMax || len(req) < 20+4*nmarks+4*depth {
+	opTok := wordAt(req, 0)
+	opType := int32(int64(wordAt(req, 1)))
+	udepth := wordAt(req, 2)
+	topMark := int32(int64(wordAt(req, 3)))
+	unmarks := wordAt(req, 4)
+	if unmarks > ppMarksMax || udepth > uint64(len(req)/8) ||
+		len(req) < 8*(5+int(unmarks)+int(udepth)) {
 		return fail("pp hook: truncated payload")
 	}
+	depth, nmarks := int(udepth), int(unmarks)
 	s.mu.Lock()
 	fn := s.perOpFns[opTok]
 	if fn == 0 {
@@ -992,14 +1005,14 @@ func (s *state) ppHook(req []byte) []byte {
 	f.ppFrame = 1
 	f.initStack(depth)
 	for i := 0; i < depth; i++ {
-		f.setStack(1+i, uint64(binary.LittleEndian.Uint32(req[20+4*nmarks+4*i:])))
+		f.setStack(1+i, wordAt(req, 5+nmarks+i))
 	}
 	f.psp = f.stBase + uintptr(depth)*8
 	// marks[0] is the mark below the ones handed over (the interpreter's
 	// mark stack starts with an entry that is never a mark)
 	f.gmarkLo = topMark - int32(nmarks)
 	for i := 0; i < nmarks; i++ {
-		f.marks[1+i] = int32(binary.LittleEndian.Uint32(req[20+4*i:]))
+		f.marks[1+i] = int32(int64(wordAt(req, 5+i)))
 	}
 	f.markidx = int32(nmarks)
 	fp := pinFrame(f)
@@ -1028,16 +1041,16 @@ func (s *state) ppHook(req []byte) []byte {
 	if xsTrace {
 		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x state=%d bytes\n", next, len(stackState))
 	}
-	resp := make([]byte, 5, 5+len(stackState))
+	resp := make([]byte, 1+8, 1+8+len(stackState))
 	resp[0] = 1
-	binary.LittleEndian.PutUint32(resp[1:], uint32(next))
+	binary.LittleEndian.PutUint64(resp[1:], uint64(next))
 	return append(resp, stackState...)
 }
 
 // hostCall services reserved method -9: one call of native code through
 // the host-call channel (the SDK's __goperl_host_invoke runs it under a
-// croak guard). req is [u32 kind] and the kind's words; the response is
-// [1] and the words the SDK answered with, or [0]+message.
+// croak guard). req is [kind] and the kind's words; the response is [1]
+// and the words the SDK answered with, or [0]+message.
 func (s *state) hostCall(req []byte) []byte {
 	s.mu.Lock()
 	inv := s.hostInvoke
@@ -1247,7 +1260,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		cMemcpy(mgPtr, namePtr, int(namLen))
 		pokeBytes(mgPtr+uintptr(namLen), []byte{0})
 	case namLen == hefSVKey:
-		if _, err := s.p.XSHelperOp(opRefcntInc, uint64(namePtr), 0, ""); err != nil {
+		if _, err := s.p.XSHelperOp(opRefcntInc, uint64(namePtr), 0, 0, ""); err != nil {
 			f.fail("sv_magicext: " + err.Error())
 			return 0
 		}
@@ -1294,13 +1307,12 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		s.mu.Unlock()
 		// The guest anchor holds the SV<->host-chain link and (perl
 		// semantics) a reference on obj.
-		if _, err := s.p.XSHelperOp(opMagicAttach, sv,
-			uint64(rec.anchorID)<<32|obj&0xFFFFFFFF, ""); err != nil {
+		if _, err := s.p.XSHelperOp(opMagicAttach, sv, obj, uint64(rec.anchorID), ""); err != nil {
 			f.fail("sv_magicext: " + err.Error())
 			return 0
 		}
 		if wantSet {
-			r, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, "")
+			r, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, 0, "")
 			if err != nil {
 				f.fail("sv_magicext: " + err.Error())
 			}
@@ -1310,7 +1322,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		}
 	} else {
 		if wantSet {
-			if _, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, ""); err != nil {
+			if _, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, 0, ""); err != nil {
 				f.fail("sv_magicext: " + err.Error())
 			}
 		}
@@ -1320,7 +1332,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		if takesObj {
 			// Real sv_magicext takes a reference on obj for every entry;
 			// the anchor only covers the first, so hold this one manually.
-			if _, err := s.p.XSHelperOp(opRefcntInc, obj, 0, ""); err != nil {
+			if _, err := s.p.XSHelperOp(opRefcntInc, obj, 0, 0, ""); err != nil {
 				f.fail("sv_magicext: " + err.Error())
 			}
 		}
@@ -1439,7 +1451,7 @@ func (s *state) magicLocalized(id uint32, nsv uint64) {
 		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
 		how := int32(int8(node[mgOffType]))
 		vtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
-		isValue, err := s.p.XSHelperOp(opSvCall, uint64(svCallMagicIsValue)<<32|uint64(node[mgOffType]), 0, "")
+		isValue, err := s.p.XSHelperOp(opSvCall, uint64(node[mgOffType]), 0, svCallMagicIsValue, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "goperl xs: local on a variable with magic: %v\n", err)
 			return
@@ -1464,11 +1476,12 @@ func (s *state) magicLocalized(id uint32, nsv uint64) {
 
 // perlioHook services reserved method -6: run one host layer hook (the
 // SDK-side __goperl_perlio_invoke does the marshalling and croak guard).
+// The request starts [hook][funcs id][f][layer].
 func (s *state) perlioHook(req []byte) []byte {
-	if len(req) < 16 {
+	if len(req) < 4*8 {
 		return append([]byte{0}, "perlio hook: short request"...)
 	}
-	id := binary.LittleEndian.Uint32(req[4:])
+	id := uint32(wordAt(req, 1))
 	s.mu.Lock()
 	funcs := s.perlioFuncs[id]
 	inv := s.perlioInvoke
@@ -1501,22 +1514,22 @@ func (s *state) perlioHook(req []byte) []byte {
 
 // keywordHook services reserved method -7: run the host keyword/infix
 // plugin chain for one candidate word (the SDK's __goperl_keyword_invoke
-// does the marshalling, parser sync, and croak guard). Response:
-// [1][handled u8][ret u32][op token u32] or [0]+message; for an infix
-// operator a module claimed, [1][1][length u32][the module's struct
-// u64][prec u32][has parse u8].
+// does the marshalling, parser sync, and croak guard). Request: [kind] and
+// the bytes of the word. Response: [1][handled][ret][op] or [0]+message;
+// for an infix operator a module claimed, [1][1][its length][the module's
+// struct][its precedence][has parse].
 func (s *state) keywordHook(req []byte) []byte {
-	if len(req) < 5 {
+	if len(req) < 8+1 {
 		return append([]byte{0}, "keyword hook: short request"...)
 	}
-	kind := binary.LittleEndian.Uint32(req[0:])
-	word := req[4:]
+	kind := uint32(wordAt(req, 0))
+	word := req[8:]
 	s.mu.Lock()
 	inv := s.keywordInvoke
 	s.mu.Unlock()
 	if inv == 0 {
 		// no SDK module with a parse surface loaded: decline
-		return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0}
 	}
 	wordC := cMalloc(len(word) + 1)
 	pokeBytes(wordC, word)
@@ -1527,7 +1540,15 @@ func (s *state) keywordHook(req []byte) []byte {
 	rc, _, _ := purego.SyscallN(inv, fp, wordC, uintptr(len(word)),
 		uintptr(kind), retC, tokC)
 	cFree(wordC)
-	out := make([]byte, 10)
+	words := func(w ...uint64) []byte {
+		out := make([]byte, 1+8*len(w))
+		out[0] = 1
+		for i, v := range w {
+			binary.LittleEndian.PutUint64(out[1+8*i:], v)
+		}
+		return out
+	}
+	var out []byte
 	switch int32(rc) {
 	case -1:
 		msg := f.errString()
@@ -1541,31 +1562,26 @@ func (s *state) keywordHook(req []byte) []byte {
 		}
 		return append([]byte{0}, msg...)
 	case 1:
-		out[0] = 1
-		out[1] = 1
-		copy(out[2:6], copyIn(retC, 4))
-		tok := copyIn(tokC, 8)
+		ret := binary.LittleEndian.Uint32(copyIn(retC, 4))
+		tok := binary.LittleEndian.Uint64(copyIn(tokC, 8))
 		if kind == 1 {
-			// An infix operator: tok is the module's struct
-			// Perl_custom_infix {prec int32; parse; build_op}, whose
-			// precedence and whether it has a parse go to the
-			// interpreter with it: [length][struct u64][prec u32][has
-			// parse u8].
-			def := uintptr(binary.LittleEndian.Uint64(tok))
-			fields := copyIn(def, infixSize)
-			out = append(out[:6], tok...)
-			out = append(out, fields[infixOffPrec:infixOffPrec+4]...)
-			hasParse := byte(0)
+			// An infix operator: ret is its length and tok the module's
+			// struct Perl_custom_infix {prec int32; parse; build_op},
+			// whose precedence and whether it has a parse go to the
+			// interpreter with it.
+			fields := copyIn(uintptr(tok), infixSize)
+			var hasParse uint64
 			if binary.LittleEndian.Uint64(fields[infixOffParse:]) != 0 {
 				hasParse = 1
 			}
-			out = append(out, hasParse)
+			prec := uint64(binary.LittleEndian.Uint32(fields[infixOffPrec:]))
+			out = words(1, uint64(ret), tok, prec, hasParse)
 			break
 		}
-		copy(out[6:10], tok[:4])
+		// the plugin's result (a KEYWORD_PLUGIN_ value) and the op
+		out = words(1, uint64(int64(int32(ret))), tok)
 	default:
-		out[0] = 1
-		out[1] = 0
+		out = words(0)
 	}
 	cFree(retC)
 	cFree(tokC)
@@ -1668,7 +1684,7 @@ func (s *state) releaseMagicObj(rec *magicRec, node []byte) {
 		rec.anchorObj = 0
 		return
 	}
-	_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, "")
+	_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, 0, "")
 }
 
 // releaseMagicName gives up what a MAGIC holds as its name: the copy
@@ -1680,7 +1696,7 @@ func (s *state) releaseMagicName(mgLen int32, mgPtr uintptr) {
 	case mgLen > 0:
 		cFree(mgPtr)
 	case mgLen == hefSVKey:
-		_, _ = s.p.XSHelperOp(opRefcntDec, uint64(mgPtr), 0, "")
+		_, _ = s.p.XSHelperOp(opRefcntDec, uint64(mgPtr), 0, 0, "")
 	}
 }
 
@@ -1728,7 +1744,7 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 		s.mu.Unlock()
 		// Detaching the guest anchor would re-enter magicFreed; the maps
 		// are already cleared, so that callback finds nothing to do.
-		_, _ = s.p.XSHelperOp(opMagicUnattach, sv, 0, "")
+		_, _ = s.p.XSHelperOp(opMagicUnattach, sv, 0, 0, "")
 	}
 }
 
@@ -1780,7 +1796,7 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		v, err := f.p.XSHelperOp(1, uint64(sv), 0, "")
+		v, err := f.p.XSHelperOp(1, uint64(sv), 0, 0, "")
 		if err != nil {
 			f.fail("SvIV: " + err.Error())
 			return 0
@@ -1792,29 +1808,29 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		packed, err := f.p.XSHelperOp(2, uint64(sv), 0, "")
+		// SV_PV: the address of the string; second: its length
+		off, err := f.p.XSHelperOp(2, uint64(sv), 0, 0, "")
 		if err != nil {
 			f.fail("SvPV: " + err.Error())
 			return 0
 		}
-		off := uint32(packed >> 32)
-		ln := uint32(packed)
-		if lenp != 0 {
-			pokeU64(lenp, uint64(ln))
-		}
 		mem := f.p.RawMemory()
-		if int(off)+int(ln) > len(mem) {
+		ln := opboxResult2(mem, f.opbox)
+		if lenp != 0 {
+			pokeU64(lenp, ln)
+		}
+		if off > uint64(len(mem)) || ln > uint64(len(mem))-off {
 			f.fail("SvPV: string outside linear memory")
 			return 0
 		}
-		return uintptr(unsafe.Pointer(&mem[off]))
+		return uintptr(unsafe.Pointer(unsafe.SliceData(mem))) + uintptr(off)
 	})
 	vtable.newIV = purego.NewCallback(func(fr, v uintptr) uintptr {
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
 		}
-		sv, err := f.p.XSHelperOp(3, uint64(v), 0, "")
+		sv, err := f.p.XSHelperOp(3, uint64(v), 0, 0, "")
 		if err != nil {
 			f.fail("newSViv: " + err.Error())
 			return 0
@@ -1826,7 +1842,7 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		sv, err := f.p.XSHelperOp(4, 0, uint64(ln), goBytesString(p, int(ln)))
+		sv, err := f.p.XSHelperOp(4, 0, uint64(ln), 0, goBytesString(p, int(ln)))
 		if err != nil {
 			f.fail("newSVpvn: " + err.Error())
 			return 0
@@ -1838,21 +1854,21 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		out, err := f.p.XSHelperOp(5, uint64(sv), 0, "")
+		out, err := f.p.XSHelperOp(5, uint64(sv), 0, 0, "")
 		if err != nil {
 			f.fail("sv_2mortal: " + err.Error())
 			return 0
 		}
 		return uintptr(out)
 	})
-	vtable.xsOp = purego.NewCallback(func(fr uintptr, op int32, a, b, sPtr, sLen uintptr) uintptr {
+	vtable.xsOp = purego.NewCallback(func(fr uintptr, op int32, a, b, c, sPtr, sLen uintptr) uintptr {
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
 		}
-		v, err := f.p.XSHelperOp(op, uint64(a), uint64(b), goBytesString(sPtr, int(sLen)))
+		v, err := f.p.XSHelperOp(op, uint64(a), uint64(b), uint64(c), goBytesString(sPtr, int(sLen)))
 		if xsTrace {
-			fmt.Fprintf(os.Stderr, "[xsop] op=%d a=%#x b=%#x slen=%d -> %#x\n", op, a, b, sLen, v)
+			fmt.Fprintf(os.Stderr, "[xsop] op=%d a=%#x b=%#x c=%#x slen=%d -> %#x\n", op, a, b, c, sLen, v)
 		}
 		if errors.Is(err, internal.ErrGuestJump) {
 			// The interpreter died inside the operation and is unwinding
@@ -1912,13 +1928,6 @@ func buildVtable() {
 			return 0
 		}
 		return 1
-	})
-	vtable.foreignIn = purego.NewCallback(func(fr, ptr uintptr) uintptr {
-		f := lookupFrame(fr)
-		if f == nil {
-			return 0
-		}
-		return uintptr(stateFor(f.p).foreignNumber(uint64(ptr)))
 	})
 	vtable.cvSetXsub = purego.NewCallback(func(fr, cv, fn uintptr) uintptr {
 		f := lookupFrame(fr)
@@ -2062,7 +2071,7 @@ func buildVtable() {
 		if fn != 0 {
 			enable = 1
 		}
-		if _, err := f.p.XSHelperOp(opPPHookSet, uint64(uint32(opType)), enable, ""); err != nil {
+		if _, err := f.p.XSHelperOp(opPPHookSet, uint64(uint32(opType)), enable, 0, ""); err != nil {
 			f.fail("pp hook set: " + err.Error())
 		}
 		return 0

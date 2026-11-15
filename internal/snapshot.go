@@ -40,12 +40,18 @@ import (
 	"github.com/goccy/perlwasm2go/base"
 )
 
-// snapshotCeiling is the linear-memory ceiling an instance built on the
-// snapshot is mapped at, in bytes — the growth cap too (NewFromSnapshot sets
-// MaxMem to the mapping length, and MemoryGrow refuses to grow past it before
-// it could reallocate, which keeps the mmap and its sharing intact for the
-// instance's whole life). Virtual, sparse: unused pages never become resident.
-const snapshotCeiling = 512 << 20
+// defaultMemoryCeiling is the limit of an instance's linear memory when
+// the embedder sets none (InstanceOptions.MaxMemoryBytes), in bytes: the
+// length of the mapping the instance's memory is, which is its growth cap
+// too (NewFromSnapshot and NewWithMemory set MaxMem to the mapping length,
+// and MemoryGrow refuses to grow past it before it could reallocate, which
+// keeps the mapping, its address and its sharing intact for the instance's
+// whole life). Virtual and sparse: pages never written are never resident.
+// 8 GiB, as llama-wasm declares for its memory64 module.
+const defaultMemoryCeiling = 8 << 30
+
+// wasmPage is the size of a page of linear memory.
+const wasmPage = 65536
 
 type perlSnapshot struct {
 	img *base.SharedImage

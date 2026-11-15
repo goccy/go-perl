@@ -11,8 +11,8 @@ import (
 	perl "github.com/goccy/go-perl"
 )
 
-// The interpreter's integers are 64 bits wide (IV and UV; pointers are 32):
-// a program computes with them as on the 64-bit perls it was written on.
+// The interpreter's integers are 64 bits wide (IV and UV): a program
+// computes with them as on the 64-bit perls it was written on.
 func TestIntegersAre64BitsWide(t *testing.T) {
 	p := newPerl(t)
 	ctx := context.Background()
@@ -59,8 +59,35 @@ func TestIntegersAre64BitsWide(t *testing.T) {
 		{"modulus beyond 32 bits", `18446744073709551615 % 1000000007`, "582344007"},
 		{"printf %s of an integer", `sprintf "%s", 1 << 62`, "4611686018427387904"},
 		{"%Config says so", `require Config; join ",", map { "$_=$Config::Config{$_}" } qw(ivsize uvsize ivtype uvtype use64bitint d_quad quadtype u64type i64type ivdformat uvuformat uvxformat nv_preserves_uv_bits ptrsize longsize byteorder)`,
-			`ivsize=8,uvsize=8,ivtype=long long,uvtype=unsigned long long,use64bitint=define,d_quad=define,quadtype=long long,u64type=unsigned long long,i64type=long long,ivdformat="lld",uvuformat="llu",uvxformat="llx",nv_preserves_uv_bits=53,ptrsize=4,longsize=4,byteorder=12345678`},
+			`ivsize=8,uvsize=8,ivtype=long,uvtype=unsigned long,use64bitint=define,d_quad=define,quadtype=long,u64type=unsigned long,i64type=long,ivdformat="ld",uvuformat="lu",uvxformat="lx",nv_preserves_uv_bits=53,ptrsize=8,longsize=8,byteorder=12345678`},
 		{"an NV does not hold every integer", `require Config; defined $Config::Config{d_nv_preserves_uv} ? "holds" : "does not"`, "does not"},
+	} {
+		r, err := p.Eval(ctx, c.src)
+		if err != nil || r.Error != nil {
+			t.Errorf("%s: %s: err=%v error=%v", c.name, c.src, err, r.Error)
+			continue
+		}
+		if got := resultStr(r); got != c.want {
+			t.Errorf("%s: %s = %q, want %q", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// The interpreter's C data model is LP64, the one of the 64-bit machines the
+// native code a program loads is compiled for: a pointer, a long and a
+// size_t are 8 bytes and an int is 4. %Config says so, and so do the pack
+// letters whose size is the C type's.
+func TestTheCDataModelIsLP64(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	for _, c := range []struct{ name, src, want string }{
+		{"%Config says so", `require Config; join ",", map { "$_=" . ($Config::Config{$_} // "undef") } qw(ptrsize longsize sizesize intsize longlongsize use64bitall use64bitint i32type u32type)`,
+			"ptrsize=8,longsize=8,sizesize=8,intsize=4,longlongsize=8,use64bitall=define,use64bitint=define,i32type=int,u32type=unsigned int"},
+		{"pack l! and L! are a long", `length(pack("l!", 0)) . "," . length(pack("L!", 0))`, "8,8"},
+		{"pack i and I are an int", `length(pack("i", 0)) . "," . length(pack("I", 0))`, "4,4"},
+		{"pack p is a pointer", `length(pack("p", "x"))`, "8"},
+		{"pack l! holds a 64-bit long", `join ",", unpack("l! L!", pack("l! L!", -9223372036854775807 - 1, ~0))`, "-9223372036854775808,18446744073709551615"},
+		{"pack p and unpack p round-trip a string", `unpack("p", pack("p", "a string"))`, "a string"},
 	} {
 		r, err := p.Eval(ctx, c.src)
 		if err != nil || r.Error != nil {

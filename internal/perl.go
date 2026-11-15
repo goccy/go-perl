@@ -530,7 +530,7 @@ type Module struct {
 // the bridge boundary is a wptr; the transpiled wasm2go package's
 // export/import signatures use the same width, so the two packages
 // stay in lock-step from the one substitution the generator makes.
-type wptr = int32
+type wptr = int64
 
 var (
 	globalModule *Module
@@ -724,21 +724,30 @@ func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, wptr, wptr
 	return resp, nil
 }
 
-// wptrOff widens a guest pointer to an unsigned slice offset. wasm32
-// pointers are UNSIGNED i32s: past the 2 GiB line the bit pattern is
-// negative in Go, so a signed slice index would panic.
+// wptrOff widens a guest pointer to an unsigned slice offset.
 func wptrOff(p wptr) uint64 {
-	return uint64(uint32(p))
+	return uint64(p)
 }
 
-func decodeResult(_ *base.Module, packed int64) (uint64, uint64) {
-	return uint64(packed) >> 32, uint64(packed) & 0xFFFFFFFF
+func decodeResult(g *base.Module, packed int64) (uint64, uint64) {
+	if packed == 0 {
+		return 0, 0
+	}
+	mem := wasm2go.Memory(g)
+	d := uint64(packed)
+	return binary.LittleEndian.Uint64(mem[d:]), binary.LittleEndian.Uint64(mem[d+8:])
 }
 
 func encodeCallbackResult(m *Module, resp []byte) int64 {
 	ptr := wasm2go.WasmAlloc(m.g, wptr(len(resp)))
 	copy(wasm2go.Memory(m.g)[wptrOff(ptr):], resp)
-	return int64(ptr)<<32 | int64(len(resp))
+	if m.cbDesc == 0 {
+		m.cbDesc = wasm2go.WasmAlloc(m.g, 16)
+	}
+	mem := wasm2go.Memory(m.g)
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc):], uint64(ptr))
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc)+8:], uint64(len(resp)))
+	return int64(m.cbDesc)
 }
 
 // envStubs implements wasm2go/base.EnvImports — the host side of the
@@ -830,16 +839,6 @@ type wasmifyStubs struct{ m *Module }
 
 func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
 	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
-}
-
-func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
-	if l0 == 0 {
-		l0 = 64
-	}
-	return wasm2go.WasmAlloc(m, l0)
-}
-func (h envStubs) X__cxa_throw(m *base.Module, l0 int32, l1 int32, l2 int32) {
-	panic("wasm: C++ exception thrown")
 }
 
 var _ = fmt.Errorf
@@ -1092,8 +1091,8 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 //
 //	*(uint32_t *)perl_interrupt_addr(h) = 1;
 //
-// The guest clears the flag when it fires. Addresses are 32-bit linear-memory
-// offsets (wasm32). Like CPython's eval-breaker, this only fires at opcode
+// The guest clears the flag when it fires. The address is a linear-memory
+// offset. Like CPython's eval-breaker, this only fires at opcode
 // boundaries: a single long-running op (a pathological regex, a big sort) is
 // not preempted until it returns to the run loop.
 //
@@ -1101,14 +1100,14 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 // (pseudo-)process: no eval can catch it, and the process ends by that
 // signal at the next opcode boundary, where it stands (no END block, no
 // destructor).
-func PerlInterruptAddr(h uint64) (uint32, error) {
+func PerlInterruptAddr(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return 0, err
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // Call the CODE reference behind `code` (a ref handle). want_scalar selects
@@ -1163,28 +1162,33 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // <site
 // _dir>/site_perl/
 // <version
-// >               sitelib
+// >              sitelib
 //
 // <site
 // _dir>/site_perl/
 // <version
 // >/
-// <site
-// _arch>   sitearch
+// <archname
+// >   sitearch
 //
 // <site
-// _dir>/bin                               sitebin, sitescript
+// _dir>/bin                              sitebin, sitescript
 //
 // <site
 // _dir>/man/man1,
 // <site
-// _dir>/man/man3     siteman1dir, siteman3dir
+// _dir>/man/man3    siteman1dir, siteman3dir
 //
 // <version
-// > is this interpreter's. `site_arch` names the kind of machine
-// the architecture-specific files there are for (the host's, when native
-// extensions are loaded into the host process); empty stands for the
-// interpreter's own architecture name. %Config reports the directories
+// > is this interpreter's. `archname` is the name of the
+// architecture: the host's, which the one interpreter takes from whatever
+// host it runs on (native modules are built for the host). It is
+// $Config{archname} and myarchname, the name of the architecture
+// subdirectories perl adds to
+// with a directory (PERL5LIB, -I) and of
+// the site's architecture directory, and what `perl -v` says perl was
+// built for; empty stands for the name the build was configured with.
+// %Config reports the directories
 // under every key that names one of them, and sitearch and sitelib are in
 //
 // where perl has them: after the PERL5LIB directories and before the
@@ -1192,11 +1196,11 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // keeps the values of the build's configuration and
 // has no site
 // directory.
-func PerlNew(libDir string, siteDir string, siteArch string) (uint64, error) {
+func PerlNew(libDir string, siteDir string, archname string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
 	buf = pbAppendString(buf, 2, siteDir)
-	buf = pbAppendString(buf, 3, siteArch)
+	buf = pbAppendString(buf, 3, archname)
 	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
@@ -1337,45 +1341,37 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 
 // SV micro-operations the host-side SDK vtable is built from. The full op
 // table lives in perl.cc (and mirrors the GOPERL_OP_* enum in the go-perl
-// native SDK header); representative entries:
+// native SDK header). An operation takes three u64 operands a, b and c and
+// a string s; a token (an address of the linear memory) is always an
+// operand of its own, whole. It answers a u64; an operation that answers
+// two values leaves the second in the operation box (result2, see
+// perl_xs_opbox), where the host reads it right after the operation.
+// Representative entries:
 //
 //	1  SV_IV       a=sv                  -> IV (as u64)
-//	2  SV_PV       a=sv                  -> (ptr
-//
-// <
-// <
-// 32)|len into linear memory
-//
+//	2  SV_PV       a=sv                  -> ptr into linear memory; second: len
 //	3  NEW_IV      a=iv                  -> new SV token
 //	4  NEW_PVN     s=bytes b=len         -> new SV token
 //	5  SV_MORTAL   a=sv                  -> sv (now mortal)
 //	...
 //	23-64          sv_setsv/setiv/setnv/catsv families, NV ops, AV/HV entry
 //	               and iterator ops, ENTER/LEAVE/SAVETMPS/FREETMPS
-//	65 CALL_SV     a=flags
-//
-// <
-// <
-// 32|sv, s+b=packed u32 arg tokens
-//
-//	-> died
+//	65 CALL_SV     a=sv, c=flags, s+b=the arguments, a u64 word each
+//	               -> mortal-AV token of results; second: died
 //
 // <
 // <
 // 63 | count
-// <
-// <
-// 32 | mortal-AV token of results
 //
-//	66 CALL_METHOD like CALL_SV but s = "name\0" + packed tokens
+//	66 CALL_METHOD like CALL_SV but s = "name\0" + the arguments
 //	68 SAVE_OP     scope-save PL_op (the SAVEOP() macro)
 //	69 RUN_PP_SCRATCH a=op_flags
 //
 // <
 // <
-// 32|op_type, s+b=arg tokens: run one pp
+// 32|op_type, s+b=the arguments as words:
 //
-//	               function on a scratch OP in list context
+//	               run one pp function on a scratch OP in list context
 //	70-72          host-side MAGIC anchor attach / id lookup / unattach
 //	73-74,80       PL_* interpreter-variable get/set and local'ised hooks
 //	98-100         pp-hook table, RUN_ORIGINAL, save-stack destructors
@@ -1396,13 +1392,14 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 //	               behavioral (tie) magic
 //
 // Unknown ops return 0.
-func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, error) {
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, op)
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
-	buf = pbAppendString(buf, 5, s)
+	buf = pbAppendUint64(buf, 5, c)
+	buf = pbAppendString(buf, 6, s)
 	resp, err := invokeMethod(0, 24, buf, wasm2go.Inv_0_24)
 	if err != nil {
 		return 0, err
@@ -1422,21 +1419,23 @@ func PerlXsOp() (uint32, error) {
 // perl_xs_helper without the bridge's encoding, for the operations native
 // code makes by the million: perl_xs_opbox answers the address of the
 // instance's operation box, a struct goperl_opbox in linear memory
-// ([a][b][result] as u64, [op] as i32, [slen] as u32, then the slen bytes
-// of s: 32 bytes before s, GOPERL_OPBOX_STR bytes of room for s). The
-// host writes an operation's arguments there and calls perl_xs_op, which
-// runs it as perl_xs_helper does (s NUL-terminated) and leaves its result
-// in the box; it answers 0, so that the bridge sends nothing back. A
-// string longer than the box holds goes through perl_xs_helper. The box is
-// free again once perl_xs_op has returned: an operation that leads to
-// native code (magic, a callback) has the operations of that code use it
-// meanwhile, after this one has taken its arguments out.
-func PerlXsOpbox(h uint64) (uint32, error) {
+// ([a][b][c][result][result2] as u64, [op] as i32, [slen] as u32, then the
+// slen bytes of s: 48 bytes before s, GOPERL_OPBOX_STR bytes of room for
+// s). The host writes an operation's arguments there and calls perl_xs_op,
+// which runs it as perl_xs_helper does (s NUL-terminated) and leaves its
+// result in the box; it answers 0, so that the bridge sends nothing back. A
+// string longer than the box holds goes through perl_xs_helper. Either way
+// the second value of an operation that answers two is in result2 when the
+// operation has returned. The box is free again once the operation has
+// returned: an operation that leads to native code (magic, a callback) has
+// the operations of that code use it meanwhile, after this one has taken
+// its arguments out.
+func PerlXsOpbox(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	resp, err := invokeMethod(0, 26, buf, wasm2go.Inv_0_26)
 	if err != nil {
 		return 0, err
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }

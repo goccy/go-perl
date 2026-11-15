@@ -19,9 +19,13 @@ import (
 // functions use positive ids, so the spaces cannot collide.
 const nativeXSMethodID = -1
 
+// The requests of the reserved callback method ids below and the responses
+// to them are made of 64-bit words, an address of the guest's memory one of
+// them, whole (see perl-wasm's perl.cc).
+
 // magicFreeMethodID is the reserved callback method id fired when a guest SV
 // carrying the SDK's anchor magic is freed (perl.cc GOPERL_MG_FREE_METHOD_ID);
-// the payload is the u32 host magic id.
+// the request is [the host magic id].
 const magicFreeMethodID = -2
 
 // ppHookMethodID is the reserved callback method id the guest run loop
@@ -31,13 +35,13 @@ const ppHookMethodID = -3
 
 // destructorMethodID is the reserved callback method id fired when a guest
 // scope pops a save-stack destructor registered through the SDK (perl.cc
-// GOPERL_DTOR_METHOD_ID); the payload is the u32 host destructor id.
+// GOPERL_DTOR_METHOD_ID); the request is [the host destructor id].
 const destructorMethodID = -4
 
 // magicLocalMethodID is the reserved callback method id fired when `local`
 // puts a new SV in the place of one that carries the anchor magic (perl.cc
-// GOPERL_MG_LOCAL_METHOD_ID): the payload is the anchor's u32 host id and
-// the u32 token of the new SV.
+// GOPERL_MG_LOCAL_METHOD_ID): the request is [the anchor's host id][the
+// new SV].
 const magicLocalMethodID = -8
 
 // perlioMethodID is the reserved callback method id the guest PerlIO proxy
@@ -56,9 +60,9 @@ const hostCallMethodID = -9
 const keywordMethodID = -7
 
 // SetNativeXSHandler installs the dispatcher for native XSUB calls. req is
-// the thunk's raw payload ([u32 fn_id][u32 cv_token][u32 items][u32
-// sv_tokens...]) and the returned bytes are the raw response ([1][u32 nret]
-// [u32 sv_tokens...] on success, [0]+message on failure). Installing a
+// the thunk's raw request ([fn_id][cv][items][svs...]) and the returned
+// bytes are the raw response ([1][nret][svs...] on success, [0]+message on
+// failure). Installing a
 // handler registers the instance's callback dispatcher with the guest if
 // that has not happened yet.
 func (p *Perl) SetNativeXSHandler(fn func(req []byte) []byte) error {
@@ -72,7 +76,7 @@ func (p *Perl) SetNativeXSHandler(fn func(req []byte) []byte) error {
 }
 
 // SetMagicFreeHandler installs the teardown hook for host-side MAGIC: when
-// the guest frees an SV carrying the native SDK's anchor magic, id (the u32
+// the guest frees an SV carrying the native SDK's anchor magic, id (the one
 // the loader stored at attach time) is delivered here so the loader can run
 // the native module's svt_free chain and release its mirrors.
 func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
@@ -100,9 +104,9 @@ func (p *Perl) SetMagicLocalHandler(fn func(id uint32, sv uint64)) error {
 
 // SetPPHookHandler installs the dispatcher for pp hooks: op types a native
 // module claimed by writing the SDK's PL_ppaddr proxy. req is the guest's
-// raw payload ([u32 op][u32 op_type] and the perl stack) and the returned
-// bytes are the raw response ([1][u32 next_op] and what the function made
-// of the stack on success, [0]+message to croak in the interpreter).
+// raw request ([op][op_type] and the perl stack) and the returned bytes are
+// the raw response ([1][next_op] and what the function made of the stack on
+// success, [0]+message to croak in the interpreter).
 func (p *Perl) SetPPHookHandler(fn func(req []byte) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
@@ -115,9 +119,9 @@ func (p *Perl) SetPPHookHandler(fn func(req []byte) []byte) error {
 
 // SetPerlIOHandler installs the dispatcher for PerlIO layer hooks: slots a
 // native module customized in a layer it registered through the SDK's
-// PerlIO_define_layer. req is the guest's raw payload ([u32 hook][u32
-// funcs_id][u32 f][u32 layer]+hook extras) and the returned bytes are the
-// raw response ([1]+hook payload on success, [0]+message to croak).
+// PerlIO_define_layer. req is the guest's raw request ([hook][funcs_id][f]
+// [layer]+hook extras) and the returned bytes are the raw response
+// ([1]+hook words on success, [0]+message to croak).
 func (p *Perl) SetPerlIOHandler(fn func(req []byte) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
@@ -131,9 +135,9 @@ func (p *Perl) SetPerlIOHandler(fn func(req []byte) []byte) error {
 // SetKeywordHandler installs the dispatcher for keyword/infix plugin
 // forwarding: the guest parser offers candidate words to the host chain a
 // native module registered through the SDK's wrap_keyword_plugin. req is
-// the guest's raw payload ([u32 kind][word bytes]) and the returned bytes
-// are the raw response ([1][handled][ret][op token] on success, [0]+message
-// to croak as a parse error).
+// the guest's raw request ([kind][word bytes]) and the returned bytes are
+// the raw response ([1][handled][ret][op] on success, [0]+message to croak
+// as a parse error).
 func (p *Perl) SetKeywordHandler(fn func(req []byte) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
@@ -145,7 +149,7 @@ func (p *Perl) SetKeywordHandler(fn func(req []byte) []byte) error {
 }
 
 // SetHostCallHandler installs the dispatcher of the host-call channel: the
-// calls of native code whose request starts with a kind ([u32 kind] and the
+// calls of native code whose request starts with a kind ([kind] and the
 // kind's words). The returned bytes are the raw response ([1] and the
 // result on success, [0]+message to croak in the interpreter).
 func (p *Perl) SetHostCallHandler(fn func(req []byte) []byte) error {
@@ -190,19 +194,21 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 	return pbExtractError(resp)
 }
 
-// XSHelperOp performs one SV micro-operation inside the guest. It is the
-// primitive the native SDK vtable is built from; see perl.cc perl_xs_helper
-// for the opcode table.
+// XSHelperOp performs one SV micro-operation inside the guest: three
+// operands and a string. It is the primitive the native SDK vtable is built
+// from; see perl.cc perl_xs_helper for the opcode table. An operation that
+// answers two values leaves the second in the operation box (XSOpBox).
 //
 // The operation may end in a non-local exit of the interpreter instead of a
 // result (ErrGuestJump): see guestJump.
-func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
+func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, op)
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
-	buf = pbAppendString(buf, 5, s)
+	buf = pbAppendUint64(buf, 5, c)
+	buf = pbAppendString(buf, 6, s)
 	// The jump is taken off the module as soon as the operation returns,
 	// inside the call: invoke frees the request in the guest after it,
 	// which is guest code, and guest code run with the exception pending
@@ -230,7 +236,7 @@ func (p *Perl) XSHelperOp(op int32, a, b uint64, s string) (uint64, error) {
 // memory (pl.h perl_xs_opbox): native code writes an operation's arguments
 // there itself, has XSOpRun run it, and reads its result there, with
 // nothing encoded or allocated on the way.
-func (p *Perl) XSOpBox() (uint32, error) {
+func (p *Perl) XSOpBox() (uint64, error) {
 	buf := pbAppendUint64(nil, 1, p.h)
 	resp, err := p.m.invoke(0, midXSOpBox, buf, wasm2go.Inv_0_26)
 	if err != nil {
@@ -239,7 +245,7 @@ func (p *Perl) XSOpBox() (uint32, error) {
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // XSOpRun runs the operation whose arguments are in the operation box, as
@@ -282,21 +288,6 @@ func (p *Perl) SetOutsideInterrupt(interrupt func()) (previous func()) {
 
 func (p *Perl) RawMemory() []byte {
 	return wasm2go.Memory(p.m.g)
-}
-
-// LimitMemory keeps the instance's linear memory below limit bytes from
-// now on: its growth stops there. It reports false when the memory is
-// already bigger.
-func (p *Perl) LimitMemory(limit uint64) bool {
-	const wasmPage = 65536
-	limit = limit / wasmPage * wasmPage
-	if p.m.g.MemSize.Load() > limit {
-		return false
-	}
-	if p.m.g.MaxMem == 0 || p.m.g.MaxMem > limit {
-		wasm2go.SetMaxMemory(p.m.g, limit)
-	}
-	return true
 }
 
 // MemorySize returns the size of the instance's linear memory in bytes: what
@@ -452,8 +443,8 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		d.p.hookMu.RLock()
 		free := d.p.magicFree
 		d.p.hookMu.RUnlock()
-		if free != nil && len(req) >= 4 {
-			free(binary.LittleEndian.Uint32(req))
+		if free != nil && len(req) >= 8 {
+			free(uint32(binary.LittleEndian.Uint64(req)))
 		}
 		return []byte{1}, nil
 	}
@@ -461,8 +452,8 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		d.p.hookMu.RLock()
 		local := d.p.magicLocal
 		d.p.hookMu.RUnlock()
-		if local != nil && len(req) >= 8 {
-			local(binary.LittleEndian.Uint32(req), uint64(binary.LittleEndian.Uint32(req[4:])))
+		if local != nil && len(req) >= 16 {
+			local(uint32(binary.LittleEndian.Uint64(req)), binary.LittleEndian.Uint64(req[8:]))
 		}
 		return []byte{1}, nil
 	}
@@ -480,8 +471,9 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		hook := d.p.keywordHook
 		d.p.hookMu.RUnlock()
 		if hook == nil {
-			// no parse-surface module loaded: decline so the guest chain runs
-			return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, nil
+			// no parse-surface module loaded: decline ([1][handled 0]) so
+			// the guest chain runs
+			return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0}, nil
 		}
 		return hook(req), nil
 	}
@@ -507,8 +499,8 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		d.p.hookMu.RLock()
 		fire := d.p.dtorFire
 		d.p.hookMu.RUnlock()
-		if fire != nil && len(req) >= 4 {
-			return fire(binary.LittleEndian.Uint32(req)), nil
+		if fire != nil && len(req) >= 8 {
+			return fire(uint32(binary.LittleEndian.Uint64(req))), nil
 		}
 		return []byte{1}, nil
 	}

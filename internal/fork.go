@@ -63,7 +63,7 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 	if p.image != nil {
 		from = p.image.img
 	}
-	dup, err := base.ForkMemory(p.m.g, from, snapshotCeiling)
+	dup, err := base.ForkMemory(p.m.g, from, memoryCeiling(p.opts, p.m.g.MemSize.Load()))
 	if err != nil {
 		return nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
 	}

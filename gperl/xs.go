@@ -95,7 +95,7 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	// Makefile.PL/Build.PL itself, and the shim (for the children make or
 	// $^X spawns) re-enters this executable. Every run preloads a %Config
 	// overlay describing the host toolchain (the interpreter's own
-	// %Config is guest-true wasm32). No perl needs to be installed.
+	// %Config is guest-true wasm64). No perl needs to be installed.
 	shim, err := xsWritePerlShim(work)
 	if err != nil {
 		return nil, err
@@ -312,7 +312,7 @@ func xsInstallBuildDeps(srcDir, lib string) error {
 }
 
 // hostToolchain is the %Config overlay describing the HOST C toolchain:
-// the embedded interpreter's own %Config is guest-true (wasm32), and the
+// the embedded interpreter's own %Config is guest-true (wasm64), and the
 // build must emit host-native compile/link rules. These are the platform
 // conventions a native perl build would have configured.
 func hostToolchain() map[string]string {

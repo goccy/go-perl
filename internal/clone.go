@@ -61,7 +61,7 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	if err := img.Err(); err != nil {
 		return nil, fmt.Errorf("perl: snapshot instance: %w", err)
 	}
-	mem, err := img.Memory(snapshotCeiling)
+	mem, err := img.Memory(memoryCeiling(p.opts, img.Size()))
 	if err != nil {
 		return nil, fmt.Errorf("perl: map clone memory: %w", err)
 	}

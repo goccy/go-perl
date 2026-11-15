@@ -153,30 +153,30 @@ typedef struct {
     PerlIO_funcs tab;
     goperl_pio_slot_t reg; /* of &buf.base.next: the handle of the layer below */
 } goperl_pio_layer_view_t;
-/* The words of a layer in the answer of LAYERS with b = 1. */
-#define GOPERL_PIO_LAYER_WORDS 10
+/* The words of a layer in the answer of LAYERS with b = 1: [next][name]
+ * [kind][flags][buf][end][ptr][bufsiz][posn]. */
+#define GOPERL_PIO_LAYER_WORDS 9
 /* What a buffered layer's view holds of its buffer, from the words of the
  * layer. */
 static void goperl_pio_view_buf(goperl_frame_t *f, PerlIOBuf *b, const goperl_gword_t *l) {
     b->buf = l[4] ? (STDCHAR *)goperl_guest_mem(f, l[4]) : 0;
     b->end = l[5] ? (STDCHAR *)goperl_guest_mem(f, l[5]) : 0;
     b->ptr = l[6] ? (STDCHAR *)goperl_guest_mem(f, l[6]) : 0;
-    b->bufsiz = l[7];
-    b->posn = (Off_t)(((uint64_t)l[9] << 32) | l[8]);
+    b->bufsiz = (STRLEN)l[7];
+    b->posn = (Off_t)(int64_t)l[8];
     b->oneword = 0;
 }
 static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
     if (!tok) return 0;
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
-        f, goperl_do_op(f, GOPERL_OP_PERLIO, ((uint64_t)GOPERL_PIO_LAYERS << 32) | (uint32_t)tok,
-                        1, 0, 0));
+        f, goperl_do_op3(f, GOPERL_OP_PERLIO, tok, 1, (uint64_t)(GOPERL_PIO_LAYERS), 0, 0));
     const goperl_gword_t n = w ? w[0] : 0;
     goperl_pio_handle_view_t *hv = (goperl_pio_handle_view_t *)goperl_arena_alloc(
         sizeof(goperl_pio_handle_view_t) + (size_t)n * sizeof(goperl_pio_layer_view_t));
     if (!hv) goperl_croakf(f, "Out of memory!");
     goperl_pio_layer_view_t *lv = (goperl_pio_layer_view_t *)(hv + 1);
     hv->reg.slot = &hv->top;
-    hv->reg.tok = (uint32_t)tok;
+    hv->reg.tok = tok;
     hv->reg.next = goperl_pio_views_v;
     goperl_pio_views_v = &hv->reg;
     for (goperl_gword_t i = 0; i < n; i++) {
@@ -188,9 +188,9 @@ static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
         lv[i].tab.fsize = sizeof(PerlIO_funcs);
         lv[i].tab.name = l[1] ? (const char *)goperl_guest_mem(f, l[1]) : "";
         lv[i].tab.size = (l[2] & PERLIO_K_BUFFERED) ? sizeof(PerlIOBuf) : sizeof(PerlIOl);
-        lv[i].tab.kind = l[2];
+        lv[i].tab.kind = (U32)l[2];
         lv[i].buf.base.tab = &lv[i].tab;
-        lv[i].buf.base.flags = l[3];
+        lv[i].buf.base.flags = (U32)l[3];
         lv[i].buf.base.next = i + 1 < n ? &lv[i + 1].buf.base : 0;
         goperl_pio_view_buf(f, &lv[i].buf, l);
     }
@@ -220,8 +220,8 @@ __attribute__((weak)) PerlIOl *goperl_pl_perlio_null_v = 0;
  * and a tail node whose funcs forward to the guest layer below. */
 typedef struct goperl_iol_shadow {
     struct goperl_iol_shadow *next;
-    uint32_t ltok; /* guest GoperlIOL* — the instance identity */
-    uint32_t ff;   /* guest PerlIO* handle, valid during a hook call */
+    uint64_t ltok; /* guest GoperlIOL* — the instance identity */
+    uint64_t ff;   /* guest PerlIO* handle, valid during a hook call */
     PerlIOl *fslot;          /* handle: &fslot is the PerlIO* */
     struct {
         PerlIOl base;
@@ -247,12 +247,11 @@ static SSize_t goperl_tail_read(pTHX_ PerlIO *f, void *vbuf, Size_t count) {
     goperl_iol_shadow_t *sh = goperl_iol_owner(f);
     /* vbuf is a host view into guest memory (the fill buffer); recover the
      * guest address from the current fill window. */
-    extern uint32_t goperl_iol_gbuf_v;
+    extern uint64_t goperl_iol_gbuf_v;
     extern char *goperl_iol_hbuf_v;
-    uint32_t gdst = goperl_iol_gbuf_v + (uint32_t)((char *)vbuf - goperl_iol_hbuf_v);
-    int64_t got = (int64_t)goperl_do_op(
-        goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_READ, sh->ff,
-        ((uint64_t)gdst << 32) | (uint32_t)count, 0, 0);
+    const uint64_t gdst = goperl_iol_gbuf_v + (uint64_t)((char *)vbuf - goperl_iol_hbuf_v);
+    int64_t got = (int64_t)goperl_do_op3(goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_READ, sh->ff,
+                                         gdst, (uint64_t)count, 0, 0);
     return (SSize_t)got;
 }
 static IV goperl_tail_fill(pTHX_ PerlIO *f) {
@@ -281,9 +280,7 @@ static IV goperl_tail_flush(pTHX_ PerlIO *f) {
 }
 static STDCHAR *goperl_tail_get_ptr(pTHX_ PerlIO *f) {
     goperl_iol_shadow_t *sh = goperl_iol_owner(f);
-    extern uint32_t goperl_iol_gbuf_v;
-    extern char *goperl_iol_hbuf_v;
-    uint32_t gp = (uint32_t)goperl_do_op(
+    const uint64_t gp = goperl_do_op(
         goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_GETPTR, sh->ff, 0, 0, 0);
     /* translate the guest pointer into host space */
     return (STDCHAR *)goperl_guest_mem(goperl_cur_frame_v, gp);
@@ -299,12 +296,12 @@ static void goperl_tail_set_ptrcnt(pTHX_ PerlIO *f, STDCHAR *ptr,
     goperl_iol_shadow_t *sh = goperl_iol_owner(f);
     /* ptr is a host view of a guest pointer obtained from get_ptr; convert
      * back by asking the guest for its current ptr and offsetting. */
-    uint32_t gp = (uint32_t)goperl_do_op(
+    const uint64_t gp = goperl_do_op(
         goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_GETPTR, sh->ff, 0, 0, 0);
     char *hp = (char *)goperl_guest_mem(goperl_cur_frame_v, gp);
-    uint32_t gnew = gp + (uint32_t)((char *)ptr - hp);
-    goperl_do_op(goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_SETPTRCNT, sh->ff,
-                 ((uint64_t)gnew << 32) | (uint32_t)(int32_t)cnt, 0, 0);
+    const uint64_t gnew = gp + (uint64_t)((char *)ptr - hp);
+    goperl_do_op3(goperl_cur_frame_v, GOPERL_OP_PERLIO_NEXT_SETPTRCNT, sh->ff, gnew,
+                  (uint64_t)(int64_t)cnt, 0, 0);
 }
 
 /* PERLIO_K_FASTGETS on the tail advertises get_ptr/get_cnt support; the
@@ -378,8 +375,7 @@ static STDCHAR *PerlIO_get_base(PerlIO *f) {
         goperl_frame_t *const gf = goperl_cur_frame_v;
         STDCHAR *const base = goperl_pio_bufptr(gf, GOPERL_PIO_GET_BASE, f);
         const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
-            gf, goperl_do_op(gf, GOPERL_OP_PERLIO,
-                             ((uint64_t)GOPERL_PIO_LAYERS << 32) | goperl_pio_tok(gf, f), 1, 0, 0));
+            gf, goperl_do_op3(gf, GOPERL_OP_PERLIO, goperl_pio_tok(gf, f), 1, (uint64_t)(GOPERL_PIO_LAYERS), 0, 0));
         if (w && w[0] && *f && (PerlIOBase(f)->tab->kind & PERLIO_K_BUFFERED))
             goperl_pio_view_buf(gf, PerlIOSelf(f, PerlIOBuf), w + 1);
         return base;
@@ -527,11 +523,11 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
 
 /* ---- the hook dispatcher (called by the loader on method -6) ------------ */
 
-__attribute__((weak)) uint32_t goperl_iol_gbuf_v = 0;
+__attribute__((weak)) uint64_t goperl_iol_gbuf_v = 0;
 __attribute__((weak)) char *goperl_iol_hbuf_v = 0;
 
-static goperl_iol_shadow_t *goperl_iol_shadow(PerlIO_funcs *tab, uint32_t ltok,
-                                              uint32_t ff) {
+static goperl_iol_shadow_t *goperl_iol_shadow(PerlIO_funcs *tab, uint64_t ltok,
+                                              uint64_t ff) {
     goperl_iol_shadow_t *sh;
     for (sh = goperl_iol_shadows_v; sh; sh = sh->next)
         if (sh->ltok == ltok) {
@@ -557,12 +553,14 @@ __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
                        const unsigned char *req, uint32_t reqlen,
                        unsigned char *resp, uint32_t respcap) {
+    /* req: the words [hook][funcs id][f][layer] and the hook's extra;
+     * resp: [1] and the hook's words, or [0] and the message */
     PerlIO_funcs *tab = (PerlIO_funcs *)funcs_v;
-    if (reqlen < 16 || respcap < 32) return 0;
-    uint32_t hook, ltok, ff;
-    memcpy(&hook, req, 4);
-    memcpy(&ff, req + 8, 4);
-    memcpy(&ltok, req + 12, 4);
+    if (reqlen < 32 || respcap < 1 + 4 * 8) return 0;
+    goperl_gword_t hook, ltok, ff;
+    memcpy(&hook, req, 8);
+    memcpy(&ff, req + 16, 8);
+    memcpy(&ltok, req + 24, 8);
 
     jmp_buf jb;
     void *prev_jb = f->jb;
@@ -583,54 +581,55 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
     int32_t rlen = 1;
     resp[0] = 1;
     switch (hook) {
-    case 1: { /* PUSHED: extra = [u32 argtok][mode NUL] */
+    case 1: { /* PUSHED: extra = [arg][mode NUL] -> [setflags][clrflags] */
         goperl_iol_shadow_t *sh = goperl_iol_shadow(tab, ltok, ff);
-        uint32_t argtok = 0;
+        goperl_gword_t argtok = 0;
         const char *mode = "r";
-        if (reqlen >= 21) {
-            memcpy(&argtok, req + 16, 4);
-            mode = (const char *)req + 20;
+        if (reqlen >= 41) {
+            memcpy(&argtok, req + 32, 8);
+            mode = (const char *)req + 40;
         }
         PerlIO *hf = &sh->fslot;
         U32 before = PerlIOBase(hf)->flags;
         IV code = tab->Pushed(hf, mode, (SV *)(uintptr_t)argtok, tab);
         U32 after = PerlIOBase(hf)->flags;
         if (code != 0) goperl_croakf(f, "layer '%s' Pushed failed", tab->name);
-        uint32_t setf = after & ~before, clrf = before & ~after;
-        memcpy(resp + 1, &setf, 4);
-        memcpy(resp + 5, &clrf, 4);
-        rlen = 9;
+        const goperl_gword_t setf = after & ~before, clrf = before & ~after;
+        memcpy(resp + 1, &setf, 8);
+        memcpy(resp + 9, &clrf, 8);
+        rlen = 17;
         break;
     }
-    case 2: { /* FILL: extra = [u32 gbuf][u32 bufsiz][u32 guest flags] */
+    case 2: { /* FILL: extra = [gbuf][bufsiz][guest flags] -> [status][ptr
+               * offset][end offset][flags set] */
         goperl_iol_shadow_t *sh = goperl_iol_shadow(tab, ltok, ff);
-        uint32_t gbuf = 0, bufsiz = 0, gflags = 0;
-        if (reqlen >= 28) {
-            memcpy(&gbuf, req + 16, 4);
-            memcpy(&bufsiz, req + 20, 4);
-            memcpy(&gflags, req + 24, 4);
+        goperl_gword_t gbuf = 0, bufsiz = 0, gflags = 0;
+        if (reqlen >= 56) {
+            memcpy(&gbuf, req + 32, 8);
+            memcpy(&bufsiz, req + 40, 8);
+            memcpy(&gflags, req + 48, 8);
         }
         PerlIO *hf = &sh->fslot;
         PerlIOBuf *b = PerlIOSelf(hf, PerlIOBuf);
         goperl_iol_gbuf_v = gbuf;
         goperl_iol_hbuf_v = (char *)goperl_guest_mem(f, gbuf);
         b->buf = goperl_iol_hbuf_v;
-        b->bufsiz = bufsiz;
+        b->bufsiz = (STRLEN)bufsiz;
         b->ptr = b->end = b->buf;
         /* mirror the guest's sticky flags, minus buffer state */
         PerlIOBase(hf)->flags =
             (gflags & ~(U32)(PERLIO_F_RDBUF | PERLIO_F_WRBUF));
         IV code = tab->Fill(hf);
-        uint32_t status = code == 0 ? 0 : 1;
-        uint32_t ptrOff = (uint32_t)(b->ptr - b->buf);
-        uint32_t endOff = (uint32_t)(b->end - b->buf);
-        uint32_t setf = PerlIOBase(hf)->flags &
-                        (PERLIO_F_EOF | PERLIO_F_ERROR | PERLIO_F_RDBUF);
-        memcpy(resp + 1, &status, 4);
-        memcpy(resp + 5, &ptrOff, 4);
-        memcpy(resp + 9, &endOff, 4);
-        memcpy(resp + 13, &setf, 4);
-        rlen = 17;
+        const goperl_gword_t status = code == 0 ? 0 : 1;
+        const goperl_gword_t ptrOff = (goperl_gword_t)(b->ptr - b->buf);
+        const goperl_gword_t endOff = (goperl_gword_t)(b->end - b->buf);
+        const goperl_gword_t setf = PerlIOBase(hf)->flags &
+                                    (PERLIO_F_EOF | PERLIO_F_ERROR | PERLIO_F_RDBUF);
+        memcpy(resp + 1, &status, 8);
+        memcpy(resp + 9, &ptrOff, 8);
+        memcpy(resp + 17, &endOff, 8);
+        memcpy(resp + 25, &setf, 8);
+        rlen = 33;
         break;
     }
     case 3: { /* POPPED: drop the shadow */
