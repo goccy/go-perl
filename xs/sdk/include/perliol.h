@@ -138,22 +138,18 @@ typedef struct {
  * PerlIOBase(f)->tab->name and kind, PerlIOBase(f)->flags, PerlIONext(f).
  * Those handles are views made for the native call from the interpreter's
  * layers as they are then: the handle, and the next field of each layer,
- * is preceded by the interpreter's address of the handle it stands for
- * (see goperl_pio_tok), so that every handle function given one of them,
- * or a PerlIONext of one, works on the interpreter's. The functions of a
+ * are registered with the interpreter's handle they stand for (see
+ * goperl_pio_tok), so that every handle function given one of them, or a
+ * PerlIONext of one, works on the interpreter's. The functions of a
  * layer's tab are the interpreter's to run and are not in the view. */
 typedef struct {
-    uint32_t gslot;
-    uint32_t mark; /* GOPERL_PIO_VIEW_MARK */
-} goperl_pio_mark_t;
-typedef struct {
-    goperl_pio_mark_t mark;
     PerlIOl *top;
+    goperl_pio_slot_t reg;
 } goperl_pio_handle_view_t;
 typedef struct {
-    goperl_pio_mark_t mark; /* of the layer below: base.next is its handle */
     PerlIOl base;
     PerlIO_funcs tab;
+    goperl_pio_slot_t reg; /* of &base.next: the handle of the layer below */
 } goperl_pio_layer_view_t;
 static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
     if (!tok) return 0;
@@ -165,12 +161,16 @@ static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
         sizeof(goperl_pio_handle_view_t) + (size_t)n * sizeof(goperl_pio_layer_view_t));
     if (!hv) goperl_croakf(f, "Out of memory!");
     goperl_pio_layer_view_t *lv = (goperl_pio_layer_view_t *)(hv + 1);
-    hv->mark.gslot = (uint32_t)tok;
-    hv->mark.mark = GOPERL_PIO_VIEW_MARK;
+    hv->reg.slot = &hv->top;
+    hv->reg.tok = (uint32_t)tok;
+    hv->reg.next = goperl_pio_views_v;
+    goperl_pio_views_v = &hv->reg;
     for (uint32_t i = 0; i < n; i++) {
         const uint32_t *l = w + 1 + 4 * i;
-        lv[i].mark.gslot = l[0];
-        lv[i].mark.mark = GOPERL_PIO_VIEW_MARK;
+        lv[i].reg.slot = &lv[i].base.next;
+        lv[i].reg.tok = l[0];
+        lv[i].reg.next = goperl_pio_views_v;
+        goperl_pio_views_v = &lv[i].reg;
         lv[i].tab.fsize = sizeof(PerlIO_funcs);
         lv[i].tab.name = l[1] ? (const char *)goperl_guest_mem(f, l[1]) : "";
         lv[i].tab.size = sizeof(PerlIOl);
@@ -316,11 +316,7 @@ __attribute__((weak)) PerlIO_funcs goperl_tail_funcs_v = {
 /* PerlIO_* dispatchers used by hook bodies (dispatch through the tab); a
  * view of a handle of the interpreter's (or of a layer of one) is the
  * interpreter's to work on. */
-static int goperl_pio_is_view(const PerlIO *f) {
-    goperl_frame_t *const fr = goperl_cur_frame_v;
-    return fr && f && (uintptr_t)f >= fr->memcap &&
-           ((const uint32_t *)f)[-1] == GOPERL_PIO_VIEW_MARK;
-}
+static int goperl_pio_is_view(const PerlIO *f) { return goperl_pio_view_of(f) != 0; }
 static SSize_t PerlIO_read(PerlIO *f, void *vbuf, Size_t count) {
     if (goperl_pio_is_view(f)) return goperl_pio_read(goperl_cur_frame_v, f, vbuf, count);
     return PerlIOBase(f)->tab->Read(aTHX_ f, vbuf, count);

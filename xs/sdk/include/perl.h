@@ -1473,6 +1473,8 @@ typedef struct goperl_shared {
     void *statcache; /* goperl_statcache_t: PL_statcache (goperl_compiler.h) */
     void *fntab; /* goperl_fntab_t: functions of native code the interpreter
                   * runs as its own, by id (goperl_compiler.h) */
+    void *pio_views; /* goperl_pio_slot_t: the views of handles made for the
+                      * native call (perliol.h), in the arena */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -4061,15 +4063,30 @@ static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen)
     __attribute__((unused));
 /* A handle is the interpreter's (an address of its memory), or a view of
- * one that code which walks layers is given (perliol.h): the interpreter's
- * address of the handle, or of the layer below, is the word before it,
- * marked as such. */
-#define GOPERL_PIO_VIEW_MARK 0xFFFFFFFFu
+ * one that code which walks layers is given (perliol.h): the views made
+ * for the native call say which handle of the interpreter each of their
+ * slots stands for (a handle, or the next field of a layer, which is the
+ * handle of the layer below). Which of the two a value is cannot be told
+ * by where it points: the C library's heap may lie below the size of the
+ * interpreter's memory. */
+typedef struct goperl_pio_slot {
+    struct goperl_pio_slot *next;
+    const void *slot;
+    uint32_t tok;
+} goperl_pio_slot_t;
+#define goperl_pio_views_v (*(goperl_pio_slot_t **)&GOPERL_SHARED->pio_views)
+static inline __attribute__((unused)) const goperl_pio_slot_t *goperl_pio_view_of(
+    const void *h) {
+    if (!h || !goperl_cur_frame_v) return 0;
+    for (const goperl_pio_slot_t *m = goperl_pio_views_v; m; m = m->next)
+        if (m->slot == h) return m;
+    return 0;
+}
 static inline __attribute__((unused)) uint32_t goperl_pio_tok(goperl_frame_t *f,
                                                               const void *h) {
-    if (!h || (uintptr_t)h < f->memcap) return (uint32_t)(uintptr_t)h;
-    const uint32_t *mark = (const uint32_t *)h - 2;
-    return mark[1] == GOPERL_PIO_VIEW_MARK ? mark[0] : (uint32_t)(uintptr_t)h;
+    (void)f;
+    const goperl_pio_slot_t *m = goperl_pio_view_of(h);
+    return m ? m->tok : (uint32_t)(uintptr_t)h;
 }
 static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen) {
@@ -6090,6 +6107,7 @@ static void goperl_arena_free_all(void) {
     }
     goperl_si_cache_v = 0;
     goperl_si_gen_v = 0;
+    goperl_pio_views_v = 0; /* they were in the arena */
 }
 
 /* ---- HE shadows (see the HE/HEK typedefs near the top) ------------------ */

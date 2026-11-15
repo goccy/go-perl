@@ -71,7 +71,10 @@ func TestNativeLayersOfAHandle(t *testing.T) {
 	// bottom (with "utf8" after a layer that has the flag)
 	const names = `sub __t_names { my $fh = shift; my @want = grep { $_ ne "utf8" } reverse PerlIO::get_layers($fh); my @got = map { (split m{/})[0] } grep { m{/} } split /,/, LayerView::layers($fh); "@got" eq "@want" ? "same" : "[@got] vs [@want]" } `
 	runEvalCases(t, p, []evalCase{
-		{"raw", names + `open my $fh, "<:raw", our $FILE or die $!; my $fd = fileno $fh; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^perlio/1/0/0,unix/0/0/0,} ? "perlio over unix" : $r, $r =~ /,$fd,$fd,0\z/ ? "descriptors" : $r`, "same,perlio over unix,descriptors"},
+		// the descriptor native code is given is the system's (which
+		// fileno numbers its own way), the same for the handle and for
+		// the layer below its top
+		{"raw", names + `open my $fh, "<:raw", our $FILE or die $!; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^perlio/1/0/0,unix/0/0/0,} ? "perlio over unix" : $r, $r =~ /,(\d+),\1,0\z/ ? "descriptors" : $r`, "same,perlio over unix,descriptors"},
 		{"utf8", names + `open my $fh, "<:raw:utf8", our $FILE or die $!; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^\w+/\d/1/} ? "utf8 on the top" : $r`, "same,utf8 on the top"},
 		{"crlf", names + `open my $fh, "<:raw:crlf", our $FILE or die $!; my $r = LayerView::layers($fh); join ",", __t_names($fh), $r =~ m{^crlf/1/\d/1,} ? "crlf on the top" : $r`, "same,crlf on the top"},
 		{"at the end", `open my $fh, "<:raw", our $FILE or die $!; my @l = <$fh>; my $r = LayerView::layers($fh); $r =~ /,(\d)\z/; $1`, "1"},
