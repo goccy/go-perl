@@ -102,9 +102,11 @@ type Config struct {
 	// capacity reserved for this instance. Reserving capacity up front makes
 	// boot-time grows zero-copy reslices, dropping a freshly-booted
 	// instance's resident memory. The reservation is virtual address space,
-	// not resident memory. Only consulted when the instance boots privately;
-	// an instance built on the copy-on-write process snapshot maps the
-	// snapshot instead. When 0, a default headroom is used.
+	// not resident memory. Only consulted when the instance boots privately
+	// and its memory is an allocation of the Go heap (a host without mmap,
+	// or a 32-bit one); on other hosts the memory is reserved address space
+	// as long as the MaxMemoryBytes limit, however the instance boots, and
+	// never moves. When 0, a default headroom is used.
 	MemoryReserveBytes int
 	// Exec is the subprocess whitelist. It is called before every process
 	// spawn with the executable path and full argv; returning false denies

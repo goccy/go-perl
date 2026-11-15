@@ -506,17 +506,27 @@ func (p *Perl) bootOwn(opts InstanceOptions, wasi *base.WasiStubs) error {
 }
 
 // bootPrivate is the no-snapshot path: run the reactor initializer and
-// perl_new on a private linear memory.
+// perl_new on a private linear memory. Where linear memory is a
+// reservation (base.MemReserved), the reservation holds the memory's whole
+// ceiling, as the mapping of an instance on memory of its own does: a
+// memory that outgrows its reservation moves to a larger one, and native
+// code holds the address it had. A memory of the Go heap gets the room
+// MemoryReserveBytes asks for, and moves when it grows past it.
 func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err error) {
-	if opts.MemoryReserveBytes > 0 {
-		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, opts.MemoryReserveBytes)
+	ceiling := memoryCeiling(opts, wasm2go.InitialMemoryBytes)
+	reserve := opts.MemoryReserveBytes
+	if base.MemReserved && uint64(reserve) < ceiling {
+		reserve = int(ceiling)
+	}
+	if reserve > 0 {
+		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, reserve)
 	} else {
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
 	// instead of growing the host process unbounded: the same limit as an
 	// instance on a mapping has.
-	wasm2go.SetMaxMemory(p.m.g, memoryCeiling(opts, uint64(len(wasm2go.Memory(p.m.g)))))
+	wasm2go.SetMaxMemory(p.m.g, ceiling)
 	return p.start(opts)
 }
 
