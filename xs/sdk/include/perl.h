@@ -7362,6 +7362,18 @@ static int goperl_piofile_seek_cb(void *c, off64_t *off, int whence) {
 /* The interpreter's stream of the handle (FIND_FILE or EXPORT_FILE), in
  * *gstream (0 when there is none); the stream of a descriptor here that is
  * the same file, or 0. */
+/* Whether the descriptor fd of this process is the one the words of
+ * FIND_FILE/EXPORT_FILE describe: the same file at the same offset (or
+ * with none, as a pipe). */
+static int goperl_pio_same_fd(const goperl_gword_t *w, int fd) {
+    /* the 64-bit values are two words, the low one first */
+    const uint64_t dev = ((uint64_t)w[3] << 32) | w[2];
+    const uint64_t ino = ((uint64_t)w[5] << 32) | w[4];
+    const int64_t off = (int64_t)(((uint64_t)w[7] << 32) | w[6]);
+    struct stat st;
+    return (dev || ino) && fstat(fd, &st) == 0 && (uint64_t)st.st_dev == dev &&
+           (uint64_t)st.st_ino == ino && (int64_t)lseek(fd, 0, SEEK_CUR) == off;
+}
 static FILE *goperl_pio_stdio(goperl_frame_t *f, const void *h, int sel,
                               const char *mode, goperl_gword_t *gstream) {
     const char *m = mode ? mode : "";
@@ -7370,15 +7382,7 @@ static FILE *goperl_pio_stdio(goperl_frame_t *f, const void *h, int sel,
     *gstream = 0;
     if (!w || (int32_t)w[0] < 0) return 0;
     *gstream = w[1];
-    /* the 64-bit values are two words, the low one first */
-    const uint64_t dev = ((uint64_t)w[3] << 32) | w[2];
-    const uint64_t ino = ((uint64_t)w[5] << 32) | w[4];
-    const int64_t off = (int64_t)(((uint64_t)w[7] << 32) | w[6]);
-    struct stat st;
-    /* the same file at the same offset (or with none, as a pipe) */
-    if ((!dev && !ino) || fstat((int)w[0], &st) != 0 || (uint64_t)st.st_dev != dev ||
-        (uint64_t)st.st_ino != ino || (int64_t)lseek((int)w[0], 0, SEEK_CUR) != off)
-        return 0;
+    if (!goperl_pio_same_fd(w, (int)w[0])) return 0;
     const int fd = dup((int)w[0]);
     if (fd < 0) return 0;
     if (!*m) {
@@ -7450,8 +7454,10 @@ static void goperl_piofile_free(goperl_piofile_t *c) {
 }
 /* PerlIO_findFILE: the stream of the handle's :stdio layer, made on first
  * use. A stream made before stands for the handle as long as the handle
- * still has the :stdio layer it was made with (a handle closed and another
- * opened at its address has not). */
+ * still has the :stdio layer it was made with and, for a stream on a
+ * descriptor, that descriptor is still the handle's (a handle closed and
+ * another opened at its address is not the same handle, even when its
+ * stream happens to be where the old one was). */
 static FILE *goperl_pio_find(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static FILE *goperl_pio_find(goperl_frame_t *f, const void *h) {
@@ -7463,7 +7469,8 @@ static FILE *goperl_pio_find(goperl_frame_t *f, const void *h) {
         if (c->gstream) {
             const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
                 f, goperl_pio(f, GOPERL_PIO_FIND_FILE, h, 0, "", 1));
-            if (!w || (int32_t)w[0] < 0 || w[1] != c->gstream) {
+            if (!w || (int32_t)w[0] < 0 || w[1] != c->gstream ||
+                (c->own && !goperl_pio_same_fd(w, fileno(c->fp)))) {
                 *pp = c->next;
                 goperl_piofile_free(c);
                 break;

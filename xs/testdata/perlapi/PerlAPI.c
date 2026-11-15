@@ -5277,6 +5277,33 @@ XS(XS_PerlAPI_uni_display_flags) {
     XSRETURN(1);
 }
 
+/* attach_free_hook(sv): ext magic whose svt_free looks its MAGIC up on the
+ * SV with mg_findext, as Linux::Epoll's does; free_hook_found() answers
+ * how many times the hook ran and found it. */
+static int PerlAPI_free_hook_seen = 0;
+static int PerlAPI_free_hook(pTHX_ SV *sv, MAGIC *mg);
+static MGVTBL PerlAPI_free_vtbl = {NULL, NULL, NULL, NULL, PerlAPI_free_hook};
+static int PerlAPI_free_hook(pTHX_ SV *sv, MAGIC *mg) {
+    MAGIC *found = mg_findext(sv, PERL_MAGIC_ext, &PerlAPI_free_vtbl);
+    if (found == mg) {
+        PerlAPI_free_hook_seen++;
+        found->mg_virtual = NULL;
+    }
+    return 0;
+}
+XS(XS_PerlAPI_attach_free_hook) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    sv_magicext(SvRV(ST(0)), NULL, PERL_MAGIC_ext, &PerlAPI_free_vtbl, NULL, 0);
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_free_hook_found) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PerlAPI_free_hook_seen));
+    XSRETURN(1);
+}
+
 static OP *pp_goperl_described(pTHX) { return NORMAL; }
 static OP *pp_goperl_undescribed(pTHX) { return NORMAL; }
 static XOP xop_goperl_described;
@@ -5907,5 +5934,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::store_fetch", XS_PerlAPI_store_fetch);
     newXS_deffile("PerlAPI::pv_display", XS_PerlAPI_pv_display);
     newXS_deffile("PerlAPI::uni_display_flags", XS_PerlAPI_uni_display_flags);
+    newXS_deffile("PerlAPI::attach_free_hook", XS_PerlAPI_attach_free_hook);
+    newXS_deffile("PerlAPI::free_hook_found", XS_PerlAPI_free_hook_found);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

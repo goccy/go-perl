@@ -1581,21 +1581,33 @@ func (s *state) magicSetHead(sv uint64, mg uintptr) {
 }
 
 // magicFreed runs when the guest frees an SV carrying the anchor magic:
-// execute every mirror node's svt_free and drop the chain.
+// execute every mirror node's svt_free and drop the chain. As in perl's
+// mg_free, the SV has its chain while a MAGIC's svt_free runs, starting at
+// that MAGIC (a hook that looks its MAGIC up with mg_findext finds it, as
+// Linux::Epoll's does), and loses it once every MAGIC is freed.
 func (s *state) magicFreed(id uint32) {
 	s.mu.Lock()
 	rec := s.magicByID[id]
-	if rec != nil {
-		delete(s.magicByID, id)
-		delete(s.magicBySV, rec.svTok)
-	}
 	s.mu.Unlock()
 	if rec == nil {
 		return
 	}
+	defer func() {
+		s.mu.Lock()
+		if s.magicByID[id] == rec {
+			delete(s.magicByID, id)
+		}
+		if s.magicBySV[rec.svTok] == rec {
+			delete(s.magicBySV, rec.svTok)
+		}
+		s.mu.Unlock()
+	}()
 	for mg := rec.head; mg != 0; {
 		node := copyIn(mg, mgAllocSize)
 		next := uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
+		s.mu.Lock()
+		rec.head = mg
+		s.mu.Unlock()
 		if xsTrace {
 			s.mu.Lock()
 			slot, hasAny := s.cvAny[rec.svTok]
@@ -1615,6 +1627,9 @@ func (s *state) magicFreed(id uint32) {
 		s.releaseMagicObj(rec, node)
 		s.releaseMagicName(int32(binary.LittleEndian.Uint32(node[mgOffLen:])),
 			uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])))
+		s.mu.Lock()
+		rec.head = next
+		s.mu.Unlock()
 		cFree(mg)
 		mg = next
 	}

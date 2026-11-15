@@ -80,6 +80,11 @@ func TestNativeStdioStreamOfAHandle(t *testing.T) {
 	code := `open my $fh, ">", "` + file + `" or die $!; print $fh "perl1,"; my $r = PerlAPI::stdio_of($fh, "c1,"); print $fh "perl2,"; my $layers = join "+", PerlIO::get_layers($fh); PerlAPI::stdio_release($fh); my $after = join "+", PerlIO::get_layers($fh); print $fh "perl3"; close $fh; open my $in, "<", "` + file + `" or die $!; my $text = <$in>; join " ", $r, $layers, $after, $text`
 	runEvalCases(t, p, []evalCase{
 		{"on the descriptor", code, "fd:same unix+perlio+stdio unix+perlio perl1,c1,perl2,perl3"},
+		// handles opened and closed in turn (the next one at the address
+		// of the last, with a :stdio stream where the last one's was):
+		// each gets a stream of its own descriptor (GD's newFromPng(file)
+		// called twice)
+		{"handles in turn", `my @got; for my $n (1 .. 3) { my $f = "` + file + `.$n"; open my $fh, ">", $f or die $!; PerlAPI::stdio_of($fh, "c$n"); close $fh; open my $in, "<", $f or die $!; push @got, scalar <$in> } join ",", @got`, "c1,c2,c3"},
 		// a handle with no descriptor (an in-memory file): a stream over
 		// the handle's functions, with no descriptor either
 		{"over the handle", `open my $fh, ">", \my $buf or die $!; print $fh "perl1,"; my $r = PerlAPI::stdio_of($fh, "c1,"); print $fh "perl2"; close $fh; join " ", $r, $buf`, "nofd:same perl1,c1,perl2"},
@@ -99,6 +104,17 @@ func TestNativeOperationArguments(t *testing.T) {
 		{"a key as long as the box", `my %h; PerlAPI::store_fetch(\%h, "k" x 4096)`, "stored:4096"},
 		{"a key longer than the box", `my %h; my $r = PerlAPI::store_fetch(\%h, "k" x 10000); $r . ":" . (exists $h{"k" x 10000} ? "there" : "missing")`, "stored:10000:there"},
 		{"native code inside the operation", `package NestTie { sub TIEHASH { bless {}, shift } sub STORE { my ($s, $k, $v) = @_; $s->{$k} = $v . ":" . PerlAPI::numcmp(2, 1) } sub FETCH { my ($s, $k) = @_; $s->{$k} . ":" . PerlAPI::numcmp(1, 2) } } tie my %h, "NestTie"; PerlAPI::store_fetch(\%h, "key")`, "stored:3:1:-1"},
+	})
+}
+
+// A MAGIC's svt_free runs while the SV still has it, as in perl's mg_free:
+// a hook that looks its MAGIC up with mg_findext finds it (Linux::Epoll's
+// clears its vtable that way).
+func TestNativeFreeHookFindsItsMagic(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"freed scalars", `for (1 .. 3) { my $x = "v"; PerlAPI::attach_free_hook(\$x) } PerlAPI::free_hook_found()`, "3"},
 	})
 }
 
