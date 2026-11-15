@@ -46,7 +46,9 @@ import (
 // too (NewFromSnapshot and NewWithMemory set MaxMem to the mapping length,
 // and MemoryGrow refuses to grow past it before it could reallocate, which
 // keeps the mapping, its address and its sharing intact for the instance's
-// whole life). Virtual and sparse: pages never written are never resident.
+// whole life). Virtual and sparse: pages never written are never resident,
+// and the runtime maps them without charging them against the commit limit
+// until they are written, so a machine with less memory maps it as well.
 // 8 GiB, as llama-wasm declares for its memory64 module.
 const defaultMemoryCeiling = 8 << 30
 
