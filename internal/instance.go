@@ -114,7 +114,7 @@ type Perl struct {
 	// intrAddr is the linear-memory offset of the interpreter's interrupt-flag
 	// word, resolved once at New so a context cancellation can fire without
 	// taking the instance lock a running Eval holds.
-	intrAddr uint32
+	intrAddr uint64
 	// mapped is the copy-on-write mapping this instance lives in when it was
 	// built from the process snapshot; unmapped on Close. nil for instances
 	// that booted privately.
@@ -339,7 +339,7 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	}
 	var addrErr error
 	base.AccessMemory(m.g, func(mem []byte) {
-		if uint64(addr)+4 > uint64(len(mem)) {
+		if addr+4 > uint64(len(mem)) {
 			addrErr = fmt.Errorf("interrupt address %#x out of range (memory is %d bytes)", addr, len(mem))
 		}
 	})
@@ -867,16 +867,14 @@ func (i *memoryImage) release() {
 func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
 
 // perlNew starts the interpreter with its library in stdlibDir and, when
-// siteDir is not empty, its site directories under siteDir. The
-// architecture-specific one among them holds native modules, which are
-// loaded into this process: it is named after this machine.
+// siteDir is not empty, its site directories under siteDir, telling it the
+// name of the architecture (ArchName): the host's, for which the native
+// modules a program loads into this process are built.
 func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
 	buf = pbAppendString(buf, 2, siteDir)
-	if siteDir != "" {
-		buf = pbAppendString(buf, 3, ArchTag())
-	}
+	buf = pbAppendString(buf, 3, ArchName())
 	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
@@ -889,7 +887,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 
 // interruptAddr fetches the address of this instance's interrupt-flag word in
 // linear memory.
-func (p *Perl) interruptAddr() (uint32, error) {
+func (p *Perl) interruptAddr() (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
@@ -899,7 +897,7 @@ func (p *Perl) interruptAddr() (uint32, error) {
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // fireInterrupt stores 1 into the interrupt-flag word. It does not take the

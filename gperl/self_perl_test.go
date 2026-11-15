@@ -6,11 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 )
 
 // A run of the perl command that nothing else arranged (no build pipeline
@@ -103,7 +103,7 @@ func TestMakeInstallWithNothingArranged(t *testing.T) {
 	}
 	root := userWithEmptyData(t)
 	lib := filepath.Join(root, "site_perl", perlVersion(t))
-	arch := filepath.Join(lib, runtime.GOOS+"_"+runtime.GOARCH)
+	arch := filepath.Join(lib, internal.ArchName())
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
 		t.Fatal(err)

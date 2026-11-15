@@ -530,7 +530,7 @@ type Module struct {
 // the bridge boundary is a wptr; the transpiled wasm2go package's
 // export/import signatures use the same width, so the two packages
 // stay in lock-step from the one substitution the generator makes.
-type wptr = int32
+type wptr = int64
 
 var (
 	globalModule *Module
@@ -724,21 +724,30 @@ func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, wptr, wptr
 	return resp, nil
 }
 
-// wptrOff widens a guest pointer to an unsigned slice offset. wasm32
-// pointers are UNSIGNED i32s: past the 2 GiB line the bit pattern is
-// negative in Go, so a signed slice index would panic.
+// wptrOff widens a guest pointer to an unsigned slice offset.
 func wptrOff(p wptr) uint64 {
-	return uint64(uint32(p))
+	return uint64(p)
 }
 
-func decodeResult(_ *base.Module, packed int64) (uint64, uint64) {
-	return uint64(packed) >> 32, uint64(packed) & 0xFFFFFFFF
+func decodeResult(g *base.Module, packed int64) (uint64, uint64) {
+	if packed == 0 {
+		return 0, 0
+	}
+	mem := wasm2go.Memory(g)
+	d := uint64(packed)
+	return binary.LittleEndian.Uint64(mem[d:]), binary.LittleEndian.Uint64(mem[d+8:])
 }
 
 func encodeCallbackResult(m *Module, resp []byte) int64 {
 	ptr := wasm2go.WasmAlloc(m.g, wptr(len(resp)))
 	copy(wasm2go.Memory(m.g)[wptrOff(ptr):], resp)
-	return int64(ptr)<<32 | int64(len(resp))
+	if m.cbDesc == 0 {
+		m.cbDesc = wasm2go.WasmAlloc(m.g, 16)
+	}
+	mem := wasm2go.Memory(m.g)
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc):], uint64(ptr))
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc)+8:], uint64(len(resp)))
+	return int64(m.cbDesc)
 }
 
 // envStubs implements wasm2go/base.EnvImports — the host side of the
@@ -830,16 +839,6 @@ type wasmifyStubs struct{ m *Module }
 
 func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
 	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
-}
-
-func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
-	if l0 == 0 {
-		l0 = 64
-	}
-	return wasm2go.WasmAlloc(m, l0)
-}
-func (h envStubs) X__cxa_throw(m *base.Module, l0 int32, l1 int32, l2 int32) {
-	panic("wasm: C++ exception thrown")
 }
 
 var _ = fmt.Errorf
@@ -1092,8 +1091,8 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 //
 //	*(uint32_t *)perl_interrupt_addr(h) = 1;
 //
-// The guest clears the flag when it fires. Addresses are 32-bit linear-memory
-// offsets (wasm32). Like CPython's eval-breaker, this only fires at opcode
+// The guest clears the flag when it fires. The address is a linear-memory
+// offset. Like CPython's eval-breaker, this only fires at opcode
 // boundaries: a single long-running op (a pathological regex, a big sort) is
 // not preempted until it returns to the run loop.
 //
@@ -1101,14 +1100,14 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 // (pseudo-)process: no eval can catch it, and the process ends by that
 // signal at the next opcode boundary, where it stands (no END block, no
 // destructor).
-func PerlInterruptAddr(h uint64) (uint32, error) {
+func PerlInterruptAddr(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return 0, err
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // Call the CODE reference behind `code` (a ref handle). want_scalar selects
@@ -1163,28 +1162,33 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // <site
 // _dir>/site_perl/
 // <version
-// >               sitelib
+// >              sitelib
 //
 // <site
 // _dir>/site_perl/
 // <version
 // >/
-// <site
-// _arch>   sitearch
+// <archname
+// >   sitearch
 //
 // <site
-// _dir>/bin                               sitebin, sitescript
+// _dir>/bin                              sitebin, sitescript
 //
 // <site
 // _dir>/man/man1,
 // <site
-// _dir>/man/man3     siteman1dir, siteman3dir
+// _dir>/man/man3    siteman1dir, siteman3dir
 //
 // <version
-// > is this interpreter's. `site_arch` names the kind of machine
-// the architecture-specific files there are for (the host's, when native
-// extensions are loaded into the host process); empty stands for the
-// interpreter's own architecture name. %Config reports the directories
+// > is this interpreter's. `archname` is the name of the
+// architecture: the host's, which the one interpreter takes from whatever
+// host it runs on (native modules are built for the host). It is
+// $Config{archname} and myarchname, the name of the architecture
+// subdirectories perl adds to
+// with a directory (PERL5LIB, -I) and of
+// the site's architecture directory, and what `perl -v` says perl was
+// built for; empty stands for the name the build was configured with.
+// %Config reports the directories
 // under every key that names one of them, and sitearch and sitelib are in
 //
 // where perl has them: after the PERL5LIB directories and before the
@@ -1192,11 +1196,11 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // keeps the values of the build's configuration and
 // has no site
 // directory.
-func PerlNew(libDir string, siteDir string, siteArch string) (uint64, error) {
+func PerlNew(libDir string, siteDir string, archname string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
 	buf = pbAppendString(buf, 2, siteDir)
-	buf = pbAppendString(buf, 3, siteArch)
+	buf = pbAppendString(buf, 3, archname)
 	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err

@@ -37,7 +37,7 @@ func TestConfigDescribesLongDouble(t *testing.T) {
 		`print "gnulibc=", (defined $Config{d_gnulibc} ? $Config{d_gnulibc} : "undef"), "\n";`,
 	)}, "")
 	r.want(t, 0, "longdblsize=16 longdblkind=1 longdblmantbits=112 doublesize=8 nvsize=8\n"+
-		`sPRIfldbl="Lf" sPRId64="lld" sPRIu64="llu" st_ino_size=8 st_dev_size=8`+"\n"+
+		`sPRIfldbl="Lf" sPRId64="ld" sPRIu64="lu" st_ino_size=8 st_dev_size=8`+"\n"+
 		"1.500000 2.25 1.000000e+03\n"+
 		"gnulibc=undef\n")
 }

@@ -44,7 +44,8 @@ func hostPerl(t *testing.T, args ...string) (stdout string, status int) {
 }
 
 // perlNumbers runs a program that prints "name number" lines and returns
-// them.
+// them. A number above the largest int64 (an unsigned long's maximum) is
+// kept as the int64 with its bits.
 func perlNumbers(t *testing.T, program string) map[string]int64 {
 	t.Helper()
 	out, status := hostPerl(t, "-e", program)
@@ -55,6 +56,10 @@ func perlNumbers(t *testing.T, program string) map[string]int64 {
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		name, value, ok := strings.Cut(line, " ")
 		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			u, uerr := strconv.ParseUint(value, 10, 64)
+			n, err = int64(u), uerr
+		}
 		if !ok || err != nil {
 			t.Fatalf("line %q of the output", line)
 		}

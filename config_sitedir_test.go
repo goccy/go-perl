@@ -1,11 +1,11 @@
 package perl_test
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal"
 )
 
 // siteProgram reports what the interpreter says about its site directories.
@@ -41,7 +41,7 @@ func TestSiteDirectoriesOfAnInstance(t *testing.T) {
 	cfg := perl.Config{SiteDir: "/opt/site"}
 	got := siteReport(t, cfg)
 	lib := "/opt/site/site_perl/" + got["version"]
-	arch := lib + "/" + runtime.GOOS + "_" + runtime.GOARCH
+	arch := lib + "/" + internal.ArchName()
 	want := map[string]string{
 		"tied":       "Config",
 		"siteprefix": "/opt/site", "sitelib_stem": "/opt/site/site_perl",
@@ -96,7 +96,7 @@ func TestNoSiteDirectoriesByDefault(t *testing.T) {
 			want := map[string]string{
 				"tied":       "Config",
 				"siteprefix": "/usr", "sitelib": lib, "sitelibexp": lib, "installsitelib": lib,
-				"sitearch": lib + "/wasm32-wasi", "sitearchexp": lib + "/wasm32-wasi",
+				"sitearch": lib + "/" + internal.ArchName(), "sitearchexp": lib + "/" + internal.ArchName(),
 				"sitebin": "/usr/bin",
 				"inc":     "STDLIB",
 			}
