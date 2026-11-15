@@ -207,6 +207,16 @@ func TestNativeIoctlOnAHandle(t *testing.T) {
 	})
 }
 
+// perl's %p formats an address as hexadecimal digits, with 0x before them
+// only by the # flag (XS::Parse::Infix names its ops "infix_NAME_0x%p").
+func TestNativeFormatOfAnAddress(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"%p", `PerlAPI::format_address()`, "abc|0xabc|   abc"},
+	})
+}
+
 // perl_require_pv is require_pv: it requires a file by its name, and a
 // failure is left in $@ (Math::Prime::Util loads its Perl half so).
 func TestNativeRequireByFileName(t *testing.T) {

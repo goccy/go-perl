@@ -5343,6 +5343,16 @@ XS(XS_PerlAPI_pending) {
     XSRETURN(1);
 }
 
+/* format_address(): an address formatted by perl's %p, with and without
+ * the # flag and with a width. */
+XS(XS_PerlAPI_format_address) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("%p|%#p|%6p", (void *)(uintptr_t)0xabc,
+                                (void *)(uintptr_t)0xabc, (void *)(uintptr_t)0xabc));
+    XSRETURN(1);
+}
+
 /* require_file(name): perl_require_pv, the old name of require_pv, of the
  * file name. */
 XS(XS_PerlAPI_require_file) {
@@ -5356,6 +5366,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
     newXS_deffile("PerlAPI::require_file", XS_PerlAPI_require_file);
+    newXS_deffile("PerlAPI::format_address", XS_PerlAPI_format_address);
     newXS_deffile("PerlAPI::pending", XS_PerlAPI_pending);
     newXS_deffile("PerlAPI::refuse_set", XS_PerlAPI_refuse_set);
     newXS_deffile("PerlAPI::enable_infix", XS_PerlAPI_enable_infix);

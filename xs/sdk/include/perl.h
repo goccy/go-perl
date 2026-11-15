@@ -2324,9 +2324,17 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             GOPERL_TEXT_VALUE(t, spec, sp);
             break;
         }
-        case 'p':
-            GOPERL_TEXT_CONV(t, spec, app, void *);
+        case 'p': {
+            /* perl's %p is the address in hexadecimal digits, as %lx is
+             * (with 0x before them only by the # flag); the C library's
+             * puts 0x before them */
+            spec[sn - 1] = 'l';
+            spec[sn] = 'x';
+            spec[sn + 1] = '\0';
+            const unsigned long pv = (unsigned long)(uintptr_t)GOPERL_VA(app, void *);
+            GOPERL_TEXT_VALUE(t, spec, pv);
             break;
+        }
         case 'e':
         case 'E':
         case 'f':
