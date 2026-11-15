@@ -146,6 +146,26 @@ func TestNativeParserOfItsOwn(t *testing.T) {
 	}
 }
 
+// An operation on op trees can free an op it was given: op_append_list
+// moves the kids of the second list into the first and frees the second
+// (perl's op_destroy, which tells PL_opfreehook nothing; Object::Pad appends
+// the statements of a field to its class's), and a constructor frees the
+// operand it folds into a constant (op_free). What the operation made is
+// what native code reads, and so is an op made afterwards in the memory of
+// the freed one, as it is while the interpreter compiles (the slab hands
+// the slot out again) and may be at run time.
+func TestNativeOpsFreedByAnOperation(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a merged list, while compiling", `my $r; BEGIN { $r = PerlAPI::merged_lists() } $r`, "1,2,lineseq"},
+		{"a merged list, at run time", `join ";", map { PerlAPI::merged_lists() } 1 .. 20`,
+			strings.TrimSuffix(strings.Repeat("1,2,lineseq;", 20), ";")},
+		{"a folded operand, while compiling", `my $r; BEGIN { $r = PerlAPI::folded_operand() } $r`,
+			"const:-5,const:10,const:20,const:30"},
+	})
+}
+
 // A shared key goes into a message with %" HEKf ".
 func TestNativeSharedKeyInAMessage(t *testing.T) {
 	p := newHostPerl(t)

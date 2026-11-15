@@ -5518,13 +5518,21 @@ static void goperl_op_pull(goperl_frame_t *f, OP *o) {
 }
 
 /* Refresh after a guest optree operation: the guest may have relinked or
- * retyped the participants. */
+ * retyped the participants, or freed one (op_append_list frees the list
+ * whose kids it moved into the first; a constructor frees an operand it
+ * folds into a constant). The ops the interpreter reports freed are given
+ * up first, and a participant left without a shadow is not asked for: its
+ * memory is the slab's or the allocator's again and holds anything. */
 static void goperl_op_refresh(goperl_frame_t *f, OP *o) {
-    if (o && o->gop) goperl_op_pull(f, o);
+    if (!o || !o->gop) return;
+    goperl_opreg_sync(f, goperl_opreg_get(f));
+    if (o->gop) goperl_op_pull(f, o); /* a shadow given up has no token */
 }
 static void goperl_op_refresh_tok(goperl_frame_t *f, uint64_t tok) {
     if (!tok) return;
-    goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+    goperl_opreg_t *r = goperl_opreg_get(f);
+    goperl_opreg_sync(f, r);
+    if (goperl_opreg_find(r, tok)) goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
 }
 
 /* Materialize a token the CALLER knows is a COP (PL_curcop, blk_oldcop):

@@ -4303,6 +4303,66 @@ XS(XS_PerlAPI_statement_line) {
     }
 }
 
+/* merged_lists(): two statement lists, the second appended to the first
+ * with op_append_list (which moves its kids into the first and frees it, as
+ * Object::Pad appends the statements of a field to a class's), then one
+ * more list op, which takes the memory of the freed list when the
+ * interpreter is compiling (the slab hands its slot out again) and may take
+ * it at run time; the kids of the merged list and the name of the last op,
+ * as native code reads them. */
+XS(XS_PerlAPI_merged_lists) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        OP *first = newLISTOP(OP_LINESEQ, 0, newSVOP(OP_CONST, 0, newSViv(1)), NULL);
+        OP *second = newLISTOP(OP_LINESEQ, 0, newSVOP(OP_CONST, 0, newSViv(2)), NULL);
+        OP *list = op_append_list(OP_LINESEQ, first, second);
+        OP *after = newLISTOP(OP_LINESEQ, 0, NULL, NULL);
+        SV *out = sv_2mortal(newSVpvs(""));
+        OP *kid;
+        for (kid = cLISTOPx(list)->op_first; kid; kid = OpSIBLING(kid))
+            sv_catpvf(out, "%" SVf ",", SVfARG(cSVOPx_sv(kid)));
+        sv_catpv(out, OP_NAME(after));
+        op_free(after);
+        op_free(list);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
+/* folded_operand(): the negation of a constant, which the interpreter folds
+ * into a new constant, freeing the negation and the constant it was given
+ * (op_free), then three more constants, the first of which takes the memory
+ * of the freed operand when the interpreter is compiling; the name and
+ * value of each, as native code reads them. Folding runs the ops it folds
+ * and leaves PL_op and PL_curcop as a parser has them, which is put right
+ * for the sub that called this. */
+XS(XS_PerlAPI_folded_operand) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        OP *ops[4];
+        SV *out = sv_2mortal(newSVpvs(""));
+        int i;
+        ENTER;
+        SAVEVPTR(PL_op);
+        SAVEVPTR(PL_curcop);
+        ops[0] = newUNOP(OP_NEGATE, 0, newSVOP(OP_CONST, 0, newSViv(5)));
+        for (i = 1; i < 4; i++) ops[i] = newSVOP(OP_CONST, 0, newSViv(10 * i));
+        LEAVE;
+        for (i = 0; i < 4; i++) {
+            if (ops[i]->op_type == OP_CONST)
+                sv_catpvf(out, "%s%s:%" IVdf, i ? "," : "", OP_NAME(ops[i]),
+                          SvIV(cSVOPx_sv(ops[i])));
+            else
+                sv_catpvf(out, "%s%s", i ? "," : "", OP_NAME(ops[i]));
+        }
+        for (i = 0; i < 4; i++) op_free(ops[i]);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* stash_hek(object): croaks with the name of the object's class, in a
  * message made with HEKf. */
 XS(XS_PerlAPI_stash_hek) {
@@ -6052,6 +6112,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::fields_object", XS_PerlAPI_fields_object);
     newXS_deffile("PerlAPI::fields_of", XS_PerlAPI_fields_of);
     newXS_deffile("PerlAPI::statement_line", XS_PerlAPI_statement_line);
+    newXS_deffile("PerlAPI::merged_lists", XS_PerlAPI_merged_lists);
+    newXS_deffile("PerlAPI::folded_operand", XS_PerlAPI_folded_operand);
     newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
     newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
     newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
