@@ -3316,13 +3316,17 @@ static inline __attribute__((unused)) CV *goperl_newmysub(
 /* A key as perl shares it: here the key itself, laid out like perl's HEK
  * (NUL after the bytes, then the flags byte), for as long as the outermost
  * native call runs; the interpreter shares the key when it is given to it
- * (CvNAME_HEK_set). A negative length says the key is UTF-8. */
+ * (CvNAME_HEK_set). A negative length says the key is UTF-8. A key whose
+ * hash the caller does not give (0: the names of stashes, globs and subs)
+ * gets the interpreter's (PERL_HASH), which the interpreter's own keys
+ * have. */
 static HEK *goperl_hek_of(goperl_frame_t *f, const char *key, I32 len,
                           int utf8, U32 hash) __attribute__((unused));
 static HEK *goperl_hek_of(goperl_frame_t *f, const char *key, I32 len,
                           int utf8, U32 hash) {
     HEK *hek = (HEK *)goperl_arena_alloc(sizeof(HEK) + (size_t)len + 2);
     if (!hek) goperl_croakf(f, "share_hek: out of memory");
+    if (!hash) hash = goperl_key_hash(f, key, (uint64_t)len);
     hek->hek_hash = hash;
     hek->hek_len = len;
     memcpy(hek->hek_key, key, (size_t)len);

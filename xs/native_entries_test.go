@@ -29,6 +29,17 @@ func TestNativeEntriesOfAHashInPlace(t *testing.T) {
 	})
 }
 
+// PERL_HASH computes a key's hash as the interpreter's keys have it
+// (HeHASH): XS::Parse::Sublike finds a named parameter by comparing the two.
+// It was 0 while an entry's hash read 0 as well.
+func TestNativeKeyHashIsTheInterpretersHash(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"short and long keys", `my %h; join ",", map { PerlAPI::key_hash(\%h, $_) } "a", "named_param", "x" x 40, ""`, "same,same,same,same"},
+	})
+}
+
 // Entries a module makes of its own read through the macros of hv.h as
 // the interpreter's do: copies in a string buffer of the interpreter's
 // pointing at a key in the same buffer that is a scalar (Cpanel::JSON::XS

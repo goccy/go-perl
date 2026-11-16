@@ -4626,6 +4626,23 @@ XS(XS_PerlAPI_entry_same) {
     }
 }
 
+/* key_hash(hashref, key): whether the hash PERL_HASH computes for the key
+ * is the one the hash's entry for it has (HeHASH): "same" or "differ"; the
+ * entry is made if it is not there. XS::Parse::Sublike compares the two. */
+XS(XS_PerlAPI_key_hash) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "hashref, key");
+    {
+        STRLEN len;
+        const char *k = SvPV(ST(1), len);
+        HE *he = hv_fetch_ent((HV *)SvRV(ST(0)), ST(1), 1, 0);
+        U32 h;
+        PERL_HASH(h, k, len);
+        ST(0) = sv_2mortal(newSVpv(h == HeHASH(he) ? "same" : "differ", 0));
+        XSRETURN(1);
+    }
+}
+
 /* bucket_values(hashref): the entries the chains of the hash's buckets
  * hold, read where they lie: "<entries>:<sum of the values>:<keys whose
  * length and bytes agree with hv_iterkeysv's>", and every value is then
@@ -6812,6 +6829,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::entry_assign", XS_PerlAPI_entry_assign);
     newXS_deffile("PerlAPI::entry_same", XS_PerlAPI_entry_same);
     newXS_deffile("PerlAPI::bucket_values", XS_PerlAPI_bucket_values);
+    newXS_deffile("PerlAPI::key_hash", XS_PerlAPI_key_hash);
     newXS_deffile("PerlAPI::own_entries", XS_PerlAPI_own_entries);
     newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
     newXS_deffile("PerlAPI::caller_gimme_list", XS_PerlAPI_caller_gimme_list);

@@ -36,7 +36,8 @@ enum {
     GOPERL_INT_PERLIO_DEBUG = 21,
     GOPERL_INT_SV_PV_FREE = 22,
     GOPERL_INT_STATCACHE = 23,
-    GOPERL_INT_SAVE_FIELD = 31 /* a: an SV; b: field<<8 | kind: a save of the field */
+    GOPERL_INT_SAVE_FIELD = 31, /* a: an SV; b: field<<8 | kind: a save of the field */
+    GOPERL_INT_HASH = 32        /* s+b: a key's bytes -> its hash (PERL_HASH) */
 };
 /* The fields of a sub (INTERNAL CV_GET / CV_SET). */
 enum {
@@ -65,6 +66,10 @@ enum {
                   (uint64_t)(uint32_t)(sel) | ((uint64_t)(uint32_t)(hi) << 32), 0, 0)
 #define GOPERL_INTERNAL_S(f, sel, tok, b, s, slen)                          \
     goperl_do_op3((f), GOPERL_OP_INTERNAL, (uint64_t)(tok), (uint64_t)(b), (uint64_t)(sel), (const char *)(s), (uint64_t)(slen))
+/* PERL_HASH: the interpreter's hash of a key's bytes (see perl.h). */
+static U32 goperl_key_hash(goperl_frame_t *f, const char *key, uint64_t len) {
+    return (U32)GOPERL_INTERNAL_S(f, GOPERL_INT_HASH, 0, len, key, len);
+}
 
 
 /* What this SDK keeps per interpreter for the compiler's structures (the

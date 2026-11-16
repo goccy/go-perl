@@ -7037,9 +7037,16 @@ static struct mro_meta *goperl_hvmrometa(goperl_frame_t *f, HV *hv) {
 }
 #define HvMROMETA(hv) goperl_hvmrometa(_gof, (HV *)(hv))
 
-/* The SDK's hv/he ops take the key bytes and ignore precomputed hashes, so
- * prehashing collapses to zero. */
-#define PERL_HASH(hash, str, len) ((hash) = 0)
+/* The hash of a key, as the keys of the interpreter's hashes have it
+ * (HeHASH, HEK_HASH, SvSHARED_HASH): a module compares one it computed with
+ * those (XS::Parse::Sublike finds named parameters by hash). The
+ * interpreter computes it, with its hash function and seed. The hash
+ * operations take the key's bytes and compute it themselves, whatever hash
+ * a module hands them. */
+static U32 goperl_key_hash(goperl_frame_t *f, const char *key, uint64_t len)
+    __attribute__((unused)); /* goperl_compiler.h */
+#define PERL_HASH(hash, str, len) \
+    ((hash) = goperl_key_hash(_gof, (const char *)(str), (uint64_t)(len)))
 
 /* Compiled-regex test: what SvRX finds, a regexp or a reference to one
  * (perl's get_re_arg, which runs get magic). */
