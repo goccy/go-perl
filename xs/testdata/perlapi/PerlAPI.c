@@ -3014,6 +3014,61 @@ XS(XS_PerlAPI_constant_calls) {
     }
 }
 
+/* cop_line_call(n, code): sets the line of the statement that calls it
+ * (PL_curcop) to n, as Devel::Declare's skipspace moves PL_compiling's line
+ * on, then calls the code, if any, and returns what it returns. */
+XS(XS_PerlAPI_cop_line_call) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "n, code");
+    {
+        SV *code = ST(1);
+        SV *r = &PL_sv_undef;
+        CopLINE_set(PL_curcop, (line_t)SvUV(ST(0)));
+        if (SvOK(code)) {
+            PUSHMARK(SP);
+            PUTBACK;
+            call_sv(code, G_SCALAR);
+            SPAGAIN;
+            r = sv_mortalcopy(POPs);
+            PUTBACK;
+        }
+        ST(0) = r;
+        XSRETURN(1);
+    }
+}
+
+/* rx_scan(qr, string): the matches of the regexp in a copy of the string
+ * in memory of this module's, found as Lucy's RegexTokenizer finds them:
+ * the regexp's body taken once (SvANY), pregexec in a loop from where the
+ * last match ended, the offsets read from the body after each match.
+ * "start-end" of each match, at most 20. */
+XS(XS_PerlAPI_rx_scan) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "qr, string");
+    {
+        REGEXP *rx = SvRX(ST(0));
+        regexp *body = (regexp *)SvANY(rx);
+        STRLEN len;
+        const char *src = SvPV(ST(1), len);
+        char *buf = (char *)malloc(len + 1);
+        char *arg = buf, *end = buf + len;
+        SV *out = newSVpvs("");
+        int n = 0;
+        memcpy(buf, src, len);
+        buf[len] = 0;
+        while (n < 20 && pregexec(rx, arg, end, arg, 1, ST(1), 1)) {
+            char *const s0 = arg + body->offs[0].start;
+            char *const e0 = arg + body->offs[0].end;
+            sv_catpvf(out, "%s%d-%d", n++ ? "," : "", (int)(s0 - buf), (int)(e0 - buf));
+            if (e0 <= arg) break;
+            arg = e0;
+        }
+        free(buf);
+        ST(0) = sv_2mortal(out);
+        XSRETURN(1);
+    }
+}
+
 /* on_own_stack(code): calls the code with G_EVAL on a stack of its own
  * (PUSHSTACKi(PERLSI_MAGIC) .. POPSTACK), as Text::Stencil and core's
  * magic_methcall do, and returns $@ */
@@ -6907,6 +6962,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::targ_calls", XS_PerlAPI_targ_calls);
     newXS_deffile("PerlAPI::eval_call", XS_PerlAPI_eval_call);
     newXS_deffile("PerlAPI::on_own_stack", XS_PerlAPI_on_own_stack);
+    newXS_deffile("PerlAPI::rx_scan", XS_PerlAPI_rx_scan);
+    newXS_deffile("PerlAPI::cop_line_call", XS_PerlAPI_cop_line_call);
     newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);
     newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
     newXS_deffile("PerlAPI::sorted_ivs", XS_PerlAPI_sorted_ivs);

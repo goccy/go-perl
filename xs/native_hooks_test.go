@@ -78,6 +78,36 @@ func TestNativePeepholeHook(t *testing.T) {
 	})
 }
 
+// What native code writes into an op reaches the interpreter before Perl
+// code runs, as on perl, where the op is the one written: Perl code native
+// code calls, and Perl code an XSUB returns to while native code further out
+// is still running (Devel::Declare's handler reads the line of
+// PL_compiling its toke_skipspace moved on). Before, the writes reached the
+// interpreter only when the outermost native call returned.
+func TestNativeOpWritesReachPerlCodeAtOnce(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"code native code calls", `PerlAPI::cop_line_call(4242, sub { (caller(0))[2] })`, "4242"},
+		{"the caller of an XSUB inside native code", `PerlAPI::cop_line_call(1, sub { eval { PerlAPI::cop_line_call(4242, undef), die "x" }; $@ =~ /line (\d+)/ ? $1 : "none" })`, "4242"},
+		{"the outermost caller", `eval { PerlAPI::cop_line_call(4242, undef), die "x" }; $@ =~ /line (\d+)/ ? $1 : "none"`, "4242"},
+	})
+}
+
+// The body of a regexp is one struct for the regexp's life, as on perl:
+// code that takes it once and matches in a loop reads each match's offsets
+// there (Lucy's RegexTokenizer). Before, the body was a copy made when it
+// was taken: the offsets never moved, the loop never ended, and Lucy's
+// tokenizer test ate the memory until it was killed.
+func TestNativeRegexpBodyFollowsTheMatches(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"words", `PerlAPI::rx_scan(qr/\w+/, "ab cd efg")`, "0-2,3-5,6-9"},
+		{"any character", `PerlAPI::rx_scan(qr/./, "a b")`, "0-1,1-2,2-3"},
+	})
+}
+
 // A callback native code runs on a stack of its own (PUSHSTACKi) has no
 // context of the code around the native call: a `last` in it finds no loop
 // to leave and dies, which the call's G_EVAL catches, and the loop around

@@ -2657,6 +2657,25 @@ typedef struct regexp {
     STRLEN wraplen;
 } regexp;
 
+/* The body of a regexp (ReANY, SvANY) is one struct, as perl's is: code
+ * keeps the pointer across matches and reads the offsets of each match there
+ * (Lucy's RegexTokenizer takes it once and runs pregexec in a loop). So a
+ * regexp has one body for the call of native code, in the arena as the
+ * other shadows of the call are; ReANY fills it again from the interpreter,
+ * and so does every match of that regexp made through the perl API. */
+typedef struct goperl_rxbody {
+    struct goperl_rxbody *next;
+    uint64_t tok;
+    U32 cap; /* the groups r has room for (nparens + 1) */
+    regexp r; /* then the offsets of the groups */
+} goperl_rxbody_t;
+#define goperl_rxbodies_v (*(goperl_rxbody_t **)&GOPERL_SHARED->rx_bodies)
+static goperl_rxbody_t *goperl_rxbody_find(uint64_t tok) __attribute__((unused));
+static goperl_rxbody_t *goperl_rxbody_find(uint64_t tok) {
+    for (goperl_rxbody_t *b = goperl_rxbodies_v; b; b = b->next)
+        if (b->tok == tok) return b;
+    return 0;
+}
 static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) __attribute__((unused));
 static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
@@ -2664,9 +2683,21 @@ static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
     if (!w) return 0;
     goperl_gword_t c[20];
     memcpy(c, w, sizeof c);
-    regexp *r = (regexp *)goperl_arena_alloc(
-        sizeof(regexp) + sizeof(regexp_paren_pair) * ((size_t)c[4] + 1));
-    if (!r) goperl_croakf(f, "Out of memory!");
+    goperl_rxbody_t *body = goperl_rxbody_find(GOPERL_TOK(rx));
+    if (!body || body->cap < (U32)c[4] + 1) {
+        /* a body too small for the groups of a regexp now at the address
+         * stays where it is: code may still hold it */
+        const size_t n = sizeof(goperl_rxbody_t) + sizeof(regexp_paren_pair) * ((size_t)c[4] + 1);
+        goperl_rxbody_t *nb = (goperl_rxbody_t *)goperl_arena_alloc(n);
+        if (!nb) goperl_croakf(f, "Out of memory!");
+        memset(nb, 0, n);
+        nb->tok = GOPERL_TOK(rx);
+        nb->cap = (U32)c[4] + 1;
+        nb->next = goperl_rxbodies_v;
+        goperl_rxbodies_v = nb;
+        body = nb;
+    }
+    regexp *r = &body->r;
     /* an engine is known by its address in the interpreter */
     r->engine = (const regexp_engine *)(uintptr_t)c[0];
     r->mother_re = (REGEXP *)GOPERL_SV(c[1]);
@@ -2805,7 +2836,10 @@ static I32 goperl_pregexec(goperl_frame_t *f, REGEXP *rx, char *stringarg,
     w[3] = (goperl_gword_t)(int64_t)minend;
     w[4] = GOPERL_TOK(screamer);
     w[5] = nosave;
-    return (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), sizeof w, (uint64_t)(GOPERL_RX_EXEC), (const char *)w, sizeof w);
+    const I32 r = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), sizeof w, (uint64_t)(GOPERL_RX_EXEC), (const char *)w, sizeof w);
+    /* the body code holds says what this match found */
+    if (goperl_rxbody_find(GOPERL_TOK(rx))) (void)goperl_reany(f, rx);
+    return r;
 }
 #define pregexec(rx, stringarg, strend, strbeg, minend, screamer, nosave)   \
     goperl_pregexec(_gof, (REGEXP *)(rx), (char *)(stringarg),              \
@@ -4033,7 +4067,10 @@ static __attribute__((unused)) I32 goperl_regexec_flags(goperl_frame_t *f, REGEX
     w[4] = GOPERL_TOK(screamer);
     w[5] = flags;
     w[6] = 0;
-    return (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), sizeof w, (uint64_t)(GOPERL_RX_EXEC_FLAGS), (const char *)w, sizeof w);
+    const I32 r = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), sizeof w, (uint64_t)(GOPERL_RX_EXEC_FLAGS), (const char *)w, sizeof w);
+    /* the body code holds says what this match found */
+    if (goperl_rxbody_find(GOPERL_TOK(rx))) (void)goperl_reany(f, rx);
+    return r;
 }
 #define CALLREGEXEC(rx, stringarg, strend, strbeg, minend, sv, data, flags)          \
     goperl_regexec_flags(_gof, (REGEXP *)(rx), (char *)(stringarg), (char *)(strend), \

@@ -1766,6 +1766,9 @@ typedef struct goperl_shared {
     uint64_t plshadow_live[2]; /* the slots of plshadow handed out, a bit
                                 * each: what the flush before every
                                 * operation looks at */
+    void *rx_bodies; /* goperl_rxbody_t: the bodies of regexps ReANY
+                      * handed out in this call of native code, in the
+                      * arena (goperl_perlapi.h) */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -4835,12 +4838,15 @@ static void goperl_xs_leave(goperl_frame_t *f) {
     /* a restored location can be the slot of an interpreter variable
      * (SAVEI32(PL_statusvalue)): the restored value is the interpreter's */
     goperl_plshadow_flush(f);
+    /* what was written into op shadows: Perl code runs next, the caller's
+     * even when native code called it (Devel::Declare's handler reads the
+     * line of PL_compiling its toke_skipspace moved on) */
+    goperl_optree_flush(f);
     if (--goperl_xs_depth_v <= 0) {
         goperl_xs_depth_v = 0;
         goperl_lvslot_flush(f);
         goperl_lvslot_reset();
         goperl_arena_free_all(); /* context-stack shadows */
-        goperl_optree_flush(f);  /* what was written into op shadows */
         goperl_opreg_clear();
         goperl_pads_rest(f);
         goperl_hooks_rest(f);
@@ -5222,6 +5228,8 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
         memcpy(buf + o, &tok, 8);
         o += 8;
     }
+    /* the code called reads the ops as native code left them */
+    goperl_optree_flush(f);
     /* -> the mortal array of the results; second: died<<63 | count */
     uint64_t second = 0;
     const uint64_t avtok =
@@ -6531,6 +6539,7 @@ static void goperl_arena_free_all(void) {
     goperl_si_cache_v = 0;
     goperl_si_gen_v = 0;
     goperl_pio_views_v = 0; /* they were in the arena */
+    GOPERL_SHARED->rx_bodies = 0; /* so were they */
 }
 
 /* ---- entries of hashes (see the HE/HEK typedefs near the top) ---------- */
@@ -7923,6 +7932,8 @@ static PerlIO *goperl_pio_import(goperl_frame_t *f, FILE *fp, const char *mode) 
 /* eval_sv: results delivered like call_sv (the guest packs them into a
  * mortal AV; the SDK pushes them onto the host stack model). */
 static I32 goperl_eval_sv(goperl_frame_t *f, SV *sv, I32 flags) {
+    /* the code run reads the ops as native code left them */
+    goperl_optree_flush(f);
     /* -> the mortal array of the results; second: died<<63 | count */
     uint64_t second = 0;
     const uint64_t avtok = goperl_do_opx(f, GOPERL_OP_EVAL_SV, GOPERL_TOK(sv), 0,
@@ -8637,6 +8648,7 @@ static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
     GOPERL_SV(goperl_op0(GOPERL_OP_SAVE_SCALAR, GOPERL_TOK(gv), 0))
 #define eval_pv(code, croak_on_err) \
     ({ GOPERL_ONCE(goperl_eval_pv_code_, code); \
+       goperl_optree_flush(_gof); /* the code run reads the ops as native code left them */ \
        GOPERL_SV(goperl_ops(GOPERL_OP_EVAL_PV, (uint64_t)(int64_t)(croak_on_err), 0, (goperl_eval_pv_code_), strlen(goperl_eval_pv_code_))); })
 #define newCONSTSUB(stash, name, sv) \
     ({ GOPERL_ONCE(goperl_newCONSTSUB_name_, name); \
