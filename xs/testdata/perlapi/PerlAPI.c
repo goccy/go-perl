@@ -3122,6 +3122,196 @@ XS(XS_PerlAPI_on_own_stack) {
     }
 }
 
+/* scope_cleanup(code): runs the code when the scope of the caller ends, as
+ * Scope::Cleanup does: the destructor calls it on a stack of its own
+ * (PUSHSTACK .. POPSTACK), without G_EVAL. The scope may end in the middle
+ * of an operation of the interpreter: a sub's return, with the values it
+ * returns on the stack below. */
+static void PerlAPI_run_cleanup(pTHX_ void *arg) {
+    SV *const code = (SV *)arg;
+    dSP;
+    PUSHSTACK;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    call_sv(code, G_VOID | G_DISCARD);
+    SPAGAIN;
+    FREETMPS;
+    LEAVE;
+    POPSTACK;
+    SvREFCNT_dec(code);
+}
+XS(XS_PerlAPI_scope_cleanup) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    LEAVE;
+    SAVEDESTRUCTOR_X(PerlAPI_run_cleanup, newSVsv(ST(0)));
+    ENTER;
+    XSRETURN_EMPTY;
+}
+
+/* cleanup_calls(sub): gives the sub a call checker that compiles a call of
+ * it with one argument into a custom op of this module's, as
+ * Scope::Cleanup's establish_cleanup is compiled: the op's pp function
+ * takes the code off the stack and saves a destructor that runs it
+ * (scope_cleanup's) in the scope the op runs in. */
+static OP *PerlAPI_pp_establish_cleanup(pTHX) {
+    dSP;
+    SV *const code = newSVsv(POPs);
+    SAVEDESTRUCTOR_X(PerlAPI_run_cleanup, code);
+    if (GIMME_V != G_VOID) PUSHs(&PL_sv_undef);
+    RETURN;
+}
+static XOP PerlAPI_cleanup_xop;
+static OP *PerlAPI_compile_to_cleanup(pTHX_ OP *entersubop, GV *namegv, SV *protosv) {
+    OP *pushop, *argop, *cvop, *estop;
+    entersubop = ck_entersub_args_proto(entersubop, namegv, protosv);
+    pushop = cUNOPx(entersubop)->op_first;
+    if (!OpHAS_SIBLING(pushop)) pushop = cUNOPx(pushop)->op_first;
+    argop = OpSIBLING(pushop);
+    if (!argop || !(cvop = OpSIBLING(argop)) || OpHAS_SIBLING(cvop)) return entersubop;
+    OpMORESIB_set(pushop, cvop);
+    OpLASTSIB_set(argop, NULL);
+    op_free(entersubop);
+    NewOpSz(0, estop, sizeof(UNOP));
+    estop->op_type = OP_CUSTOM;
+    estop->op_ppaddr = PerlAPI_pp_establish_cleanup;
+    cUNOPx(estop)->op_flags = OPf_KIDS;
+    cUNOPx(estop)->op_first = argop;
+    OpLASTSIB_set(argop, estop);
+    PL_hints |= HINT_BLOCK_SCOPE;
+    return estop;
+}
+XS(XS_PerlAPI_cleanup_calls) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sub");
+    {
+        static int registered;
+        CV *const target = (CV *)SvRV(ST(0));
+        if (!registered) {
+            registered = 1;
+            XopENTRY_set(&PerlAPI_cleanup_xop, xop_name, "perlapi_cleanup");
+            XopENTRY_set(&PerlAPI_cleanup_xop, xop_desc, "a cleanup of the scope");
+            XopENTRY_set(&PerlAPI_cleanup_xop, xop_class, OA_UNOP);
+            Perl_custom_op_register(aTHX_ PerlAPI_pp_establish_cleanup, &PerlAPI_cleanup_xop);
+        }
+        cv_set_call_checker(target, PerlAPI_compile_to_cleanup, (SV *)target);
+        XSRETURN_EMPTY;
+    }
+}
+
+/* watch_with(ref, get, set, free): magic whose hooks call the Perl code
+ * given for each (undef for none) as Variable::Magic's do: inside a scope,
+ * on a stack of their own (PUSHSTACKi(PERLSI_MAGIC) .. POPSTACK), with a
+ * reference to the variable, in scalar context and G_EVAL; a die in the
+ * code is the hook's (croak(NULL)), and the code's number is the hook's
+ * answer. The hooks run in the middle of an operation of the interpreter:
+ * a read or a write of the variable, or its free. */
+static I32 PerlAPI_watch_call_sv(pTHX_ SV *code, I32 flags) {
+    SV *old_err = NULL;
+    I32 ret;
+    if (SvTRUE(ERRSV)) {
+        old_err = newSVsv(ERRSV);
+        sv_setsv(ERRSV, &PL_sv_undef);
+    }
+    ret = call_sv(code, flags | G_EVAL);
+    if (SvTRUE(ERRSV)) {
+        SvREFCNT_dec(old_err);
+        croak(NULL);
+    }
+    if (old_err) {
+        sv_setsv(ERRSV, old_err);
+        SvREFCNT_dec(old_err);
+    }
+    return ret;
+}
+static int PerlAPI_watch_hook(pTHX_ SV *sv, MAGIC *mg, I32 which) {
+    SV **code = av_fetch((AV *)mg->mg_obj, which, 0);
+    SV *svr;
+    int ret = 0;
+    dSP;
+    if (!code || !SvOK(*code)) return 0;
+    if (which == 2) SvREFCNT_inc_simple_void(sv); /* survives the free */
+    ENTER;
+    SAVETMPS;
+    PUSHSTACKi(PERLSI_MAGIC);
+    PUSHMARK(SP);
+    EXTEND(SP, 1);
+    PUSHs(sv_2mortal(newRV_inc(sv)));
+    PUTBACK;
+    PerlAPI_watch_call_sv(aTHX_ *code, G_SCALAR);
+    SPAGAIN;
+    svr = POPs;
+    if (SvOK(svr)) ret = (int)SvIV(svr);
+    PUTBACK;
+    POPSTACK;
+    FREETMPS;
+    LEAVE;
+    if (which == 2) --SvREFCNT(sv);
+    return ret;
+}
+static int PerlAPI_watch_get(pTHX_ SV *sv, MAGIC *mg) { return PerlAPI_watch_hook(aTHX_ sv, mg, 0); }
+static int PerlAPI_watch_set_hook(pTHX_ SV *sv, MAGIC *mg) { return PerlAPI_watch_hook(aTHX_ sv, mg, 1); }
+static int PerlAPI_watch_free(pTHX_ SV *sv, MAGIC *mg) { return PerlAPI_watch_hook(aTHX_ sv, mg, 2); }
+static MGVTBL PerlAPI_watch_with_vtbl = {PerlAPI_watch_get, PerlAPI_watch_set_hook, NULL, NULL,
+                                       PerlAPI_watch_free, NULL, NULL, NULL};
+XS(XS_PerlAPI_watch_with) {
+    dXSARGS;
+    if (items != 4) croak_xs_usage(cv, "ref, get, set, free");
+    {
+        AV *const codes = newAV();
+        av_push(codes, newSVsv(ST(1)));
+        av_push(codes, newSVsv(ST(2)));
+        av_push(codes, newSVsv(ST(3)));
+        sv_magicext(SvRV(ST(0)), (SV *)codes, PERL_MAGIC_ext, &PerlAPI_watch_with_vtbl, NULL, 0);
+        SvREFCNT_dec((SV *)codes);
+        XSRETURN_EMPTY;
+    }
+}
+
+/* croak_after_own_stack(code): calls the code on a stack of its own, then
+ * croaks inside XCPT_TRY with a destructor of its scope saved: the
+ * destructor notes whether the function was still running when it ran
+ * (guard_seen: 1), as it is when perl leaves the scopes before it jumps to
+ * the catch point, or not (0). */
+static int PerlAPI_guard_live;
+static int PerlAPI_guard_seen = -1;
+static void PerlAPI_note_live(pTHX_ void *arg) {
+    PERL_UNUSED_ARG(arg);
+    PerlAPI_guard_seen = PerlAPI_guard_live;
+}
+XS(XS_PerlAPI_croak_after_own_stack) {
+    dXSARGS;
+    dXCPT;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        SV *const code = ST(0);
+        PerlAPI_guard_seen = -1;
+        XCPT_TRY_START {
+            ENTER;
+            SAVEDESTRUCTOR_X(PerlAPI_note_live, NULL);
+            PerlAPI_guard_live = 1;
+            PUSHSTACKi(PERLSI_MAGIC);
+            PUSHMARK(SP);
+            PUTBACK;
+            call_sv(code, G_DISCARD | G_EVAL);
+            SPAGAIN;
+            POPSTACK;
+            SPAGAIN;
+            croak("failed after the callback");
+        } XCPT_TRY_END
+        PerlAPI_guard_live = 0;
+        XCPT_CATCH { XCPT_RETHROW; }
+        XSRETURN_EMPTY;
+    }
+}
+XS(XS_PerlAPI_guard_seen) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PerlAPI_guard_seen));
+    XSRETURN(1);
+}
+
 /* eval_call(code): calls the code with G_EVAL, as Text::Stencil calls a
  * row callback, and reports whether it died by looking at $@ without
  * running its overloading: "died with a reference", "died", or "returned". */
@@ -6997,6 +7187,11 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::targ_calls", XS_PerlAPI_targ_calls);
     newXS_deffile("PerlAPI::eval_call", XS_PerlAPI_eval_call);
     newXS_deffile("PerlAPI::on_own_stack", XS_PerlAPI_on_own_stack);
+    newXS_deffile("PerlAPI::scope_cleanup", XS_PerlAPI_scope_cleanup);
+    newXS_deffile("PerlAPI::cleanup_calls", XS_PerlAPI_cleanup_calls);
+    newXS_deffile("PerlAPI::watch_with", XS_PerlAPI_watch_with);
+    newXS_deffile("PerlAPI::croak_after_own_stack", XS_PerlAPI_croak_after_own_stack);
+    newXS_deffile("PerlAPI::guard_seen", XS_PerlAPI_guard_seen);
     newXS_deffile("PerlAPI::rx_scan", XS_PerlAPI_rx_scan);
     newXS_deffile("PerlAPI::cop_line_call", XS_PerlAPI_cop_line_call);
     newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);

@@ -122,6 +122,59 @@ func TestNativeCallbackOnAStackOfItsOwn(t *testing.T) {
 	})
 }
 
+// Native code that runs in the middle of an operation of the interpreter
+// (a destructor at a sub's return, a magic hook on a read, a write or a
+// free) and calls Perl code on a stack of its own leaves the interpreter's
+// stack as it found it: the values a sub returns, and those an expression
+// has computed so far, are still there afterwards.
+func TestNativeCallbackOnAStackOfItsOwnInsideAnOperation(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a scope's cleanup at a sub's return", `sub sc1 { PerlAPI::scope_cleanup(sub { my @x = (7, 8, 9); my %h = (a => 1); @x }); return (1, 2, 3) } join ",", sc1()`, "1,2,3"},
+		{"a cleanup that returns an array", `sub sc2 { my @a = (4, 5); PerlAPI::scope_cleanup(sub { my @y = (1) x 20; @y }); return @a } join ",", sc2(), sc2()`, "4,5,4,5"},
+		{"a cleanup op's at a sub's return", `sub est ($); PerlAPI::cleanup_calls(\&est); my @log; my $f = eval q{ sub { my @a = (4, 5); est(sub { my @y = (1) x 20; push @log, "cleanup" }); return @a } } or die $@; join ",", $f->(), $f->(), @log`, "4,5,4,5,cleanup,cleanup"},
+		{"a cleanup op's at a block's end", `sub est2 ($); PerlAPI::cleanup_calls(\&est2); my @log; my $f = eval q{ sub { my @r = map { est2(sub { my @y = (2) x 9; push @log, "c" }); $_ * 2 } 1 .. 3; @r } } or die $@; join ",", $f->(), @log`, "2,4,6,c,c,c"},
+		{"a get hook in a list", `my $v = 5; PerlAPI::watch_with(\$v, sub { my @t = (1 .. 20); 0 }, undef, undef); sub wg { return (1, $v, 2, $v + 1, $v) } join ",", wg()`, "1,5,2,6,5"},
+		{"a set hook in a list", `my $v = 5; my @seen; PerlAPI::watch_with(\$v, undef, sub { my @t = (1 .. 20); push @seen, ${$_[0]}; 0 }, undef); sub ws { return (1, ($v = 6), 2, ($v = 7)) } join ",", ws(), @seen`, "1,7,2,7,6,7"},
+		{"a free hook at a sub's return", `my @log; sub wf { my $x = 1; PerlAPI::watch_with(\$x, undef, undef, sub { my @t = (1 .. 20); push @log, "free"; 0 }); return (1, 2, 3) } join ",", wf(), @log`, "1,2,3,free"},
+	})
+}
+
+// A native call whose callback ran on a stack of its own, and called native
+// code there, is still known to be running afterwards: when it croaks, the
+// scopes it opened are left before the jump to its catch point, while it
+// runs, as on perl. Before, the native call made from the callback's stack
+// took the running calls below it for ones a die had left, and forgot them.
+func TestNativeCallRunsOnAfterACallbackOnAStackOfItsOwn(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a callback of Perl code", `eval { PerlAPI::croak_after_own_stack(sub { 1 }) }; ($@ =~ /^(failed after the callback)/)[0] . ":" . PerlAPI::guard_seen()`, "failed after the callback:1"},
+		{"a callback that calls native code", `eval { PerlAPI::croak_after_own_stack(sub { PerlAPI::big() }) }; ($@ =~ /^(failed after the callback)/)[0] . ":" . PerlAPI::guard_seen()`, "failed after the callback:1"},
+		{"under another native call", `my $r; PerlAPI::callback_then_mark(sub { eval { PerlAPI::croak_after_own_stack(sub { PerlAPI::big() }) }; $r = ($@ =~ /^(failed after the callback)/)[0] . ":" . PerlAPI::guard_seen() }, 1); $r`, "failed after the callback:1"},
+	})
+}
+
+// When the interpreter dies inside an operation of a native call and the
+// eval that catches it is further out, the interpreter has left the scopes
+// down to that eval before the native call ends, as perl does; nothing more
+// is left as the call ends, also when the call itself was made from a
+// callback of another native call (an overloading native code runs, as
+// Text::Stencil's render does when it stringifies a field). Before, the
+// scopes of the native call below were left as well: a `local` was undone
+// while its scope still ran, or the interpreter went on with the stacks of
+// the outer call taken down.
+func TestNativeCallLeftByADieOfTheInterpreter(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const dies = `{ package OvDies; use overload '""' => sub { die "boom\n" }, fallback => 1 } `
+	runEvalCases(t, p, []evalCase{
+		{"a native call under another", dies + `our $lx = "outer"; my @log; PerlAPI::callback_then_mark(sub { local $lx = "inner"; my @keep = (1, 2); eval { PerlAPI::show(bless({}, 'OvDies'), 3) }; push @log, $lx, @keep, ($@ =~ /^boom/ ? "caught" : "[$@]") }, 1); join ",", @log, $lx`, "inner,1,2,caught,outer"},
+		{"a native call in an overloading of another's", dies + `{ package OvCatches; use overload '""' => sub { my @t = (1 .. 5); eval { PerlAPI::show(bless({}, 'OvDies'), 3) }; $main::caught = $@; "X" }, fallback => 1 } sub ovc { my @keep = (7, 8); my $s = PerlAPI::show(bless({}, 'OvCatches'), 3); join ",", @keep, ($main::caught =~ /^boom/ ? "caught" : "[$main::caught]") } join ";", ovc(), ovc()`, "7,8,caught;7,8,caught"},
+	})
+}
+
 // A call native code makes with G_EVAL leaves $@ to the caller, as perl's
 // call_sv does: an exception object's bool overloading does not run on the
 // way (Text::Stencil counts that it does not). Before, the interpreter asked
