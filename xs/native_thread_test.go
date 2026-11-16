@@ -176,40 +176,6 @@ func TestNativeThreadReentryAndCancellation(t *testing.T) {
 	}
 }
 
-// A fork child runs its program on a thread of its own, the same one for
-// all of its calls, not the parent's.
-func TestNativeForkChildKeepsItsThread(t *testing.T) {
-	p := threadStatePerl(t, perl.Config{Fork: true})
-	got := evalStr(t, p, `
-		pipe(my $r, my $w) or die "pipe: $!";
-		my $parent = ThreadState::thread_id();
-		my $pid = fork() // die "fork: $!";
-		if (!$pid) {
-			close $r;
-			my %t; my $lost = 0;
-			for my $i (1 .. 50) {
-				ThreadState::tls_set($i);
-				select(undef, undef, undef, 0.001);
-				my @x = map { [$_] } 1 .. 2000;
-				$t{ThreadState::thread_id()}++;
-				$lost++ unless ThreadState::tls_get() == $i;
-			}
-			print $w join(",", keys %t), " $lost\n";
-			close $w;
-			exit 0;
-		}
-		close $w;
-		my $line = <$r>;
-		waitpid $pid, 0;
-		chomp $line;
-		my ($tids, $lost) = split / /, $line;
-		my @t = split /,/, $tids;
-		join ",", scalar(@t), ($t[0] eq $parent ? "parent's" : "own"), $lost, $? >> 8`)
-	if got != "1,own,0,0" {
-		t.Fatalf("fork child: got %q, want one thread of its own, nothing lost, exit 0", got)
-	}
-}
-
 // BenchmarkInstanceThreadEval measures an Eval of a constant: on an
 // instance with native code, which hands the call to its thread and waits,
 // and on one without, which runs it on the caller's goroutine. The

@@ -101,7 +101,9 @@ func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
 // SetMagicLocalHandler installs the hook for `local` on an SV with
 // host-side magic: id is the anchor of the variable, sv the token of the SV
 // that takes its place for the scope and is to get the magic `local` gives.
-func (p *Perl) SetMagicLocalHandler(fn func(id uint32, sv uint64)) error {
+// The hook's result is the response: [1], or [0]+message for `local` to die
+// with.
+func (p *Perl) SetMagicLocalHandler(fn func(id uint32, sv uint64) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
 	}
@@ -495,7 +497,7 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		local := d.p.magicLocal
 		d.p.hookMu.RUnlock()
 		if local != nil && len(req) >= 16 {
-			local(uint32(binary.LittleEndian.Uint64(req)), binary.LittleEndian.Uint64(req[8:]))
+			return local(uint32(binary.LittleEndian.Uint64(req)), binary.LittleEndian.Uint64(req[8:])), nil
 		}
 		return []byte{1}, nil
 	}

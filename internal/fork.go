@@ -94,11 +94,18 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 		return nil, err
 	}
 
-	if !p.family.start(c, pid, p.HasThread(), exited) {
+	if !p.family.start(c, pid, exited) {
 		c.discard()
 		return nil, errFamilyOver
 	}
 	return c.signalForkChild, nil
+}
+
+// ForkChild reports whether the instance is a pseudo-process: one that a
+// fork of another instance made (forkGuest), whose family's first process
+// is that other instance or one it was forked from.
+func (p *Perl) ForkChild() bool {
+	return p.family != nil && p.family.origin != p
 }
 
 // runForkChild runs the child's program to its end, tears the instance

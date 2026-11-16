@@ -153,7 +153,7 @@ type Perl struct {
 	ppHook func(req []byte) []byte
 	// magicLocal gives the SV `local` puts in a variable's place the
 	// host-side magic of the variable (reserved callback method id -8).
-	magicLocal func(id uint32, sv uint64)
+	magicLocal func(id uint32, sv uint64) []byte
 	// dtorFire handles save-stack destructors registered by native modules
 	// (reserved callback method id -4); its result is the response.
 	dtorFire func(id uint32) []byte
@@ -226,11 +226,9 @@ type forkFamily struct {
 }
 
 // start runs child's program as the pseudo-process pid, on a goroutine of
-// its own, which with ownThread is the child's thread for its life (the
-// parent runs native code: see instanceThread); exited is told the status
-// it ends with. It reports false, and starts nothing, when the family is
-// over.
-func (f *forkFamily) start(child *Perl, pid int32, ownThread bool, exited func(status int32)) bool {
+// its own; exited is told the status it ends with. It reports false, and
+// starts nothing, when the family is over.
+func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.over {
@@ -241,9 +239,7 @@ func (f *forkFamily) start(child *Perl, pid int32, ownThread bool, exited func(s
 	}
 	f.running[child] = struct{}{}
 	go func() {
-		child.keepForkChildThread(ownThread)
 		status := child.runForkChild(pid)
-		child.leaveForkChildThread()
 		f.mu.Lock()
 		delete(f.running, child)
 		f.mu.Unlock()
@@ -859,7 +855,7 @@ func (p *Perl) releaseHostState() error {
 	if xsDynamicLoader != nil && xsDynamicLoader.Release != nil {
 		xsDynamicLoader.Release(p)
 	}
-	first := p.family == nil || p.family.origin == p
+	first := !p.ForkChild()
 	if !first && p.family.isOver() {
 		// A pseudo-process that goes because the family is over takes its
 		// commands with it. It does that itself, here, before its process

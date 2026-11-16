@@ -422,6 +422,9 @@ type state struct {
 // __goperl_shared_clone); scope bookkeeping starts empty: the native
 // activations it belongs to exist only in the original.
 func (s *state) adoptClone(clone *internal.Perl) error {
+	if clone.ForkChild() {
+		return s.adoptForkChild(clone)
+	}
 	if err := memoryAboveCeiling(clone); err != nil {
 		return err
 	}
@@ -870,6 +873,9 @@ func (e *plainLibraryError) Unwrap() error { return e.err }
 // loads every module that way, and a module built on another one's library
 // (Test::Catch on XS::libcatch) needs it.
 func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
+	if p.ForkChild() {
+		return 0, errors.New(unavailable(path, 0))
+	}
 	s, err := loaderState(p)
 	if err != nil {
 		return 0, err
@@ -891,6 +897,9 @@ func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 // librarySymbol is DynaLoader's dl_find_symbol: the address of the symbol
 // in the library whose handle dl_load_file returned.
 func librarySymbol(p *internal.Perl, lib uint64, name string) (uint64, error) {
+	if p.ForkChild() {
+		return 0, errors.New(unavailable(name, 0))
+	}
 	s := stateFor(p)
 	handle := uintptr(lib)
 	s.mu.Lock()
@@ -912,6 +921,9 @@ func librarySymbol(p *internal.Perl, lib uint64, name string) (uint64, error) {
 // installXSub is DynaLoader's dl_install_xsub: the function at the address
 // dl_find_symbol returned becomes the Perl sub name.
 func installXSub(p *internal.Perl, name string, sym uint64) error {
+	if p.ForkChild() {
+		return errors.New(unavailable(name, 0))
+	}
 	s := stateFor(p)
 	fn := uintptr(sym)
 	s.mu.Lock()
@@ -1584,7 +1596,7 @@ func (s *state) callSvtFree(sv uint64, mg uintptr) {
 // every other entry is attached to nsv again with sv_magicext, which gives
 // nsv a chain and an anchor of its own. The interpreter then calls set
 // magic on nsv, and frees its magic with it when the scope ends.
-func (s *state) magicLocalized(id uint32, nsv uint64) {
+func (s *state) magicLocalized(id uint32, nsv uint64) []byte {
 	s.mu.Lock()
 	rec := s.magicByID[id]
 	var head uintptr
@@ -1600,7 +1612,7 @@ func (s *state) magicLocalized(id uint32, nsv uint64) {
 		isValue, err := s.p.XSHelperOp(opSvCall, uint64(node[mgOffType]), 0, svCallMagicIsValue, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "goperl xs: local on a variable with magic: %v\n", err)
-			return
+			return []byte{1}
 		}
 		switch {
 		case isValue != 0:
@@ -1618,6 +1630,7 @@ func (s *state) magicLocalized(id uint32, nsv uint64) {
 		}
 		mg = next
 	}
+	return []byte{1}
 }
 
 // perlioHook services reserved method -6: run one host layer hook (the
@@ -2294,6 +2307,7 @@ func (f *cFrame) fail(msg string) {
 var (
 	libcOnce sync.Once
 	strlenFn uintptr
+	dladdrFn uintptr
 	memcpyFn uintptr
 	mallocFn uintptr
 	freeFn   uintptr
@@ -2327,6 +2341,10 @@ func libcInit() {
 				return
 			}
 			*sym.dst = fn
+		}
+		// only for messages (libraryOf): none where the C library lacks it
+		if fn, err := purego.Dlsym(purego.RTLD_DEFAULT, "dladdr"); err == nil {
+			dladdrFn = fn
 		}
 	})
 }

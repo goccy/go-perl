@@ -14,15 +14,14 @@ import "runtime"
 // (KeepOnOneThread): a goroutine of its own, locked to its thread, runs
 // every entry into the guest that another goroutine makes, while that
 // goroutine waits; an entry made on the thread itself (by native code, or
-// by a Go function the program called) runs where it is. A fork child runs
-// its whole program on a goroutine of its own, which keeps its thread.
-// Instances without native code run on their callers' goroutines.
+// by a Go function the program called) runs where it is. Instances without
+// native code run on their callers' goroutines, and so does a fork child,
+// which runs no native code (see the xs package's fork child).
 type instanceThread struct {
 	// tid is the thread's id (threadID): an entry made with it runs in
 	// place. Which thread a goroutine runs on can be learnt nowhere else.
 	tid uint64
-	// calls carries entries from other goroutines to the thread; nil for a
-	// fork child, whose goroutine is busy with its program for its life.
+	// calls carries entries from other goroutines to the thread.
 	calls chan func()
 	// quit ends the thread's goroutine (Close); entries made after it run
 	// on their callers' goroutines, on an instance that is closed.
@@ -63,30 +62,11 @@ func (p *Perl) KeepOnOneThread() {
 	}
 }
 
-// keepForkChildThread makes the calling goroutine, which runs a fork
-// child's program, the child's thread for the child's life, when the
-// instance it was forked from has one.
-func (c *Perl) keepForkChildThread(parentHasOne bool) {
-	if !parentHasOne || !threadIDs {
-		return
-	}
-	runtime.LockOSThread()
-	c.thread.Store(&instanceThread{tid: threadID()})
-}
-
-// leaveForkChildThread gives the thread back when the child's program has
-// ended (see KeepOnOneThread for why it is not ended).
-func (c *Perl) leaveForkChildThread() {
-	if c.thread.Load() != nil {
-		runtime.UnlockOSThread()
-	}
-}
-
 // OnThread runs fn on the instance's thread, if it has one, and waits for
 // it; a panic of fn is the caller's.
 func (p *Perl) OnThread(fn func()) {
 	t := p.thread.Load()
-	if t == nil || t.calls == nil || threadID() == t.tid {
+	if t == nil || threadID() == t.tid {
 		fn()
 		return
 	}
@@ -113,7 +93,7 @@ func (p *Perl) OnThread(fn func()) {
 
 // invoke is m.invoke on the instance's thread (see instanceThread).
 func (p *Perl) invoke(svc, mid int32, req []byte, call invoker) (resp []byte, err error) {
-	if t := p.thread.Load(); t == nil || t.calls == nil || threadID() == t.tid {
+	if t := p.thread.Load(); t == nil || threadID() == t.tid {
 		return p.m.invoke(svc, mid, req, call)
 	}
 	p.OnThread(func() { resp, err = p.m.invoke(svc, mid, req, call) })
@@ -122,7 +102,7 @@ func (p *Perl) invoke(svc, mid int32, req []byte, call invoker) (resp []byte, er
 
 // endThread ends the instance's thread, after its last entry (Close).
 func (p *Perl) endThread() {
-	if t := p.thread.Load(); t != nil && t.quit != nil {
+	if t := p.thread.Load(); t != nil {
 		close(t.quit)
 	}
 }

@@ -68,11 +68,11 @@ our ($fh, $r, $w, $nr, $nw, $nrh, $sa, $sb, $sah);
 }
 
 // A forked process starts with its parent's descriptors under the same
-// numbers, for native code as for the program. Where the child puts a file
-// of its own under a number its parent still uses, the child's handle has
-// no number of the process's — native code is told so, and does not reach
-// the parent's file — while the parent's handle keeps its number.
-func TestNativeCodeInAForkedProcessSeesItsOwnDescriptors(t *testing.T) {
+// numbers. What the child does with them, putting a file of its own under a
+// number its parent still uses, leaves the parent's alone: the parent's
+// native code still reaches its file under its number. (The child itself
+// cannot run native code.)
+func TestNativeCodeOfTheParentKeepsItsDescriptorsAcrossAFork(t *testing.T) {
 	so := buildPerlAPI(t)
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -99,11 +99,10 @@ func TestNativeCodeInAForkedProcessSeesItsOwnDescriptors(t *testing.T) {
 		`my $pid = fork() // die "fork: $!";`,
 		`if (!$pid) {`,
 		`    close($r);`,
-		`    print {$w} "child, inherited: ", (PerlAPI::fd_of($shared) == $number ? "the parent's number" : "another"), ", ", PerlAPI::fd_state($number), "\n";`,
-		`    PerlAPI::fd_write($number, "child,");`,
+		`    print {$w} "child, inherited: ", (fileno($shared) == $number ? "the parent's number" : "another"), "\n";`,
+		`    syswrite($shared, "child,");`,
 		`    open(my $own, ">", "$dir/own.txt") or die "open: $!";`,
 		`    POSIX::dup2(fileno($own), $number) // die "dup2: $!";`,
-		`    print {$w} "child, its own file under the number: ", PerlAPI::fd_of($shared), "\n";`,
 		`    syswrite($shared, "the child's own");`,
 		`    exit 0;`,
 		`}`,
@@ -123,8 +122,7 @@ func TestNativeCodeInAForkedProcessSeesItsOwnDescriptors(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	want := strings.Join([]string{
-		"child, inherited: the parent's number, file blocking",
-		"child, its own file under the number: -1",
+		"child, inherited: the parent's number",
 		"child status: 0",
 		"parent: its number",
 		"shared.txt: child,parent",

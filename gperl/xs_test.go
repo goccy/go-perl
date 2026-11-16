@@ -152,10 +152,12 @@ func TestNativeModuleLoadsFromInc(t *testing.T) {
 	place(filepath.Join(project, "local", "lib", "perl5", "Demo", "XS.pm"), "Demo", "XS.pm")
 	place(filepath.Join(xsDir(project), "Demo-XS.so"), "auto", "Demo", "XS", "XS.so")
 
+	// A fork child cannot use it (native code is not available there): the
+	// call dies, naming the sub and the module's shared object.
 	status, stdout, stderr := runCLI(t, t.TempDir(), "", "-I"+lib, "-MDemo::XS", "-e",
 		`print "sum=", Demo::XS::add(40, 2), "\n";`,
-		`-e`, `my $pid = fork // die "fork: $!"; if (!$pid) { print "child=", Demo::XS::add(1, 2), "\n"; exit 0 } waitpid($pid, 0);`)
-	if status != 0 || stdout != "sum=42\nchild=3\n" {
+		`-e`, `my $pid = fork // die "fork: $!"; if (!$pid) { my $r = eval { Demo::XS::add(1, 2) }; print "child=", $r // ($@ =~ m{^Demo::XS::add: native modules cannot be used in a forked child \(\S*/XS\.so\) at } ? "refused" : "other: $@"), "\n"; exit 0 } waitpid($pid, 0);`)
+	if status != 0 || stdout != "sum=42\nchild=refused\n" {
 		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
 	}
 
