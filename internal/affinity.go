@@ -59,11 +59,18 @@ const (
 // handOffSpin is how long each side of a hand-off looks for the other
 // before it waits. A goroutine locked to its thread that waits puts the
 // thread to sleep, and the goroutine that hands it an entry then has to wake
-// the thread through the system, which takes longer than an entry that
-// evaluates a constant (tens of microseconds on darwin): the thread looks
-// for the next entry, and the caller for the end of its entry, this long
-// first. Spinning needs a processor for each side; with one there is none
-// to spare and neither side spins.
+// the thread through the system, and the thread the caller when the entry
+// is done, which takes longer than an entry that evaluates a constant (tens
+// of microseconds on darwin). So the thread looks for the next entry this
+// long after each one, and the caller for the end of its entry while the
+// thread runs it.
+//
+// Spinning pays only when the two sides run at once. Where the processors
+// are busy (other programs, other goroutines), the side that spins holds
+// the processor the other side needs, and every hand-off then costs the
+// whole spin: the caller spins only while the thread is running its entry
+// (it took it), and the thread only while its spins keep finding entries
+// (see serve). With one processor for Go code neither side spins.
 const handOffSpin = 50 * time.Microsecond
 
 // spinning reports whether the two sides of a hand-off spin (handOffSpin).
@@ -98,7 +105,14 @@ func (p *Perl) KeepOnOneThread() {
 
 // serve runs the entries handed to the thread until quit; those handed over
 // before quit was seen run first.
+//
+// The thread spins for the next entry while spinning finds one: credit
+// counts the recent spins that did (a few at most), and a spin that finds
+// none takes credit away; with none left the thread waits for its entries
+// and tries a spin again after a while (probeAfter waits).
 func (t *instanceThread) serve() {
+	const maxCredit, probeAfter = 4, 64
+	credit, waits := maxCredit, 0
 	for {
 		select {
 		case c := <-t.calls:
@@ -106,9 +120,16 @@ func (t *instanceThread) serve() {
 			continue
 		default:
 		}
-		if c := t.spinForCall(); c != nil {
-			c.run()
-			continue
+		if credit > 0 || waits >= probeAfter {
+			waits = 0
+			if c := t.spinForCall(); c != nil {
+				credit = min(credit+1, maxCredit)
+				c.run()
+				continue
+			}
+			credit = max(credit-2, 0)
+		} else {
+			waits++
 		}
 		select {
 		case c := <-t.calls:
@@ -186,8 +207,8 @@ func (p *Perl) OnThread(fn func()) {
 	}
 }
 
-// spinForDone looks for the end of the entry for handOffSpin without
-// waiting, and reports whether it saw it.
+// spinForDone looks for the end of the entry without waiting, while the
+// thread runs it, for handOffSpin at most, and reports whether it saw it.
 func (c *threadCall) spinForDone() bool {
 	if !spinning() {
 		return false
@@ -199,7 +220,7 @@ func (c *threadCall) spinForDone() bool {
 			return true
 		default:
 		}
-		if i%64 == 0 && time.Since(start) > handOffSpin {
+		if i%64 == 0 && (c.state.Load() != callTaken || time.Since(start) > handOffSpin) {
 			return false
 		}
 	}
