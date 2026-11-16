@@ -41,8 +41,10 @@ var (
 // derived from its content, and every later process — and every later call —
 // reuses that directory. A different go-perl version carries a different
 // library and gets its own directory. The directory is shared: treat it as
-// read-only. When the user cache directory cannot be used, the library is
-// unpacked into a temporary directory for this process instead.
+// read-only. When the user cache directory cannot be used (HOME is not set,
+// say), the library goes the same way into a directory of the user's own in
+// the system temporary directory, which is used only when it is the user's
+// alone (see stdlibTempRoot); otherwise ExtractStdlib fails and says why.
 func ExtractStdlib() (string, error) {
 	stdlibOnce.Do(func() {
 		stdlibPath, stdlibErr = cachedStdlib()
@@ -54,14 +56,17 @@ func ExtractStdlib() (string, error) {
 // process to need it.
 func cachedStdlib() (string, error) {
 	base, err := os.UserCacheDir()
-	if err != nil {
-		return extractStdlibTo("")
+	if err == nil {
+		var dir string
+		if dir, err = stdlibInCache(filepath.Join(base, "go-perl")); err == nil {
+			return dir, nil
+		}
 	}
-	dir, err := stdlibInCache(filepath.Join(base, "go-perl"))
-	if err != nil {
-		return extractStdlibTo("")
+	root, terr := stdlibTempRoot()
+	if terr != nil {
+		return "", fmt.Errorf("no directory for the standard library: the user cache directory: %v; the temporary directory: %w", err, terr)
 	}
-	return dir, nil
+	return stdlibInCache(root)
 }
 
 // stdlibInCache returns the library's directory under root, creating it when
@@ -92,7 +97,7 @@ func stdlibInCache(root string) (string, error) {
 }
 
 // extractStdlibTo unpacks the embedded zip into a new directory under parent
-// (the system temporary directory when empty) and returns it.
+// and returns it.
 func extractStdlibTo(parent string) (string, error) {
 	dir, err := os.MkdirTemp(parent, "go-perl-stdlib-")
 	if err != nil {
