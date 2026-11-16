@@ -1902,17 +1902,24 @@ static void goperl_require_pv(goperl_frame_t *f, const char *pv) {
 }
 #define require_pv(pv) goperl_require_pv(_gof, (pv))
 
-/* A module that runs a callback on "a new stack" keeps working on the one
- * host stack: the position to come back to is kept on the mark stack. */
+/* A module that runs a callback on "a new stack" gets one in the
+ * interpreter, of the type it names: the callback runs on it (a `last` or
+ * a goto in it finds no context of the module's caller's to leave to, as
+ * on perl). The module keeps working on the one host stack meanwhile: the
+ * position to come back to is kept on the mark stack. */
 #define PUSHSTACKi(type)                                                  \
     STMT_START {                                                          \
         PL_stack_sp = sp;                                                 \
         goperl_pushmark(_gof, (I32)(sp - PL_stack_base));                 \
+        (void)GOPERL_INTERNAL(_gof, GOPERL_INT_PUSHSTACK, 0, (I32)(type)); \
     }                                                                     \
     STMT_END
 #define PUSHSTACK PUSHSTACKi(PERLSI_UNKNOWN)
 #define POPSTACK                                                          \
-    STMT_START { PL_stack_sp = PL_stack_base + goperl_popmark(_gof); }    \
+    STMT_START {                                                          \
+        (void)GOPERL_INTERNAL(_gof, GOPERL_INT_POPSTACK, 0, 0);            \
+        PL_stack_sp = PL_stack_base + goperl_popmark(_gof);               \
+    }                                                                     \
     STMT_END
 
 #define XST_mUV(i, v) (ST(i) = sv_2mortal(newSVuv((UV)(v))))

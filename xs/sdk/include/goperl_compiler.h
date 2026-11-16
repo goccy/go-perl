@@ -37,7 +37,9 @@ enum {
     GOPERL_INT_SV_PV_FREE = 22,
     GOPERL_INT_STATCACHE = 23,
     GOPERL_INT_SAVE_FIELD = 31, /* a: an SV; b: field<<8 | kind: a save of the field */
-    GOPERL_INT_HASH = 32        /* s+b: a key's bytes -> its hash (PERL_HASH) */
+    GOPERL_INT_HASH = 32,       /* s+b: a key's bytes -> its hash (PERL_HASH) */
+    GOPERL_INT_PUSHSTACK = 33,  /* b: the stackinfo type: PUSHSTACKi */
+    GOPERL_INT_POPSTACK = 34    /* POPSTACK */
 };
 /* The fields of a sub (INTERNAL CV_GET / CV_SET). */
 enum {

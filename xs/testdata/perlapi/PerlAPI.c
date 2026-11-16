@@ -3014,6 +3014,86 @@ XS(XS_PerlAPI_constant_calls) {
     }
 }
 
+/* on_own_stack(code): calls the code with G_EVAL on a stack of its own
+ * (PUSHSTACKi(PERLSI_MAGIC) .. POPSTACK), as Text::Stencil and core's
+ * magic_methcall do, and returns $@ */
+XS(XS_PerlAPI_on_own_stack) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        SV *code = ST(0);
+        PUSHSTACKi(PERLSI_MAGIC);
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(code, G_DISCARD | G_EVAL);
+        SPAGAIN;
+        POPSTACK;
+        SPAGAIN;
+        ST(0) = sv_2mortal(newSVsv(ERRSV));
+        XSRETURN(1);
+    }
+}
+
+/* eval_call(code): calls the code with G_EVAL, as Text::Stencil calls a
+ * row callback, and reports whether it died by looking at $@ without
+ * running its overloading: "died with a reference", "died", or "returned". */
+XS(XS_PerlAPI_eval_call) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        SV *code = ST(0);
+        const char *r;
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(code, G_SCALAR | G_EVAL);
+        SPAGAIN;
+        (void)POPs;
+        PUTBACK;
+        if (SvROK(ERRSV)) r = "died with a reference";
+        else if (SvPOK(ERRSV) && SvCUR(ERRSV)) r = "died";
+        else r = "returned";
+        ST(0) = sv_2mortal(newSVpv(r, 0));
+        XSRETURN(1);
+    }
+}
+
+/* targ_calls(code, n): gives the sub a call checker that compiles a call of
+ * it into a custom op of this module's whose op_targ holds n << 20 (a
+ * module keeps a pointer of its own there, as Object::Pad's and
+ * Object::Proto's accessors do, PTR2IV(data)); the op's pp function returns
+ * its op_targ >> 20. */
+static OP *PerlAPI_pp_targ(pTHX) {
+    dSP;
+    XPUSHs(sv_2mortal(newSVuv((UV)PL_op->op_targ >> 20)));
+    RETURN;
+}
+static XOP PerlAPI_targ_xop;
+static OP *PerlAPI_compile_to_targ(pTHX_ OP *entersubop, GV *namegv, SV *ckobj) {
+    OP *o;
+    PERL_UNUSED_ARG(namegv);
+    op_free(entersubop);
+    o = newOP(OP_CUSTOM, 0);
+    o->op_ppaddr = PerlAPI_pp_targ;
+    o->op_targ = (PADOFFSET)(SvUV(ckobj) << 20);
+    return o;
+}
+XS(XS_PerlAPI_targ_calls) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "code, n");
+    {
+        static int registered;
+        if (!registered) {
+            registered = 1;
+            XopENTRY_set(&PerlAPI_targ_xop, xop_name, "perlapi_targ");
+            XopENTRY_set(&PerlAPI_targ_xop, xop_desc, "an op with a wide op_targ");
+            XopENTRY_set(&PerlAPI_targ_xop, xop_class, OA_BASEOP);
+            Perl_custom_op_register(aTHX_ PerlAPI_pp_targ, &PerlAPI_targ_xop);
+        }
+        cv_set_call_checker((CV *)SvRV(ST(0)), PerlAPI_compile_to_targ, ST(1));
+        XSRETURN_EMPTY;
+    }
+}
+
 /* A destructor for a variable of the function that registers it: it notes
  * what it finds there. */
 struct PerlAPI_guarded {
@@ -6824,6 +6904,9 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::rx_compile", XS_PerlAPI_rx_compile);
     newXS_deffile("PerlAPI::own_magic", XS_PerlAPI_own_magic);
     newXS_deffile("PerlAPI::constant_calls", XS_PerlAPI_constant_calls);
+    newXS_deffile("PerlAPI::targ_calls", XS_PerlAPI_targ_calls);
+    newXS_deffile("PerlAPI::eval_call", XS_PerlAPI_eval_call);
+    newXS_deffile("PerlAPI::on_own_stack", XS_PerlAPI_on_own_stack);
     newXS_deffile("PerlAPI::croak_guarded", XS_PerlAPI_croak_guarded);
     newXS_deffile("PerlAPI::scope_guard", XS_PerlAPI_scope_guard);
     newXS_deffile("PerlAPI::sorted_ivs", XS_PerlAPI_sorted_ivs);

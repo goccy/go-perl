@@ -78,6 +78,46 @@ func TestNativePeepholeHook(t *testing.T) {
 	})
 }
 
+// A callback native code runs on a stack of its own (PUSHSTACKi) has no
+// context of the code around the native call: a `last` in it finds no loop
+// to leave and dies, which the call's G_EVAL catches, and the loop around
+// goes on. Before, the stack was not switched, and the `last` left the loop
+// through the native call's frame.
+func TestNativeCallbackOnAStackOfItsOwn(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"last in the callback", `my @r; for my $i (1 .. 2) { my $e = PerlAPI::on_own_stack(sub { last }); push @r, $e =~ /^Can't "last" outside a loop block/ ? "caught" : "[$e]" } join ",", @r`, "caught,caught"},
+		{"a callback that returns", `my $e = PerlAPI::on_own_stack(sub { 1 }); "[$e]"`, "[]"},
+	})
+}
+
+// A call native code makes with G_EVAL leaves $@ to the caller, as perl's
+// call_sv does: an exception object's bool overloading does not run on the
+// way (Text::Stencil counts that it does not). Before, the interpreter asked
+// for the truth of $@ after every such call.
+func TestNativeEvalCallLeavesTheExceptionAlone(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a false exception object", `{ package FalseErr; our $n = 0; use overload 'bool' => sub { $n++; 0 }, fallback => 1 } my $r = PerlAPI::eval_call(sub { die bless {}, 'FalseErr' }); "$r,$FalseErr::n"`, "died with a reference,0"},
+		{"a message", `PerlAPI::eval_call(sub { die "no\n" })`, "died"},
+		{"a return", `PerlAPI::eval_call(sub { 1 })`, "returned"},
+	})
+}
+
+// The op_targ of an op is as wide as a pointer, and a module keeps one of
+// its own there (Object::Proto's typed setter: op_targ = PTR2IV(data)); its
+// pp function reads it back whole. Before, the op the function was given
+// had the low 32 bits of it, and Object::Proto faulted on the rest.
+func TestNativeOpTargIsWhole(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a value past 32 bits", `sub tg {} PerlAPI::targ_calls(\&tg, 0x123456789); my $f = eval q{ sub { tg() } } or die $@; sprintf "%x", $f->()`, "123456789"},
+	})
+}
+
 // A sub that was given a call checker has every call of it handed to the
 // checker when the call is compiled; cv_get_call_checker says which checker
 // a sub has, the interpreter's own being a function like any other.
