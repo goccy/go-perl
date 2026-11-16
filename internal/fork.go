@@ -94,7 +94,7 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 		return nil, err
 	}
 
-	if !p.family.start(c, pid, exited) {
+	if !p.family.start(c, pid, p.HasThread(), exited) {
 		c.discard()
 		return nil, errFamilyOver
 	}
@@ -113,7 +113,7 @@ func (c *Perl) runForkChild(pid int32) (status int32) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, c.h)
 	buf = pbAppendInt32(buf, 2, pid)
-	resp, err := c.m.invoke(0, midForkChild, buf, wasm2go.Inv_0_9)
+	resp, err := c.invoke(0, midForkChild, buf, wasm2go.Inv_0_9)
 	if err == nil {
 		err = pbExtractError(resp)
 	}

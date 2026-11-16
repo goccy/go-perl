@@ -203,6 +203,10 @@ type Perl struct {
 	family *forkFamily
 	// killed is the signal this fork child died of (0 = none).
 	killed atomic.Int32
+	// thread is the thread the instance runs its guest code on, when it
+	// runs native code (see instanceThread); nil runs it on the callers'
+	// goroutines.
+	thread atomic.Pointer[instanceThread]
 }
 
 // forkFamily knows the running pseudo-processes forked from one instance,
@@ -222,9 +226,11 @@ type forkFamily struct {
 }
 
 // start runs child's program as the pseudo-process pid, on a goroutine of
-// its own; exited is told the status it ends with. It reports false, and
-// starts nothing, when the family is over.
-func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bool {
+// its own, which with ownThread is the child's thread for its life (the
+// parent runs native code: see instanceThread); exited is told the status
+// it ends with. It reports false, and starts nothing, when the family is
+// over.
+func (f *forkFamily) start(child *Perl, pid int32, ownThread bool, exited func(status int32)) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.over {
@@ -235,7 +241,9 @@ func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bo
 	}
 	f.running[child] = struct{}{}
 	go func() {
+		child.keepForkChildThread(ownThread)
 		status := child.runForkChild(pid)
+		child.leaveForkChildThread()
 		f.mu.Lock()
 		delete(f.running, child)
 		f.mu.Unlock()
@@ -319,7 +327,7 @@ func (p *Perl) drainReleases() {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, packed)
 	buf = pbAppendUint64(buf, 3, uint64(len(packed)))
-	_, _ = p.m.invoke(0, midRelease, buf, wasm2go.Inv_0_21)
+	_, _ = p.invoke(0, midRelease, buf, wasm2go.Inv_0_21)
 }
 
 // New boots a fresh instance from opts, mapping the process-wide
@@ -619,7 +627,7 @@ func (p *Perl) valueOp(ctx context.Context, mid int32, inv invoker, buf []byte) 
 	p.drainReleases()
 
 	disarm := p.armInterrupt(ctx)
-	out, invokeErr := p.m.invoke(0, mid, buf, inv)
+	out, invokeErr := p.invoke(0, mid, buf, inv)
 	interrupted = disarm()
 
 	if invokeErr != nil {
@@ -832,11 +840,15 @@ func (p *Perl) Close() error {
 	}
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_6)
+	resp, err := p.invoke(0, midClose, buf, wasm2go.Inv_0_6)
 	if err == nil {
 		err = pbExtractError(resp)
 	}
-	return errors.Join(err, p.releaseHostState())
+	// the native modules' state goes on the thread they ran on
+	var relErr error
+	p.OnThread(func() { relErr = p.releaseHostState() })
+	p.endThread()
+	return errors.Join(err, relErr)
 }
 
 // releaseHostState gives back what the host holds for an instance that
@@ -922,7 +934,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	buf = pbAppendString(buf, 1, stdlibDir)
 	buf = pbAppendString(buf, 2, siteDir)
 	buf = pbAppendString(buf, 3, ArchName())
-	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_17)
+	resp, err := p.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
 	}
@@ -937,7 +949,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 func (p *Perl) interruptAddr() (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
+	resp, err := p.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return 0, err
 	}

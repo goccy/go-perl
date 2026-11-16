@@ -76,6 +76,9 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	c.writeMemoryBase(true)
 	c.family = &forkFamily{origin: c}
 	c.installForkHook()
+	if p.HasThread() {
+		c.KeepOnOneThread() // a thread of its own: see instanceThread
+	}
 
 	if err := p.handOver(c); err != nil {
 		c.Close()

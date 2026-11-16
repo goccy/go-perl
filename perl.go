@@ -98,8 +98,12 @@ func New(cfg Config) (*Perl, error) {
 	raw.OnFork = p.adoptForkChild
 	p.raw = raw
 	if cfg.NativeModules {
-		// native code runs here: pointers pack 'p' makes are addresses of
-		// the process from the start (see internal.Perl.MarkMemoryBase)
+		// native code runs here: the interpreter runs on one thread for
+		// its life, whatever goroutines call it (native modules keep state
+		// per thread, see internal.Perl.KeepOnOneThread), and pointers pack
+		// 'p' makes are addresses of the process from the start (see
+		// internal.Perl.MarkMemoryBase)
+		raw.KeepOnOneThread()
 		raw.MarkMemoryBase()
 		if err := p.installDynaLoader(); err != nil {
 			p.Close()

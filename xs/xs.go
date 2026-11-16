@@ -310,7 +310,11 @@ func loadDir(p *internal.Perl, dir string) error {
 			continue
 		}
 		module := strings.ReplaceAll(strings.TrimSuffix(e.Name(), ".so"), "-", "::")
-		if err := load(p, module, filepath.Join(dir, e.Name())); err != nil {
+		// native code runs in the instance from here on, on its thread
+		// (internal.Perl.KeepOnOneThread): the module is opened there too
+		p.KeepOnOneThread()
+		p.OnThread(func() { err = load(p, module, filepath.Join(dir, e.Name())) })
+		if err != nil {
 			return fmt.Errorf("load native module %s: %w", module, err)
 		}
 	}
