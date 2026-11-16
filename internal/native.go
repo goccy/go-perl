@@ -564,5 +564,5 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 	if d.p.UserHandler == nil {
 		return nil, fmt.Errorf("no handler bound for callback method id %d", methodID)
 	}
-	return d.p.UserHandler(methodID, req)
+	return d.p.callGo(methodID, req)
 }

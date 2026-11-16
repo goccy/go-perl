@@ -880,7 +880,11 @@ func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	lib, err := s.open(path, flags&dlGlobalSymbols != 0)
+	// dl_load_file is a Go function the program calls, which runs off the
+	// instance's thread (internal.Perl's callGo); loading runs the
+	// library's initializers, native code, on the thread.
+	var lib uintptr
+	p.OnThread(func() { lib, err = s.open(path, flags&dlGlobalSymbols != 0) })
 	var plain *plainLibraryError
 	if errors.As(err, &plain) {
 		err = nil

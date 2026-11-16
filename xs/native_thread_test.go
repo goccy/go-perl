@@ -140,9 +140,9 @@ func TestNativeThreadLocalStateAcrossCalls(t *testing.T) {
 	}
 }
 
-// The instance's thread runs the Go functions the program calls, and an
-// entry they make into the instance runs there in place; a context that
-// ends stops the program on that thread, which keeps its native state.
+// An entry a Go function the program calls makes into the instance runs on
+// the instance's thread; a context that ends stops the program on that
+// thread, which keeps its native state.
 func TestNativeThreadReentryAndCancellation(t *testing.T) {
 	p := threadStatePerl(t, perl.Config{})
 	ctx := context.Background()
@@ -173,6 +173,46 @@ func TestNativeThreadReentryAndCancellation(t *testing.T) {
 	}
 	if got := evalStr(t, p, `ThreadState::tls_get()`); got != "77" {
 		t.Fatalf("after the cancellation: %s", got)
+	}
+}
+
+// A Go function the program calls may wait for another goroutine that calls
+// the same instance: that call runs while the function waits, nested in the
+// program's call of the function, as it does on an instance without native
+// code; and it runs on the instance's thread. Before, the call waited for
+// the instance's thread, which was running the function: a hang.
+func TestNativeThreadServesCallsWhileAGoFunctionWaits(t *testing.T) {
+	p := threadStatePerl(t, perl.Config{})
+	ctx := context.Background()
+	if err := p.Bind("ask_another_goroutine", func(args []perl.Value) ([]perl.Value, error) {
+		answer := make(chan string, 1)
+		go func() {
+			r, err := p.Eval(ctx, `ThreadState::thread_id() . ":" . $main::during`)
+			switch {
+			case err != nil:
+				answer <- "error: " + err.Error()
+			case r.Error != nil:
+				answer <- "died: " + r.Error.Error()
+			default:
+				answer <- resultStr(r)
+			}
+		}()
+		select {
+		case got := <-answer:
+			return []perl.Value{perl.ValueOf(got)}, nil
+		case <-time.After(20 * time.Second):
+			return nil, errors.New("the other goroutine's call did not run while the function waited")
+		}
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	got := evalStr(t, p, `our $during = "in the call"; my $tid = ThreadState::thread_id(); my ($r) = ask_another_goroutine(); $r eq "$tid:in the call" ? "nested, on the thread" : "got $r, want $tid:in the call"`)
+	if got != "nested, on the thread" {
+		t.Fatalf("%s", got)
+	}
+	// and the instance goes on as before
+	if got := evalStr(t, p, `ThreadState::tls_set(5); ThreadState::tls_get()`); got != "5" {
+		t.Fatalf("after: %s", got)
 	}
 }
 
