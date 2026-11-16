@@ -189,6 +189,49 @@ func TestNativeFetchedSlotsKept(t *testing.T) {
 	})
 }
 
+// A key whose length is negative is UTF-8, for every keyed hash function
+// that takes a length: hv_store, hv_fetch and hv_exists find the key of
+// characters, and hv_exists with the same bytes as a key of bytes does not.
+// hv_exists took the negative length for the length of the key it made, and
+// the interpreter panicked ("sv_setpvn_fresh called with negative strlen").
+func TestNativeUTF8KeyLength(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"store, fetch, exists", `use utf8; my %h; my $r = PerlAPI::utf8_key_ops(\%h); join ",", $r, map { length($_) . (exists $h{"füü"} ? "found" : "missing") } keys %h`, "e1 b0 f1,3found"},
+	})
+}
+
+// SvIsUV is the flag itself: a string above UV_MAX made a number keeps its
+// integer (UV_MAX) privately, with the flag and without SvIOK, so SvIsUV is
+// true and SvUOK false. SvIsUV answered false then, and Cpanel::JSON::XS
+// took such a number for -1.
+func TestNativeIsUVWithoutIOK(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"above UV_MAX", `PerlAPI::iv_then_isuv("18446744073709551616")`, "isuv=1 uok=0 uv=18446744073709551615"},
+		{"above IV_MAX", `PerlAPI::iv_then_isuv("18446744073709551615")`, "isuv=1 uok=1 uv=18446744073709551615"},
+		{"negative", `PerlAPI::iv_then_isuv("-5")`, "isuv=0 uok=0 uv=18446744073709551611"},
+	})
+}
+
+// The interpreter's variables and structures that Text::CSV_XS and
+// Package::Stash::XS reach: the output record separator (PL_ors_sv), set
+// aside around a print and put back; the name of a stash (hv_name_set),
+// given and taken away; the CV of a glob set with GvCV_set, whose value is
+// the CV.
+func TestNativeStashAndRecordSeparator(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"ors set aside", `my $out = ""; open my $fh, ">", \$out; { local $\ = "!"; PerlAPI::ors_aside(sub { print $fh "a"; }); print $fh "b"; } print $fh "c"; close $fh; $out`, "ab!c"},
+		{"ors read", `local $\ = "#"; my $out = ""; open my $fh, ">", \$out; PerlAPI::ors_aside(sub { $\ = "x" }); print $fh "a"; close $fh; $out`, "a#"},
+		{"stash named", `my ($obj, $left) = PerlAPI::named_stash("Some::Anon"); join ",", ref($obj), $left`, "Some::Anon,none"},
+		{"sub installed", `my $ok = PerlAPI::install_sub("main::installed_by_native", sub { 42 }); require B; join ",", $ok ? "set" : "unset", main::installed_by_native(), (B::svref_2object(\*main::installed_by_native)->GvFLAGS & 0x80) ? "imported" : "own"`, "set,42,imported"},
+	})
+}
+
 // pv_uni_display is perl's: with UNI_DISPLAY_QQ a backslash and the
 // controls that have a mnemonic are escaped, a double quote is not; the
 // flags have utf8.h's values.

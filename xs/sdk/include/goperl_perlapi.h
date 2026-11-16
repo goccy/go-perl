@@ -618,7 +618,8 @@ enum {
     /* 11 to 14: the formatter's (perl.h) */
     GOPERL_SVSTR_TAINT_PROPER = 15,
     /* 16: the formatter's (perl.h) */
-    GOPERL_SVSTR_GV_NAME_SET = 17
+    GOPERL_SVSTR_GV_NAME_SET = 17,
+    GOPERL_SVSTR_HV_NAME_SET = 18
 };
 
 /* PLVAR_GET/SET ids beyond the shadowed ones of perl.h. */
@@ -1654,8 +1655,12 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
 #define GvIOp(gv) \
     (*(IO **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVIO, GOPERL_LV_AT))
 #define GvFORM(gv) ((CV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_FORM, gv, 0)))
-#define GvCV_set(gv, cv) \
-    ((void)GOPERL_GVCALL(GOPERL_GVCALL_CV_SET, gv, GOPERL_TOK(cv)))
+/* An expression whose value is the CV stored, as gv.h's assignment is
+ * (Package::Stash::XS tests it: `if ((GvCV_set(g, cv))) GvIMPORTED_CV_on(g)`). */
+#define GvCV_set(gv, cv)                                                   \
+    ({ GOPERL_ONCE(goperl_GvCV_set_cv_, cv);                               \
+       (void)GOPERL_GVCALL(GOPERL_GVCALL_CV_SET, gv, GOPERL_TOK(goperl_GvCV_set_cv_)); \
+       (CV *)(goperl_GvCV_set_cv_); })
 /* An lvalue as on perl (`GvFLAGS(gv) ^= flag`): the whole word is stored. */
 #define GvFLAGS(gv) \
     (*(U32 *)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVFLAGS, GOPERL_LV_AT))
@@ -1682,6 +1687,15 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
  * (nor is it on perl). */
 #define gv_name_set(gv, name, len, flags) \
     ((void)GOPERL_SVSTR(GOPERL_SVSTR_GV_NAME_SET, gv, flags, (name), (len)))
+/* The name of a stash, given (or taken away, with a null name) as perl's
+ * hv_name_set does it (Package::Stash::XS names the stash it makes for an
+ * anonymous package "__ANON__"); HvNAME is not an lvalue. flags:
+ * HVhek_UTF8; bit 31 of what crosses says that there is no name. */
+#define hv_name_set(hv, name, len, flags)                                  \
+    ({ GOPERL_ONCE(goperl_hv_name_set_name_, name);                        \
+       (void)GOPERL_SVSTR(GOPERL_SVSTR_HV_NAME_SET, hv,                     \
+                          (U32)(flags) | (goperl_hv_name_set_name_ ? 0u : 0x80000000u), \
+                          goperl_hv_name_set_name_, goperl_hv_name_set_name_ ? (len) : 0); })
 /* GvGP is an identity: modules test it and compare it, never look inside. */
 #define GvGP(gv) ((void *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
 #define GvFILE(gv) \

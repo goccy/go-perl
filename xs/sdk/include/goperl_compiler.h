@@ -1890,6 +1890,11 @@ static __attribute__((unused)) UV goperl_case_utf8(goperl_frame_t *f, int which,
 #define GOPERL_PL_IN_CLEAN_ALL 110
 #define GOPERL_PL_ORIGARGC 111
 #define GOPERL_PL_ORIGARGV 112
+#define GOPERL_PL_ORS 113
+/* The output record separator ($\) print appends, NULL for none: code
+ * that prints for itself sets it aside (Text::CSV_XS: `ors = PL_ors_sv;
+ * PL_ors_sv = NULL; ...; PL_ors_sv = ors`). */
+#define PL_ors_sv (*goperl_plsv_ref(_gof, GOPERL_PL_ORS))
 /* Global destruction: the objects are being destroyed (sv_clean_objs), or
  * every SV is (sv_clean_all). */
 #define PL_in_clean_objs (GOPERL_PLVAR(GOPERL_PL_IN_CLEAN_OBJS) != 0)

@@ -7963,6 +7963,11 @@ static U32 *goperl_hints_ref(goperl_frame_t *f) {
 #define HINT_BYTES 0x00000008
 #define SVt_RV SVt_IV /* pre-5.12 name */
 #define PERL_MAGIC_overload_table 'c'
+/* The overload magic of perls before 5.18, as ppport.h defines it for the
+ * modules that still name it (Package::Stash::XS puts it on a %OVERLOAD it
+ * makes): the interpreter has no such magic and refuses it, as perl does
+ * ("Don't know how to handle magic of type \\101"). */
+#define PERL_MAGIC_overload 'A'
 #define av_pop(av) \
     GOPERL_SV(goperl_op0(GOPERL_OP_AV_POP, GOPERL_TOK(av), 0))
 #define av_top_index(av) av_len(av)
@@ -7971,11 +7976,15 @@ static U32 *goperl_hints_ref(goperl_frame_t *f) {
 #define hv_delete_ent(hv, keysv, flags, hash)                              \
     GOPERL_SV(goperl_op3(GOPERL_OP_HV_DELETE_ENT, GOPERL_TOK(hv),          \
                          GOPERL_TOK(keysv), (uint64_t)(int64_t)(I32)(flags)))
+/* A negative klen is the length of a key that is UTF-8, as for hv_fetch
+ * and hv_store. */
 static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
                             I32 klen) {
-    uint64_t k = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, (uint64_t)klen, key,
-                              (uint64_t)klen);
+    const int utf8 = klen < 0;
+    const uint64_t len = utf8 ? (uint64_t)-(int64_t)klen : (uint64_t)klen;
+    uint64_t k = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, len, key, len);
     goperl_do_op(f, GOPERL_OP_SV_MORTAL, k, 0, 0, 0);
+    if (utf8) goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, k, 0, 0, 0);
     return (I32)goperl_do_op(f, GOPERL_OP_HV_EXISTS_ENT, GOPERL_TOK(hv), k,
                              0, 0);
 }
@@ -7989,7 +7998,7 @@ static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
 #define MEMBER_TO_FPTR(x) (x)
 #define Perl_deb(...) ((void)0)
 #define Strerror(e) strerror(e)
-#define SvUOK(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_ISUV) != 0)
+#define SvUOK(sv) SvIOK_UV(sv)
 /* Dists pair these with a value write (sv_setiv/SvIV_set), which already
  * sets the guest flags — the standalone flag flip is then a no-op. */
 /* The process id is the program's. A fork child is a process of its own

@@ -5711,6 +5711,111 @@ XS(XS_PerlAPI_keep_fetched) {
     XSRETURN(1);
 }
 
+/* utf8_key_ops(hash): the keyed hash functions with the key "füü" given as
+ * UTF-8 bytes and a negative length, as Cpanel::JSON::XS gives a bare key
+ * that has a byte above 0x7f: stores 1 under it with hv_store, then says
+ * whether hv_exists finds it so (e), whether it finds the same bytes as a
+ * key of bytes (b), and what hv_fetch gets (f). */
+XS(XS_PerlAPI_utf8_key_ops) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hash");
+    {
+        HV *const hv = (HV *)SvRV(ST(0));
+        static const char key[] = "f\xc3\xbc\xc3\xbc";
+        SV **fetched;
+        (void)hv_store(hv, key, -5, newSViv(1), 0);
+        fetched = hv_fetch(hv, key, -5, 0);
+        ST(0) = sv_2mortal(newSVpvf("e%d b%d f%" SVf, hv_exists(hv, key, -5) ? 1 : 0,
+                                    hv_exists(hv, key, 5) ? 1 : 0,
+                                    SVfARG(fetched ? *fetched : &PL_sv_undef)));
+    }
+    XSRETURN(1);
+}
+
+/* iv_then_isuv(sv): SvIV_nomg of the value, then what SvIsUV and SvUOK say
+ * of it and its SvUV_nomg, as Cpanel::JSON::XS asks to tell a number above
+ * IV_MAX from a negative one. */
+XS(XS_PerlAPI_iv_then_isuv) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *const sv = ST(0);
+        const IV iv = SvIV_nomg(sv);
+        PERL_UNUSED_VAR(iv);
+        ST(0) = sv_2mortal(newSVpvf("isuv=%d uok=%d uv=%" UVuf, SvIsUV(sv) ? 1 : 0,
+                                    SvUOK(sv) ? 1 : 0, SvUV_nomg(sv)));
+    }
+    XSRETURN(1);
+}
+
+/* ors_aside(code): runs code with the output record separator set aside,
+ * as Text::CSV_XS prints a record of its own: `ors = PL_ors_sv; PL_ors_sv
+ * = NULL; ...; PL_ors_sv = ors`. */
+XS(XS_PerlAPI_ors_aside) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        SV *const ors = PL_ors_sv;
+        PL_ors_sv = NULL;
+        PUSHMARK(SP);
+        PUTBACK;
+        call_sv(ST(0), G_DISCARD | G_NOARGS);
+        PL_ors_sv = ors;
+    }
+    XSRETURN_EMPTY;
+}
+
+/* named_stash(name): a new hash named as a stash with hv_name_set, as
+ * Package::Stash::XS names one for an anonymous package; returns an object
+ * blessed into it, and the name hv_name_set with a null name leaves on a
+ * second such hash ("none" for none). */
+XS(XS_PerlAPI_named_stash) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "name");
+    {
+        STRLEN len;
+        const char *const name = SvPV(ST(0), len);
+        HV *const stash = newHV();
+        HV *const unnamed = (HV *)sv_2mortal((SV *)newHV());
+        SV *obj;
+        const char *left;
+        hv_name_set(stash, name, (U32)len, SvUTF8(ST(0)) ? HVhek_UTF8 : 0);
+        obj = sv_bless(newRV_noinc((SV *)newHV()), stash);
+        SvREFCNT_dec((SV *)stash); /* the object holds the stash */
+        hv_name_set(unnamed, name, (U32)len, 0);
+        hv_name_set(unnamed, NULL, 0, 0);
+        left = HvNAME(unnamed);
+        EXTEND(SP, 2);
+        ST(0) = sv_2mortal(obj);
+        ST(1) = sv_2mortal(newSVpv(left ? left : "none", 0));
+    }
+    XSRETURN(2);
+}
+
+/* install_sub(name, code): the sub becomes the CV of the glob of that name
+ * as Package::Stash::XS installs one: `if ((GvCV_set(g, cv)))
+ * GvIMPORTED_CV_on(g)`, GvCV_set being an expression whose value is the
+ * CV; returns whether the value was that CV. */
+XS(XS_PerlAPI_install_sub) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "name, code");
+    {
+        GV *const gv = gv_fetchpv(SvPV_nolen(ST(0)), GV_ADD, SVt_PVCV);
+        CV *const code = (CV *)SvRV(ST(1));
+        CV *got;
+        SvREFCNT_inc((SV *)code);
+        SvREFCNT_dec((SV *)GvCV(gv));
+        if ((got = GvCV_set(gv, code))) {
+            GvIMPORTED_CV_on(gv);
+            GvASSUMECV_on(gv);
+        }
+        GvCVGEN(gv) = 0;
+        mro_method_changed_in(GvSTASH(gv));
+        ST(0) = boolSV(got == code && GvCV(gv) == code);
+    }
+    XSRETURN(1);
+}
+
 /* lexical_import(name, sub): Exporter::Lexical's: the sub becomes the
  * lexical sub &name of the code being compiled. */
 XS(XS_PerlAPI_lexical_import) {
@@ -6382,5 +6487,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::names_with_nul", XS_PerlAPI_names_with_nul);
     newXS_deffile("PerlAPI::load_with", XS_PerlAPI_load_with);
     newXS_deffile("PerlAPI::keep_fetched", XS_PerlAPI_keep_fetched);
+    newXS_deffile("PerlAPI::utf8_key_ops", XS_PerlAPI_utf8_key_ops);
+    newXS_deffile("PerlAPI::iv_then_isuv", XS_PerlAPI_iv_then_isuv);
+    newXS_deffile("PerlAPI::ors_aside", XS_PerlAPI_ors_aside);
+    newXS_deffile("PerlAPI::named_stash", XS_PerlAPI_named_stash);
+    newXS_deffile("PerlAPI::install_sub", XS_PerlAPI_install_sub);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
