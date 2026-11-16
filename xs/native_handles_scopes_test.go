@@ -37,6 +37,39 @@ func TestNativeDestructorDies(t *testing.T) {
 	})
 }
 
+// An XSUB that leaves its caller's scope and enters a new one (Guard's
+// scope_guard: `LEAVE; SAVEDESTRUCTOR_X(...); ENTER;`, so that the
+// destructor runs when the caller's scope ends) leaves what the native
+// calls running under it keep alone: the XSUB that called the code it was
+// called from goes on, the guard runs at the end of the caller's scope.
+// Before, the LEAVE also undid the bookkeeping of the native activations
+// (theirs and the calling XSUB's), and the calling XSUB faulted on its next
+// operation (AnyEvent on EV with Guard: a NULL frame in EV's callback).
+func TestNativeScopeLeftAndEnteredByAnXSUB(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"at the top level", `my @log; { PerlAPI::scope_guard(sub { push @log, "guard" }); push @log, "in the block" } push @log, "after"; join ",", @log`, "in the block,guard,after"},
+		{"under a native call", `my @log; my $n = PerlAPI::callback_then_mark(sub { { PerlAPI::scope_guard(sub { push @log, "guard" }); push @log, "in the block" } push @log, "after the block" }, 7); join ",", $n, @log`, "9,in the block,guard,after the block"},
+		{"under two", `my @log; my $n = PerlAPI::callback_then_mark(sub { push @log, PerlAPI::callback_then_mark(sub { PerlAPI::scope_guard(sub { push @log, "guard" }) }, 3) }, 5); join ",", $n, @log`, "7,guard,5"},
+	})
+}
+
+// A scratch block of the savestack (SSNEW) is there to be read after its
+// scope has ended, until the savestack takes its place again, as on perl:
+// Devel::NYTProf reads the block it keeps a call's data in right after
+// running the op of the call, which may have left that scope (an
+// exception, a goto). Before, the block was freed with the scope and the
+// read found none (NYTProf: "Assertion `subr_entry' failed").
+func TestNativeSavestackBlockAfterItsScope(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"read after the scope", `PerlAPI::ssnew_after_scope(42)`, "42"},
+		{"and again, in another slot", `join ",", map { PerlAPI::ssnew_after_scope($_) } 1 .. 3`, "1,2,3"},
+	})
+}
+
 // The fields of an IO and the IO of a glob are lvalues, as Linux::FD,
 // Tickit and FCGI assign them: a handle made field by field reads the
 // descriptor it was given.

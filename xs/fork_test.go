@@ -308,6 +308,21 @@ func TestForkChildOfANativeRunLoop(t *testing.T) {
 	}
 }
 
+// A module may fork the process itself with fork(2). The child of such a
+// fork cannot run the interpreter (the Go runtime does not survive fork):
+// a child that calls it ends at that call with a message and status 255; a
+// child that execs runs as on perl. Before, the child entered the runtime
+// in a copy of the process without its threads.
+func TestNativeCodeForksTheProcess(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"a child that calls the interpreter", `my ($status, $err) = PerlAPI::fork_and_call("call"); join ",", $status >> 8, $status & 127, $err =~ /^native code forked this process with fork\(2\), and its child called the interpreter: .* the child exits\n\z/s ? "message" : "[$err]"`, "255,0,message"},
+		{"a child that execs", `my ($status, $err) = PerlAPI::fork_and_call("exec"); join ",", $status >> 8, $status & 127, "[$err]"`, "7,0,[]"},
+		{"the parent goes on", `PerlAPI::sub_slot(4)`, "4"},
+	})
+}
+
 // A function a module gave to call_atexit before a fork releases what the
 // module keeps: it runs once, when the parent ends, and not when the child
 // does.

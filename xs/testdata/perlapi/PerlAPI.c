@@ -6078,6 +6078,72 @@ XS(XS_PerlAPI_write_at) {
     XSRETURN_EMPTY;
 }
 
+/* ssnew_after_scope(v): a scratch block of the savestack (SSNEW) made in
+ * a scope and written, the scope left, the block read: what was written,
+ * as perl's savestack keeps it until the stack grows over it again
+ * (Devel::NYTProf reads its block after an op that left the scope). */
+XS(XS_PerlAPI_ssnew_after_scope) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "v");
+    {
+        const IV v = SvIV(ST(0));
+        I32 ix;
+        ENTER;
+        ix = SSNEW(sizeof(IV));
+        *SSPTR(ix, IV *) = v;
+        LEAVE;
+        ST(0) = sv_2mortal(newSViv(*SSPTR(ix, IV *)));
+        XSRETURN(1);
+    }
+}
+
+/* fork_and_call(how): forks the process with fork(2), as a module that
+ * runs workers of its own does (DBIx::Loop's pool). The child's standard
+ * error is a pipe to the parent; with how "call" the child then calls the
+ * interpreter (newSViv) and exits 0, with "exec" it runs /bin/sh -c 'exit
+ * 7' without calling it. The parent waits up to ten seconds (then kills
+ * the child) and returns the wait status and what the child wrote. */
+#include <sys/wait.h>
+#include <signal.h>
+XS(XS_PerlAPI_fork_and_call) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "how");
+    {
+        const int exec_it = strEQ(SvPV_nolen(ST(0)), "exec");
+        int fds[2];
+        if (pipe(fds) != 0) croak("pipe: %s", strerror(errno));
+        const pid_t pid = fork();
+        if (pid < 0) croak("fork: %s", strerror(errno));
+        if (pid == 0) {
+            close(fds[0]);
+            dup2(fds[1], 2);
+            if (exec_it) {
+                execl("/bin/sh", "sh", "-c", "exit 7", (char *)0);
+                _exit(127);
+            }
+            SV *sv = newSViv(1);
+            PERL_UNUSED_VAR(sv);
+            _exit(0);
+        }
+        close(fds[1]);
+        int status = -1, waited = 0;
+        for (int i = 0; i < 1000; i++) {
+            if (waitpid(pid, &status, WNOHANG) == pid) { waited = 1; break; }
+            usleep(10000);
+        }
+        if (!waited) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+        }
+        char buf[1024];
+        ssize_t n = read(fds[0], buf, sizeof buf);
+        close(fds[0]);
+        ST(0) = sv_2mortal(newSViv(waited ? status : -1));
+        ST(1) = sv_2mortal(newSVpvn(buf, n > 0 ? (STRLEN)n : 0));
+        XSRETURN(2);
+    }
+}
+
 /* native_string(): the address of a string of this module's, "native
  * bytes", as a C function returns a buffer FFI::Platypus hands to
  * buffer_to_scalar (unpack 'P'). */
@@ -6895,6 +6961,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::handler_on_altstack", XS_PerlAPI_handler_on_altstack);
     newXS_deffile("PerlAPI::void_calls", XS_PerlAPI_void_calls);
     newXS_deffile("PerlAPI::native_string", XS_PerlAPI_native_string);
+    newXS_deffile("PerlAPI::fork_and_call", XS_PerlAPI_fork_and_call);
+    newXS_deffile("PerlAPI::ssnew_after_scope", XS_PerlAPI_ssnew_after_scope);
     newXS_deffile("PerlAPI::entersub_seen", XS_PerlAPI_entersub_seen);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

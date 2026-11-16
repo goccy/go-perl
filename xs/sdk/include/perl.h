@@ -888,8 +888,51 @@ typedef struct goperl_tframe {
 #define GOPERL_TFRAME_SLOTS 512
 typedef struct goperl_process {
     goperl_tframe_t tf[GOPERL_TFRAME_SLOTS];
+    /* set in a child of fork(2) native code made (see fork below): the
+     * block is the child's copy, so only the child sees it */
+    int32_t forked;
 } goperl_process_t;
 #define GOPERL_PROCESS ((goperl_process_t *)goperl_api_v->shared_raw)
+
+/* ---- fork(2) in native code ----------------------------------------------
+ * The interpreter runs inside a Go program, whose runtime keeps threads of
+ * its own; fork(2) copies the process with only the calling thread, so in
+ * the child the runtime, and with it the interpreter, cannot run (it waits
+ * for threads that are not there, uses descriptors the child closes). A
+ * child that execs, or does its work in C alone and exits, is fine. A
+ * child that calls the interpreter (perl API functions, a callback into
+ * Perl code) ends instead, at its first such call, with a message: perl
+ * would run that child, gperl cannot. fork is the module's own (hidden), as
+ * sigaction is; it marks the child's copy of the process block. */
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t (*goperl_libc_fork)(void) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t fork(void) GOPERL_LIBC_THROW {
+    if (!goperl_libc_fork) {
+        goperl_libc_fork = (pid_t (*)(void))dlsym(RTLD_NEXT, "fork");
+        if (!goperl_libc_fork) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    const pid_t pid = goperl_libc_fork();
+    if (pid == 0 && goperl_api_v) GOPERL_PROCESS->forked = 1;
+    return pid;
+}
+static void goperl_forked_exit(void) __attribute__((noreturn, unused));
+static void goperl_forked_exit(void) {
+    static const char msg[] =
+        "native code forked this process with fork(2), and its child called "
+        "the interpreter: a child of fork(2) made by native code cannot run "
+        "Perl code under gperl (the Go runtime does not survive fork); the "
+        "child exits\n";
+    ssize_t w = write(2, msg, sizeof msg - 1);
+    (void)w;
+    _exit(255);
+}
+/* Ends a child of native code's fork(2) that calls the interpreter. */
+#define goperl_forked_check()                                         \
+    do {                                                              \
+        if (goperl_api_v && GOPERL_PROCESS->forked) goperl_forked_exit(); \
+    } while (0)
 
 /* ---- errno ------------------------------------------------------------------
  * The host's errno is native code's own: a call into the loader (which runs
@@ -962,6 +1005,7 @@ static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
 static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint64_t slen, uint64_t *second) {
+    goperl_forked_check();
     const int goperl_e_ = errno;
     const int32_t failed_before = f->failed;
     const uint64_t r = slen <= GOPERL_OPBOX_STR
@@ -1557,6 +1601,7 @@ static void goperl_errno_leave(goperl_frame_t *f) {
 }
 
 static goperl_frame_t **goperl_curframe_slot(void) {
+    goperl_forked_check();
     void *tid = (void *)pthread_self();
     goperl_tframe_t *tf = GOPERL_PROCESS->tf;
     uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
@@ -1592,6 +1637,13 @@ typedef struct goperl_hostsave {
 } goperl_hostsave_t;
 #define GOPERL_HOSTSAVE_GENERIC 9
 #define GOPERL_HOSTSAVE_MAX 256
+/* The scope of the saves an activation's entry makes (GOPERL_XS_OPEN: the
+ * previous activation's frame, catch point and base): no LEAVE reaches it,
+ * only the activation's end restores them. An XSUB may leave its caller's
+ * scope (Guard's scope_guard: `LEAVE; SAVEDESTRUCTOR_X(...); ENTER;`), and
+ * that LEAVE must not undo the bookkeeping of the native calls running
+ * under it, its own or that of the XSUB whose callback called it. */
+#define GOPERL_HOSTSAVE_ACTIVATION INT32_MIN
 
 /* Control-flow state SHARED ACROSS MODULES. Weak globals only coalesce
  * within one shared object; with several SDK-built .so files loaded
@@ -4830,6 +4882,8 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
         goperl_hostsave_i32((frame), &(frame)->hostsave_base); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->prev_frame); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->jb); \
+        for (int32_t goperl_i = goperl_entry_base; goperl_i < goperl_hostsave_n; goperl_i++) \
+            goperl_hostsave_v[goperl_i].scope = GOPERL_HOSTSAVE_ACTIVATION; \
         (frame)->prev_frame = ((frame) == (prev_cur))      \
                                   ? (void *)(frame)        \
                                   : (void *)(prev_cur);    \
@@ -6313,20 +6367,33 @@ typedef char goperl_ssnew_fits
          ? 1
          : -1] __attribute__((unused));
 
+/* The end of the block's scope releases the block rather than freeing it:
+ * perl's savestack keeps what was there until the stack grows over it
+ * again, and code reads a block right after an op that left its scope
+ * (Devel::NYTProf looks there whether the destructor it saved beside the
+ * block has run). The block goes when its slot is taken again. A released
+ * block's pointer has its low bit set (calloc's blocks are aligned): which
+ * blocks were released cannot be told otherwise. */
+#define GOPERL_SSNEW_RELEASED ((uintptr_t)1)
+static void *goperl_ssnew_block(void *mem) {
+    return (void *)((uintptr_t)mem & ~GOPERL_SSNEW_RELEASED);
+}
 static void goperl_ssnew_free_cb(pTHX_ void *p) {
     int32_t ix = (int32_t)(intptr_t)p;
     (void)_gof;
-    if (ix >= 0 && ix < GOPERL_SSNEW_MAX && goperl_ssnew_v[ix].mem) {
-        free(goperl_ssnew_v[ix].mem);
-        goperl_ssnew_v[ix].mem = 0;
-    }
+    if (ix >= 0 && ix < GOPERL_SSNEW_MAX && goperl_ssnew_v[ix].mem)
+        goperl_ssnew_v[ix].mem =
+            (void *)((uintptr_t)goperl_ssnew_v[ix].mem | GOPERL_SSNEW_RELEASED);
 }
 
 static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
     int32_t ix = -1;
     for (int32_t k = 0; k < GOPERL_SSNEW_MAX; k++) {
         int32_t i = (goperl_ssnew_hint_v + k) % GOPERL_SSNEW_MAX;
-        if (!goperl_ssnew_v[i].mem) {
+        void *mem = goperl_ssnew_v[i].mem;
+        if (!mem || ((uintptr_t)mem & GOPERL_SSNEW_RELEASED)) {
+            free(goperl_ssnew_block(mem));
+            goperl_ssnew_v[i].mem = 0;
             ix = i;
             break;
         }
@@ -6341,7 +6408,7 @@ static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
 }
 #define SSNEW(size) goperl_ssnew(_gof, (size_t)(size))
 #define SSNEWa(size, align) goperl_ssnew(_gof, (size_t)(size))
-#define SSPTR(ix, type) ((type)goperl_ssnew_v[(ix)].mem)
+#define SSPTR(ix, type) ((type)goperl_ssnew_block(goperl_ssnew_v[(ix)].mem))
 #define MEM_ALIGNBYTES 8
 
 /* ---- context stack shadows -----------------------------------------------
