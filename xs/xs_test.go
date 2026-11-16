@@ -303,6 +303,37 @@ func TestNativeCxxModuleWithoutExternC(t *testing.T) {
 // exception specification is part of a function's type: the C library's
 // functions the SDK defines for a module (signal, sigaction) have to have
 // the C library's.
+// The SDK leaves MY_CXT_KEY to the module, as perl's perl.h does: a
+// module defines it where it keeps state in MY_CXT and tests it to know
+// whether it does (Time::HiRes runs MY_CXT_INIT `#ifdef MY_CXT_KEY`, and
+// declares my_cxt only on Windows). Before, the SDK defined it, and
+// Time::HiRes did not build ('my_cxt' undeclared).
+func TestSDKLeavesMyCxtKeyToTheModule(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("no host C compiler available")
+	}
+	src := filepath.Join(t.TempDir(), "cxt.c")
+	if err := os.WriteFile(src, []byte(`#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+XS(boot_Cxt) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+#ifdef MY_CXT_KEY
+    MY_CXT_INIT;
+#endif
+    XSRETURN_YES;
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-fsyntax-only", "-D_GNU_SOURCE", "-I", "sdk/include", src}
+	if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+		t.Fatalf("a module that uses MY_CXT only where it defines MY_CXT_KEY does not compile: %v\n%s", err, out)
+	}
+}
+
 func TestSDKCompilesAsCxx(t *testing.T) {
 	tried := 0
 	for _, cxx := range []string{"c++", "g++", "clang++"} {

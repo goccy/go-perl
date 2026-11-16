@@ -7204,7 +7204,9 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 #define aMY_CXT
 #define aMY_CXT_
 #define _aMY_CXT
-#define MY_CXT_KEY "goperl::_guts" XS_VERSION
+/* MY_CXT_KEY is the module's, as in perl's perl.h, which does not define
+ * it: a module tells by it whether it keeps state in MY_CXT (Time::HiRes
+ * defines it only where it does, and runs MY_CXT_INIT `#ifdef MY_CXT_KEY`). */
 
 /* HePV is defined with the HE-shadow machinery below. */
 
