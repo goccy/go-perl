@@ -73,6 +73,7 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	c.mapped = mem
 	c.h = p.h
 	c.intrAddr = p.intrAddr
+	c.writeMemoryBase(true)
 	c.family = &forkFamily{origin: c}
 	c.installForkHook()
 

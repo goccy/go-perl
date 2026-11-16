@@ -356,30 +356,34 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	return p, nil
 }
 
-// The words after the interpreter's interrupt flag (perl-wasm's
-// g_hostwords): a marker that says they are there, and where this process
-// has the instance's memory, which pack 'p' and 'P' add to an address of
-// the memory and unpack 'p' and 'P' take away again (the pointers are for
-// native code, which reads the process's memory).
-const (
-	hostWordsMagic       = 0x676f7077
-	hostWordsMagicOffset = 4
-	hostWordsBaseOffset  = 8
-)
+// hostWordsBaseOffset is where, after the interpreter's interrupt flag
+// (perl-wasm's g_hostwords), the word lies that says where this process has
+// the instance's memory: pack 'p' and 'P' add it to an address of the
+// memory and unpack 'p' and 'P' take it away again (the pointers are for
+// native code, which reads the process's memory). 0 means no base: the
+// addresses are the memory's own.
+const hostWordsBaseOffset = 8
 
-// MarkMemoryBase writes where this process has the instance's memory into
-// the interpreter's word for it, from when native code runs in the
-// instance: the native loader marks an instance when it loads the first
-// module into it, and each copy of such an instance (a Clone, a fork
-// child), whose memory is in a place of its own. Until then pack 'p' makes
-// addresses of the interpreter's memory, and unpack 'p' reads nothing but
-// that memory, as before. The memory does not move (it is a reservation as
-// large as it can grow).
+// MarkMemoryBase gives an instance that runs native code its base, before
+// any code runs in it: the configuration decides it once, for the life of
+// the instance (a pointer pack 'p' made before a base appeared would be
+// taken for an address of the process afterwards). The memory does not
+// move (it is a reservation as large as it can grow).
 func (p *Perl) MarkMemoryBase() {
+	p.writeMemoryBase(false)
+}
+
+// writeMemoryBase writes the base of the instance's memory into the word;
+// with ifSet, only when the word has a base already: a copy of an instance
+// (a Clone, a fork child) has its memory in a place of its own, and its word
+// came with the original's memory.
+func (p *Perl) writeMemoryBase(ifSet bool) {
 	base.AccessMemory(p.m.g, func(mem []byte) {
 		at := p.intrAddr
-		if len(mem) == 0 || at+hostWordsBaseOffset+8 > uint64(len(mem)) ||
-			binary.LittleEndian.Uint32(mem[at+hostWordsMagicOffset:]) != hostWordsMagic {
+		if len(mem) == 0 || at+hostWordsBaseOffset+8 > uint64(len(mem)) {
+			return
+		}
+		if ifSet && binary.LittleEndian.Uint64(mem[at+hostWordsBaseOffset:]) == 0 {
 			return
 		}
 		binary.LittleEndian.PutUint64(mem[at+hostWordsBaseOffset:], uint64(uintptr(unsafe.Pointer(&mem[0]))))

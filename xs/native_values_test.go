@@ -71,7 +71,15 @@ func TestNativeStringLengthIntoAnInt(t *testing.T) {
 // of the process at that number, and an address of native code's was read
 // in the interpreter's memory, past its end.
 func TestNativePackedAddressesAreTheProcesss(t *testing.T) {
-	p := newHostPerl(t)
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, NativeModules: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
 	perlAPIInstance(t, p)
 	runEvalCases(t, p, []evalCase{
 		{"written by native code", `my $buf = "\0" x 8; PerlAPI::write_at(unpack("J", pack("P", $buf)), "abc"); substr($buf, 0, 3)`, "abc"},

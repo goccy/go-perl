@@ -98,6 +98,9 @@ func New(cfg Config) (*Perl, error) {
 	raw.OnFork = p.adoptForkChild
 	p.raw = raw
 	if cfg.NativeModules {
+		// native code runs here: pointers pack 'p' makes are addresses of
+		// the process from the start (see internal.Perl.MarkMemoryBase)
+		raw.MarkMemoryBase()
 		if err := p.installDynaLoader(); err != nil {
 			p.Close()
 			return nil, err

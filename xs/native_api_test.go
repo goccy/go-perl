@@ -77,6 +77,20 @@ func TestNativeOwnJumpsKeepTheSignalStackState(t *testing.T) {
 	})
 }
 
+// A handler a module installs runs on the alternate signal stack, also when
+// the module calls sigaction under a name that is not the SDK's macro (EV
+// #undefs signal and sigaction after perl.h, before libev installs its
+// SIGCHLD handler). Installed on the thread's stack, libev's handler ran on
+// whatever goroutine stack the thread had when a child process ended, and
+// the runtime found its own threads' stacks broken.
+func TestNativeHandlerOnTheAlternateStack(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"sigaction not as a macro", `PerlAPI::handler_on_altstack()`, "onstack"},
+	})
+}
+
 // Native code that follows an address of the interpreter's that its memory
 // does not hold — past the memory's size but inside the range reserved for
 // the memory (whose pages past the size are not readable), past that
@@ -89,9 +103,7 @@ func TestNativeCodeFollowsAnAddressPastTheMemory(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
 	cases := []evalCase{
-		// pack 'p' makes the process's address of the string; less the
-		// memory's base, it is the interpreter's
-		{"a string's buffer", `my $s = "perl"; PerlAPI::guest_byte(unpack("Q", pack("p", $s)) - PerlAPI::memory_base())`, "112"},
+		{"a string's buffer", `my $s = "perl"; PerlAPI::guest_byte(unpack("Q", pack("p", $s)))`, "112"},
 		{"buffers made during the call", `PerlAPI::grown_buffers(128 << 20)`, "az"},
 	}
 	for _, addr := range []string{"3*2**30", "9*2**30", "2**46", "2**63", "~0"} {

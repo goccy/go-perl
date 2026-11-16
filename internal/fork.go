@@ -82,6 +82,7 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 	m := &Module{}
 	c := &Perl{m: m, wasi: childWASI, opts: p.opts, mapped: dup.Memory, image: image.retain(), h: p.h, intrAddr: p.intrAddr, family: p.family}
 	m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, dup.Memory, dup.Size, dup.Globals)
+	c.writeMemoryBase(true)
 	// The copied fd table came with the parent's hook; the child's forks
 	// must snapshot the child.
 	c.installForkHook()

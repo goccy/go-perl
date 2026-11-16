@@ -4035,12 +4035,26 @@ XS(XS_PerlAPI_guest_byte) {
     }
 }
 
-/* memory_base(): where the interpreter's memory starts in this process (an
- * address pack 'p' makes less this is an address of the interpreter's). */
-XS(XS_PerlAPI_memory_base) {
+/* handler_on_altstack(): installs a handler for SIGUSR2 without SA_ONSTACK
+ * through the name sigaction not taken as a macro, as EV does (it #undefs
+ * signal and sigaction after perl.h before libev installs its handlers),
+ * and says whether the handler went in with SA_ONSTACK; the action before
+ * is put back. */
+static void goperl_usr2_noop(int sig) { (void)sig; }
+XS(XS_PerlAPI_handler_on_altstack) {
     dXSARGS;
     PERL_UNUSED_VAR(items);
-    ST(0) = sv_2mortal(newSVuv(PTR2UV(_gof->membase)));
+    {
+        struct sigaction act, old, now;
+        memset(&act, 0, sizeof(act));
+        act.sa_handler = goperl_usr2_noop;
+        sigemptyset(&act.sa_mask);
+        act.sa_flags = SA_RESTART;
+        if ((sigaction)(SIGUSR2, &act, &old) != 0) croak("sigaction: %s", strerror(errno));
+        (sigaction)(SIGUSR2, NULL, &now);
+        (sigaction)(SIGUSR2, &old, NULL);
+        ST(0) = sv_2mortal(newSVpv((now.sa_flags & SA_ONSTACK) ? "onstack" : "thread stack", 0));
+    }
     XSRETURN(1);
 }
 
@@ -6709,7 +6723,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::write_at", XS_PerlAPI_write_at);
     newXS_deffile("PerlAPI::returns_freed", XS_PerlAPI_returns_freed);
     newXS_deffile("PerlAPI::pv_int_len", XS_PerlAPI_pv_int_len);
-    newXS_deffile("PerlAPI::memory_base", XS_PerlAPI_memory_base);
+    newXS_deffile("PerlAPI::handler_on_altstack", XS_PerlAPI_handler_on_altstack);
     newXS_deffile("PerlAPI::void_calls", XS_PerlAPI_void_calls);
     newXS_deffile("PerlAPI::native_string", XS_PerlAPI_native_string);
     newXS_deffile("PerlAPI::entersub_seen", XS_PerlAPI_entersub_seen);

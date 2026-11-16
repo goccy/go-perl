@@ -495,7 +495,6 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	if err := clone.SetProcessMemoryHandler(readProcessMemory); err != nil {
 		return err
 	}
-	clone.MarkMemoryBase()
 	return clone.SetDestructorHandler(cs.dtorFired)
 }
 
@@ -664,9 +663,6 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	if err := p.SetProcessMemoryHandler(readProcessMemory); err != nil {
 		return 0, err
 	}
-	// pack 'p' makes addresses of this process from now on (see
-	// internal.Perl.MarkMemoryBase)
-	p.MarkMemoryBase()
 	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
 		return 0, err
 	}

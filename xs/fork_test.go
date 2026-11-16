@@ -26,7 +26,7 @@ func runForkingProgram(t *testing.T, code ...string) (status int, stdout, stderr
 		t.Fatalf("extract stdlib: %v", err)
 	}
 	var out, errOut bytes.Buffer
-	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, Fork: true, Stdout: &out, Stderr: &errOut})
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, Fork: true, NativeModules: true, Stdout: &out, Stderr: &errOut})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

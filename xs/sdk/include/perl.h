@@ -99,6 +99,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <dlfcn.h>
 #include <locale.h>
 #include <dirent.h>
 #include <sys/ioctl.h>
@@ -172,9 +173,15 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
  * The process a module is loaded into has a handler of its own for every
  * signal, which runs on an alternate signal stack and takes the three
  * arguments of an SA_SIGINFO handler; a signal that reaches it in any other
- * way ends the process. A module that sets a signal aside for a moment
- * keeps the handler it found — the pointer alone — and puts that back with
- * the flags it has for handlers of its own:
+ * way ends the process. A handler that runs on the stack of whatever the
+ * thread was running corrupts that stack: the process's threads run on
+ * small stacks of its runtime (libev's SIGCHLD handler, installed without
+ * SA_ONSTACK, broke the stacks of the runtime's own threads when a child
+ * process ended).
+ *
+ * A module that sets a signal aside for a moment keeps the handler it found
+ * — the pointer alone — and puts that back with the flags it has for
+ * handlers of its own:
  *
  *     old = signal(SIGCHLD, SIG_DFL);  ...;  signal(SIGCHLD, old);
  *
@@ -184,18 +191,43 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
  * that action. A handler that is the module's own is installed as the
  * module asks, on the alternate stack every thread of the process has.
  *
- * goperl_seen_action is what this translation unit was shown, by signal: a
- * handler pointer does not tell what action it came from. */
+ * They are functions of the module itself (hidden: its own calls bind to
+ * them, and nothing outside it sees them), not macros: a module may #undef
+ * signal and sigaction after perl.h, as EV does, and still installs its
+ * handlers through them. The C library's sigaction is the next one after
+ * the module (RTLD_NEXT).
+ *
+ * goperl_seen_action is what the module was shown, by signal: a handler
+ * pointer does not tell what action it came from. */
 #ifndef NSIG
 #define NSIG 65
 #endif
-static struct sigaction goperl_seen_action[NSIG] __attribute__((unused));
+/* glibc's declarations end in __THROW: in C++ an exception specification
+ * the definition has to repeat; in C attributes, which gcc does not take
+ * after the declarator of a definition */
+#if defined(__cplusplus) && defined(__THROW)
+#define GOPERL_LIBC_THROW __THROW
+#else
+#define GOPERL_LIBC_THROW
+#endif
+GOPERL_C __attribute__((weak, visibility("hidden"))) struct sigaction goperl_seen_action[NSIG] = {0};
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigaction)(
+    int, const struct sigaction *, struct sigaction *) = 0;
 
-static inline int goperl_sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+GOPERL_C __attribute__((weak, visibility("hidden"))) int sigaction(
+    int sig, const struct sigaction *act, struct sigaction *old) GOPERL_LIBC_THROW {
     struct sigaction current, with;
+    if (!goperl_libc_sigaction) {
+        goperl_libc_sigaction = (int (*)(int, const struct sigaction *, struct sigaction *))
+            dlsym(RTLD_NEXT, "sigaction");
+        if (!goperl_libc_sigaction) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
     if (sig <= 0 || sig >= NSIG)
-        return (sigaction)(sig, act, old);
-    if ((sigaction)(sig, NULL, &current) == 0 &&
+        return goperl_libc_sigaction(sig, act, old);
+    if (goperl_libc_sigaction(sig, NULL, &current) == 0 &&
         current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN)
         goperl_seen_action[sig] = current;
     if (act != NULL && act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN) {
@@ -207,23 +239,20 @@ static inline int goperl_sigaction(int sig, const struct sigaction *act, struct 
         }
         act = &with;
     }
-    return (sigaction)(sig, act, old);
+    return goperl_libc_sigaction(sig, act, old);
 }
 
-static inline void (*goperl_signal(int sig, void (*handler)(int)))(int) {
+GOPERL_C __attribute__((weak, visibility("hidden"))) void (*signal(int sig, void (*handler)(int)))(int)
+    GOPERL_LIBC_THROW {
     struct sigaction act, old;
     memset(&act, 0, sizeof(act));
     act.sa_handler = handler;
     sigemptyset(&act.sa_mask);
     act.sa_flags = SA_RESTART;
-    if (goperl_sigaction(sig, &act, &old) != 0)
+    if (sigaction(sig, &act, &old) != 0)
         return SIG_ERR;
     return old.sa_handler;
 }
-
-#define sigaction(sig, act, old) goperl_sigaction((sig), (act), (old))
-#undef signal
-#define signal(sig, handler) goperl_signal((sig), (handler))
 
 /* The perl this SDK targets (the embedded interpreter's version). */
 #define PERL_PATCHLEVEL_H_IMPLICIT
