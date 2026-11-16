@@ -47,6 +47,23 @@ func runForkingProgram(t *testing.T, code ...string) (status int, stdout, stderr
 	return status, out.String(), errOut.String()
 }
 
+// A fork child has its memory in a place of its own, and pack 'P' there
+// makes the address of the child's string: native code writes into the
+// child's copy, and the parent's string stays as it was.
+func TestForkPackedAddressesAreTheChilds(t *testing.T) {
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; $| = 1;`,
+		`my $buf = "\0" x 4;`,
+		`my $pid = fork // die "fork: $!";`,
+		`if (!$pid) { PerlAPI::write_at(unpack("J", pack("P", $buf)), "kid"); exit(substr($buf, 0, 3) eq "kid" ? 7 : 1) }`,
+		`waitpid $pid, 0;`,
+		`print "child ", $? >> 8, " parent ", ($buf eq "\0" x 4 ? "untouched" : "changed"), "\n";`,
+	)
+	if status != 0 || stdout != "child 7 parent untouched\n" {
+		t.Fatalf("status %d, stdout %q, stderr %q; want child 7 parent untouched", status, stdout, stderr)
+	}
+}
+
 // A program forks while a variable carries magic of a native module and an
 // XSUB a value in its own slot. The fork succeeds and the child has both.
 // The slot is the child's own from then on. The C memory behind the magic

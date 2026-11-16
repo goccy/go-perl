@@ -210,7 +210,7 @@ static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
 
 /* utf8_strict walks PL_perlio to flush line-buffered TTY handles; there is
  * no host-visible handle table, and the walk exits immediately on NULL. */
-__attribute__((weak)) PerlIOl *goperl_pl_perlio_null_v = 0;
+GOPERL_C __attribute__((weak)) PerlIOl *goperl_pl_perlio_null_v = 0;
 #define PL_perlio (goperl_pl_perlio_null_v)
 
 /* ---- host shadow instances ---------------------------------------------- */
@@ -231,7 +231,7 @@ typedef struct goperl_iol_shadow {
     /* dist layer struct follows (funcs->size bytes) */
 } goperl_iol_shadow_t;
 
-__attribute__((weak)) goperl_iol_shadow_t *goperl_iol_shadows_v = 0;
+GOPERL_C __attribute__((weak)) goperl_iol_shadow_t *goperl_iol_shadows_v = 0;
 
 /* ---- tail: the guest layer below the proxy ------------------------------ */
 
@@ -315,7 +315,7 @@ static IV goperl_tail_pushed(pTHX_ PerlIO *f, const char *mode, SV *arg,
     return 0;
 }
 
-__attribute__((weak)) PerlIO_funcs goperl_tail_funcs_v = {
+GOPERL_C __attribute__((weak)) PerlIO_funcs goperl_tail_funcs_v = {
     sizeof(PerlIO_funcs), "goperl_tail", sizeof(PerlIOl),
     PERLIO_K_BUFFERED | PERLIO_K_FASTGETS,
     goperl_tail_pushed, 0, 0, 0, 0, 0, 0,
@@ -523,8 +523,8 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
 
 /* ---- the hook dispatcher (called by the loader on method -6) ------------ */
 
-__attribute__((weak)) uint64_t goperl_iol_gbuf_v = 0;
-__attribute__((weak)) char *goperl_iol_hbuf_v = 0;
+GOPERL_C __attribute__((weak)) uint64_t goperl_iol_gbuf_v = 0;
+GOPERL_C __attribute__((weak)) char *goperl_iol_hbuf_v = 0;
 
 static goperl_iol_shadow_t *goperl_iol_shadow(PerlIO_funcs *tab, uint64_t ltok,
                                               uint64_t ff) {
@@ -549,7 +549,7 @@ static goperl_iol_shadow_t *goperl_iol_shadow(PerlIO_funcs *tab, uint64_t ltok,
     return sh;
 }
 
-__attribute__((weak, visibility("default"), used)) int32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
                        const unsigned char *req, uint32_t reqlen,
                        unsigned char *resp, uint32_t respcap) {

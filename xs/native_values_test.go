@@ -50,6 +50,38 @@ func runEvalCases(t *testing.T, p *perl.Perl, cases []evalCase) {
 	}
 }
 
+// The length an SvPV form gives is assigned to the module's variable,
+// whatever its integer type, as perl's macros assign it: Digest::OAT gives
+// it an int. The SDK wrote the eight bytes of a length through a pointer to
+// the variable, past the int (the C library reported the stack smashed).
+func TestNativeStringLengthIntoAnInt(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"int and U32", `PerlAPI::pv_int_len("hello")`, "len=5 kept ulen=5 kept he"},
+	})
+}
+
+// pack 'p' and 'P' make addresses of this process, as on perl, which native
+// code reads and writes at: a C function FFI::Platypus calls with the buffer
+// of scalar_to_buffer (pack 'P') writes into the string. unpack 'p' and 'P'
+// read at such an address, whether it is in the interpreter's memory or in
+// native code's (buffer_to_scalar of a buffer a C function returned). They
+// were addresses of the interpreter's memory: native code wrote to memory
+// of the process at that number, and an address of native code's was read
+// in the interpreter's memory, past its end.
+func TestNativePackedAddressesAreTheProcesss(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"written by native code", `my $buf = "\0" x 8; PerlAPI::write_at(unpack("J", pack("P", $buf)), "abc"); substr($buf, 0, 3)`, "abc"},
+		{"native memory, a length", `unpack("P12", pack("J", PerlAPI::native_string()))`, "native bytes"},
+		{"native memory, to the NUL", `unpack("p", pack("J", PerlAPI::native_string()))`, "native bytes"},
+		{"the interpreter's memory", `my $s = "xyz"; my $p = pack("p", $s); unpack("p", $p) . unpack("P2", pack("P", $s))`, "xyzxy"},
+		{"a null pointer", `defined(unpack("p", pack("J", 0))) ? "defined" : "undef"`, "undef"},
+	})
+}
+
 // The IV and UV of native code and the interpreter's are the same 64 bits:
 // a pointer or any integer a module stores with sv_setiv, newSViv or
 // sv_setref_pv comes back whole from SvIV, SvUV, SvIVX and INT2PTR, what the

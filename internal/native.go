@@ -56,6 +56,13 @@ const perlioMethodID = -6
 // functions registered with call_atexit).
 const hostCallMethodID = -9
 
+// processMemoryMethodID is the reserved callback method id of reading
+// memory of the process outside the guest's (perl.cc
+// GOPERL_PROCMEM_METHOD_ID): the request is [address][length, or -1 for the
+// string up to its NUL], the response [1] and the bytes, or [0] and a
+// message to croak with.
+const processMemoryMethodID = -10
+
 // keywordMethodID is the reserved callback method id the guest keyword and
 // infix plugin wrappers dispatch on while compiling (perl.cc
 // GOPERL_KEYWORD_METHOD_ID).
@@ -160,6 +167,19 @@ func (p *Perl) SetHostCallHandler(fn func(req []byte) []byte) error {
 	}
 	p.hookMu.Lock()
 	p.hostCall = fn
+	p.hookMu.Unlock()
+	return nil
+}
+
+// SetProcessMemoryHandler installs the reader of the process's memory
+// outside the guest's: n bytes at addr, or with n < 0 the bytes up to the
+// NUL there.
+func (p *Perl) SetProcessMemoryHandler(fn func(addr uint64, n int64) ([]byte, error)) error {
+	if err := p.EnsureDispatcher(); err != nil {
+		return err
+	}
+	p.hookMu.Lock()
+	p.processMemory = fn
 	p.hookMu.Unlock()
 	return nil
 }
@@ -501,6 +521,19 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 			return append([]byte{0}, "no PerlIO layer handler installed"...), nil
 		}
 		return hook(req), nil
+	}
+	if methodID == processMemoryMethodID {
+		d.p.hookMu.RLock()
+		read := d.p.processMemory
+		d.p.hookMu.RUnlock()
+		if read == nil || len(req) < 16 {
+			return append([]byte{0}, "no reader of the memory of the process"...), nil
+		}
+		b, err := read(binary.LittleEndian.Uint64(req), int64(binary.LittleEndian.Uint64(req[8:])))
+		if err != nil {
+			return append([]byte{0}, err.Error()...), nil
+		}
+		return append([]byte{1}, b...), nil
 	}
 	if methodID == hostCallMethodID {
 		d.p.hookMu.RLock()

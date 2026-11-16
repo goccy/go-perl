@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+
+	perl "github.com/goccy/go-perl"
+	goperlfs "github.com/goccy/go-perl/fs"
 )
 
 // buildPlainLibrary compiles a shared library that is not a native XS
@@ -62,6 +65,34 @@ my $other = DynaLoader::dl_find_symbol($lib, "no_such_function") ? "found" : (Dy
 	if want := "found|missing, with an error"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+}
+
+// dl_find_symbol returns the address of the symbol and dl_load_file the
+// library's handle, as perl's do, and native code can call the function at
+// that address: SPVM finds the functions of the native classes it builds
+// that way and calls them. Both returned numbers of their own (indexes),
+// and SPVM jumped to one. A handle or an address that DynaLoader did not
+// hand out is refused.
+func TestDynaLoaderSymbolIsTheFunctionsAddress(t *testing.T) {
+	so := buildPlainLibrary(t)
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, NativeModules: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"called", `require DynaLoader;
+my $lib = DynaLoader::dl_load_file('` + so + `', 0) or die "dl_load_file: " . DynaLoader::dl_error();
+my $sym = DynaLoader::dl_find_symbol($lib, "plain_answer") or die "dl_find_symbol: " . DynaLoader::dl_error();
+PerlAPI::call_int_function($sym)`, "42"},
+		{"unknown handle", `DynaLoader::dl_find_symbol(12345, "plain_answer") ? "found" : (DynaLoader::dl_error() =~ /unknown library handle/ ? "refused" : DynaLoader::dl_error())`, "refused"},
+		{"unknown address", `eval { DynaLoader::dl_install_xsub("main::nothing", 12345); 1 } ? "installed" : ($@ =~ /unknown symbol address/ ? "refused" : $@)`, "refused"},
+	})
 }
 
 // dl_load_file's flags decide whether a library's symbols are global, as

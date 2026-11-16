@@ -22,6 +22,20 @@ func TestNativeContextStores(t *testing.T) {
 	})
 }
 
+// A pp function a module put in PL_ppaddr reads the file and line of the
+// statement the original pp function returns (Test2::Plugin::Cover's
+// entersub: after a call of an XSUB that is the op after the call, a
+// nextstate the interpreter described only as a link of the call's op).
+// The COP fields of such an op were not filled: CopFILE was NULL, and the
+// module's strlen of it faulted.
+func TestNativeStatementAfterACall(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"after an XSUB", "PerlAPI::entersub_watch(); eval qq{#line 10 \"cops.pl\"\nutf8::is_utf8('x');\nutf8::is_utf8('y');\n1;\n} or die; PerlAPI::entersub_seen()", "cops.pl:11;cops.pl:12;"},
+	})
+}
+
 // The auxiliary data of a multideref op: an SV and a pad offset fill the
 // low half of an item; PL_multideref_pc takes the address of an item. A
 // string buffer is given back with SvPV_free (autovivification's way of

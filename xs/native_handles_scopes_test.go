@@ -189,6 +189,36 @@ func TestNativeFetchedSlotsKept(t *testing.T) {
 	})
 }
 
+// What a sub called in void context leaves on the stack is left alone, as
+// perl leaves it: a callback can leave values the scope of its call has
+// freed by the time call_sv returns (Future::XS's callbacks end with a bare
+// return after nested calls), and the caller does not read them. The call
+// took a reference on each result and dropped it at the next FREETMPS,
+// freeing such a value a second time (Future's "weakself retention" case
+// died in FREETMPS: "memory access out of bounds").
+func TestNativeVoidCallLeavesItsResults(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"values freed by the call's scope", `PerlAPI::void_calls(200)`, "ok"},
+	})
+}
+
+// AvARRAY is the array's memory as it is, past its last element too: code
+// that takes the elements out by lowering AvFILLp in the same expression
+// that reads the slot (`AvARRAY(av)[AvFILLp(av)--]`, Future::XS) reads the
+// slot it has just left behind, which perl leaves in place. The slots past
+// the last element read as NULL, and Future::XS dereferenced it.
+func TestNativeSlotsPastTheLastElement(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"values", `my @a = ("a", "b", "c"); my $r = PerlAPI::take_out_by_fill(\@a); "$r|" . scalar(@a)`, "c,b,a|0"},
+		{"native pointers", `PerlAPI::native_pointers_by_fill(5)`, "15"},
+		{"in turn", `my $ok = 0; for (1 .. 50) { $ok++ if PerlAPI::native_pointers_by_fill(40) == 820 } $ok`, "50"},
+	})
+}
+
 // A key whose length is negative is UTF-8, for every keyed hash function
 // that takes a length: hv_store, hv_fetch and hv_exists find the key of
 // characters, and hv_exists with the same bytes as a key of bytes does not.

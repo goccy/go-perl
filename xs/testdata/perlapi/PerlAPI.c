@@ -4035,6 +4035,15 @@ XS(XS_PerlAPI_guest_byte) {
     }
 }
 
+/* memory_base(): where the interpreter's memory starts in this process (an
+ * address pack 'p' makes less this is an address of the interpreter's). */
+XS(XS_PerlAPI_memory_base) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVuv(PTR2UV(_gof->membase)));
+    XSRETURN(1);
+}
+
 /* grown_buffers(n): makes two strings of n bytes, one after the other, for
  * which the interpreter's memory grows after the call began (the second
  * lies where the memory had nothing when the call began); writes the first
@@ -5816,6 +5825,207 @@ XS(XS_PerlAPI_install_sub) {
     XSRETURN(1);
 }
 
+/* take_out_by_fill(array): the elements taken out from the last as
+ * Future::XS takes out its callbacks, `AvARRAY(av)[AvFILLp(av)--]`, each
+ * then released; their values joined by commas. The index is taken (and
+ * AvFILLp lowered) before AvARRAY is read, the order gcc evaluates that
+ * expression in. */
+XS(XS_PerlAPI_take_out_by_fill) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "array");
+    {
+        AV *const av = (AV *)SvRV(ST(0));
+        SV *const out = sv_2mortal(newSVpvs(""));
+        while (AvFILLp(av) > -1) {
+            const SSize_t last = AvFILLp(av)--;
+            SV *const sv = AvARRAY(av)[last];
+            if (SvCUR(out)) sv_catpvs(out, ",");
+            if (sv) {
+                sv_catsv(out, sv);
+                SvREFCNT_dec(sv);
+            } else {
+                sv_catpvs(out, "(null)");
+            }
+        }
+        ST(0) = out;
+    }
+    XSRETURN(1);
+}
+
+/* entersub_watch(): a pp function for entersub that notes the file and line
+ * of the statement the original returns when that is a nextstate, as
+ * Test2::Plugin::Cover's does (`out = orig(aTHX); if (out->op_type ==
+ * OP_NEXTSTATE) ... CopFILE(cCOPx(out))`); entersub_seen() returns the
+ * notes, "file:line;" each, and empties them. */
+static Perl_ppaddr_t goperl_entersub_orig;
+static SV *goperl_entersub_notes;
+static OP *pp_goperl_entersub(pTHX) {
+    OP *const out = goperl_entersub_orig(aTHX);
+    if (out && (out->op_type == OP_NEXTSTATE || out->op_type == OP_DBSTATE)) {
+        const char *const file = CopFILE(cCOPx(out));
+        sv_catpvf(goperl_entersub_notes, "%s:%d;", file ? file : "(null)",
+                  (int)CopLINE(cCOPx(out)));
+    }
+    return out;
+}
+XS(XS_PerlAPI_entersub_watch) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    if (!goperl_entersub_notes) goperl_entersub_notes = newSVpvs("");
+    if (PL_ppaddr[OP_ENTERSUB] != pp_goperl_entersub) {
+        goperl_entersub_orig = PL_ppaddr[OP_ENTERSUB];
+        PL_ppaddr[OP_ENTERSUB] = pp_goperl_entersub;
+    }
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_entersub_seen) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVsv(goperl_entersub_notes));
+    sv_setpvs(goperl_entersub_notes, "");
+    XSRETURN(1);
+}
+
+/* write_at(address, bytes): copies the bytes to the address, as a C function
+ * FFI::Platypus calls writes into the buffer of scalar_to_buffer (an address
+ * pack 'P' made). */
+XS(XS_PerlAPI_write_at) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "address, bytes");
+    {
+        STRLEN len;
+        const char *const bytes = SvPV(ST(1), len);
+        memcpy(INT2PTR(char *, SvIV(ST(0))), bytes, len);
+    }
+    XSRETURN_EMPTY;
+}
+
+/* native_string(): the address of a string of this module's, "native
+ * bytes", as a C function returns a buffer FFI::Platypus hands to
+ * buffer_to_scalar (unpack 'P'). */
+static const char goperl_native_string[] = "native bytes";
+XS(XS_PerlAPI_native_string) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSViv(PTR2IV(goperl_native_string)));
+    XSRETURN(1);
+}
+
+/* returns_freed(): leaves on the stack a value the end of the call frees
+ * (SAVEFREESV), as a callback of Future::XS that ends with a bare return
+ * leaves values the scope of its call freed. void_calls(n) calls it n times
+ * in void context, as Future::XS calls its callbacks (call_sv(code,
+ * G_VOID); FREETMPS; LEAVE), making a string after each call; returns "ok"
+ * when every string is still what it was made as, or the first that is
+ * not. */
+XS(XS_PerlAPI_returns_freed) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    {
+        /* the value goes first, then another value, which is then the
+         * first SV perl hands out again */
+        SV *const other = newSViv(8);
+        SV *const sv = newSViv(7);
+        SAVEFREESV(other);
+        SAVEFREESV(sv);
+        ST(0) = sv;
+    }
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_void_calls) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        CV *const target = get_cv("PerlAPI::returns_freed", 0);
+        AV *const keep = (AV *)sv_2mortal((SV *)newAV());
+        IV i;
+        for (i = 0; i < n; i++) {
+            ENTER;
+            SAVETMPS;
+            PUSHMARK(SP);
+            PUTBACK;
+            call_sv((SV *)target, G_VOID);
+            FREETMPS;
+            LEAVE;
+            av_push(keep, newSVpvf("v%d", (int)i));
+        }
+        ST(0) = sv_2mortal(newSVpvs("ok"));
+        for (i = 0; i < n; i++) {
+            SV **const got = av_fetch(keep, i, 0);
+            SV *const want = sv_2mortal(newSVpvf("v%d", (int)i));
+            if (!got || !*got || !sv_eq(*got, want)) {
+                ST(0) = sv_2mortal(newSVpvf("bad at %d", (int)i));
+                break;
+            }
+        }
+    }
+    XSRETURN(1);
+}
+
+/* pv_int_len(sv): SvPV and SvPVbyte with the length given to variables of
+ * 32 bits (`int len; SvPV(sv, len)`, as Digest::OAT has it), each followed
+ * by a guard word; says the lengths and whether the guards were kept. */
+XS(XS_PerlAPI_pv_int_len) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        struct { int len; int guard; } s = {0, 0x5a5a5a5a};
+        struct { U32 len; U32 guard; } u = {0, 0x5a5a5a5a};
+        const char *const p = SvPV(ST(0), s.len);
+        const char *const q = SvPVbyte(ST(0), u.len);
+        ST(0) = sv_2mortal(newSVpvf("len=%d %s ulen=%u %s %c%c", s.len,
+                                    s.guard == 0x5a5a5a5a ? "kept" : "overwritten",
+                                    (unsigned)u.len,
+                                    u.guard == 0x5a5a5a5a ? "kept" : "overwritten", p[0], q[1]));
+    }
+    XSRETURN(1);
+}
+
+/* call_int_function(address): calls the function `int f(void)` at the
+ * address, as SPVM calls the function DynaLoader::dl_find_symbol found for
+ * a method of a native class; returns what it returns. */
+XS(XS_PerlAPI_call_int_function) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "address");
+    {
+        int (*const fn)(void) = INT2PTR(int (*)(void), SvIV(ST(0)));
+        ST(0) = sv_2mortal(newSViv(fn()));
+    }
+    XSRETURN(1);
+}
+
+/* native_pointers_by_fill(n): an array of n native pointers (to the numbers
+ * 1 .. n) pushed as Future::XS pushes its callback records, `av_push(av,
+ * (SV *)record)`, then taken out from the last by lowering AvFILLp (as
+ * take_out_by_fill) and freed, and the array released empty; returns the
+ * sum of the numbers. */
+XS(XS_PerlAPI_native_pointers_by_fill) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        const IV n = SvIV(ST(0));
+        AV *const av = newAV();
+        IV sum = 0, i;
+        for (i = 1; i <= n; i++) {
+            IV *rec;
+            Newx(rec, 1, IV);
+            *rec = i;
+            av_push(av, (SV *)rec);
+        }
+        while (AvFILLp(av) > -1) {
+            const SSize_t last = AvFILLp(av)--;
+            IV *const rec = (IV *)AvARRAY(av)[last];
+            if (!rec) croak("slot %d is empty", (int)last);
+            sum += *rec;
+            Safefree(rec);
+        }
+        SvREFCNT_dec((SV *)av);
+        ST(0) = sv_2mortal(newSViv(sum));
+    }
+    XSRETURN(1);
+}
+
 /* lexical_import(name, sub): Exporter::Lexical's: the sub becomes the
  * lexical sub &name of the code being compiled. */
 XS(XS_PerlAPI_lexical_import) {
@@ -6492,5 +6702,16 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::ors_aside", XS_PerlAPI_ors_aside);
     newXS_deffile("PerlAPI::named_stash", XS_PerlAPI_named_stash);
     newXS_deffile("PerlAPI::install_sub", XS_PerlAPI_install_sub);
+    newXS_deffile("PerlAPI::take_out_by_fill", XS_PerlAPI_take_out_by_fill);
+    newXS_deffile("PerlAPI::native_pointers_by_fill", XS_PerlAPI_native_pointers_by_fill);
+    newXS_deffile("PerlAPI::call_int_function", XS_PerlAPI_call_int_function);
+    newXS_deffile("PerlAPI::entersub_watch", XS_PerlAPI_entersub_watch);
+    newXS_deffile("PerlAPI::write_at", XS_PerlAPI_write_at);
+    newXS_deffile("PerlAPI::returns_freed", XS_PerlAPI_returns_freed);
+    newXS_deffile("PerlAPI::pv_int_len", XS_PerlAPI_pv_int_len);
+    newXS_deffile("PerlAPI::memory_base", XS_PerlAPI_memory_base);
+    newXS_deffile("PerlAPI::void_calls", XS_PerlAPI_void_calls);
+    newXS_deffile("PerlAPI::native_string", XS_PerlAPI_native_string);
+    newXS_deffile("PerlAPI::entersub_seen", XS_PerlAPI_entersub_seen);
     Perl_xs_boot_epilog(aTHX_ ax);
 }

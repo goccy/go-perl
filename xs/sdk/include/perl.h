@@ -45,6 +45,17 @@
 #ifndef GOPERL_XS_SDK_PERL_H
 #define GOPERL_XS_SDK_PERL_H
 
+/* The loader's entry points and the state the translation units of a module
+ * share have C linkage in whatever language includes the header: a C++
+ * module that includes it outside extern "C" (Algorithm::LibLinear) would
+ * otherwise define them under mangled names the loader does not find, and a
+ * module made of C and C++ units would have two of each. */
+#ifdef __cplusplus
+#define GOPERL_C extern "C"
+#else
+#define GOPERL_C
+#endif
+
 /* The stdio stream of a handle (PerlIO_findFILE, PerlIO_exportFILE) is built
  * on fopencookie where there is no funopen; glibc and musl declare it only
  * under _GNU_SOURCE, which has to be in effect before the first system
@@ -664,10 +675,15 @@ struct op {
        goperl_OpMAYBESIB_set_o_->op_sibparent = \
            goperl_OpMAYBESIB_set_sib_ ? goperl_OpMAYBESIB_set_sib_ : (OP *)(parent); \
        goperl_OpMAYBESIB_set_o_->op_moresib = goperl_OpMAYBESIB_set_sib_ ? 1 : 0; })
-#define CopLINE(c) ((c)->cop_line)
-#define CopFILE(c) ((c)->cop_file)
-#define OutCopFILE(c) ((c)->cop_file)
-#define CopSTASHPV(c) ((char *)(c)->cop_stashpv)
+/* The fields of a COP are read through goperl_cop_fields, which fills them
+ * for a shadow at the edge of what the interpreter described (see
+ * goperl_op_apply): a link of another op, such as the op_next a pp
+ * function returns, has its type and none of its COP fields yet. */
+static COP *goperl_cop_fields(COP *c);
+#define CopLINE(c) (goperl_cop_fields((COP *)(c))->cop_line)
+#define CopFILE(c) (goperl_cop_fields((COP *)(c))->cop_file)
+#define OutCopFILE(c) CopFILE(c)
+#define CopSTASHPV(c) ((char *)goperl_cop_fields((COP *)(c))->cop_stashpv)
 
 /* ---- the vtable the loader injects (field order is ABI) ----------------- */
 
@@ -806,7 +822,7 @@ struct goperl_frame {
  * it exports) must not lend them to the modules loaded after it, whose
  * references would otherwise bind to its copies. */
 
-__attribute__((weak, visibility("hidden"))) const goperl_api_t *goperl_api_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) const goperl_api_t *goperl_api_v = 0;
 
 /* ---- the current frame, per THREAD --------------------------------------
  * "The current activation" is per-thread process-wide state: several
@@ -1753,7 +1769,7 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     (uintptr_t)__builtin_frame_address(0)
 
 /* PL_ppaddr proxy: every slot is the same generic trampoline. */
-__attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_v[OP_max];
+GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_v[OP_max] = {0};
 
 /* Native-XSUB nesting depth: when the top-level XSUB returns, the lvalue
  * slots are dropped (the interpreter may free what they designate between
@@ -1771,7 +1787,7 @@ typedef char goperl_form_fits
          ? 1
          : -1] __attribute__((unused));
 
-__attribute__((weak, visibility("default"), used)) uint32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) uint32_t
 __goperl_xs_init(const goperl_api_t *api) {
     if (!api || api->abi != GOPERL_XS_ABI) return 0;
     if (!api->shared_raw ||
@@ -2780,12 +2796,22 @@ static double goperl_sv_nv(goperl_frame_t *f, SV *sv) {
 #define SvNV(sv) goperl_sv_nv(_gof, (SV *)(sv))
 #define SvNVx(sv) SvNV(sv)
 
+/* The SvPV forms with a length give it to a variable of the module's, which
+ * may be of any integer type: perl's macros assign the length (`int len;
+ * SvPV(sv, len)`, Digest::OAT). The call writes it into a STRLEN of its
+ * own, and the variable is assigned from that; written through a pointer
+ * to the variable, the length's eight bytes went past an int. */
+#define GOPERL_PV_LEN(lenvar, call)                \
+    ({ STRLEN goperl_pvlen_ = 0;                   \
+       char *const goperl_pvp_ = (char *)(call);   \
+       (lenvar) = goperl_pvlen_;                   \
+       goperl_pvp_; })
 #define SvPV_nolen(sv) ((char *)goperl_sv_pv_(_gof, (SV *)(sv), 0))
 #define SvPV_nolen_const(sv) goperl_sv_pv_(_gof, (SV *)(sv), 0)
 #define SvPV(sv, lenvar) \
-    ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar)))
+    GOPERL_PV_LEN(lenvar, ((char *)goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&goperl_pvlen_)))
 #define SvPV_const(sv, lenvar) \
-    goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&(lenvar))
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_(_gof, (SV *)(sv), (uint64_t *)&goperl_pvlen_))
 /* SvPVX is the RAW buffer pointer (no get-magic, no stringification):
  * code grows the SV and writes through it. NULL when the SV has no
  * buffer yet — grow first, as real perl requires. */
@@ -3875,12 +3901,17 @@ static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
     uint64_t n = 0;
     const uint64_t where = goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, &n);
     int32_t len = (int32_t)n;
-    /* the slots are SV pointers of the interpreter's: words of its width */
-    const uint64_t *const guest =
-        len > 0 ? (const uint64_t *)goperl_guest_mem(f, where) : 0;
-    if (!guest) len = 0;
     int32_t slots = goperl_av_slots(f, m->svtok);
     if (slots < len) slots = len;
+    /* the slots are SV pointers of the interpreter's: words of its width.
+     * Every slot the array has room for is read as it is in memory, past
+     * its last element too: code that takes elements out by lowering
+     * AvFILLp reads the slot it has just left behind
+     * (`AvARRAY(av)[AvFILLp(av)--]`, Future::XS), and perl leaves what
+     * was there in place. */
+    const uint64_t *const guest =
+        slots > 0 ? (const uint64_t *)goperl_guest_mem(f, where) : 0;
+    len = guest ? slots : 0;
     goperl_avbody_t *b = m->val ? GOPERL_AVBODY_OF(m) : 0;
     if (!b || slots > b->cap) {
         int32_t ncap = b ? b->cap : 16;
@@ -4641,9 +4672,16 @@ static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
 #define CALL_FPTR(fptr) (*(fptr))
 
 #define XSPROTO(name) void name(pTHX_ CV *cv)
-#define XS(name) XSPROTO(name)
+/* as perl's XSUB.h: an exported XSUB has C linkage in C++ (the boot
+ * function XSLoader looks up by name among them) */
+#ifdef __cplusplus
+#define XS_EXTERNAL(name) \
+    extern "C" __attribute__((visibility("default"))) void name(pTHX_ CV *cv)
+#else
 #define XS_EXTERNAL(name) \
     __attribute__((visibility("default"))) void name(pTHX_ CV *cv)
+#endif
+#define XS(name) XS_EXTERNAL(name)
 #define XS_INTERNAL(name) static void name(pTHX_ CV *cv)
 
 static void goperl_arena_free_all(void);
@@ -5640,7 +5678,7 @@ static COP *goperl_cop_shadow(goperl_frame_t *f, uint64_t tok) {
  * without checks, so hand it a stable dummy COP (line 0, package main)
  * instead — the same shape modules already handle for optimized-away
  * COPs. */
-__attribute__((weak, visibility("hidden"))) OP goperl_nullcop_v = {
+GOPERL_C __attribute__((weak, visibility("hidden"))) OP goperl_nullcop_v = {
     0, 0, 0, 0, OP_NEXTSTATE, 0, 0, 0, /* base scalars */
     1 /* gop_full */, 1 /* gop_iscop */, 0 /* moresib */, 12 /* a COP */,
     0, 0, 0, 0, 0 /* the flag bits */, 0 /* gop */,
@@ -5679,6 +5717,15 @@ static COP **goperl_curcop_ref(goperl_frame_t *f) {
     COP *const cop = goperl_curcop(f);
     goperl_curcop_slot_v = goperl_curcop_seen_v = cop;
     return &goperl_curcop_slot_v;
+}
+
+/* A COP at the edge of what was described gets its fields now, as an op
+ * gets its links in OpSIBLING. Outside a call of native code there is no
+ * interpreter to ask, and the shadow is as it is. */
+static COP *goperl_cop_fields(COP *c) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (c && c->gop && !c->gop_full && f) goperl_op_describe(f, c->gop, GOPERL_OPDUMP_ONE);
+    return c;
 }
 
 static OP *goperl_op_sibling(goperl_frame_t *f, OP *o) {
@@ -5722,9 +5769,9 @@ static OP *goperl_newop_dispatch(pTHX_ int type, OP *o);
 static void goperl_pp_stack_push(goperl_frame_t *f);
 #include "goperl_ppslots.h"
 
-__attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max];
-__attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max];
-__attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max] = {0};
+GOPERL_C __attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max] = {0};
+GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
 
 static OP *goperl_pp_dispatch(pTHX_ int type) {
     OP *cur = _gof->plop;
@@ -5929,7 +5976,7 @@ static void goperl_hostsave_settle(goperl_frame_t *f, int32_t base, const void *
 }
 
 /* Loader entry: run a fired destructor (from guest scope pop). */
-__attribute__((weak, visibility("default"), used)) void
+GOPERL_C __attribute__((weak, visibility("default"), used)) void
 __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
     if (id1 == 0 || id1 > GOPERL_DTOR_MAX) return;
     jmp_buf jb;
@@ -5970,7 +6017,7 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
  * (Params::Classify's read the stack with dMARK and dSP alone) reads the
  * stack, reaches the interpreter and croaks like any other. The dXSARGS of
  * an XSUB that has one takes this activation over. */
-__attribute__((weak, visibility("default"), used)) void
+GOPERL_C __attribute__((weak, visibility("default"), used)) void
 __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
     void (*fn)(pTHX_ CV *) = (void (*)(pTHX_ CV *))fnv;
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave)));
@@ -5988,7 +6035,7 @@ __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
  * Each xs_leave unwinds that activation's host saves, which restores the
  * previous prev_frame/jb/base — so the loop also settles bare-returning
  * NESTED direct calls, one level at a time. */
-__attribute__((weak, visibility("default"), used)) uint32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) uint32_t
 __goperl_xs_epilogue(goperl_frame_t *f) {
     uint32_t n = 0;
     while (goperl_cur_frame_v == f && goperl_xs_depth_v > 0 && n < 64) {
@@ -6004,7 +6051,7 @@ __goperl_xs_epilogue(goperl_frame_t *f) {
  * int (*)(pTHX_ SV*, MAGIC*) shape) with the current frame installed and a
  * croak guard armed. The loader calls this instead of the raw function
  * pointer so interpreter macros inside the hook see the right frame. */
-__attribute__((weak, visibility("default"), used)) uint32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) uint32_t
 __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     int (*fn)(pTHX_ SV *, MAGIC *) = (int (*)(pTHX_ SV *, MAGIC *))fnv;
     jmp_buf jb;
@@ -6145,7 +6192,7 @@ static void goperl_pp_stack_pull(goperl_frame_t *f) {
  * Returns the next-op token (0 = NULL), and leaves what the function made
  * of the stack in the frame; on croak, f->failed is set and the message is
  * in f->err. */
-__attribute__((weak, visibility("default"), used)) uint64_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) uint64_t
 __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     OP *(*fn)(pTHX) = (OP * (*)(pTHX)) fnv;
     jmp_buf jb;
@@ -7910,7 +7957,8 @@ static U8 *goperl_utf8_to_bytes(U8 *s, STRLEN *lenp) {
 static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
     return goperl_str_op(f, GOPERL_OP_SV_PV_FORCE, GOPERL_TOK(sv), 0, 0, lenp);
 }
-#define SvPV_force(sv, lenvar) goperl_sv_pv_force(_gof, (SV *)(sv), &(lenvar))
+#define SvPV_force(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_force(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_))
 #define sv_chop(sv, p) \
     ({ GOPERL_ONCE(goperl_sv_chop_sv_, sv); \
        ((void)goperl_op0(GOPERL_OP_SV_CHOP, GOPERL_TOK(goperl_sv_chop_sv_), (uint64_t)((const char *)(p)-SvPVX_const(goperl_sv_chop_sv_)))); })
@@ -9686,7 +9734,7 @@ static void goperl_wrap_infix_plugin(goperl_frame_t *f,
  * with its result in *ret_out (the length of an infix operator) and the op
  * (the module's struct of an infix operator) in *op_out, 0 when none did,
  * -1 on a croak (the frame says how). */
-__attribute__((weak, visibility("default"), used)) int32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
                         uint32_t kind, uint32_t *ret_out, uint64_t *op_out) {
     jmp_buf jb;
@@ -9969,7 +10017,7 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
  * req is [kind] and the kind's words; the answer goes to resp, in words,
  * and its length in bytes is returned (reqlen and respcap are in bytes
  * too). On a croak the frame carries the message. */
-__attribute__((weak, visibility("default"), used)) int32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reqlen,
                      goperl_gword_t *resp, uint32_t respcap) {
     jmp_buf jb;
@@ -10846,7 +10894,7 @@ static inline __attribute__((unused)) I32 goperl_fold_eq_locale(const char *s1,
  * released once.
  *
  * Returns 0, or -1 when memory runs out. */
-__attribute__((weak, visibility("default"), used)) int32_t
+GOPERL_C __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_shared_clone(void *dst_raw, const void *src_raw) {
     goperl_shared_t *const dst = (goperl_shared_t *)dst_raw;
     const goperl_shared_t *const src = (const goperl_shared_t *)src_raw;
@@ -10966,7 +11014,7 @@ __goperl_shared_clone(void *dst_raw, const void *src_raw) {
 /* Loader entry: the instance of the block is gone. The functions given to
  * call_atexit it shares with copies and did not run are left to them: the
  * last instance that runs one runs it. */
-__attribute__((weak, visibility("default"), used)) void
+GOPERL_C __attribute__((weak, visibility("default"), used)) void
 __goperl_shared_release(void *raw) {
     goperl_hooks_t *const h = (goperl_hooks_t *)((goperl_shared_t *)raw)->hooks;
     for (int32_t i = 0; h && i < h->atexit_n; i++) {

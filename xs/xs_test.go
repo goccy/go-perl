@@ -221,6 +221,81 @@ func TestNativeCppObjectModule(t *testing.T) {
 	}
 }
 
+// buildCxxPlain compiles testdata/cxxplain into a module: its C++ unit
+// alone, or with mixed also its C unit (helper.c).
+func buildCxxPlain(t *testing.T, mixed bool) string {
+	t.Helper()
+	cxx := findCXX(t)
+	dir := t.TempDir()
+	var arch []string
+	if runtime.GOOS == "darwin" {
+		switch runtime.GOARCH {
+		case "arm64":
+			arch = []string{"-arch", "arm64"}
+		case "amd64":
+			arch = []string{"-arch", "x86_64"}
+		}
+	}
+	run := func(name string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+	}
+	objs := []string{filepath.Join(dir, "CxxPlain.o")}
+	args := append(append(append([]string{}, arch...), cxx[1:]...),
+		"-c", "-fPIC", "-x", "c++", "-std=c++11", "-I", "sdk/include", "-o", objs[0], "testdata/cxxplain/CxxPlain.cc")
+	if mixed {
+		args = append(args, "-DCXXPLAIN_MIXED")
+	}
+	run(cxx[0], args...)
+	if mixed {
+		cc, err := exec.LookPath("cc")
+		if err != nil {
+			t.Skip("no host C compiler available")
+		}
+		objs = append(objs, filepath.Join(dir, "helper.o"))
+		run(cc, append(append([]string{}, arch...),
+			"-c", "-fPIC", "-I", "sdk/include", "-o", objs[1], "testdata/cxxplain/helper.c")...)
+	}
+	so := filepath.Join(dir, "CxxPlain.so")
+	run(cxx[0], append(append(append(append([]string{}, arch...), cxx[1:]...), "-shared", "-o", so), objs...)...)
+	return so
+}
+
+// A C++ module that includes the perl headers outside extern "C", after
+// C++ headers of its own (Algorithm::LibLinear), loads and runs: the
+// loader's entry points it defines have their C names. They had mangled
+// ones then, the loader did not initialize the module, and its boot
+// function faulted on the missing vtable. A module of a C++ unit and a C
+// unit shares one vtable between them: with mangled names each language's
+// units had their own, and the C++ unit's was never set.
+func TestNativeCxxModuleWithoutExternC(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		so := buildCxxPlain(t, mixed)
+		p := newHostPerl(t)
+		loadXSModule(t, p, "CxxPlain", so)
+		libdir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(libdir, "CxxPlain.pm"),
+			[]byte("package CxxPlain;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code := `unshift @INC, '` + libdir + `'; require CxxPlain; CxxPlain::greet("perl")`
+		want := "hello, perl"
+		if mixed {
+			code += ` . "|" . CxxPlain::twice(21)`
+			want += "|42"
+		}
+		r, err := p.Eval(context.Background(), code)
+		if err != nil {
+			t.Fatalf("mixed=%v: Eval: %v", mixed, err)
+		}
+		if r.Error != nil || resultStr(r) != want {
+			t.Errorf("mixed=%v: got %q (error %v), want %q", mixed, resultStr(r), r.Error, want)
+		}
+	}
+}
+
 // The SDK headers compile as C++ with every C++ compiler of the host: a
 // module includes perl.h and XSUB.h inside extern "C" and says dXSARGS in
 // functions with and without an interpreter context. (g++ refuses what

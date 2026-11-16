@@ -259,14 +259,14 @@ void *calloc(size_t, size_t);
 void *realloc(void *, size_t);
 void free(void *);
 #endif
-__attribute__((weak, visibility("hidden"))) void *(Perl_malloc)(size_t n) { return malloc(n); }
-__attribute__((weak, visibility("hidden"))) void *(Perl_calloc)(size_t n, size_t size) {
+GOPERL_C __attribute__((weak, visibility("hidden"))) void *(Perl_malloc)(size_t n) { return malloc(n); }
+GOPERL_C __attribute__((weak, visibility("hidden"))) void *(Perl_calloc)(size_t n, size_t size) {
     return calloc(n, size);
 }
-__attribute__((weak, visibility("hidden"))) void *(Perl_realloc)(void *p, size_t n) {
+GOPERL_C __attribute__((weak, visibility("hidden"))) void *(Perl_realloc)(void *p, size_t n) {
     return realloc(p, n);
 }
-__attribute__((weak, visibility("hidden"))) void (Perl_mfree)(void *p) { free(p); }
+GOPERL_C __attribute__((weak, visibility("hidden"))) void (Perl_mfree)(void *p) { free(p); }
 #ifdef __cplusplus
 }
 #endif
@@ -369,10 +369,10 @@ typedef struct {
     uint64_t tok;
     HE *he;
 } goperl_eiter_t;
-__attribute__((weak, visibility("hidden"))) goperl_eiter_t *goperl_eiter_v = 0;
-__attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_cap_v = 0;
-__attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_n_v = 0;
-__attribute__((weak, visibility("hidden"))) pthread_mutex_t goperl_eiter_lock_v =
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_eiter_t *goperl_eiter_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_cap_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_n_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) pthread_mutex_t goperl_eiter_lock_v =
     PTHREAD_MUTEX_INITIALIZER;
 /* The lasting shadow of the entry, made when there is none (NULL when
  * memory ran out); several instances may run native code at once. */
@@ -1204,7 +1204,7 @@ static char *goperl_sv_pv_flags(goperl_frame_t *f, SV *sv, STRLEN *lenp,
 #define SvTRUE_nomg_NN(sv) SvTRUE_nomg(sv)
 #define SvTRUEx(sv) SvTRUE(sv)
 #define SvPV_flags(sv, lenvar, flags) \
-    goperl_sv_pv_flags(_gof, (SV *)(sv), (STRLEN *)&(lenvar), (U32)(flags))
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_flags(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, (U32)(flags)))
 #define SvPV_flags_const(sv, lenvar, flags) \
     ((const char *)SvPV_flags(sv, lenvar, flags))
 #define SvPV_nomg(sv, lenvar) SvPV_flags(sv, lenvar, 0)
@@ -1841,7 +1841,7 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 
 /* ---- compile-time hints of a COP ----------------------------------------- */
 
-#define CopHINTS_get(c) ((c)->cop_hints)
+#define CopHINTS_get(c) (goperl_cop_fields((COP *)(c))->cop_hints)
 #define IN_BYTES (CopHINTS_get(PL_curcop) & HINT_BYTES)
 #define IN_LOCALE_RUNTIME (CopHINTS_get(PL_curcop) & HINT_LOCALE)
 #define cop_hints_fetch_pvn(cop, key, keylen, hash, flags) \
@@ -2238,12 +2238,12 @@ static char *goperl_sv_pvbyte(goperl_frame_t *f, SV *sv, STRLEN *lenp,
                          lenp);
 }
 #define SvPVbyte(sv, lenvar) \
-    goperl_sv_pvbyte(_gof, (SV *)(sv), &(lenvar), SV_GMAGIC)
+    GOPERL_PV_LEN(lenvar, goperl_sv_pvbyte(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, SV_GMAGIC))
 #define SvPVbyte_nolen(sv) goperl_sv_pvbyte(_gof, (SV *)(sv), 0, SV_GMAGIC)
 #define SvPVbytex(sv, lenvar) SvPVbyte(sv, lenvar)
 #define SvPVbytex_nolen(sv) SvPVbyte_nolen(sv)
 #define SvPVbyte_nomg(sv, lenvar) \
-    goperl_sv_pvbyte(_gof, (SV *)(sv), &(lenvar), 0)
+    GOPERL_PV_LEN(lenvar, goperl_sv_pvbyte(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, 0))
 #define sv_2pvbyte(sv, lenp) \
     goperl_sv_pvbyte(_gof, (SV *)(sv), (lenp), SV_GMAGIC)
 #define sv_2pvbyte_nolen(sv) SvPVbyte_nolen(sv)
@@ -2280,24 +2280,20 @@ static char *goperl_sv_pv_force_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
                          GOPERL_SVCALL_PV_FORCE_AS | ((uint64_t)how << 32), lenp);
 }
 #define SvPVutf8(sv, lenvar) \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, SV_GMAGIC)
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, GOPERL_PV_UTF8, SV_GMAGIC))
 #define SvPVutf8_nomg(sv, lenvar) \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, 0)
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, GOPERL_PV_UTF8, 0))
 #define SvPVutf8_nolen(sv) \
     goperl_sv_pv_as(_gof, (SV *)(sv), 0, GOPERL_PV_UTF8, SV_GMAGIC)
 #define SvPVutf8x(sv, lenvar) SvPVutf8(sv, lenvar)
-#define SvPVutf8_or_null(sv, lenvar)                         \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
-                    GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, SV_GMAGIC)
-#define SvPVutf8_or_null_nomg(sv, lenvar)                    \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
-                    GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, 0)
-#define SvPVbyte_or_null(sv, lenvar)                         \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
-                    GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, SV_GMAGIC)
-#define SvPVbyte_or_null_nomg(sv, lenvar)                    \
-    goperl_sv_pv_as(_gof, (SV *)(sv), &(lenvar),             \
-                    GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, 0)
+#define SvPVutf8_or_null(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_,              GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, SV_GMAGIC))
+#define SvPVutf8_or_null_nomg(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_,              GOPERL_PV_UTF8 | GOPERL_PV_OR_NULL, 0))
+#define SvPVbyte_or_null(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_,              GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, SV_GMAGIC))
+#define SvPVbyte_or_null_nomg(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_,              GOPERL_PV_BYTES | GOPERL_PV_OR_NULL, 0))
 #define sv_2pvutf8_flags(sv, lenp, flags) \
     goperl_sv_pv_as(_gof, (SV *)(sv), (lenp), GOPERL_PV_UTF8, (U32)(flags))
 #define sv_2pvutf8(sv, lenp) sv_2pvutf8_flags(sv, lenp, SV_GMAGIC)
@@ -2309,7 +2305,7 @@ static char *goperl_sv_pv_force_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
     ((const char *)goperl_sv_pv_flags(_gof, (SV *)(sv), 0, (U32)(flags)))
 
 #define SvPV_force_flags(sv, lenvar, flags) \
-    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), 0, (U32)(flags))
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_force_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, 0, (U32)(flags)))
 #define SvPV_force_flags_nolen(sv, flags) \
     goperl_sv_pv_force_as(_gof, (SV *)(sv), 0, 0, (U32)(flags))
 #define SvPV_force_flags_mutable(sv, lenvar, flags) \
@@ -2317,13 +2313,11 @@ static char *goperl_sv_pv_force_as(goperl_frame_t *f, SV *sv, STRLEN *lenp,
 #define SvPV_force_nomg(sv, lenvar) SvPV_force_flags(sv, lenvar, 0)
 #define SvPV_force_nomg_nolen(sv) SvPV_force_flags_nolen(sv, 0)
 #define SvPVx_force(sv, lenvar) SvPV_force(sv, lenvar)
-#define SvPVutf8_force(sv, lenvar)                                    \
-    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_UTF8, \
-                          SV_GMAGIC)
+#define SvPVutf8_force(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_force_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, GOPERL_PV_UTF8,  SV_GMAGIC))
 #define SvPVutf8x_force(sv, lenvar) SvPVutf8_force(sv, lenvar)
-#define SvPVbyte_force(sv, lenvar)                                     \
-    goperl_sv_pv_force_as(_gof, (SV *)(sv), &(lenvar), GOPERL_PV_BYTES, \
-                          SV_GMAGIC)
+#define SvPVbyte_force(sv, lenvar) \
+    GOPERL_PV_LEN(lenvar, goperl_sv_pv_force_as(_gof, (SV *)(sv), (STRLEN *)&goperl_pvlen_, GOPERL_PV_BYTES,  SV_GMAGIC))
 #define SvPVbytex_force(sv, lenvar) SvPVbyte_force(sv, lenvar)
 #define sv_pvn_force_flags(sv, lenp, flags) \
     goperl_sv_pv_force_as(_gof, (SV *)(sv), (lenp), 0, (U32)(flags))
@@ -2640,9 +2634,9 @@ static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
 #define new_warnings_bitfield(buffer, bits, size) \
     goperl_new_warnings_bitfield(_gof, (buffer), (bits), (size))
 
-#define CopLINE_set(c, l) ((c)->cop_line = (l))
-#define CopLINE_inc(c) (++(c)->cop_line)
-#define CopLINE_dec(c) (--(c)->cop_line)
+#define CopLINE_set(c, l) (goperl_cop_fields((COP *)(c))->cop_line = (l))
+#define CopLINE_inc(c) (++goperl_cop_fields((COP *)(c))->cop_line)
+#define CopLINE_dec(c) (--goperl_cop_fields((COP *)(c))->cop_line)
 static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv)
     __attribute__((unused));
 static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv) {

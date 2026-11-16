@@ -89,7 +89,9 @@ func TestNativeCodeFollowsAnAddressPastTheMemory(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
 	cases := []evalCase{
-		{"a string's buffer", `my $s = "perl"; PerlAPI::guest_byte(unpack("Q", pack("p", $s)))`, "112"},
+		// pack 'p' makes the process's address of the string; less the
+		// memory's base, it is the interpreter's
+		{"a string's buffer", `my $s = "perl"; PerlAPI::guest_byte(unpack("Q", pack("p", $s)) - PerlAPI::memory_base())`, "112"},
 		{"buffers made during the call", `PerlAPI::grown_buffers(128 << 20)`, "az"},
 	}
 	for _, addr := range []string{"3*2**30", "9*2**30", "2**46", "2**63", "~0"} {

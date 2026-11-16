@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	goperlfs "github.com/goccy/go-perl/fs"
 	wasm2go "github.com/goccy/perlwasm2go"
@@ -165,6 +166,10 @@ type Perl struct {
 	// hostCall handles the calls of native code that share one channel
 	// (reserved callback method id -9).
 	hostCall func(req []byte) []byte
+	// processMemory reads memory of the process outside the guest's
+	// (reserved callback method id -10): unpack 'p' and 'P' of such an
+	// address.
+	processMemory func(addr uint64, n int64) ([]byte, error)
 
 	// closed flips when Close runs; every entry point checks it so a
 	// straggler — including a handle release racing a Close — errors out
@@ -349,6 +354,36 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	}
 	p.intrAddr = addr
 	return p, nil
+}
+
+// The words after the interpreter's interrupt flag (perl-wasm's
+// g_hostwords): a marker that says they are there, and where this process
+// has the instance's memory, which pack 'p' and 'P' add to an address of
+// the memory and unpack 'p' and 'P' take away again (the pointers are for
+// native code, which reads the process's memory).
+const (
+	hostWordsMagic       = 0x676f7077
+	hostWordsMagicOffset = 4
+	hostWordsBaseOffset  = 8
+)
+
+// MarkMemoryBase writes where this process has the instance's memory into
+// the interpreter's word for it, from when native code runs in the
+// instance: the native loader marks an instance when it loads the first
+// module into it, and each copy of such an instance (a Clone, a fork
+// child), whose memory is in a place of its own. Until then pack 'p' makes
+// addresses of the interpreter's memory, and unpack 'p' reads nothing but
+// that memory, as before. The memory does not move (it is a reservation as
+// large as it can grow).
+func (p *Perl) MarkMemoryBase() {
+	base.AccessMemory(p.m.g, func(mem []byte) {
+		at := p.intrAddr
+		if len(mem) == 0 || at+hostWordsBaseOffset+8 > uint64(len(mem)) ||
+			binary.LittleEndian.Uint32(mem[at+hostWordsMagicOffset:]) != hostWordsMagic {
+			return
+		}
+		binary.LittleEndian.PutUint64(mem[at+hostWordsBaseOffset:], uint64(uintptr(unsafe.Pointer(&mem[0]))))
+	})
 }
 
 // KeepRuntimeDescriptorsHigh has the Go runtime make the descriptors it

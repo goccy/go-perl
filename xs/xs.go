@@ -36,6 +36,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -299,10 +300,13 @@ func loadDir(p *internal.Perl, dir string) error {
 type state struct {
 	p  *internal.Perl
 	mu sync.Mutex
-	// libs and syms back the tokens DynaLoader's dl_load_file and
-	// dl_find_symbol hand to Perl code (token = index+1).
-	libs    []uintptr
-	syms    []uintptr
+	// libs and syms are what DynaLoader's dl_load_file and dl_find_symbol
+	// handed to Perl code: the library handles and the addresses of the
+	// symbols themselves, as perl's dl_dlopen.xs hands them (SPVM passes
+	// a symbol's address to native code of its own, which calls it). The
+	// loader refuses a handle or an address it did not hand out.
+	libs    map[uintptr]struct{}
+	syms    map[uintptr]struct{}
 	fns     []uintptr // fnID -> native XSUB pointer
 	fnNames [][]byte  // fnID -> NUL-terminated sub name (frame.subname points here)
 	// per-CV storage: CvXSUBANY slots (8 bytes of C heap each, written by
@@ -398,8 +402,8 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	statesMu.Lock()
 	cs := &state{
 		p:             clone,
-		libs:          append([]uintptr(nil), s.libs...),
-		syms:          append([]uintptr(nil), s.syms...),
+		libs:          maps.Clone(s.libs),
+		syms:          maps.Clone(s.syms),
 		fns:           append([]uintptr(nil), s.fns...),
 		fnNames:       append([][]byte(nil), s.fnNames...),
 		cvAny:         make(map[uint64]uintptr, len(s.cvAny)),
@@ -488,7 +492,27 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	if err := clone.SetHostCallHandler(cs.hostCall); err != nil {
 		return err
 	}
+	if err := clone.SetProcessMemoryHandler(readProcessMemory); err != nil {
+		return err
+	}
+	clone.MarkMemoryBase()
 	return clone.SetDestructorHandler(cs.dtorFired)
+}
+
+// readProcessMemory reads memory of this process that is not the
+// interpreter's, for unpack 'p' and 'P' of an address native code made (a
+// buffer a C function returned): n bytes at addr, or with n < 0 the bytes up
+// to the NUL there. As on perl, the address is trusted: memory that is not
+// there faults.
+func readProcessMemory(addr uint64, n int64) ([]byte, error) {
+	if addr == 0 {
+		return nil, errors.New("read of the memory of the process at address 0")
+	}
+	if n < 0 {
+		l, _, _ := purego.SyscallN(strlenFn, uintptr(addr))
+		n = int64(l)
+	}
+	return copyIn(uintptr(addr), int(n)), nil
 }
 
 var (
@@ -537,6 +561,8 @@ func stateFor(p *internal.Perl) *state {
 	if !ok {
 		s = &state{
 			p:           p,
+			libs:        map[uintptr]struct{}{},
+			syms:        map[uintptr]struct{}{},
 			cvAny:       map[uint64]uintptr{},
 			perlioFuncs: map[uint32]uintptr{},
 			cvFn:        map[uint64]uintptr{},
@@ -635,6 +661,12 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	if err := p.SetHostCallHandler(s.hostCall); err != nil {
 		return 0, err
 	}
+	if err := p.SetProcessMemoryHandler(readProcessMemory); err != nil {
+		return 0, err
+	}
+	// pack 'p' makes addresses of this process from now on (see
+	// internal.Perl.MarkMemoryBase)
+	p.MarkMemoryBase()
 	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
 		return 0, err
 	}
@@ -732,7 +764,7 @@ func (e *plainLibraryError) Error() string {
 func (e *plainLibraryError) Unwrap() error { return e.err }
 
 // openLibrary is DynaLoader's dl_load_file: it loads the library at path
-// and returns the token Perl code names it by. Like dlopen, which perl's
+// and returns its handle, as perl's does. Like dlopen, which perl's
 // dl_load_file is, it loads any shared library, not only a native module:
 // code that looks for a C library's functions through DynaLoader
 // (FFI::CheckLib, for one) loads the library to find its symbols. Only a
@@ -756,41 +788,42 @@ func openLibrary(p *internal.Perl, path string, flags int) (uint64, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.libs = append(s.libs, lib)
-	return uint64(len(s.libs)), nil
+	s.libs[lib] = struct{}{}
+	return uint64(lib), nil
 }
 
-// librarySymbol is DynaLoader's dl_find_symbol.
+// librarySymbol is DynaLoader's dl_find_symbol: the address of the symbol
+// in the library whose handle dl_load_file returned.
 func librarySymbol(p *internal.Perl, lib uint64, name string) (uint64, error) {
 	s := stateFor(p)
+	handle := uintptr(lib)
 	s.mu.Lock()
-	if lib == 0 || lib > uint64(len(s.libs)) {
-		s.mu.Unlock()
-		return 0, fmt.Errorf("unknown library handle %d", lib)
-	}
-	handle := s.libs[lib-1]
+	_, known := s.libs[handle]
 	s.mu.Unlock()
+	if !known {
+		return 0, fmt.Errorf("unknown library handle %#x", lib)
+	}
 	fn, err := purego.Dlsym(handle, name)
 	if err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.syms = append(s.syms, fn)
-	return uint64(len(s.syms)), nil
+	s.syms[fn] = struct{}{}
+	return uint64(fn), nil
 }
 
-// installXSub is DynaLoader's dl_install_xsub: the function behind sym
-// becomes the Perl sub name.
+// installXSub is DynaLoader's dl_install_xsub: the function at the address
+// dl_find_symbol returned becomes the Perl sub name.
 func installXSub(p *internal.Perl, name string, sym uint64) error {
 	s := stateFor(p)
+	fn := uintptr(sym)
 	s.mu.Lock()
-	if sym == 0 || sym > uint64(len(s.syms)) {
-		s.mu.Unlock()
-		return fmt.Errorf("unknown symbol handle %d", sym)
-	}
-	fn := s.syms[sym-1]
+	_, known := s.syms[fn]
 	s.mu.Unlock()
+	if !known {
+		return fmt.Errorf("unknown symbol address %#x", sym)
+	}
 	_, err := s.registerNative(name, false, fn)
 	return err
 }
@@ -1054,6 +1087,20 @@ func (s *state) ppHook(req []byte) []byte {
 // the host-call channel (the SDK's __goperl_host_invoke runs it under a
 // croak guard). req is [kind] and the kind's words; the response is [1]
 // and the words the SDK answered with, or [0]+message.
+// boxedOp describes the operation in the instance's box (perl-wasm's struct
+// goperl_opbox: a, b and c at 0, 8 and 16, the op number at 40), for the
+// message of an operation that failed.
+func (s *state) boxedOp() string {
+	mem := s.p.RawMemory()
+	at := s.opbox
+	if at == 0 || at+48 > uint64(len(mem)) {
+		return "(no box)"
+	}
+	w := mem[at:]
+	return fmt.Sprintf("%d (a=%#x b=%#x c=%#x)", int32(binary.LittleEndian.Uint32(w[40:])),
+		binary.LittleEndian.Uint64(w[0:]), binary.LittleEndian.Uint64(w[8:]), binary.LittleEndian.Uint64(w[16:]))
+}
+
 func (s *state) hostCall(req []byte) []byte {
 	s.mu.Lock()
 	inv := s.hostInvoke
@@ -1926,8 +1973,9 @@ func buildVtable() {
 			return 0
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "goperl xs: op in the box failed: %v\n", err)
-			f.fail(fmt.Sprintf("xs op: %v", err))
+			op := stateFor(f.p).boxedOp()
+			fmt.Fprintf(os.Stderr, "goperl xs: op in the box failed: %s: %v\n", op, err)
+			f.fail(fmt.Sprintf("xs op %s: %v", op, err))
 			return 0
 		}
 		return 1
