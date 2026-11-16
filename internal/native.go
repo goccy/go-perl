@@ -320,6 +320,12 @@ func (p *Perl) MemorySize() uint64 {
 	return p.m.g.MemSize.Load()
 }
 
+// MemoryCeiling returns how far the instance's memory may grow (see
+// memoryCeiling): every address of the memory is below it.
+func (p *Perl) MemoryCeiling() uint64 {
+	return memoryCeiling(p.opts, p.m.g.MemSize.Load())
+}
+
 // MemorySizeWord returns where the instance keeps MemorySize: the word
 // memory.grow stores the new size in, so a reader of it has the size as it
 // is now, for the instance's whole life. Native code bounds the addresses

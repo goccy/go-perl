@@ -347,7 +347,7 @@ enum {
     GOPERL_LAY_PN_LEN = 9, GOPERL_LAY_PN_FLAGS = 10, GOPERL_LAY_PNL_FILL = 11,
     GOPERL_LAY_PNL_ALLOC = 12, GOPERL_LAY_PNL_MAX = 13, GOPERL_LAY_PNL_MAX_NAMED = 14,
     GOPERL_LAY_PNL_REFCNT = 15, GOPERL_LAY_PL_MAX = 16, GOPERL_LAY_PL_ARR = 17,
-    GOPERL_LAY_PL_ID = 18, GOPERL_LAY_PL_OUTID = 19, GOPERL_LAY_HE_NEXT = 23
+    GOPERL_LAY_PL_ID = 18, GOPERL_LAY_PL_OUTID = 19
 };
 static __attribute__((unused)) const uint32_t *goperl_pad_layout(goperl_frame_t *f) {
     goperl_compiler_state_t *c = goperl_compiler(f);
@@ -1347,9 +1347,13 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
                                      GvNAMEUTF8(goperl_gnh_gv_) != 0, 0)    \
                      : (HEK *)0; })
 
-/* HvARRAY: the buckets of a hash, each the chain of its entries (HE
- * shadows, linked by hent_next), as the interpreter has them when it is
- * evaluated; NULL when the hash has no buckets yet (pp_defined's test of a
+/* HvARRAY: the buckets of a hash as the interpreter has them when it is
+ * evaluated, each its first entry (the interpreter's own: HeNEXT gives the
+ * rest of the chain); NULL when the hash has no buckets yet (pp_defined's
+ * test of a hash). The bucket array of the interpreter holds addresses of
+ * its memory, so this is an array of this process's pointers to the same
+ * entries, made at each evaluation and kept until the outermost native call
+ * returns; it is not an lvalue (a store into it would not reach the
  * hash). */
 static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
     /* -> the buckets, or 0; second: their number */
@@ -1357,21 +1361,11 @@ static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
     const uint64_t arr = goperl_do_opx(f, GOPERL_OP_INTERNAL, GOPERL_TOK(hv), 0, GOPERL_INT_HV_ARRAY,
                                        0, 0, &nbuckets);
     if (!arr) return (HE **)0;
-    const uint32_t *L = goperl_pad_layout(f);
     const uint64_t n = nbuckets;
     HE **out = (HE **)goperl_arena_alloc(sizeof(HE *) * (size_t)(n ? n : 1));
     if (!out) goperl_croakf(f, "Out of memory!");
-    for (uint64_t i = 0; i < n; i++) {
-        HE **link = &out[i];
-        for (uint64_t he = goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i); he;
-             he = goperl_g64(f, he + L[GOPERL_LAY_HE_NEXT])) {
-            HE *const shadow = goperl_he_shadow(f, hv, he);
-            shadow->hent_next = 0;
-            *link = shadow;
-            link = &shadow->hent_next;
-        }
-        *link = 0;
-    }
+    for (uint64_t i = 0; i < n; i++)
+        out[i] = goperl_he_at(f, goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i));
     return out;
 }
 #define HvARRAY(hv) goperl_hv_array(_gof, (HV *)(hv))

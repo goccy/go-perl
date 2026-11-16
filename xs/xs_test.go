@@ -299,7 +299,10 @@ func TestNativeCxxModuleWithoutExternC(t *testing.T) {
 // The SDK headers compile as C++ with every C++ compiler of the host: a
 // module includes perl.h and XSUB.h inside extern "C" and says dXSARGS in
 // functions with and without an interpreter context. (g++ refuses what
-// clang++ lets pass, overloads with C linkage among them.)
+// clang++ lets pass, overloads with C linkage among them.) Under C++17 an
+// exception specification is part of a function's type: the C library's
+// functions the SDK defines for a module (signal, sigaction) have to have
+// the C library's.
 func TestSDKCompilesAsCxx(t *testing.T) {
 	tried := 0
 	for _, cxx := range []string{"c++", "g++", "clang++"} {
@@ -307,10 +310,10 @@ func TestSDKCompilesAsCxx(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		args := []string{"-fsyntax-only", "-x", "c++", "-std=c++11", "-I", "sdk/include", "testdata/objdemo/ObjDemo.c"}
+		var sysroot []string
 		if runtime.GOOS == "darwin" {
 			if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
-				args = append([]string{"-isysroot", strings.TrimSpace(string(out))}, args...)
+				sysroot = []string{"-isysroot", strings.TrimSpace(string(out))}
 			}
 		}
 		// Some hosts have a C++ compiler whose standard library headers
@@ -320,13 +323,17 @@ func TestSDKCompilesAsCxx(t *testing.T) {
 		if err := os.WriteFile(probe, []byte("#include <string>\nint main(){return 0;}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		probeArgs := append(append([]string{}, args[:len(args)-3]...), probe)
+		probeArgs := append(append([]string{}, sysroot...), "-fsyntax-only", "-x", "c++", probe)
 		if exec.Command(path, probeArgs...).Run() != nil {
 			continue
 		}
 		tried++
-		if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
-			t.Errorf("%s: %v\n%s", cxx, err, out)
+		for _, std := range []string{"-std=c++11", "-std=c++17"} {
+			args := append(append([]string{}, sysroot...), "-fsyntax-only", "-x", "c++", std, "-D_GNU_SOURCE",
+				"-I", "sdk/include", "testdata/objdemo/ObjDemo.c")
+			if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+				t.Errorf("%s %s: %v\n%s", cxx, std, err, out)
+			}
 		}
 	}
 	if tried == 0 {

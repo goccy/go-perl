@@ -359,81 +359,6 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
 static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
 static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
 
-/* The entry a hash's iterator is at (HvEITER) is kept by modules beyond the
- * call that read it, to be put back later (Hash::SafeKeys,
- * Hash::StoredIterator); the shadows of other calls live in the call's
- * arena, released when it returns. Each entry of an instance therefore has
- * one shadow that lasts, here, with its value as it was last read. */
-typedef struct {
-    void *inst;
-    uint64_t tok;
-    HE *he;
-} goperl_eiter_t;
-GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_eiter_t *goperl_eiter_v = 0;
-GOPERL_C __attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_cap_v = 0;
-GOPERL_C __attribute__((weak, visibility("hidden"))) uint32_t goperl_eiter_n_v = 0;
-GOPERL_C __attribute__((weak, visibility("hidden"))) pthread_mutex_t goperl_eiter_lock_v =
-    PTHREAD_MUTEX_INITIALIZER;
-/* The lasting shadow of the entry, made when there is none (NULL when
- * memory ran out); several instances may run native code at once. */
-static HE *goperl_eiter_find(void *inst, uint64_t tok) __attribute__((unused));
-static HE *goperl_eiter_find(void *inst, uint64_t tok) {
-    HE *he = 0;
-    pthread_mutex_lock(&goperl_eiter_lock_v);
-    if (2 * (goperl_eiter_n_v + 1) > goperl_eiter_cap_v) {
-        uint32_t ncap = goperl_eiter_cap_v ? 2 * goperl_eiter_cap_v : 64;
-        goperl_eiter_t *n = (goperl_eiter_t *)calloc(ncap, sizeof(*n));
-        if (!n) goto out;
-        for (uint32_t i = 0; i < goperl_eiter_cap_v; i++) {
-            goperl_eiter_t *e = &goperl_eiter_v[i];
-            if (!e->he) continue;
-            uint32_t h = (uint32_t)((e->tok ^ (uintptr_t)e->inst) * 2654435761u) & (ncap - 1);
-            while (n[h].he) h = (h + 1) & (ncap - 1);
-            n[h] = *e;
-        }
-        free(goperl_eiter_v);
-        goperl_eiter_v = n;
-        goperl_eiter_cap_v = ncap;
-    }
-    {
-        uint32_t h = (uint32_t)((tok ^ (uintptr_t)inst) * 2654435761u) & (goperl_eiter_cap_v - 1);
-        while (goperl_eiter_v[h].he &&
-               (goperl_eiter_v[h].tok != tok || goperl_eiter_v[h].inst != inst))
-            h = (h + 1) & (goperl_eiter_cap_v - 1);
-        goperl_eiter_t *e = &goperl_eiter_v[h];
-        if (!e->he && (e->he = (HE *)calloc(1, sizeof(HE))) != 0) {
-            e->inst = inst;
-            e->tok = tok;
-            e->he->goperl_tok = tok;
-            goperl_eiter_n_v++;
-        }
-        he = e->he;
-    }
-out:
-    pthread_mutex_unlock(&goperl_eiter_lock_v);
-    return he;
-}
-static HE *goperl_eiter_shadow(goperl_frame_t *f, uint64_t hvtok, uint64_t tok)
-    __attribute__((unused));
-static HE *goperl_eiter_shadow(goperl_frame_t *f, uint64_t hvtok, uint64_t tok) {
-    if (!tok) return 0;
-    HE *he = goperl_eiter_find(f->inst, tok);
-    if (!he) goperl_croakf(f, "%s", "Out of memory!");
-    /* the key and the value now (the address may be another entry's by
-     * now); the key is the shadow's own, as the shadow is */
-    HEK *old = he->hent_hek;
-    he->hent_hek = 0;
-    free(old);
-    const HEK *k = goperl_he_hek(f, he);
-    const size_t ksize = sizeof(HEK) + (size_t)k->hek_len + 2;
-    HEK *own = (HEK *)malloc(ksize);
-    if (!own) goperl_croakf(f, "%s", "Out of memory!");
-    memcpy(own, k, ksize);
-    he->hent_hek = own;
-    he->he_valu.hent_val = GOPERL_SV(goperl_do_op(f, GOPERL_OP_HV_ITERVAL, hvtok, tok, 0, 0));
-    return he;
-}
-
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     switch (field) {
     case GOPERL_LV_IV:
@@ -497,9 +422,9 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return (uint64_t)(U8)goperl_do_op3(f, GOPERL_OP_SV_CALL, tok, 0, (uint64_t)(GOPERL_SVCALL_IO_FLAGS), 0, 0);
     case GOPERL_LV_GVIO:
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 6, 0, 0);
-    case GOPERL_LV_HVEITER: /* FIELD 4 */
-        return (uint64_t)(uintptr_t)goperl_eiter_shadow(
-            f, tok, goperl_do_op3(f, GOPERL_OP_FIELD, tok, 0, (uint64_t)(4), 0, 0));
+    case GOPERL_LV_HVEITER: /* FIELD 4: the entry itself */
+        return (uint64_t)(uintptr_t)goperl_he_at(
+            f, goperl_do_op3(f, GOPERL_OP_FIELD, tok, 0, (uint64_t)(4), 0, 0));
     default:
         return goperl_do_op3(f, GOPERL_OP_GV_CALL, tok, 0, (uint64_t)(GOPERL_GVCALL_CVGEN), 0, 0);
     }
@@ -580,8 +505,10 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_HVRITER: /* FIELD 3 */
         goperl_xs_opx(f, GOPERL_OP_FIELD, tok, (uint64_t)(int64_t)(int32_t)(uint32_t)val, (uint64_t)(3), 0, 0, 0);
         break;
-    case GOPERL_LV_HVEITER: /* FIELD 5: the entry the shadow stands for */
-        goperl_xs_opx(f, GOPERL_OP_FIELD, tok, val ? ((HE *)(uintptr_t)val)->goperl_tok : 0, (uint64_t)(5), 0, 0, 0);
+    case GOPERL_LV_HVEITER: /* FIELD 5: the entry's address */
+        goperl_xs_opx(f, GOPERL_OP_FIELD, tok,
+                      goperl_he_addr(f, (const HE *)(uintptr_t)val, "HvEITER"), (uint64_t)(5),
+                      0, 0, 0);
         break;
     case GOPERL_LV_IOIFP: /* FIELD 20 */
     case GOPERL_LV_IOOFP: /* FIELD 21 */
@@ -2497,21 +2424,18 @@ enum {
 #define HvRITER_set(hv, r) \
     ((void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER_SET, hv, (uint64_t)(int64_t)(r)))
 /* Where the iterator of a hash is: lvalues as on perl (`HvRITER(hv) =
- * saved_riter; HvEITER(hv) = saved_eiter;`). An entry is a shadow that
- * lasts beyond the call (goperl_eiter_shadow). */
+ * saved_riter; HvEITER(hv) = saved_eiter;`). The entry is the
+ * interpreter's own, which a module may keep from one call to the next. */
 #define HvRITER(hv) \
     (*(I32 *)goperl_lv_ref(_gof, (SV *)(hv), GOPERL_LV_HVRITER, GOPERL_LV_AT))
 #define HvEITER(hv) \
     (*(HE **)goperl_lv_ref(_gof, (SV *)(hv), GOPERL_LV_HVEITER, GOPERL_LV_AT))
-#define HvEITER_get(hv)                                                     \
-    ({ GOPERL_ONCE(goperl_HvEITER_get_hv_, hv);                             \
-       goperl_eiter_shadow(_gof, GOPERL_TOK(goperl_HvEITER_get_hv_),        \
-                           GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER,           \
-                                        goperl_HvEITER_get_hv_, 0)); })
+#define HvEITER_get(hv) \
+    goperl_he_at(_gof, GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER, hv, 0))
 #define HvEITER_set(hv, e)                                                  \
-    ({ HE *const goperl_HvEITER_set_e_ = (e);                               \
-       (void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER_SET, hv,                 \
-                          goperl_HvEITER_set_e_ ? goperl_HvEITER_set_e_->goperl_tok : 0); })
+    ({ const uint64_t goperl_HvEITER_set_e_ =                               \
+           goperl_he_addr(_gof, (const HE *)(e), "HvEITER_set");            \
+       (void)GOPERL_FIELD(GOPERL_FIELD_HVAUX_EITER_SET, hv, goperl_HvEITER_set_e_); })
 
 /* ---- ops ----------------------------------------------------------------- */
 
@@ -3069,11 +2993,8 @@ static NV goperl_my_atof(goperl_frame_t *f, const char *s) {
 #define Atof my_atof
 #define HV_ITERNEXT_WANTPLACEHOLDERS 0x01
 #define hv_iternext_flags(hv, flags)                                         \
-    ({ GOPERL_ONCE(goperl_hv_iternext_flags_hv_, hv);                        \
-       goperl_he_shadow(_gof, (HV *)(goperl_hv_iternext_flags_hv_),          \
-                        goperl_op0(GOPERL_OP_HV_ITERNEXT,                    \
-                                   GOPERL_TOK(goperl_hv_iternext_flags_hv_), \
-                                   (uint64_t)(int64_t)(flags))); })
+    goperl_he_at(_gof, goperl_op0(GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv),     \
+                                  (uint64_t)(int64_t)(flags)))
 #define CvSPECIAL_on(cv)                          \
     ({ GOPERL_ONCE(goperl_CvSPECIAL_on_cv_, cv);  \
        GOPERL_CVFLAGS_CHANGE(goperl_CvSPECIAL_on_cv_, CVf_UNIQUE, 0); \

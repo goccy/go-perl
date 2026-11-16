@@ -4594,6 +4594,153 @@ XS(XS_PerlAPI_buckets) {
     }
 }
 
+/* entry_assign(hashref, key, value): the entry of the key, made if it is
+ * not there (hv_fetch_ent with lval), gets a copy of the value the way
+ * Package::Stash::XS gives a glob to an entry of a stash: the value there
+ * freed, the new one stored into HeVAL. */
+XS(XS_PerlAPI_entry_assign) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "hashref, key, value");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        HE *he = hv_fetch_ent(hv, ST(1), 1, 0);
+        SvREFCNT_dec(HeVAL(he));
+        HeVAL(he) = newSVsv(ST(2));
+        XSRETURN_EMPTY;
+    }
+}
+
+/* entry_same(hashref, key): whether the entry of the key is the one this
+ * function had for a key the last time it was called ("first", "same" or
+ * "other"): an entry keeps its identity from one call to the next. */
+static HE *entry_same_last;
+XS(XS_PerlAPI_entry_same) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "hashref, key");
+    {
+        HE *he = hv_fetch_ent((HV *)SvRV(ST(0)), ST(1), 0, 0);
+        const char *r = !entry_same_last ? "first" : he == entry_same_last ? "same" : "other";
+        entry_same_last = he;
+        ST(0) = sv_2mortal(newSVpv(r, 0));
+        XSRETURN(1);
+    }
+}
+
+/* bucket_values(hashref): the entries the chains of the hash's buckets
+ * hold, read where they lie: "<entries>:<sum of the values>:<keys whose
+ * length and bytes agree with hv_iterkeysv's>", and every value is then
+ * doubled in place (HeVAL stored into). */
+XS(XS_PerlAPI_bucket_values) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hashref");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        HE **buckets = HvARRAY(hv);
+        IV sum = 0;
+        I32 n = 0, agree = 0;
+        STRLEN i;
+        for (i = 0; buckets && i <= HvMAX(hv); i++) {
+            HE *he;
+            for (he = buckets[i]; he; he = HeNEXT(he)) {
+                STRLEN klen;
+                const char *k = SvPV(hv_iterkeysv(he), klen);
+                if (klen == (STRLEN)HeKLEN(he) && memcmp(k, HeKEY(he), klen) == 0)
+                    agree++;
+                sum += SvIV(HeVAL(he));
+                n++;
+                {
+                    SV *const old = HeVAL(he);
+                    HeVAL(he) = newSViv(2 * SvIV(old));
+                    SvREFCNT_dec(old);
+                }
+            }
+        }
+        ST(0) = sv_2mortal(newSVpvf("%d:%" IVdf ":%d", (int)n, sum, (int)agree));
+        XSRETURN(1);
+    }
+}
+
+/* own_entries(hashref): the hash's entries copied into entries of the
+ * module's own, read back through the macros of hv.h: copies in a string
+ * buffer of the interpreter's, each pointing at a key in the same buffer
+ * that holds the key as a scalar (Cpanel::JSON::XS's copies of a tied
+ * hash's entries), and copies in memory of this process with the key's
+ * bytes. Answers "key=value" for each, sorted, the copies of the first
+ * kind, then a "|", then the second kind. */
+struct own_entry {
+    HE he;
+    char hek[sizeof(HEK) + sizeof(SV *) + 2];
+};
+static int own_entry_cmp(const void *a, const void *b) {
+    STRLEN la, lb;
+    const char *pa = HePV(*(HE *const *)a, la), *pb = HePV(*(HE *const *)b, lb);
+    const int c = memcmp(pa, pb, la < lb ? la : lb);
+    return c ? c : (la > lb) - (la < lb);
+}
+XS(XS_PerlAPI_own_entries) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "hashref");
+    {
+        HV *hv = (HV *)SvRV(ST(0));
+        I32 count = 0;
+        SV *buf;
+        hv_iterinit(hv); /* counted by iterating: a tied hash says 0 */
+        while (hv_iternext(hv)) count++;
+        hv_iterinit(hv);
+        buf = sv_2mortal(newSV(count * sizeof(struct own_entry) + 1));
+        struct own_entry *in_buf = (struct own_entry *)SvPVX(buf);
+        struct own_entry *in_heap = (struct own_entry *)calloc(count ? count : 1, sizeof(struct own_entry) + 64);
+        HE **order = (HE **)calloc(count ? count : 1, sizeof(HE *));
+        SV *out = sv_2mortal(newSVpvs(""));
+        HE *he;
+        I32 i = 0, j;
+        Zero(in_buf, count, struct own_entry);
+        while ((he = hv_iternext(hv)) && i < count) {
+            HE *const c = &in_buf[i].he;
+            c->hent_hek = (HEK *)in_buf[i].hek;
+            HeVAL(c) = hv_iterval(hv, he);
+            HeSVKEY_set(c, hv_iterkeysv(he));
+            i++;
+        }
+        for (j = 0; j < i; j++) order[j] = &in_buf[j].he;
+        qsort(order, i, sizeof(HE *), own_entry_cmp);
+        for (j = 0; j < i; j++) {
+            STRLEN kl;
+            const char *k = HePV(order[j], kl);
+            if (!HeSVKEY(order[j]) || HeKLEN(order[j]) != HEf_SVKEY) croak("not a scalar key");
+            sv_catpvf(out, "%s%.*s=%" SVf, j ? "," : "", (int)kl, k,
+                      SVfARG(HeVAL(order[j])));
+        }
+        sv_catpvs(out, "|");
+        hv_iterinit(hv);
+        i = 0;
+        while ((he = hv_iternext(hv)) && i < count) {
+            struct own_entry *const e = (struct own_entry *)((char *)in_heap + i * (sizeof(struct own_entry) + 64));
+            HEK *const hek = (HEK *)e->hek;
+            I32 kl;
+            const char *k = hv_iterkey(he, &kl);
+            if (kl > 64) kl = 64;
+            e->he.hent_hek = hek;
+            hek->hek_len = kl;
+            memcpy(hek->hek_key, k, kl);
+            hek->hek_key[kl] = 0;
+            hek->hek_key[kl + 1] = 0;
+            HeVAL(&e->he) = hv_iterval(hv, he);
+            order[i++] = &e->he;
+        }
+        qsort(order, i, sizeof(HE *), own_entry_cmp);
+        for (j = 0; j < i; j++) {
+            SV *const keysv = hv_iterkeysv(order[j]);
+            sv_catpvf(out, "%s%" SVf "=%" SVf, j ? "," : "", SVfARG(keysv),
+                      SVfARG(HeVAL(order[j])));
+        }
+        free(order);
+        free(in_heap);
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* caller_gimme_list(): the calling sub runs in list context from here on
  * (its context is stored into after an operation of the interpreter, as
  * Wanted's double_return does). */
@@ -6662,6 +6809,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::stash_hek", XS_PerlAPI_stash_hek);
     newXS_deffile("PerlAPI::ref_name", XS_PerlAPI_ref_name);
     newXS_deffile("PerlAPI::buckets", XS_PerlAPI_buckets);
+    newXS_deffile("PerlAPI::entry_assign", XS_PerlAPI_entry_assign);
+    newXS_deffile("PerlAPI::entry_same", XS_PerlAPI_entry_same);
+    newXS_deffile("PerlAPI::bucket_values", XS_PerlAPI_bucket_values);
+    newXS_deffile("PerlAPI::own_entries", XS_PerlAPI_own_entries);
     newXS_deffile("PerlAPI::custom_op_description", XS_PerlAPI_custom_op_description);
     newXS_deffile("PerlAPI::caller_gimme_list", XS_PerlAPI_caller_gimme_list);
     newXS_deffile("PerlAPI::assertions_off", XS_PerlAPI_assertions_off);

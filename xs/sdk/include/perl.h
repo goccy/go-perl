@@ -242,8 +242,13 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int sigaction(
     return goperl_libc_sigaction(sig, act, old);
 }
 
-GOPERL_C __attribute__((weak, visibility("hidden"))) void (*signal(int sig, void (*handler)(int)))(int)
-    GOPERL_LIBC_THROW {
+/* a handler named by a type of its own: in the declarator signal's own,
+ * `void (*signal(int, void (*)(int)))(int) throw()` gives the exception
+ * specification to the handler signal returns, not to signal, and g++
+ * refuses that as another declaration than glibc's */
+typedef void (*goperl_sighandler_t)(int);
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_sighandler_t signal(
+    int sig, goperl_sighandler_t handler) GOPERL_LIBC_THROW {
     struct sigaction act, old;
     memset(&act, 0, sizeof(act));
     act.sa_handler = handler;
@@ -321,12 +326,24 @@ typedef struct goperl_sv HV;
 typedef struct goperl_sv GV;
 typedef struct goperl_sv IO;
 typedef struct goperl_interp PerlInterpreter;
-/* HE/HEK are REAL structs (host shadows): dists both consume HEs from
- * iteration/fetch_ent AND fabricate their own with New + HeSVKEY_set
- * (Cpanel::JSON::XS), then read either kind back through the same macros —
- * so member access must work. A shadow made from a guest HE carries the
- * guest token; its key bytes materialize lazily into an arena HEK laid out
- * like perl's (NUL after the bytes, then the flags byte). */
+/* HE and HEK are perl's own (hv.h), laid out as the interpreter has them:
+ * an entry the interpreter hands out (hv_fetch_ent, hv_store_ent,
+ * hv_iternext, HvEITER, HvARRAY) is the entry itself, where it lies in the
+ * interpreter's memory, so HeVAL reads and writes the hash's value slot
+ * (a value is an SV token, the address the interpreter has for it) and
+ * an entry keeps its identity from one call to the next. Modules also make
+ * entries of their own (Cpanel::JSON::XS, for the entries of a tied hash,
+ * in a string buffer: HeSVKEY_set, hent_hek assigned) and read either kind
+ * through the same macros.
+ *
+ * The pointers an entry of the interpreter holds are addresses of its
+ * memory. hent_next is a struct of one member, so that native code that
+ * follows it as a pointer (he->hent_next->...) does not compile; HeNEXT
+ * gives the next entry. hent_hek keeps its pointer type, for the modules
+ * that store a pointer of this process there (Cpanel::JSON::XS); HeKEY_hek
+ * tells the two kinds apart (goperl_he_ptr). The loader compares this
+ * layout with the interpreter's when it loads a module (__goperl_xs_layout)
+ * and refuses a module that disagrees. */
 typedef struct hek {
     U32 hek_hash;
     I32 hek_len;
@@ -335,13 +352,16 @@ typedef struct hek {
 #define cBOOL(x) ((bool)!!(x))
 #define DO_UTF8(sv) SvUTF8(sv)
 typedef struct goperl_he HE;
+typedef struct goperl_he_link {
+    uint64_t goperl_addr; /* an address of the interpreter's memory, or 0 */
+} goperl_he_link_t;
 struct goperl_he {
-    HE *hent_next;
+    goperl_he_link_t hent_next;
     HEK *hent_hek;
     union {
         SV *hent_val;
+        size_t hent_refcount;
     } he_valu;
-    uint64_t goperl_tok; /* guest HE token; 0 = fabricated by the dist */
 };
 
 /* svtype: the REAL perl 5.44 enum values, and the guest reports raw
@@ -1824,6 +1844,32 @@ __goperl_xs_init(const goperl_api_t *api) {
         return 0;
     goperl_api_v = api;
     return GOPERL_XS_ABI;
+}
+
+/* The structures of the interpreter's that native code reads and writes
+ * where they lie in its memory (HE, HEK), as this SDK lays them out: pairs
+ * of an index of the interpreter's table of its layout (perl-wasm's
+ * GOPERL_INT_LAYOUT) and the value the module was compiled with. The loader
+ * compares them with the interpreter's when it loads the module, and
+ * refuses a module that disagrees. */
+enum {
+    GOPERL_LAY_HE_NEXT = 23, GOPERL_LAY_HE_HEK = 24, GOPERL_LAY_HE_VALU = 25,
+    GOPERL_LAY_HE_SIZE = 26, GOPERL_LAY_HEK_HASH = 27, GOPERL_LAY_HEK_LEN = 28,
+    GOPERL_LAY_HEK_KEY = 29
+};
+GOPERL_C __attribute__((weak, visibility("default"), used)) const uint32_t *
+__goperl_xs_layout(uint32_t *n) {
+    static const uint32_t pairs[] = {
+        GOPERL_LAY_HE_NEXT, (uint32_t)offsetof(HE, hent_next),
+        GOPERL_LAY_HE_HEK, (uint32_t)offsetof(HE, hent_hek),
+        GOPERL_LAY_HE_VALU, (uint32_t)offsetof(HE, he_valu),
+        GOPERL_LAY_HE_SIZE, (uint32_t)sizeof(HE),
+        GOPERL_LAY_HEK_HASH, (uint32_t)offsetof(HEK, hek_hash),
+        GOPERL_LAY_HEK_LEN, (uint32_t)offsetof(HEK, hek_len),
+        GOPERL_LAY_HEK_KEY, (uint32_t)offsetof(HEK, hek_key),
+    };
+    *n = (uint32_t)(sizeof(pairs) / sizeof(pairs[0]) / 2);
+    return pairs;
 }
 
 /* ---- guest op numbers (mirror perl-wasm's perl_xs_helper) --------------- */
@@ -3448,8 +3494,7 @@ static SV **goperl_hv_store(goperl_frame_t *f, HV *hv, const char *key,
     ((I32)goperl_op0(GOPERL_OP_HV_ITERINIT, GOPERL_TOK(hv), 0))
 #define HvKEYS(hv) hv_iterinit(hv)
 /* hv_fetch_ent / hv_store_ent / hv_iternext / HeVAL / hv_iterkeysv /
- * hv_iterval live in the HE-shadow section further down (they need the
- * arena allocator). */
+ * hv_iterval live in the section on entries of hashes further down. */
 #define HvNAME(hv) \
     ((char *)goperl_intern_op(_gof, GOPERL_OP_HV_NAME, GOPERL_TOK(hv), 0, 0))
 #define HvNAME_get(hv) HvNAME(hv)
@@ -6421,108 +6466,138 @@ static void goperl_arena_free_all(void) {
     goperl_pio_views_v = 0; /* they were in the arena */
 }
 
-/* ---- HE shadows (see the HE/HEK typedefs near the top) ------------------ */
+/* ---- entries of hashes (see the HE/HEK typedefs near the top) ---------- */
 
 #ifndef HVhek_UTF8
 #define HVhek_UTF8 0x01
 #endif
 
-static HE *goperl_he_shadow(goperl_frame_t *f, HV *hv, uint64_t tok) {
-    if (!tok) return 0;
-    HE *he = (HE *)goperl_arena_alloc(sizeof(HE));
-    if (!he) goperl_croakf(f, "HE shadow: out of memory");
-    he->goperl_tok = tok;
-    he->he_valu.hent_val =
-        GOPERL_SV(hv ? goperl_do_op(f, GOPERL_OP_HV_ITERVAL, GOPERL_TOK(hv), tok, 0, 0)
-                     : goperl_do_op(f, GOPERL_OP_HE_VAL, tok, 0, 0, 0));
-    return he;
+/* Whether p points into the interpreter's memory as it is now (it never
+ * shrinks, and never moves). */
+static inline __attribute__((unused)) int goperl_in_memory(const goperl_frame_t *f,
+                                                           const void *p) {
+    return f->membase && (uintptr_t)p - (uintptr_t)f->membase < *f->memsize;
 }
-
-/* The key bytes materialize lazily, laid out like a real perl HEK: the
- * bytes, a NUL, then the flags byte (HVhek_UTF8). */
-static HEK *goperl_he_hek(goperl_frame_t *f, HE *he) {
-    if (he->hent_hek) return he->hent_hek;
-    uint64_t keytok = goperl_do_op(f, GOPERL_OP_HV_ITERKEYSV, he->goperl_tok,
-                                   0, 0, 0);
-    uint64_t len = 0;
-    const char *p = keytok ? goperl_direct_sv_pv(f, keytok, &len) : 0;
-    HEK *hek = (HEK *)goperl_arena_alloc(sizeof(HEK) + (size_t)len + 2);
-    if (!hek) goperl_croakf(f, "HEK shadow: out of memory");
-    hek->hek_hash = 0;
-    hek->hek_len = (I32)len;
-    if (p) memcpy(hek->hek_key, p, (size_t)len);
-    hek->hek_key[len] = 0;
-    hek->hek_key[len + 1] =
-        (keytok &&
-         (goperl_do_op(f, GOPERL_OP_SV_INFO, keytok, 0, 0, 0) &
-          GOPERL_INFO_UTF8))
-            ? HVhek_UTF8
-            : 0;
-    he->hent_hek = hek;
-    return hek;
+/* The entry of the interpreter's at an address of its memory, where it
+ * lies (NULL for 0). */
+static inline __attribute__((unused)) HE *goperl_he_at(goperl_frame_t *f, uint64_t g) {
+    return (HE *)goperl_guest_mem(f, g);
+}
+/* A pointer an entry holds (hent_next, hent_hek), as a pointer of this
+ * process. An entry outside the interpreter's memory is a module's own and
+ * holds pointers of this process. One inside it holds addresses of the
+ * memory, except where a module stored a pointer of this process there:
+ * Cpanel::JSON::XS makes the entries of a tied hash in a string buffer and
+ * points them at keys in the same buffer. The number alone tells the two
+ * apart: every address of the memory is below the memory's ceiling, and
+ * the memory lies at or above its ceiling in this process (the loader
+ * loads no native code into an instance whose memory does not: see
+ * memoryAboveCeiling in xs.go), so an address of the memory is never also
+ * a pointer into it. Any other number is an address, and goperl_guest_mem
+ * fails the call when the memory does not hold it. */
+static inline __attribute__((unused)) void *goperl_he_ptr(goperl_frame_t *f, const HE *he,
+                                                          uint64_t v) {
+    if (!v || !goperl_in_memory(f, he) || goperl_in_memory(f, (const void *)(uintptr_t)v))
+        return (void *)(uintptr_t)v;
+    return goperl_guest_mem(f, v);
+}
+static inline __attribute__((unused)) HEK *goperl_he_hek(goperl_frame_t *f, const HE *he) {
+    return (HEK *)goperl_he_ptr(f, he, (uint64_t)(uintptr_t)he->hent_hek);
+}
+static inline __attribute__((unused)) HE *goperl_he_next(goperl_frame_t *f, const HE *he) {
+    return (HE *)goperl_he_ptr(f, he, he->hent_next.goperl_addr);
+}
+/* Whether the interpreter can read the entry itself: one of its memory
+ * whose key is an address of its memory (an entry of the interpreter's,
+ * not one a module made with a key of this process's). */
+static inline __attribute__((unused)) int goperl_he_readable(const goperl_frame_t *f,
+                                                             const HE *he) {
+    return goperl_in_memory(f, he) && !goperl_in_memory(f, (const void *)he->hent_hek);
+}
+/* The address of an entry of the interpreter's memory, for the
+ * interpreter to keep (HvEITER): an entry of this process's cannot be
+ * handed to it. */
+static uint64_t goperl_he_addr(goperl_frame_t *f, const HE *he, const char *what)
+    __attribute__((unused));
+static uint64_t goperl_he_addr(goperl_frame_t *f, const HE *he, const char *what) {
+    if (!he) return 0;
+    if (!goperl_in_memory(f, he))
+        goperl_croakf(f, "%s: an entry that is not in the interpreter's memory", what);
+    return (uint64_t)((uintptr_t)he - (uintptr_t)f->membase);
 }
 
 #define hv_fetch_ent(hv, keysv, lval, hash)                              \
-    goperl_he_shadow(_gof, (HV *)0,                                      \
-                     goperl_op3(GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv),  \
-                                GOPERL_TOK(keysv), (lval) ? 1 : 0))
+    goperl_he_at(_gof, goperl_op3(GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv), \
+                                  GOPERL_TOK(keysv), (lval) ? 1 : 0))
 #define hv_store_ent(hv, keysv, sv, hash)                                 \
-    goperl_he_shadow(_gof, (HV *)0,                                       \
-                     goperl_op3(GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv),   \
-                                GOPERL_TOK(keysv), GOPERL_TOK(sv)))
+    goperl_he_at(_gof, goperl_op3(GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv),  \
+                                  GOPERL_TOK(keysv), GOPERL_TOK(sv)))
 #define hv_iternext(hv) \
-    ({ GOPERL_ONCE(goperl_hv_iternext_hv_, hv); \
-       goperl_he_shadow(_gof, (HV *)(goperl_hv_iternext_hv_), goperl_op0(GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(goperl_hv_iternext_hv_), 0)); })
+    goperl_he_at(_gof, goperl_op0(GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv), 0))
 #define hv_iternext_sv hv_iternext
+/* hv.h's, over goperl_he_hek and goperl_he_next */
 #define HeVAL(he) ((he)->he_valu.hent_val)
-#define HeNEXT(he) ((he)->hent_next)
-#define HeKEY_hek(he) goperl_he_hek(_gof, (HE *)(he))
-#define HeKEY(he) ((void *)HeKEY_hek(he)->hek_key)
+#define HeNEXT(he) goperl_he_next(_gof, (const HE *)(he))
+#define HeKEY_hek(he) goperl_he_hek(_gof, (const HE *)(he))
+#define HeKEY(he) HEK_KEY(HeKEY_hek(he))
 #define HeKEY_sv(he) (*(SV **)HeKEY(he))
-#define HeKLEN(he) (HeKEY_hek(he)->hek_len)
-#define HeHASH(he) (HeKEY_hek(he)->hek_hash)
-#define HeKUTF8(he) \
-    ({ HEK *const goperl_HeKUTF8_hek_ = HeKEY_hek(he); \
-       goperl_HeKUTF8_hek_->hek_key[goperl_HeKUTF8_hek_->hek_len + 1] & HVhek_UTF8; })
-#define HeKWASUTF8(he) 0
-#define HeUTF8(he) \
-    ({ HEK *const goperl_HeUTF8_hek_ = HeKEY_hek(he); \
-       (goperl_HeUTF8_hek_->hek_len == HEf_SVKEY) \
-           ? SvUTF8(*(SV **)goperl_HeUTF8_hek_->hek_key) \
-           : (U32)(goperl_HeUTF8_hek_->hek_key[goperl_HeUTF8_hek_->hek_len + 1] & HVhek_UTF8); })
-#define HePV(he, lenvar) \
-    ({ HEK *const goperl_HePV_hek_ = HeKEY_hek(he); \
-       (lenvar) = (STRLEN)goperl_HePV_hek_->hek_len; \
-       (char *)goperl_HePV_hek_->hek_key; })
-#define HeSVKEY(he) \
-    ({ HEK *const goperl_HeSVKEY_hek_ = HeKEY_hek(he); \
-       (goperl_HeSVKEY_hek_->hek_len == HEf_SVKEY) \
-           ? *(SV **)goperl_HeSVKEY_hek_->hek_key : (SV *)0; })
-#define HeSVKEY_set(he, sv) \
-    ({ HEK *const goperl_HeSVKEY_set_hek_ = (he)->hent_hek; \
-       goperl_HeSVKEY_set_hek_->hek_len = HEf_SVKEY; \
-       *(SV **)goperl_HeSVKEY_set_hek_->hek_key = (sv); })
+#define HeKLEN(he) HEK_LEN(HeKEY_hek(he))
+#define HeHASH(he) HEK_HASH(HeKEY_hek(he))
+#define HeKUTF8(he) HEK_UTF8(HeKEY_hek(he))
+#define HeKWASUTF8(he) HEK_WASUTF8(HeKEY_hek(he))
+#define HeKLEN_UTF8(he)                                                    \
+    ({ HEK *const goperl_HeKLEN_UTF8_hek_ = HeKEY_hek(he);                 \
+       HEK_UTF8(goperl_HeKLEN_UTF8_hek_) ? -HEK_LEN(goperl_HeKLEN_UTF8_hek_) \
+                                         : HEK_LEN(goperl_HeKLEN_UTF8_hek_); })
+#define HeUTF8(he)                                                         \
+    ({ HEK *const goperl_HeUTF8_hek_ = HeKEY_hek(he);                      \
+       (HEK_LEN(goperl_HeUTF8_hek_) == HEf_SVKEY)                          \
+           ? (U32)SvUTF8(*(SV **)HEK_KEY(goperl_HeUTF8_hek_))              \
+           : (U32)HEK_UTF8(goperl_HeUTF8_hek_); })
+#define HePV(he, lp)                                                       \
+    ({ HEK *const goperl_HePV_hek_ = HeKEY_hek(he);                        \
+       (HEK_LEN(goperl_HePV_hek_) == HEf_SVKEY)                            \
+           ? SvPV(*(SV **)HEK_KEY(goperl_HePV_hek_), lp)                   \
+           : ((lp = HEK_LEN(goperl_HePV_hek_)), HEK_KEY(goperl_HePV_hek_)); })
+#define HeSVKEY(he)                                                        \
+    ({ HEK *const goperl_HeSVKEY_hek_ = HeKEY_hek(he);                     \
+       (goperl_HeSVKEY_hek_ && HEK_LEN(goperl_HeSVKEY_hek_) == HEf_SVKEY)  \
+           ? *(SV **)HEK_KEY(goperl_HeSVKEY_hek_) : (SV *)0; })
+#define HeSVKEY_set(he, sv)                                                \
+    ({ HEK *const goperl_HeSVKEY_set_hek_ = HeKEY_hek(he);                 \
+       HEK_LEN(goperl_HeSVKEY_set_hek_) = HEf_SVKEY;                       \
+       *(SV **)HEK_KEY(goperl_HeSVKEY_set_hek_) = (sv); })
 
-/* The key as an SV: guest-backed shadows go through the guest (a mortal
- * copy, utf8-faithful); SVKEY entries return the stored SV. */
-static SV *goperl_hv_iterkeysv(goperl_frame_t *f, HE *he) {
-    if (he->goperl_tok)
+/* The key as a new mortal scalar (hv_iterkeysv): the interpreter's own
+ * for an entry it can read; for one a module made, of the key it points
+ * at (newSVhek). */
+static SV *goperl_newSVhek(goperl_frame_t *f, const HEK *hek) __attribute__((unused));
+static SV *goperl_hv_iterkeysv(goperl_frame_t *f, const HE *he) __attribute__((unused));
+static SV *goperl_hv_iterkeysv(goperl_frame_t *f, const HE *he) {
+    if (goperl_he_readable(f, he))
         return GOPERL_SV(goperl_do_op(f, GOPERL_OP_HV_ITERKEYSV,
-                                      he->goperl_tok, 0, 0, 0));
-    if (he->hent_hek && he->hent_hek->hek_len == HEf_SVKEY)
-        return *(SV **)he->hent_hek->hek_key;
-    if (he->hent_hek) {
-        SV *sv = GOPERL_SV(goperl_do_op(
-            f, GOPERL_OP_NEW_PVN, 0, (uint64_t)he->hent_hek->hek_len,
-            he->hent_hek->hek_key, (uint64_t)he->hent_hek->hek_len));
-        goperl_do_op(f, GOPERL_OP_SV_MORTAL, GOPERL_TOK(sv), 0, 0, 0);
-        return sv;
-    }
-    return 0;
+                                      (uint64_t)((uintptr_t)he - (uintptr_t)f->membase),
+                                      0, 0, 0));
+    const HEK *const hek = goperl_he_hek(f, he);
+    if (!hek) return 0;
+    SV *const sv = goperl_newSVhek(f, hek);
+    goperl_do_op(f, GOPERL_OP_SV_MORTAL, GOPERL_TOK(sv), 0, 0, 0);
+    return sv;
 }
-#define hv_iterkeysv(he) goperl_hv_iterkeysv(_gof, (HE *)(he))
+#define hv_iterkeysv(he) goperl_hv_iterkeysv(_gof, (const HE *)(he))
 #define HeSVKEY_force(he) hv_iterkeysv(he)
-#define hv_iterval(hv, he) HeVAL(he)
+/* The value of the entry an iteration is at: the interpreter's for an
+ * entry it can read (the value of a tied hash's is fetched); HeVAL of
+ * one a module made. */
+static SV *goperl_hv_iterval(goperl_frame_t *f, HV *hv, const HE *he) __attribute__((unused));
+static SV *goperl_hv_iterval(goperl_frame_t *f, HV *hv, const HE *he) {
+    if (goperl_he_readable(f, he))
+        return GOPERL_SV(goperl_do_op(f, GOPERL_OP_HV_ITERVAL, GOPERL_TOK(hv),
+                                      (uint64_t)((uintptr_t)he - (uintptr_t)f->membase),
+                                      0, 0));
+    return he->he_valu.hent_val;
+}
+#define hv_iterval(hv, he) goperl_hv_iterval(_gof, (HV *)(hv), (const HE *)(he))
 
 static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
                                       int depth) {
@@ -7155,14 +7230,12 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
             goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, GOPERL_TOK(keysv), 0, 0, 0);
     }
     if (action & HV_FETCH_ISSTORE)
-        return (void *)goperl_he_shadow(
-            f, (HV *)0,
-            goperl_do_op3(f, GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
-                          GOPERL_TOK(val), 0, 0));
-    return (void *)goperl_he_shadow(
-        f, (HV *)0,
-        goperl_do_op3(f, GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
-                      (action & HV_FETCH_LVALUE) ? 1 : 0, 0, 0));
+        return (void *)goperl_he_at(
+            f, goperl_do_op3(f, GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
+                             GOPERL_TOK(val), 0, 0));
+    return (void *)goperl_he_at(
+        f, goperl_do_op3(f, GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
+                         (action & HV_FETCH_LVALUE) ? 1 : 0, 0, 0));
 }
 #define hv_common(hv, keysv, key, klen, kflags, action, val, hash)        \
     goperl_hv_common(_gof, (HV *)(hv), (SV *)(keysv), (key),              \
@@ -7410,12 +7483,22 @@ static void goperl_gv_efullname(goperl_frame_t *f, SV *sv, GV *gv) {
                  strlen(buf));
 }
 #define gv_efullname(sv, gv) goperl_gv_efullname(_gof, (SV *)(sv), (GV *)(gv))
-static char *goperl_hv_iterkey(goperl_frame_t *f, HE *he, I32 *retlen) {
-    HEK *hek = goperl_he_hek(f, he);
+/* The key of an entry (hv.c's hv_iterkey): its bytes where the entry's key
+ * has them, or a key that is a scalar's string. */
+static char *goperl_hv_iterkey(goperl_frame_t *f, const HE *he, I32 *retlen) {
+    HEK *const hek = goperl_he_hek(f, he);
+    if (hek->hek_len == HEf_SVKEY) {
+        SV *keysv;
+        memcpy(&keysv, hek->hek_key, sizeof keysv);
+        uint64_t len = 0;
+        char *const p = (char *)goperl_direct_sv_pv(f, GOPERL_TOK(keysv), &len);
+        *retlen = (I32)len;
+        return p;
+    }
     *retlen = hek->hek_len;
     return hek->hek_key;
 }
-#define hv_iterkey(he, retlen) goperl_hv_iterkey(_gof, (HE *)(he), (retlen))
+#define hv_iterkey(he, retlen) goperl_hv_iterkey(_gof, (const HE *)(he), (retlen))
 #define sv_2io(sv) \
     ((IO *)GOPERL_SV(goperl_op0(GOPERL_OP_SV_2IO, GOPERL_TOK(sv), 0)))
 #define sv_force_normal(sv) \
@@ -8444,22 +8527,20 @@ static char *ninstr(const char *big, const char *bigend, const char *little,
     return 0;
 }
 
-/* hv_iternextsv: iterate returning value with key pv (interned copy). */
+/* hv_iternextsv (hv.c): the next entry's key, where the entry has it
+ * (hv_iterkey), and its value (hv_iterval); NULL at the end. */
 static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
                                 I32 *retlen) __attribute__((unused));
 static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
                                 I32 *retlen) {
-    uint64_t he =
-        goperl_do_op(f, GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv), 0, 0, 0);
+    const HE *const he =
+        goperl_he_at(f, goperl_do_op(f, GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv), 0, 0, 0));
     if (!he) return 0;
-    uint64_t keysv =
-        goperl_do_op(f, GOPERL_OP_HV_ITERKEYSV, he, 0, 0, 0);
-    uint64_t klen = 0;
-    const char *kp = goperl_direct_sv_pv(f, keysv, &klen);
-    const char *interned = kp ? goperl_intern(kp, (size_t)klen) : "";
-    if (keyp) *keyp = (char *)interned;
-    if (retlen) *retlen = (I32)klen;
-    return GOPERL_SV(goperl_do_op(f, GOPERL_OP_HV_ITERVAL, GOPERL_TOK(hv), he, 0, 0));
+    I32 len = 0;
+    char *const key = goperl_hv_iterkey(f, he, &len);
+    if (keyp) *keyp = key;
+    if (retlen) *retlen = len;
+    return goperl_hv_iterval(f, hv, he);
 }
 #define hv_iternextsv(hv, keyp, retlenp) \
     goperl_hv_iternextsv(_gof, (HV *)(hv), (keyp), (retlenp))

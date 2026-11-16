@@ -98,7 +98,28 @@ const (
 	opMagicSetHook  = 133
 	opSvCall        = 187
 	opGvCall        = 188
+	opInternal      = 204
 )
+
+// intLayout is the selector of opInternal that answers the address of the
+// interpreter's table of the layout of its structures (GOPERL_INT_LAYOUT in
+// perl-wasm): words of four bytes, layoutWords of them.
+const (
+	intLayout   = 0
+	layoutWords = 32
+)
+
+// layoutNames names the words of the interpreter's layout table that a
+// module is compared on (GOPERL_LAY_* in the SDK's perl.h).
+var layoutNames = map[uint32]string{
+	23: "offsetof(HE, hent_next)",
+	24: "offsetof(HE, hent_hek)",
+	25: "offsetof(HE, he_valu)",
+	26: "sizeof(HE)",
+	27: "offsetof(HEK, hek_hash)",
+	28: "offsetof(HEK, hek_len)",
+	29: "offsetof(HEK, hek_key)",
+}
 
 // gvCallCvNative is the GV_CALL selector that makes a CV call the native
 // function of an id (GOPERL_GVCALL_CV_NATIVE in perl-wasm).
@@ -397,6 +418,9 @@ type state struct {
 // __goperl_shared_clone); scope bookkeeping starts empty: the native
 // activations it belongs to exist only in the original.
 func (s *state) adoptClone(clone *internal.Perl) error {
+	if err := memoryAboveCeiling(clone); err != nil {
+		return err
+	}
 	from, to := spanOf(s.p.RawMemory()), spanOf(clone.RawMemory())
 	s.mu.Lock()
 	statesMu.Lock()
@@ -623,6 +647,9 @@ func loaderState(p *internal.Perl) (*state, error) {
 	if libcErr != nil {
 		return nil, libcErr
 	}
+	if err := memoryAboveCeiling(p); err != nil {
+		return nil, err
+	}
 	s := stateFor(p)
 	if s.opbox == 0 {
 		// the second value of an operation that answers two is only ever
@@ -630,6 +657,72 @@ func loaderState(p *internal.Perl) (*state, error) {
 		return nil, errors.New("xs: the interpreter has no operation box")
 	}
 	return s, nil
+}
+
+// memoryAboveCeiling refuses native code to an instance whose memory does
+// not lie at or above its ceiling in this process. Native code reads some
+// of the interpreter's structures where they lie (the entries of hashes),
+// and a pointer such a structure holds may be an address of the memory or,
+// where a module stored one there, a pointer of this process into the
+// memory: the SDK tells them apart by the number alone (goperl_he_ptr).
+// Every address of the memory is below its ceiling (it never grows past
+// it), and every pointer into it is at or above its base (it never moves);
+// with the base at or above the ceiling the two never meet, so the rule is
+// total. The reservations of the 64-bit hosts are mapped above their
+// ceilings (Linux maps them below the top of the address space; macOS
+// gives one past the zero page and the program a place at or above its
+// length, which is longer than the ceiling), so this refuses nothing
+// there; but no system promises it, and this makes it a condition.
+func memoryAboveCeiling(p *internal.Perl) error {
+	mem := p.RawMemory()
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
+	if ceiling := p.MemoryCeiling(); cap(mem) == 0 || uint64(base) < ceiling {
+		return fmt.Errorf("xs: the interpreter's memory lies at %#x, below its ceiling of %#x bytes: native code cannot tell its addresses from pointers into it", base, ceiling)
+	}
+	return nil
+}
+
+// layoutAgrees compares the layout of the interpreter's structures that
+// the module at path was compiled with (its __goperl_xs_layout: pairs of a
+// word of the interpreter's layout table and the value the module has for
+// it) with the interpreter's own, and refuses a module that disagrees: it
+// reads and writes those structures where they lie. A module built before
+// the SDK read any of them in place has no such table, and nothing to
+// compare.
+func (s *state) layoutAgrees(lib uintptr, path string) error {
+	fn, err := purego.Dlsym(lib, "__goperl_xs_layout")
+	if err != nil {
+		return nil
+	}
+	np := cMalloc(8)
+	defer cFree(np)
+	pokeU64(np, 0)
+	pairs, _, _ := purego.SyscallN(fn, np)
+	n := int(binary.LittleEndian.Uint32(copyIn(np, 4)))
+	if pairs == 0 || n <= 0 || n > layoutWords {
+		return fmt.Errorf("%s: __goperl_xs_layout describes no layout", path)
+	}
+	want := copyIn(pairs, 8*n)
+	at, err := s.p.XSHelperOp(opInternal, 0, 0, intLayout, "")
+	if err != nil {
+		return fmt.Errorf("%s: the interpreter's layout: %w", path, err)
+	}
+	mem := s.p.RawMemory()
+	if at == 0 || at > uint64(len(mem)) || uint64(len(mem))-at < 4*layoutWords {
+		return fmt.Errorf("%s: the interpreter did not describe its layout", path)
+	}
+	for i := 0; i < n; i++ {
+		word := binary.LittleEndian.Uint32(want[8*i:])
+		val := binary.LittleEndian.Uint32(want[8*i+4:])
+		name, known := layoutNames[word]
+		if !known || word >= layoutWords {
+			return fmt.Errorf("%s: the module was compiled with a layout of word %d, which this loader does not know", path, word)
+		}
+		if got := binary.LittleEndian.Uint32(mem[at+4*uint64(word):]); got != val {
+			return fmt.Errorf("%s: the module was compiled with %s = %d, the interpreter has %d", path, name, val, got)
+		}
+	}
+	return nil
 }
 
 // open dlopens a native XS module built against the SDK, injects the
@@ -687,6 +780,9 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	got, _, _ := purego.SyscallN(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
 		return 0, fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
+	}
+	if err := s.layoutAgrees(lib, path); err != nil {
+		return 0, err
 	}
 	// The SDK's croak-guarded entry points for pp hooks and save-stack
 	// destructors (weak, so any SDK .so provides them).
