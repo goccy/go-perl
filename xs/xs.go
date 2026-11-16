@@ -269,10 +269,9 @@ type cAPI struct {
 
 // magicRec tracks one guest SV's host-side MAGIC chain.
 type magicRec struct {
-	svTok     uint64
-	head      uintptr // C-heap MAGIC* chain head
-	anchorObj uint64  // mg_obj whose refcount the guest anchor holds
-	anchorID  uint32
+	svTok    uint64
+	head     uintptr // C-heap MAGIC* chain head
+	anchorID uint32
 }
 
 func init() {
@@ -481,7 +480,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 		cs.pvHost[sv] = own
 	}
 	for sv, rec := range s.magicBySV {
-		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head, from, to), anchorObj: rec.anchorObj, anchorID: rec.anchorID}
+		own := &magicRec{svTok: sv, head: copyMagicChain(rec.head, from, to), anchorID: rec.anchorID}
 		cs.magicBySV[sv] = own
 		cs.magicByID[own.anchorID] = own
 	}
@@ -1463,13 +1462,13 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 	if first {
 		s.mu.Lock()
 		s.nextMagicID++
-		rec = &magicRec{svTok: sv, head: mg, anchorObj: obj, anchorID: s.nextMagicID}
+		rec = &magicRec{svTok: sv, head: mg, anchorID: s.nextMagicID}
 		s.magicBySV[sv] = rec
 		s.magicByID[rec.anchorID] = rec
 		s.mu.Unlock()
-		// The guest anchor holds the SV<->host-chain link and (perl
-		// semantics) a reference on obj.
-		if _, err := s.p.XSHelperOp(opMagicAttach, sv, obj, uint64(rec.anchorID), ""); err != nil {
+		// The guest anchor holds the SV<->host-chain link, and nothing
+		// else: what a MAGIC holds is the MAGIC's (below).
+		if _, err := s.p.XSHelperOp(opMagicAttach, sv, 0, uint64(rec.anchorID), ""); err != nil {
 			f.fail("sv_magicext: " + err.Error())
 			return 0
 		}
@@ -1491,12 +1490,14 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 		s.mu.Lock()
 		rec.head = mg
 		s.mu.Unlock()
-		if takesObj {
-			// Real sv_magicext takes a reference on obj for every entry;
-			// the anchor only covers the first, so hold this one manually.
-			if _, err := s.p.XSHelperOp(opRefcntInc, obj, 0, 0, ""); err != nil {
-				f.fail("sv_magicext: " + err.Error())
-			}
+	}
+	if takesObj {
+		// sv_magicext takes a reference on obj for the MAGIC
+		// (MGf_REFCOUNTED). Whoever frees the MAGIC gives it up: mg_free
+		// here (magicFreed, magicDel), or a module that takes the MAGIC off
+		// the chain itself (Object::Pad::FieldAttr::LazyInit), as on perl.
+		if _, err := s.p.XSHelperOp(opRefcntInc, obj, 0, 0, ""); err != nil {
+			f.fail("sv_magicext: " + err.Error())
 		}
 	}
 	return mg
@@ -1807,7 +1808,7 @@ func (s *state) magicFreed(id uint32) {
 			// What svt_free left in the MAGIC is what is given up.
 			node = copyIn(mg, mgAllocSize)
 		}
-		s.releaseMagicObj(rec, node)
+		s.releaseMagicObj(node)
 		s.releaseMagicName(int32(binary.LittleEndian.Uint32(node[mgOffLen:])),
 			uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])))
 		s.mu.Lock()
@@ -1836,15 +1837,10 @@ func magicTakesObj(sv, obj uint64, how int32) bool {
 // releaseMagicObj gives up the reference a MAGIC holds on its mg_obj, as
 // mg_free does: only a MAGIC that took one (MGf_REFCOUNTED) holds one —
 // a module that sets mg_obj itself gives its reference up in its own
-// svt_free. The reference of the first MAGIC of a variable is held by the
-// guest's anchor, which gives it up itself.
-func (s *state) releaseMagicObj(rec *magicRec, node []byte) {
+// svt_free.
+func (s *state) releaseMagicObj(node []byte) {
 	obj := binary.LittleEndian.Uint64(node[mgOffObj:])
 	if obj == 0 || node[mgOffFlags]&mgfRefcounted == 0 {
-		return
-	}
-	if obj == rec.anchorObj {
-		rec.anchorObj = 0
 		return
 	}
 	_, _ = s.p.XSHelperOp(opRefcntDec, obj, 0, 0, "")
@@ -1883,7 +1879,7 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 				s.callSvtFree(sv, mg)
 				node = copyIn(mg, mgAllocSize)
 			}
-			s.releaseMagicObj(rec, node)
+			s.releaseMagicObj(node)
 			s.releaseMagicName(int32(binary.LittleEndian.Uint32(node[mgOffLen:])),
 				uintptr(binary.LittleEndian.Uint64(node[mgOffPtr:])))
 			if prev == 0 {

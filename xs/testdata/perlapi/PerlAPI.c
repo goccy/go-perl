@@ -2099,6 +2099,39 @@ XS(XS_PerlAPI_magic_refcounted) {
     }
 }
 
+/* Magic with an mg_obj sv_magicext takes a reference on and a name that is
+ * an SV, which the module takes off the variable itself, the way
+ * Object::Pad::FieldAttr::LazyInit disarms its magic (its mg_freeext for
+ * perls without one): it unlinks the MAGIC from the chain, then gives up
+ * what the MAGIC held, as mg_free would. */
+static MGVTBL perlapi_lazy_vtbl = {0, 0, 0, 0, 0, 0, 0, 0};
+
+XS(XS_PerlAPI_lazy_attach) {
+    dXSARGS;
+    if (items != 3) croak_xs_usage(cv, "holder, obj, name");
+    sv_magicext(ST(0), ST(1), PERL_MAGIC_ext, &perlapi_lazy_vtbl, (char *)ST(2), HEf_SVKEY);
+    XSRETURN(0);
+}
+
+XS(XS_PerlAPI_lazy_disarm) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "holder");
+    {
+        SV *sv = ST(0);
+        MAGIC *mg, *prevmg, *moremg;
+        for (prevmg = NULL, mg = SvMAGIC(sv); mg; prevmg = mg, mg = moremg) {
+            moremg = mg->mg_moremagic;
+            if (mg->mg_type == PERL_MAGIC_ext && mg->mg_virtual == &perlapi_lazy_vtbl) {
+                if (prevmg) prevmg->mg_moremagic = moremg;
+                else SvMAGIC_set(sv, moremg);
+                if (mg->mg_ptr && mg->mg_len == HEf_SVKEY) SvREFCNT_dec(MUTABLE_SV(mg->mg_ptr));
+                if (mg->mg_flags & MGf_REFCOUNTED) SvREFCNT_dec(mg->mg_obj);
+            }
+        }
+        XSRETURN(0);
+    }
+}
+
 /* SvRV reads the slot, whatever the flags say: a reference whose ROK flag
  * is turned off still has its target there, as in perl. */
 XS(XS_PerlAPI_rv_slot_after_rok_off) {
@@ -6923,6 +6956,8 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::view_read", XS_PerlAPI_view_read);
     newXS_deffile("PerlAPI::pin_attach", XS_PerlAPI_pin_attach);
     newXS_deffile("PerlAPI::magic_refcounted", XS_PerlAPI_magic_refcounted);
+    newXS_deffile("PerlAPI::lazy_attach", XS_PerlAPI_lazy_attach);
+    newXS_deffile("PerlAPI::lazy_disarm", XS_PerlAPI_lazy_disarm);
     newXS_deffile("PerlAPI::rv_slot_after_rok_off", XS_PerlAPI_rv_slot_after_rok_off);
     newXS_deffile("PerlAPI::process_id", XS_PerlAPI_process_id);
     newXS_deffile("PerlAPI::discard_string", XS_PerlAPI_discard_string);

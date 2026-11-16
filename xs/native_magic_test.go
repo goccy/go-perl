@@ -192,3 +192,26 @@ func TestNativeMagicHoldsOnlyTheReferenceItTook(t *testing.T) {
 		{"taken by sv_magicext, after the module's", prelude + `{ my $h = "h"; PerlAPI::pin_attach($h, $pinned); PerlAPI::view_attach($h, $viewed) } ` + tail, "0,0,0"},
 	})
 }
+
+// The references a MAGIC holds (on its mg_obj, when sv_magicext took one,
+// and on a name that is an SV) are the MAGIC's: a module that takes the
+// MAGIC off the variable itself gives them up, as
+// Object::Pad::FieldAttr::LazyInit does when its field is first read or
+// written, and freeing the variable afterwards gives up nothing more.
+// Before, the reference on the mg_obj of a variable's first MAGIC was held
+// for it by the interpreter's side of the chain, which gave it up again
+// with the variable: one reference too many was given up, and the weakened
+// self-reference LazyInit keeps there was freed twice.
+func TestNativeMagicTakenOffByTheModule(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const prelude = `my @w; local $SIG{__WARN__} = sub { push @w, @_ }; our ($obj, $name, $pinned) = ("o", "n", "p"); my ($o0, $n0, $p0) = (Internals::SvREFCNT($obj), Internals::SvREFCNT($name), Internals::SvREFCNT($pinned)); `
+	const tail = `join ",", Internals::SvREFCNT($obj) - $o0, Internals::SvREFCNT($name) - $n0, Internals::SvREFCNT($pinned) - $p0, scalar(@w), @w`
+	runEvalCases(t, p, []evalCase{
+		{"held while attached", prelude + `my $h = "h"; PerlAPI::lazy_attach($h, $obj, $name); join ",", Internals::SvREFCNT($obj) - $o0, Internals::SvREFCNT($name) - $n0`, "1,1"},
+		{"the first magic, taken off", prelude + `{ my $h = "h"; PerlAPI::lazy_attach($h, $obj, $name); PerlAPI::lazy_disarm($h) } ` + tail, "0,0,0,0"},
+		{"the first magic, freed with the variable", prelude + `{ my $h = "h"; PerlAPI::lazy_attach($h, $obj, $name) } ` + tail, "0,0,0,0"},
+		{"after another magic, taken off", prelude + `{ my $h = "h"; PerlAPI::pin_attach($h, $pinned); PerlAPI::lazy_attach($h, $obj, $name); PerlAPI::lazy_disarm($h) } ` + tail, "0,0,0,0"},
+		{"before another magic, taken off", prelude + `{ my $h = "h"; PerlAPI::lazy_attach($h, $obj, $name); PerlAPI::pin_attach($h, $pinned); PerlAPI::lazy_disarm($h) } ` + tail, "0,0,0,0"},
+	})
+}
