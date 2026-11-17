@@ -2097,6 +2097,109 @@ static __attribute__((unused)) UV goperl_case_utf8(goperl_frame_t *f, int which,
     goperl_case_utf8(_gof, GOPERL_CASE_TITLE, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
 #define toFOLD_utf8_safe(p, e, s, l) \
     goperl_case_utf8(_gof, GOPERL_CASE_FOLD, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+/* foldEQ_utf8 (utf8.c): whether the leading portions of two strings,
+ * either or both of which may be UTF-8, are the same case-insensitively,
+ * how far into them given by l1/pe1 and l2/pe2 as perl has it, and on a
+ * match where each scan ended into *pe1 and *pe2. It is perl's algorithm;
+ * the full fold of a character past ASCII is the interpreter's
+ * (toFOLD_uvchr). Locale folding (FOLDEQ_LOCALE) is not the SDK's: the
+ * strings are compared as under no locale. */
+#ifndef FOLDEQ_UTF8_NOMIX_ASCII
+#define FOLDEQ_UTF8_NOMIX_ASCII (1 << 0)
+#define FOLDEQ_LOCALE (1 << 1)
+#define FOLDEQ_S1_ALREADY_FOLDED (1 << 2)
+#define FOLDEQ_S2_ALREADY_FOLDED (1 << 3)
+#define FOLDEQ_S1_FOLDS_SANE (1 << 4)
+#define FOLDEQ_S2_FOLDS_SANE (1 << 5)
+#endif
+/* the fold of the character at p of a string (UTF-8 or not), in UTF-8 */
+static __attribute__((unused)) const U8 *goperl_fold_char(goperl_frame_t *f, const U8 *p,
+                                                          const U8 *e, bool u, U8 *buf,
+                                                          STRLEN *n) {
+    if (isASCII(*p)) {
+        *buf = (U8)toFOLD(*p);
+        *n = 1;
+    } else if (u) {
+        goperl_case_utf8(f, GOPERL_CASE_FOLD, p, e, buf, n);
+    } else {
+        goperl_case_uvchr(f, GOPERL_CASE_FOLD, (UV)*p, buf, n);
+    }
+    return buf;
+}
+static __attribute__((unused)) I32 goperl_foldEQ_utf8_flags(goperl_frame_t *f, const char *s1,
+                                                            char **pe1, UV l1, bool u1,
+                                                            const char *s2, char **pe2,
+                                                            UV l2, bool u2, U32 flags) {
+    const U8 *p1 = (const U8 *)s1, *p2 = (const U8 *)s2;
+    const U8 *g1 = 0, *g2 = 0, *e1 = 0, *e2 = 0;
+    const U8 *f1 = 0, *f2 = 0;
+    STRLEN n1 = 0, n2 = 0;
+    U8 foldbuf1[UTF8_MAXBYTES_CASE + 1], foldbuf2[UTF8_MAXBYTES_CASE + 1];
+    if (pe1) e1 = *(U8 **)pe1;
+    if (l1) g1 = (const U8 *)s1 + l1;
+    if (pe2) e2 = *(U8 **)pe2;
+    if (l2) g2 = (const U8 *)s2 + l2;
+    if (!g1 && !g2) goperl_croakf(f, "foldEQ_utf8: neither string has a goal (l1, l2)");
+    if (g1) e1 = g1;
+    else if (!e1) goperl_croakf(f, "foldEQ_utf8: the first string has no end");
+    if (g2) e2 = g2;
+    else if (!e2) goperl_croakf(f, "foldEQ_utf8: the second string has no end");
+    while (p1 < e1 && p2 < e2) {
+        if (n1 == 0) {
+            if (flags & FOLDEQ_S1_ALREADY_FOLDED) {
+                f1 = p1;
+                n1 = UTF8SKIP(f1);
+            } else {
+                if (isASCII(*p1) && (flags & FOLDEQ_UTF8_NOMIX_ASCII) && !isASCII(*p2))
+                    return 0;
+                f1 = goperl_fold_char(f, p1, e1, u1, foldbuf1, &n1);
+            }
+        }
+        if (n2 == 0) {
+            if (flags & FOLDEQ_S2_ALREADY_FOLDED) {
+                if (UTF8_IS_INVARIANT(*p2)) {
+                    f2 = p2;
+                    n2 = 1;
+                } else if (u2) {
+                    f2 = p2;
+                    n2 = UTF8SKIP(f2);
+                } else {
+                    foldbuf2[0] = UTF8_EIGHT_BIT_HI(*p2);
+                    foldbuf2[1] = UTF8_EIGHT_BIT_LO(*p2);
+                    f2 = foldbuf2;
+                    n2 = 2;
+                }
+            } else {
+                if (isASCII(*p2) && (flags & FOLDEQ_UTF8_NOMIX_ASCII) && !isASCII(*p1))
+                    return 0;
+                f2 = goperl_fold_char(f, p2, e2, u2, foldbuf2, &n2);
+            }
+        }
+        /* the folds are compared a character at a time */
+        while (n1 && n2) {
+            const STRLEN fold_length = UTF8SKIP(f1);
+            if (fold_length != (STRLEN)UTF8SKIP(f2) || memNE((const char *)f1, (const char *)f2, fold_length))
+                return 0;
+            n1 -= fold_length;
+            f1 += fold_length;
+            n2 -= fold_length;
+            f2 += fold_length;
+        }
+        if (n1 == 0) p1 += u1 ? UTF8SKIP(p1) : 1;
+        if (n2 == 0) p2 += u2 ? UTF8SKIP(p2) : 1;
+    }
+    /* a match: each scan with a goal reached it, and no fold is left half
+     * matched */
+    if (!((g1 == 0 || p1 == g1) && (g2 == 0 || p2 == g2)) || n1 || n2) return 0;
+    if (pe1) *pe1 = (char *)p1;
+    if (pe2) *pe2 = (char *)p2;
+    return 1;
+}
+#define foldEQ_utf8_flags(s1, pe1, l1, u1, s2, pe2, l2, u2, flags)                         \
+    goperl_foldEQ_utf8_flags(_gof, (const char *)(s1), (char **)(pe1), (UV)(l1), cBOOL(u1), \
+                             (const char *)(s2), (char **)(pe2), (UV)(l2), cBOOL(u2), (U32)(flags))
+#define foldEQ_utf8(s1, pe1, l1, u1, s2, pe2, l2, u2) \
+    foldEQ_utf8_flags((s1), (pe1), (l1), (u1), (s2), (pe2), (l2), (u2), 0)
 #define toUPPER_utf8(p, e, s, l) toUPPER_utf8_safe((p), (e), (s), (l))
 #define toLOWER_utf8(p, e, s, l) toLOWER_utf8_safe((p), (e), (s), (l))
 #define toTITLE_utf8(p, e, s, l) toTITLE_utf8_safe((p), (e), (s), (l))
