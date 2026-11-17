@@ -6919,7 +6919,9 @@ XS(XS_PerlAPI_vstring_of) {
  * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
  * isinfnan of the number ("infnan"), a line written to Perl_error_log, the
  * program's STDERR as it has it now ("error_log"), do_sv_dump of the value
- * into Perl_error_log ("dump"), TARGi of the number ("targi"), and the
+ * into Perl_error_log ("dump"), the UTF-8 of the value lowercased in place
+ * a character at a time, as Tk does ("lower_in_place"), TARGi of the
+ * number ("targi"), and the
  * names that only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
  * PERL_FLUSHALL_FOR_CHILD, the pointer table types PTR_TBL_t and
  * PTR_TBL_ENT_t: "compiled"). */
@@ -7035,6 +7037,24 @@ XS(XS_PerlAPI_small_names) {
         } else if (strEQ(which, "error_log")) {
             PerlIO_printf(Perl_error_log, "to the error log\n");
             sv_setpv(out, "written");
+        } else if (strEQ(which, "lower_in_place")) {
+            /* Tk's Tcl_UtfToLower: the string is changed in place, a
+             * character at a time */
+            STRLEN n;
+            const char *pv = SvPV(ST(1), n);
+            char *buf = (char *)safemalloc(n + 1);
+            memcpy(buf, pv, n + 1);
+            U8 *s = (U8 *)buf, *d = (U8 *)buf;
+            while (*s) {
+                STRLEN len;
+                toLOWER_utf8_safe(s, s + UTF8_CHK_SKIP(s), d, &len);
+                d += len;
+                s += len;
+            }
+            *d = '\0';
+            sv_setpvn(out, buf, (STRLEN)(d - (U8 *)buf));
+            SvUTF8_on(out);
+            safefree(buf);
         } else if (strEQ(which, "dump")) {
             do_sv_dump(0, Perl_error_log, ST(1), 0, 4, FALSE, 0);
             sv_setpv(out, "dumped");

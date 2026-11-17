@@ -2042,7 +2042,10 @@ static __attribute__((unused)) void goperl_cop_file_free(goperl_frame_t *f, COP 
  * The interpreter's: the result is the UTF-8 of the character in the other
  * case (possibly more than one character: the upper case of U+00DF is
  * "SS"), its length goes to *lenp, and the first code point of it is
- * returned. */
+ * returned. Nothing is written after the result, as with perl's: Tk
+ * changes the case of a string in place, a character at a time, and a NUL
+ * after the first character ended its string there (a search with
+ * -nocase found nothing). */
 #define GOPERL_CALL_CASEMAP 25
 enum { GOPERL_CASE_UPPER = 0, GOPERL_CASE_LOWER = 1, GOPERL_CASE_TITLE = 2, GOPERL_CASE_FOLD = 3 };
 static __attribute__((unused)) UV goperl_case_uvchr(goperl_frame_t *f, int which, UV cp,
@@ -2054,7 +2057,6 @@ static __attribute__((unused)) UV goperl_case_uvchr(goperl_frame_t *f, int which
     const UV first = (UV)r[0];
     const STRLEN len = (STRLEN)r[1];
     memcpy(s, (const U8 *)(r + 2), len);
-    s[len] = 0;
     if (lenp) *lenp = len;
     return first;
 }
