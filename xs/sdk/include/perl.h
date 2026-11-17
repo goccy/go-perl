@@ -8812,6 +8812,135 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait4(
     pid_t pid, int *status, int options, struct rusage *usage) GOPERL_LIBC_THROWNL {
     return goperl_wait_child(pid, status, options, usage);
 }
+/* ---- waits with a signal mask -----------------------------------------------
+ * epoll_pwait, ppoll and pselect put the signal mask they are given in
+ * place for the wait alone, so that a signal the program blocks otherwise
+ * ends the wait (IO::Async::Loop::Epoll blocks SIGCHLD with sigprocmask
+ * and waits with a mask that lets it in). The program's signals and their
+ * mask are the interpreter's, not the kernel's: so the mask is the
+ * program's while the wait runs, a signal for the program ends the wait
+ * with EINTR as any signal does a wait of native code, and what arrived is
+ * delivered, with the wait's mask still in place, before the mask before
+ * is put back, as the kernel delivers it. The mask is a sigset_t of the
+ * interpreter's (POSIX::SigSet's, which native code hands on as it is) or
+ * one of the host's. Where the interpreter cannot be asked (see
+ * goperl_wait_child) the C library's wait runs as it is.
+ *
+ * They are functions of the module itself (hidden), as sigaction is. */
+#define GOPERL_INT_WAIT_MASK 41 /* a: 1 begin, 0 end; b: the mask or the address of
+                                 * a sigset_t of the interpreter's (c's high half 1)
+                                 * -> the mask before; second: a handler ran */
+static goperl_frame_t *goperl_wait_frame(const void *mask) {
+    return mask && goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
+               ? goperl_thread_frame()
+               : NULL;
+}
+/* The wait's mask in place: the mask before in *old; 1 when a signal it
+ * lets in was delivered at once, which ends the wait before it begins. */
+static int goperl_wait_mask_begin(goperl_frame_t *f, const sigset_t *mask, uint64_t *old) {
+    uint64_t b = 0, form = 0;
+    const char *const m = (const char *)mask;
+    if (f->membase && m >= f->membase && m < f->membase + *f->memsize) {
+        b = (uint64_t)(m - f->membase);
+        form = 1;
+    } else {
+        for (int g = 1; g <= 64; g++)
+            if (sigismember(mask, goperl_signal_host(g)) == 1) b |= (uint64_t)1 << (g - 1);
+    }
+    const int e = errno;
+    uint64_t ran = 0;
+    *old = goperl_xs_opx(f, GOPERL_OP_INTERNAL, 1, b, GOPERL_INT_WAIT_MASK | (form << 32), 0, 0,
+                         &ran);
+    errno = e;
+    return ran != 0;
+}
+/* The wait has ended with r: what arrived is delivered, the mask before is
+ * put back, and a wait that found nothing ends with EINTR when a handler
+ * ran. */
+static int goperl_wait_mask_end(goperl_frame_t *f, uint64_t old, int r) {
+    const int e = errno;
+    uint64_t ran = 0;
+    (void)goperl_xs_opx(f, GOPERL_OP_INTERNAL, 0, old, GOPERL_INT_WAIT_MASK, 0, 0, &ran);
+    errno = e;
+    if (r == 0 && ran) {
+        errno = EINTR;
+        return -1;
+    }
+    return r;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_pselect)(
+    int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) int pselect(
+    int n, fd_set *r, fd_set *w, fd_set *x, const struct timespec *timeout,
+    const sigset_t *mask) {
+    if (!goperl_libc_pselect) {
+        goperl_libc_pselect = (int (*)(int, fd_set *, fd_set *, fd_set *, const struct timespec *,
+                                       const sigset_t *))dlsym(RTLD_NEXT, "pselect");
+        if (!goperl_libc_pselect) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    goperl_frame_t *const f = goperl_wait_frame(mask);
+    if (!f) return goperl_libc_pselect(n, r, w, x, timeout, mask);
+    uint64_t old;
+    if (goperl_wait_mask_begin(f, mask, &old)) {
+        (void)goperl_wait_mask_end(f, old, 0);
+        errno = EINTR;
+        return -1;
+    }
+    return goperl_wait_mask_end(f, old, goperl_libc_pselect(n, r, w, x, timeout, NULL));
+}
+#ifdef __linux__
+#include <poll.h>
+#include <sys/epoll.h>
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_ppoll)(
+    struct pollfd *, nfds_t, const struct timespec *, const sigset_t *) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) int ppoll(
+    struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *mask) {
+    if (!goperl_libc_ppoll) {
+        goperl_libc_ppoll = (int (*)(struct pollfd *, nfds_t, const struct timespec *,
+                                     const sigset_t *))dlsym(RTLD_NEXT, "ppoll");
+        if (!goperl_libc_ppoll) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    goperl_frame_t *const f = goperl_wait_frame(mask);
+    if (!f) return goperl_libc_ppoll(fds, nfds, timeout, mask);
+    uint64_t old;
+    if (goperl_wait_mask_begin(f, mask, &old)) {
+        (void)goperl_wait_mask_end(f, old, 0);
+        errno = EINTR;
+        return -1;
+    }
+    return goperl_wait_mask_end(f, old, goperl_libc_ppoll(fds, nfds, timeout, NULL));
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_epoll_pwait)(
+    int, struct epoll_event *, int, int, const sigset_t *) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) int epoll_pwait(
+    int epfd, struct epoll_event *events, int maxevents, int timeout, const sigset_t *mask) {
+    if (!goperl_libc_epoll_pwait) {
+        goperl_libc_epoll_pwait = (int (*)(int, struct epoll_event *, int, int,
+                                           const sigset_t *))dlsym(RTLD_NEXT, "epoll_pwait");
+        if (!goperl_libc_epoll_pwait) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    goperl_frame_t *const f = goperl_wait_frame(mask);
+    if (!f) return goperl_libc_epoll_pwait(epfd, events, maxevents, timeout, mask);
+    uint64_t old;
+    if (goperl_wait_mask_begin(f, mask, &old)) {
+        (void)goperl_wait_mask_end(f, old, 0);
+        errno = EINTR;
+        return -1;
+    }
+    return goperl_wait_mask_end(f, old,
+                                goperl_libc_epoll_pwait(epfd, events, maxevents, timeout, NULL));
+}
+#endif
+
 #define getpid goperl_getpid
 #define PerlProc_getpid() ((int)goperl_getpid())
 #define PerlProc_getuid() ((int)getuid())
