@@ -521,10 +521,13 @@ func TestNativeNamesOfTkEventAndSortKey(t *testing.T) {
 // code made its own handler the process's action (an event loop's signal
 // watcher, EV's or Event's): the process takes the signal, and the native
 // handler runs, also after the program changed what it does with another
-// signal (which makes the Go runtime install its handlers again). Before,
-// the signal was given to the program, whose default action for it ended
-// the program (EV's t/11_signal.t, Event's t/signal.t). Linux only: the
-// runtime asks the kernel for the process's action of a signal.
+// signal (which makes the Go runtime install its handlers again), and has
+// run by the time kill returns, as in a process of one thread (EV's
+// t/11_signal.t runs the loop once right after the kill). Before, the
+// signal was given to the program, whose default action for it ended the
+// program (EV's t/11_signal.t, Event's t/signal.t), and then it was the
+// process's, for any of its threads to take some time later. Linux only:
+// the runtime asks the kernel for the process's action of a signal.
 func TestNativeSignalActionOfTheHostProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the runtime knows a native signal action from the kernel on Linux")
@@ -557,6 +560,8 @@ func TestNativeSignalActionOfTheHostProcess(t *testing.T) {
 		`local $SIG{ALRM} = sub { };`,
 		`kill USR2 => $$;`,
 		`print $log "after a %SIG change ", noted(), "\n";`,
+		`kill USR2 => $$;`,
+		`print $log "by the time kill returns ", PerlAPI::signal_noted(), "\n";`,
 		`PerlAPI::note_with_rsignal(` + usr2 + `, 0);`,
 		`close $log or die "close: $!";`,
 	}})
@@ -568,7 +573,7 @@ func TestNativeSignalActionOfTheHostProcess(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	got, _ := os.ReadFile(report)
-	want := "first " + usr2 + "\nafter a %SIG change " + usr2 + "\n"
+	want := "first " + usr2 + "\nafter a %SIG change " + usr2 + "\nby the time kill returns " + usr2 + "\n"
 	if status != 0 || string(got) != want {
 		t.Fatalf("status %d, report %q, want %q; stderr %q", status, got, want, errOut.String())
 	}
