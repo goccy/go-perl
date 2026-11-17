@@ -2838,9 +2838,34 @@ static uint64_t goperl_vtext_sv(goperl_frame_t *f, int mortal, const char *fmt,
 
 /* warn: the interpreter gets the text and its encoding, and does the
  * rest (the place of the caller, $SIG{__WARN__}). */
+/* A warning or a croak of native code on a thread of its own, which runs no
+ * part of the interpreter and has no frame of it (GLib logs from its worker
+ * thread through Glib's log handler, which calls warn): the interpreter
+ * cannot be entered from that thread, so the message goes to the process's
+ * standard error, as perl's warn writes one that no __WARN__ hook takes.
+ * The text is formatted without the interpreter (an SVf argument shows as
+ * the address it is). A croak there has nowhere to unwind to: it says so
+ * and ends the process, as a croak outside an XSUB does. */
+static void goperl_message_without_frame(const char *what, const char *fmt, va_list ap)
+    __attribute__((unused));
+static void goperl_message_without_frame(const char *what, const char *fmt, va_list ap) {
+    char buf[4096];
+    int n = snprintf(buf, sizeof buf, "%s", what);
+    if (n < 0) n = 0;
+    const int m = vsnprintf(buf + n, sizeof buf - (size_t)n, fmt, ap);
+    size_t len = (size_t)n + (m < 0 ? 0u : (size_t)m);
+    if (len > sizeof buf - 2) len = sizeof buf - 2;
+    if (len == 0 || buf[len - 1] != '\n') buf[len++] = '\n';
+    (void)!write(2, buf, len);
+}
+
 static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap)
     __attribute__((unused));
 static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap) {
+    if (!f) {
+        goperl_message_without_frame("", fmt, ap);
+        return;
+    }
     goperl_text_t t;
     goperl_text_init(&t);
     goperl_vtext(f, &t, fmt, ap);
@@ -2854,6 +2879,11 @@ static void goperl_vwarn(goperl_frame_t *f, const char *fmt, va_list ap) {
 static void goperl_croak_text(goperl_frame_t *f, goperl_text_t *tp)
     __attribute__((noreturn));
 static void goperl_vcroak(goperl_frame_t *f, const char *fmt, va_list ap) {
+    if (!f) {
+        goperl_message_without_frame(
+            "goperl native XS: croak on a thread that does not run the interpreter: ", fmt, ap);
+        abort();
+    }
     goperl_text_t t;
     goperl_text_init(&t);
     goperl_vtext(f, &t, fmt, ap);
@@ -2948,6 +2978,10 @@ static void Perl_warner(pTHX_ U32 cat, const char *fmt, ...)
     __attribute__((unused));
 static void goperl_vwarner(goperl_frame_t *f, int kind, U32 cat,
                            const char *fmt, va_list ap) {
+    if (!f) {
+        goperl_message_without_frame("", fmt, ap);
+        return;
+    }
     goperl_text_t t;
     goperl_text_init(&t);
     goperl_vtext(f, &t, fmt, ap);
