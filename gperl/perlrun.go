@@ -41,12 +41,9 @@ type perlRunOpts struct {
 
 // startupGlue prepares the interpreter for a run the way the process
 // around a perl command would have: its working directory, the path it
-// knows itself by ($^X), and the build pipeline's %Config overlay. It
-// returns the name of the system the interpreter was built for: $^O as the
-// interpreter has it before the preload, which can present another.
+// knows itself by ($^X), and the build pipeline's %Config overlay.
 const startupGlue = `sub {
     my ($dir, $exe, $preload) = @_;
-    my $built_for = $^O;
     chdir $dir or die "chdir $dir: $!\n";
     $^X = $exe if defined $exe;
     if (defined $preload) {
@@ -61,7 +58,7 @@ const startupGlue = `sub {
         # scanner reading %INC) must not find it.
         delete $INC{$preload};
     }
-    return $built_for;
+    return;
 }`
 
 // runPerlCLI executes a perl(1)-style command line on an in-process
@@ -215,41 +212,33 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	if exe == "" {
 		exe = selfPerl()
 	}
-	builtFor, err := startInterpreter(ctx, p, dir, exe, envValue(env, "GPERL_PERL_PRELOAD"))
-	if err != nil {
+	if err := startInterpreter(ctx, p, dir, exe, envValue(env, "GPERL_PERL_PRELOAD")); err != nil {
 		return 1, err
-	}
-	if len(cmd.describe) > 0 {
-		prog.Preamble = append([]string(nil), prog.Preamble...)
-		for _, at := range cmd.describe {
-			prog.Preamble[at] = describeStatement(builtFor)
-		}
 	}
 	return p.RunProgram(ctx, prog)
 }
 
 // startInterpreter applies startupGlue; an empty exe or preload leaves that
-// part of the interpreter as it is. It returns the name of the system the
-// interpreter was built for.
-func startInterpreter(ctx context.Context, p *perl.Perl, dir, exe, preload string) (builtFor string, err error) {
+// part of the interpreter as it is.
+func startInterpreter(ctx context.Context, p *perl.Perl, dir, exe, preload string) error {
 	r, err := p.Eval(ctx, startupGlue)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if r.Error != nil {
-		return "", fmt.Errorf("install the startup routine: %w", r.Error)
+		return fmt.Errorf("install the startup routine: %w", r.Error)
 	}
 	ref, err := perl.As[perl.RefValue](r.Value)
 	if err != nil {
-		return "", fmt.Errorf("install the startup routine: %w", err)
+		return fmt.Errorf("install the startup routine: %w", err)
 	}
 	routine, err := ref.Deref(ctx)
 	if err != nil {
-		return "", fmt.Errorf("install the startup routine: %w", err)
+		return fmt.Errorf("install the startup routine: %w", err)
 	}
 	start, err := perl.As[perl.CodeValue](routine)
 	if err != nil {
-		return "", fmt.Errorf("install the startup routine: %w", err)
+		return fmt.Errorf("install the startup routine: %w", err)
 	}
 	optional := func(s string) perl.Value {
 		if s == "" {
@@ -257,15 +246,8 @@ func startInterpreter(ctx context.Context, p *perl.Perl, dir, exe, preload strin
 		}
 		return perl.ValueOf(s)
 	}
-	result, err := start.CallScalar(ctx, perl.ValueOf(dir), optional(exe), optional(preload))
-	if err != nil {
-		return "", err
-	}
-	name, err := perl.As[perl.ScalarValue](result)
-	if err != nil {
-		return "", fmt.Errorf("the startup routine: %w", err)
-	}
-	return name.String(), nil
+	_, err = start.CallScalar(ctx, perl.ValueOf(dir), optional(exe), optional(preload))
+	return err
 }
 
 // envValue reads key from an environ-shaped slice (last assignment wins,
