@@ -4355,7 +4355,12 @@ static void goperl_frame_enter(goperl_frame_t *f) {
     goperl_cur_frame_v = f;
     goperl_marks_publish(f);
 }
+/* The pointer as an lvalue: what the code moved it to before (Inline's
+ * void XSUBs push a mark with `temp = PL_markstack_ptr++` and compare the
+ * pointer with temp after the call) is taken into the frame's marks first,
+ * so that a read sees it. */
 static int32_t **goperl_markstack_ref(goperl_frame_t *f) {
+    goperl_marks_adopt(f);
     goperl_marks_publish(f);
     return &goperl_markstack_ptr_v;
 }
@@ -5043,16 +5048,25 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
             /* xs_leave unwinds the host saves itself, after reading \
              * the frame to return to: that link is one of them */  \
             goperl_xs_leave(frame);                        \
-            /* Real XSUBs are void; the sole non-void dXSARGS user \
-             * (DBI's bounce) is reached nested, where a croak      \
-             * unwinds to the OUTER activation's setjmp instead. */ \
-            _Pragma("GCC diagnostic push")                 \
-            _Pragma("GCC diagnostic ignored \"-Wpragmas\"") \
-            _Pragma("GCC diagnostic ignored \"-Wreturn-mismatch\"") \
-            return;                                        \
-            _Pragma("GCC diagnostic pop")                  \
+            GOPERL_XS_OPEN_RETURN                          \
         }                                                  \
     }
+/* Real XSUBs are void; the sole non-void dXSARGS user in C (DBI's bounce)
+ * is reached nested, where a croak unwinds to the OUTER activation's
+ * setjmp instead. C++ makes `return;` an error in a function that returns
+ * a value (Inline::CPP's functions with variable arguments use dXSARGS):
+ * there the croak goes on to the outer activation, as perl's croak goes
+ * past every function of native code to the interpreter. */
+#ifdef __cplusplus
+#define GOPERL_XS_OPEN_RETURN goperl_raise(goperl_cur_frame_v);
+#else
+#define GOPERL_XS_OPEN_RETURN                              \
+    _Pragma("GCC diagnostic push")                         \
+    _Pragma("GCC diagnostic ignored \"-Wpragmas\"")        \
+    _Pragma("GCC diagnostic ignored \"-Wreturn-mismatch\"") \
+    return;                                                \
+    _Pragma("GCC diagnostic pop")
+#endif
 
 /* dXSARGS works on the current frame. An XSUB the loader called through
  * its entry (__goperl_xs_invoke) takes the activation the entry opened:
