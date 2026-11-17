@@ -311,8 +311,6 @@
 #define PerlIO_layer_fetch GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_layer_fetch") 0
 #undef PerlIOBase_open
 #define PerlIOBase_open GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_open") 0
-#undef PerlIOBuf_unread
-#define PerlIOBuf_unread GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBuf_unread") 0
 #undef PerlIOBase_read
 #define PerlIOBase_read GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_read") 0
 #undef PerlIOBase_pushed
