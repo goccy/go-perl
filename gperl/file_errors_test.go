@@ -4,6 +4,8 @@ package gperl_test
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -67,5 +69,40 @@ print "command: ", ($status == 0 ? $out : "status $status\n");
 `)
 	if want := "command: started\n"; status != 0 || out != want {
 		t.Fatalf("status %d, output %q, want %q", status, out, want)
+	}
+}
+
+// A program started in a working directory the user may not search runs
+// there, as perl does, and so do the commands it starts: by a pipe open of
+// $^X, which is a new perl process started there, and by fork and exec.
+func TestProgramStartedInADirectoryThatCannotBeSearched(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may search any directory")
+	}
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin's getcwd does not name a directory the process may not search")
+	}
+	dir := filepath.Join(t.TempDir(), "here")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	program := `
+$| = 1;
+open(my $fh, '-|', $^X, '-e', 'print "started\n"') or die "pipe open: $!";
+print "a new perl process: ", scalar(<$fh>) // "nothing\n";
+close $fh;
+my $pid = fork // die "fork: $!";
+if (!$pid) { exec "/bin/echo", "a forked process's command: started" or die "exec: $!" }
+waitpid $pid, 0;
+`
+	// The shell goes into the directory while it may, and starts perl
+	// there once it may not.
+	cmd := exec.Command("/bin/sh", "-c", `cd "$1" && chmod 0600 . && exec "$2" -e "$3"`, "sh", dir, os.Args[0], program)
+	cmd.Env = append(os.Environ(), asPerlEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	want := "a new perl process: started\na forked process's command: started\n"
+	if err != nil || string(out) != want {
+		t.Fatalf("perl: %v, output:\n%s\nwant:\n%s", err, out, want)
 	}
 }
