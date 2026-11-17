@@ -115,6 +115,8 @@
 #define HAS_MKTIME
 #define HAS_LOCALTIME_R
 #define HAS_GMTIME_R
+#define HAS_TM_TM_ZONE
+#define HAS_TM_TM_GMTOFF
 #define HAS_NANOSLEEP
 #define HAS_USLEEP
 #define HAS_SIGACTION
