@@ -1298,7 +1298,7 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     if (!w) goperl_croakf(f, "Out of memory!");
     w[0] = (goperl_gword_t)nmarks;
     w[1] = (goperl_gword_t)(n > 0 ? n : 0);
-    for (int32_t i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)f->marks[i];
+    for (int32_t i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)goperl_marks(f)[i];
     for (int32_t i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[1 + i]);
     const uint64_t r = goperl_do_op3(f, GOPERL_OP_INTERNAL, tok, bytes, (uint64_t)(GOPERL_INT_RUNOPS), (const char *)w, bytes);
     free(w);
@@ -1306,19 +1306,19 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     const goperl_gword_t *a = (const goperl_gword_t *)goperl_guest_mem(f, r);
     if (!a) goperl_croakf(f, "the interpreter did not hand back the stack of a run of ops");
     const int32_t count = (int32_t)a[0];
-    int32_t nm = (int32_t)a[1];
+    const int32_t nm = (int32_t)a[1] > 0 ? (int32_t)a[1] : 0;
     const uint64_t avtok = a[2];
-    if (nm > GOPERL_XS_MARKS - 1) nm = GOPERL_XS_MARKS - 1;
-    int32_t marks[GOPERL_XS_MARKS];
-    for (int32_t i = 0; i < nm; i++) marks[i] = (int32_t)(int64_t)a[3 + i];
+    /* the marks, before the fetches below run code that may move the
+     * interpreter's memory */
+    while (nm > goperl_marks_cap(f)) goperl_marks_grow(f);
+    for (int32_t i = 0; i < nm; i++) goperl_marks(f)[i] = (int32_t)(int64_t)a[3 + i];
+    f->markidx = nm - 1;
+    goperl_marks_publish(f);
     f->psp = f->stbase;
     goperl_stack_extend(f, f->psp, count);
     for (int32_t i = 0; i < count; i++)
         *++f->psp = (SV *)(uintptr_t)goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,
                                                   (uint64_t)(int64_t)i, 0, 0);
-    f->markidx = nm - 1;
-    for (int32_t i = 0; i < nm; i++) f->marks[i] = marks[i];
-    goperl_marks_publish(f);
 }
 #define CALLRUNOPS(ctx) goperl_callrunops(_gof)
 #define PL_runops_std goperl_callrunops

@@ -243,6 +243,10 @@ type cFrame struct {
 	// st[0..below-1] when native code may index them, setting below to 0.
 	gstack uint64
 	below  int32
+	// markv is the block the SDK moved the marks to once they outgrew
+	// marks (markcap of them), a C heap block releaseStack frees; 0 before.
+	markcap int32
+	markv   uintptr
 
 	// Go-only:
 	p *internal.Perl
@@ -2464,6 +2468,10 @@ func (f *cFrame) releaseStack() {
 		cFree(f.stBase)
 		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
 		f.stCap = maxStack
+	}
+	if f.markv != 0 {
+		cFree(f.markv)
+		f.markv, f.markcap = 0, 0
 	}
 	for f.tmpMore != 0 {
 		b := f.tmpMore

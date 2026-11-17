@@ -922,6 +922,12 @@ struct goperl_frame {
      * it is for a frame whose stack is no such copy. */
     uint64_t gstack;
     int32_t below;
+    /* The marks once they outgrew marks, as perl's mark stack grows (a
+     * module that leaks a mark in a callback the interpreter runs
+     * thousands of times in one native call: Tcl): a block of markcap
+     * marks (malloc'd; the loader frees it when the frame ends), 0 before. */
+    int32_t markcap;
+    int32_t *markv;
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) ---------
@@ -4492,14 +4498,22 @@ static inline goperl_frame_t *goperl_stk(goperl_frame_t *f) {
  * adjustment back into the frame's mark index first. */
 #define goperl_markstack_ptr_v (GOPERL_SHARED->markstack_ptr)
 #define goperl_markstack_owner_v (GOPERL_SHARED->markstack_owner)
+/* The frame's marks: marks, or the block they grew into (markv), and how
+ * many there is room for. */
+static inline int32_t *goperl_marks(goperl_frame_t *f) {
+    return f->markv ? f->markv : f->marks;
+}
+static inline int32_t goperl_marks_cap(const goperl_frame_t *f) {
+    return f->markv ? f->markcap : GOPERL_XS_MARKS;
+}
 static void goperl_marks_adopt(goperl_frame_t *f) {
     goperl_stk(f);
     if (goperl_markstack_owner_v == f && goperl_markstack_ptr_v)
-        f->markidx = (int32_t)(goperl_markstack_ptr_v - f->marks);
+        f->markidx = (int32_t)(goperl_markstack_ptr_v - goperl_marks(f));
 }
 static void goperl_marks_publish(goperl_frame_t *f) {
     goperl_markstack_owner_v = f;
-    goperl_markstack_ptr_v = f->marks + f->markidx;
+    goperl_markstack_ptr_v = goperl_marks(f) + f->markidx;
 }
 /* Makes a frame the current one. The mark pointer is the current frame's
  * from then on: what the frame that ran before left there is not this
@@ -4514,7 +4528,7 @@ static void goperl_frame_enter(goperl_frame_t *f) {
     if (prev == f) return;
     if (prev && goperl_markstack_owner_v == prev && goperl_markstack_ptr_v &&
         !prev->st_stale)
-        prev->markidx = (int32_t)(goperl_markstack_ptr_v - prev->marks);
+        prev->markidx = (int32_t)(goperl_markstack_ptr_v - goperl_marks(prev));
     goperl_cur_frame_v = f;
     goperl_marks_publish(f);
 }
@@ -4537,15 +4551,31 @@ static I32 goperl_popmark(goperl_frame_t *f) {
     if (f->pp_frame && f->markidx <= 0 && f->gmark_lo > 0)
         goperl_croakf(f, "a pp function popped more marks than the go-perl "
                          "XS SDK hands it (%d)", GOPERL_XS_MARKS / 2);
-    I32 r = f->markidx >= 0 ? f->marks[f->markidx--] : 0;
+    I32 r = f->markidx >= 0 ? goperl_marks(f)[f->markidx--] : 0;
     goperl_marks_publish(f);
     return r;
 }
+/* Moves the marks to a block twice the size, as perl's markstack_grow
+ * does: what a pointer into them was is where PL_markstack_ptr is now. A
+ * pp function's are a copy of the interpreter's of a fixed size (the
+ * loader compares the copy with what it was, mark by mark). */
+static void goperl_marks_grow(goperl_frame_t *f) {
+    if (f->pp_frame)
+        goperl_croakf(f, "a pp function pushed more marks than the go-perl "
+                         "XS SDK holds for one (%d)", GOPERL_XS_MARKS);
+    const int32_t cap = goperl_marks_cap(f);
+    int32_t *const m = (int32_t *)malloc((size_t)cap * 2 * sizeof(int32_t));
+    if (!m) goperl_croakf(f, "Out of memory during mark stack extend");
+    memcpy(m, goperl_marks(f), (size_t)cap * sizeof(int32_t));
+    free(f->markv);
+    f->markv = m;
+    f->markcap = cap * 2;
+    if (goperl_markstack_owner_v == f) goperl_marks_publish(f);
+}
 static void goperl_pushmark(goperl_frame_t *f, I32 off) {
     goperl_marks_adopt(f);
-    if (f->markidx + 1 >= GOPERL_XS_MARKS)
-        goperl_croakf(f, "mark stack overflow in native XS");
-    f->marks[++f->markidx] = off;
+    if (f->markidx + 1 >= goperl_marks_cap(f)) goperl_marks_grow(f);
+    goperl_marks(f)[++f->markidx] = off;
     goperl_marks_publish(f);
 }
 /* Makes room for n more values above sp, moving the stack to a larger
@@ -4574,7 +4604,7 @@ static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
 #define SP sp
 #define MARK mark
 #define POPMARK goperl_popmark(_gof)
-#define TOPMARK (goperl_stk(_gof)->marks[_gof->markidx])
+#define TOPMARK (goperl_marks(goperl_stk(_gof))[_gof->markidx])
 #define PUSHMARK(p) goperl_pushmark(_gof, (I32)((p)-PL_stack_base))
 #define dMARK SV **mark = PL_stack_base + POPMARK
 #define dORIGMARK const I32 origmark = (I32)(mark - PL_stack_base)
@@ -6325,7 +6355,7 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     if (!w) goperl_croakf(f, "Out of memory!");
     w[0] = (goperl_gword_t)nmarks;
     w[1] = cur ? (goperl_gword_t)cur->op_targ : 0;
-    for (I32 i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)f->marks[i];
+    for (I32 i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)goperl_marks(f)[i];
     for (I32 i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[1 + i]);
     const uint64_t op = ((uint64_t)(cur ? cur->op_private : 0) << 40) |
                         ((uint64_t)(cur ? cur->op_flags : 0) << 32) |
