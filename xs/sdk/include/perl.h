@@ -5128,24 +5128,14 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
             after_croak                                    \
         }                                                  \
     }
-/* Real XSUBs are void; the sole non-void dXSARGS user in C (DBI's bounce)
- * is reached nested, where a croak unwinds to the OUTER activation's
- * setjmp instead. C++ makes `return;` an error in a function that returns
- * a value (Inline::CPP's functions with variable arguments use dXSARGS):
- * there the croak goes on to the outer activation, as perl's croak goes
- * past every function of native code to the interpreter. dXSARGS opens an
- * activation of its own only inside another one, the entry's at least,
- * which returns (__goperl_xs_invoke). */
-#ifdef __cplusplus
+/* A croak in an activation dXSARGS opened (inside another one, the
+ * entry's at least, which returns: __goperl_xs_invoke) goes on to the
+ * outer activation, as perl's croak goes past every function of native
+ * code to the interpreter: the function that declared dXSARGS does not
+ * return to its caller. A function of a module's own that returns a value
+ * (XS::JIT's, Inline::CPP's with variable arguments) would hand its
+ * caller whatever its return register held. */
 #define GOPERL_XS_OPEN_RETURN goperl_raise(goperl_cur_frame_v);
-#else
-#define GOPERL_XS_OPEN_RETURN                              \
-    _Pragma("GCC diagnostic push")                         \
-    _Pragma("GCC diagnostic ignored \"-Wpragmas\"")        \
-    _Pragma("GCC diagnostic ignored \"-Wreturn-mismatch\"") \
-    return;                                                \
-    _Pragma("GCC diagnostic pop")
-#endif
 
 /* dXSARGS works on the current frame. An XSUB the loader called through
  * its entry (__goperl_xs_invoke) takes the activation the entry opened:
