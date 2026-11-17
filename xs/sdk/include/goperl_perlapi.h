@@ -1331,13 +1331,18 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
  * interpreter is told of the hooks of native code's MAGICs first (setting
  * the head the chain has gives the host a look at it), as a module may have
  * given one a vtable since it was attached (pTk's Tcl_ObjMagic sets
- * mg_virtual on what mg_find found, then calls mg_magical). */
+ * mg_virtual on what mg_find found, then calls mg_magical). A chain with no
+ * uvar magic left (Variable::Magic's dispell unlinks its own) has the
+ * interpreter's uvar magic that stood for it go too (bit 0). */
 static void goperl_mg_magical(goperl_frame_t *f, SV *sv) __attribute__((unused));
 static void goperl_mg_magical(goperl_frame_t *f, SV *sv) {
     goperl_flush(f);
     MAGIC *const head = goperl_api_magic_chain(f, GOPERL_TOK(sv));
     if (head) goperl_api_magic_set_head(f, GOPERL_TOK(sv), head);
-    (void)GOPERL_SVCALL(GOPERL_SVCALL_MG_MAGICAL, sv, 0);
+    int uvar = 0;
+    for (const MAGIC *mg = head; mg && !uvar; mg = mg->mg_moremagic)
+        uvar = mg->mg_type == 'U'; /* PERL_MAGIC_uvar */
+    (void)GOPERL_SVCALL(GOPERL_SVCALL_MG_MAGICAL, sv, uvar ? 0 : 1);
 }
 #define mg_magical(sv) goperl_mg_magical(_gof, (SV *)(sv))
 #define mg_size(sv) ((U32)GOPERL_SVCALL(GOPERL_SVCALL_MG_SIZE, sv, 0))
