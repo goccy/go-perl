@@ -2,7 +2,11 @@
 
 package xs_test
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // handOverModule hands blocks of its own to SVs as their buffers, the
 // sv_usepvn idiom: CBOR::Free's encoder (SvPV_set, SvPOK_on, SvCUR_set,
@@ -74,6 +78,58 @@ XS_EXTERNAL(boot_HandOver) {
     Perl_xs_boot_epilog(aTHX_ ax);
 }
 `
+
+// A block allocated in one file of a module and handed to an SV in another
+// (CBOR::Free allocates its encoder's buffer in cbor_free_encode.c and
+// hands it over in Free.xs) is handed over too: the table of blocks is the
+// module's, not the file's.
+func TestNativeBufferHandedOverAcrossFiles(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "alloc.c")
+	if err := os.WriteFile(other, []byte(`#include "EXTERN.h"
+#include "perl.h"
+char *handover_alloc(const char *text, STRLEN len) {
+    char *buf;
+    Newx(buf, len + 1, char);
+    Copy(text, buf, len + 1, char);
+    return buf;
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	so, out, err := compileModuleSource(t, "HandOverFiles", `#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+char *handover_alloc(const char *text, STRLEN len);
+XS(XS_HandOverFiles_handed) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "text");
+    {
+        STRLEN len;
+        const char *text = SvPV(ST(0), len);
+        SV *sv = newSV(0);
+        SvUPGRADE(sv, SVt_PV);
+        SvPV_set(sv, handover_alloc(text, len));
+        SvPOK_on(sv);
+        SvCUR_set(sv, len);
+        SvLEN_set(sv, len + 1);
+        ST(0) = sv_2mortal(sv);
+        XSRETURN(1);
+    }
+}
+XS_EXTERNAL(boot_HandOverFiles) {
+    dXSBOOTARGSXSAPIVERCHK;
+    newXS_deffile("HandOverFiles::handed", XS_HandOverFiles_handed);
+    Perl_xs_boot_epilog(aTHX_ ax);
+}
+`, other)
+	if err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	if got := requireModule(t, "HandOverFiles", so, `HandOverFiles::handed("from the other file")`); got != "from the other file" {
+		t.Errorf("got %q", got)
+	}
+}
 
 // A block the module's own allocators gave (Newx, Renew, savepv) that it
 // hands to an SV as its buffer is the SV's from then on, as on perl: the

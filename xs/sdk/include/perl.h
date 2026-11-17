@@ -8842,9 +8842,12 @@ typedef struct goperl_block {
     size_t n;
 } goperl_block_t;
 #define GOPERL_BLOCK_GONE ((void *)1)
-static goperl_block_t *goperl_blocks_v;
-static size_t goperl_blocks_cap, goperl_blocks_fill; /* fill: live and gone */
-static int goperl_blocks_lock_v;
+/* one table for the module's every file (a weak definition each file has,
+ * which the link makes one; hidden: another module has its own) */
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_block_t *goperl_blocks_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) size_t goperl_blocks_cap = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) size_t goperl_blocks_fill = 0; /* live and gone */
+GOPERL_C __attribute__((weak, visibility("hidden"))) int goperl_blocks_lock_v = 0;
 static void goperl_blocks_lock(void) {
     while (__atomic_exchange_n(&goperl_blocks_lock_v, 1, __ATOMIC_ACQUIRE)) {
     }

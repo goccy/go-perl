@@ -348,12 +348,12 @@ typedef struct goperl_pending_block {
     size_t n;
     int copied;
 } goperl_pending_block_t;
-static goperl_pending_block_t *goperl_pending_blocks_v;
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_pending_block_t *goperl_pending_blocks_v = 0;
 typedef struct goperl_handed {
     struct goperl_handed *next;
     void *p;
 } goperl_handed_t;
-static goperl_handed_t *goperl_handed_v;
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_handed_t *goperl_handed_v = 0;
 static void goperl_blocks_handed_free(void) {
     while (goperl_handed_v) {
         goperl_handed_t *const h = goperl_handed_v;
