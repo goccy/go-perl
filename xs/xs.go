@@ -91,6 +91,8 @@ const (
 	opRefcntInc     = 15
 	opRefcntDec     = 78
 	opNewXS         = 81
+	opGvPtr         = 108
+	opSvIsGVGP      = 110
 	opMagicAttach   = 70
 	opMagicUnattach = 72
 	opPlvarSet      = 74
@@ -122,8 +124,21 @@ var layoutNames = map[uint32]string{
 }
 
 // gvCallCvNative is the GV_CALL selector that makes a CV call the native
-// function of an id (GOPERL_GVCALL_CV_NATIVE in perl-wasm).
-const gvCallCvNative = 37
+// function of an id (GOPERL_GVCALL_CV_NATIVE in perl-wasm), and gvCallForm
+// the one that answers a glob's format (GOPERL_GVCALL_FORM).
+const (
+	gvCallCvNative = 37
+	gvCallForm     = 7
+)
+
+// The GV_PTR selectors of a glob's slots (GOPERL_GVPTR_* in perl-wasm).
+const (
+	gvPtrHV = 2
+	gvPtrAV = 3
+	gvPtrSV = 5
+	gvPtrIO = 6
+	gvPtrCV = 7
+)
 
 // svCallMagicIsValue is the SV_CALL selector that asks whether a magic type
 // is value magic (GOPERL_SVCALL_MAGIC_IS_VALUE in perl-wasm).
@@ -1454,7 +1469,7 @@ func (s *state) magicExt(f *cFrame, sv, obj uint64, how int32, vtbl, namePtr uin
 			return 0
 		}
 	}
-	takesObj := magicTakesObj(sv, obj, how)
+	takesObj := magicTakesObj(sv, obj, how) && !s.globHolds(obj, sv)
 	var buf [mgAllocSize]byte
 	binary.LittleEndian.PutUint64(buf[mgOffMore:], uint64(oldHead))
 	binary.LittleEndian.PutUint64(buf[mgOffVirtual:], uint64(vtbl))
@@ -1946,6 +1961,27 @@ func magicTakesObj(sv, obj uint64, how int32) bool {
 		return false
 	}
 	return true
+}
+
+// globHolds reports whether obj is a glob one of whose slots (scalar,
+// array, hash, sub, handle, format) holds sv. sv_magicext takes no
+// reference on such an obj: the glob holds sv, and a reference back would
+// be a loop that keeps both alive (the isa magic of @ISA, whose obj is its
+// glob, as Package::Stash::XS adds a package's @ISA).
+func (s *state) globHolds(obj, sv uint64) bool {
+	if obj == 0 || sv == 0 {
+		return false
+	}
+	if isGV, err := s.p.XSHelperOp(opSvIsGVGP, obj, 0, 0, ""); err != nil || isGV == 0 {
+		return false
+	}
+	for _, sel := range []uint64{gvPtrSV, gvPtrAV, gvPtrHV, gvPtrCV, gvPtrIO} {
+		if got, err := s.p.XSHelperOp(opGvPtr, obj, sel, 0, ""); err == nil && got == sv {
+			return true
+		}
+	}
+	form, err := s.p.XSHelperOp(opGvCall, obj, 0, gvCallForm, "")
+	return err == nil && form == sv
 }
 
 // releaseMagicObj gives up the reference a MAGIC holds on its mg_obj, as
