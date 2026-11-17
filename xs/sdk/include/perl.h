@@ -2346,14 +2346,26 @@ static void goperl_hostsave_unwind_to(goperl_frame_t *f, int32_t base) {
     }
 }
 
+/* The interpreter left an operation by a non-local exit (it died inside
+ * it, and what catches that is further out than this native call): the
+ * call ends without a message of its own, and the interpreter goes on
+ * unwinding once the call has returned. */
+#define GOPERL_FAILED_JUMP 3
+
 /* The jump out of native code that ends a native call with a failure.
  * The scopes the call opened are left first (HOOK 5), while its C frames
  * exist: a destructor it registered for a variable of its own
  * (SAVEDESTRUCTOR_X(cleanup, &local)) runs on that variable, as it does
- * when perl unwinds to an eval before it jumps. */
+ * when perl unwinds to an eval before it jumps. A jump of the
+ * interpreter's own has left the scopes up to the eval that catches it
+ * already, as perl's die_unwind does before its jump; what is still open
+ * above the call's start belongs to code that goes on after that eval (a
+ * run loop of native code, Test::LeakTrace's, runs the eval and what
+ * follows it in the same call), and stays open, as it does on perl, whose
+ * jump passes over the C frames of the loop. */
 static void goperl_jump_out(goperl_frame_t *f) __attribute__((noreturn));
 static void goperl_jump_out(goperl_frame_t *f) {
-    if (f->native_call) {
+    if (f->native_call && f->failed != GOPERL_FAILED_JUMP) {
         const int32_t failed = f->failed;
         f->failed = 0; /* the frame is still in use while the scopes go */
         goperl_xs_op(f, GOPERL_OP_HOOK, 5, 0, 0, 0);
@@ -2361,12 +2373,6 @@ static void goperl_jump_out(goperl_frame_t *f) {
     }
     GOPERL_LONGJMP(*(jmp_buf *)f->jb, 1);
 }
-
-/* The interpreter left an operation by a non-local exit (it died inside
- * it, and what catches that is further out than this native call): the
- * call ends without a message of its own, and the interpreter goes on
- * unwinding once the call has returned. */
-#define GOPERL_FAILED_JUMP 3
 static void goperl_raise(goperl_frame_t *f) {
     if (f->failed != GOPERL_FAILED_JUMP) f->failed = 1;
     if (!f->jb) {
