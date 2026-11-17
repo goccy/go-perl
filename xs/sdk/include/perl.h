@@ -6947,10 +6947,12 @@ static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
     si->si_cxix =
         (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 3, 0, 0);
     I32 n = si->si_cxix + 1;
-    /* the contexts, then what each was when it was read (what native code
-     * stores into one goes to the interpreter: goperl_cx_writeback) */
+    if (n < 0) n = 0;
+    /* the contexts, the one above them, then what each context was when it
+     * was read (what native code stores into one goes to the interpreter:
+     * goperl_cx_writeback) */
     si->si_cxstack = (PERL_CONTEXT *)goperl_arena_alloc(
-        sizeof(PERL_CONTEXT) * 2 * (size_t)(n > 0 ? n : 1));
+        sizeof(PERL_CONTEXT) * (2 * (size_t)n + 1));
     if (!si->si_cxstack) goperl_croakf(f, "context shadow: out of memory");
     for (I32 i = 0; i < n; i++) {
         PERL_CONTEXT *cx = &si->si_cxstack[i];
@@ -6997,7 +6999,32 @@ static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
             cx->blk_loop.my_op = goperl_op_shadow_full(f, c[10]);
             break;
         }
-        si->si_cxstack[n + i] = *cx;
+        si->si_cxstack[n + 1 + i] = *cx;
+    }
+    /* The context above the top is the one perl popped last, which it
+     * leaves as it was: code that has just left a scope reads it (the free
+     * of Variable::Magic asks whether an eval was being left). It is shown
+     * as the interpreter has it, with its type and numbers but none of its
+     * ops or scalars, which may be gone; what native code stores into it
+     * goes nowhere, as nothing reads it back. */
+    {
+        PERL_CONTEXT *ghost = &si->si_cxstack[n];
+        memset(ghost, 0, sizeof(*ghost));
+        const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+            f, goperl_do_op3(f, GOPERL_OP_CX, tok, (uint64_t)(int64_t)n, 0 /* GOPERL_CX_DUMP */,
+                             0, 0));
+        if (w) {
+            goperl_gword_t c[10];
+            memcpy(c, w, sizeof c);
+            ghost->cx_type = (U8)c[0];
+            ghost->blk_gimme = (U8)c[1];
+            ghost->blk_u16 = (U16)c[2];
+            ghost->blk_oldsaveix = (I32)c[3];
+            ghost->blk_oldsp = (SSize_t)(int64_t)c[4];
+            ghost->blk_oldmarksp = (I32)c[5];
+            ghost->blk_oldscopesp = (I32)c[6];
+            ghost->blk_old_tmpsfloor = (SSize_t)(int64_t)c[9];
+        }
     }
     uint64_t prev =
         goperl_do_op(f, GOPERL_OP_SI_GET, tok, 1, 0, 0);
@@ -7093,7 +7120,7 @@ static void goperl_cx_writeback(goperl_frame_t *f) {
     for (PERL_SI *si = goperl_si_cache_v; si; si = si->si_prev) {
         const I32 n = si->si_cxix + 1;
         for (I32 i = 0; i < n; i++) {
-            PERL_CONTEXT *cx = &si->si_cxstack[i], *was = &si->si_cxstack[n + i];
+            PERL_CONTEXT *cx = &si->si_cxstack[i], *was = &si->si_cxstack[n + 1 + i];
             if (!memcmp(cx, was, sizeof *cx)) continue;
             if (!fresh && !goperl_cx_unchanged(f, si->tok, i, was)) {
                 *cx = *was;
