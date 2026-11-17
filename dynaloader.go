@@ -36,7 +36,8 @@ sub dl_find_symbol {
 }
 sub dl_install_xsub {
     DynaLoader::__goperl_install_xsub($_[0], $_[1]);
-    no strict 'refs';
+    # (the glue is not under strict refs; it loads no module, strict.pm
+    # among them, before the program does)
     return \&{$_[0]};
 }
 sub dl_undef_symbols { () }

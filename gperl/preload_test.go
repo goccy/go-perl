@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -55,11 +56,59 @@ print "listed: ", (scalar(grep { $_ eq "cc" } keys %Config) ? "cc among the keys
 }
 
 // The preload is how the interpreter was started, not something the program
-// loaded: %INC does not list it.
-func TestPreloadLeavesNoTraceInINC(t *testing.T) {
-	got := overlayRun(t, "-e", `print join(",", sort grep { !/^(?:Config|strict|warnings|vars|Config_heavy)\b/ } keys %INC), "|", scalar(grep { /overlay/ } %INC), "\n";`)
-	if want := "|0\n"; got != want {
-		t.Fatalf("%%INC after the preload = %q, want %q", got, want)
+// loaded: %INC does not list it, and it loads no module either. The program
+// starts with nothing loaded, as on perl: a -I directory that holds a
+// module the overlay would otherwise have loaded first is where that module
+// comes from, a test may assign to %Config::Config before it loads Config,
+// and a module that looks at what is loaded (Devel::cst, at -d:cst) finds
+// itself alone.
+func TestPreloadLoadsNothing(t *testing.T) {
+	if got, want := overlayRun(t, "-e", `print scalar(keys %INC), "\n";`), "0\n"; got != want {
+		t.Fatalf("%%INC after the preload has %q entries, want %q", got, want)
+	}
+	if status, got, _ := runCLI(t, t.TempDir(), "", "-e", `print join(",", sort keys %INC), "\n";`); status != 0 || got != "\n" {
+		t.Fatalf("%%INC at the start of a program without a preload: %q (status %d), want none", got, status)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "strict.pm"), []byte("package strict; sub import {} sub unimport {} 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := overlayRun(t, "-I"+dir, "-e", `use strict; print "$INC{'strict.pm'}\n";`), filepath.Join(dir, "strict.pm")+"\n"; got != want {
+		t.Fatalf("strict.pm under -I%s came from %q, want %q", dir, got, want)
+	}
+	got := overlayRun(t, "-e", `BEGIN { %Config::Config = (osname => 'darwin') } print "assigned: $Config::Config{osname}\n";`)
+	if want := "assigned: darwin\n"; got != want {
+		t.Fatalf("assigning to %%Config::Config before loading Config: %q, want %q", got, want)
+	}
+}
+
+// Under the overlay every view of %Config shows the same values: the hash,
+// the text of config_sh, config_re and config_vars (perl -V:name), as on
+// perl, where they all come from one config.sh.
+func TestConfigOverlayIsEveryViewOfConfig(t *testing.T) {
+	got := overlayRun(t, "-MConfig", "-e", `
+my ($keys, @differ) = (0);
+for my $line (split /\n/, Config::config_sh()) {
+    my ($key, $value) = $line =~ /\A(\w+)='(.*)'\z/ or next;
+    $keys++;
+    $value = undef if $value eq 'undef';
+    my $has = $Config{$key};
+    push @differ, "$key: config_sh '" . ($value // 'undef') . "', %Config '" . ($has // 'undef') . "'"
+        if (defined $value) != (defined $has) || (defined $value && $value ne $has);
+}
+print "config_sh: ", ($keys > 1000 ? "all keys" : "$keys keys"), ", ", (@differ ? join("; ", @differ) : "as %Config"), "\n";
+my ($cc) = Config::config_re('cc');
+print "config_re: $cc\n";
+print "privlib: ", (Config::config_re('privlibexp'))[0] eq "privlibexp='/the/stdlib'" ? "overlaid" : "not overlaid", "\n";
+`)
+	want := "config_sh: all keys, as %Config\n" +
+		"config_re: cc='cc'\n" +
+		"privlib: overlaid\n"
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if got, want := overlayRun(t, "-V:cc"), "cc='cc';\n"; got != want {
+		t.Fatalf("perl -V:cc under the overlay = %q, want %q", got, want)
 	}
 }
 
@@ -81,7 +130,7 @@ func TestConfigOverlayDescribesTheHostCompiler(t *testing.T) {
 	if strings.Contains(string(macros), "#define __clang__ ") {
 		wantName = "clang"
 	}
-	raw := overlayRun(t, "-e", `
+	raw := overlayRun(t, "-MConfig", "-e", `
 for my $key (qw(cc ccname gccversion cpp cpprun cppstdin cppflags libc libs ccsymbols)) {
     print "$key=", ($Config::Config{$key} // "undef"), "\n";
 }
@@ -123,10 +172,10 @@ print "preprocessed=", (qx(echo __VERSION__ | $Config::Config{cpprun} -) =~ /"\Q
 }
 
 // perl -V prints the summary of the configuration and what the binary was
-// built with, under the overlay as without it: the overlay gives $^O the
-// host's name, and Config::_V's check that the library was built for the
-// system that runs it is made with the interpreter's own system. The
-// summary shows %Config as the overlay leaves it.
+// built with, under the overlay as without it: the overlay gives $^O and
+// %Config's osname the host's name, and perl -V says the library was built
+// for the system %Config names, as it does on perl (Config::Perl::V reads
+// it). The summary shows %Config as the overlay leaves it.
 func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
 	got := overlayRun(t, "-V")
 	for _, want := range []string{
@@ -134,6 +183,7 @@ func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
 		"    osname=" + runtime.GOOS + "\n",
 		"    cc='cc'\n",
 		"Characteristics of this binary (from libperl):",
+		"  Built under " + runtime.GOOS + "\n",
 		"  @INC:\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -141,7 +191,7 @@ func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
 		}
 	}
 	status, plain, stderr := runCLI(t, t.TempDir(), "", "-V")
-	if status != 0 || !strings.Contains(plain, "Summary of my perl5") || !strings.Contains(plain, "  @INC:\n") {
+	if status != 0 || !strings.Contains(plain, "Summary of my perl5") || !strings.Contains(plain, "  Built under wasi\n") || !strings.Contains(plain, "  @INC:\n") {
 		t.Errorf("perl -V without the overlay: status=%d stderr=%q stdout:\n%s", status, stderr, plain)
 	}
 	// $^O stays the host's for the rest of the program.

@@ -465,11 +465,6 @@ func xsWritePerlShim(work string) (string, error) {
 	return shim, nil
 }
 
-// xsWriteConfigOverlay writes the preload every build-driving perl run
-// executes first: it replaces the guest-true toolchain/path keys of
-// %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
-// generate a build for THIS machine while everything else about %Config
-// (version, ivsize, ...) stays guest-true.
 // xsStandInArchlib makes the directory an XS build is told is the
 // interpreter's architecture library. The compiler's CORE include
 // directory is the SDK, via a CORE in it that links to the SDK (both
@@ -491,6 +486,11 @@ func xsStandInArchlib(work, sdkDir, stdlibDir string) (string, error) {
 	return dir, nil
 }
 
+// xsWriteConfigOverlay writes the preload every build-driving perl run
+// executes first: it replaces the guest-true toolchain/path keys of
+// %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
+// generate a build for THIS machine while everything else about %Config
+// (version, ivsize, ...) stays guest-true.
 func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
 	tc := hostToolchain()
 	if sdkDir != "" {
@@ -510,9 +510,16 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 	tc["perlpath"] = perlPath
 	tc["startperl"] = "#!" + perlPath
 
+	// The values go into %Config::Override, which the standard library's
+	// Config.pm reports in place of its own in every view of %Config (the
+	// hash, config_sh, perl -V) once it is loaded. The preload loads no
+	// module itself: the program finds %INC and %Config as perl leaves them
+	// before it runs (a test that assigns to %Config::Config before loading
+	// Config, a -I directory that holds strict.pm, a debugger module that
+	// looks at what is loaded), and Config is loaded when the program loads
+	// it.
 	var b strings.Builder
-	b.WriteString("use Config ();\n")
-	b.WriteString("my %over = (\n")
+	b.WriteString("%Config::Override = (\n")
 	keys := make([]string, 0, len(tc))
 	for k := range tc {
 		keys = append(keys, k)
@@ -523,13 +530,6 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 		b.WriteString("    '" + k + "' => '" + v + "',\n")
 	}
 	b.WriteString(");\n")
-	// %Config stays what it is on every perl: a tied, read-only view (code
-	// that asks `tied %Config`, as modules that mock or inspect the
-	// configuration do, finds the Config object). The object keeps the
-	// values it has looked up, and looks there first: the overlay goes in
-	// as such values.
-	b.WriteString("my $config = tied %Config::Config;\n")
-	b.WriteString("$config->{$_} = $over{$_} for keys %over;\n")
 	// Build tools branch on $^O, not just $Config{osname}: the build must
 	// look like the host it targets.
 	b.WriteString("$^O = '" + tc["osname"] + "';\n1;\n")
