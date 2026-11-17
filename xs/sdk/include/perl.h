@@ -4956,8 +4956,8 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
  * catch point of croak is the buffer declared here. */
 #define GOPERL_XS_OPEN(frame, prev_cur)                    \
     {                                                      \
-        errno = GOPERL_ERRNO_UNSET;                        \
         int32_t goperl_entry_base = goperl_hostsave_n;     \
+        errno = GOPERL_ERRNO_UNSET;                        \
         goperl_hostsave_i32((frame), &(frame)->hostsave_base); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->prev_frame); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->jb); \
@@ -4990,17 +4990,22 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
  * its entry (__goperl_xs_invoke) takes the activation the entry opened:
  * croak has its catch point there. Every other dXSARGS opens an activation
  * of its own on the frame: an XSUB called by C pointer from another (DBI's
- * dispatch), a module's own function (Inline::C's Inline_Stack_Vars). */
+ * dispatch), a module's own function (Inline::C's Inline_Stack_Vars).
+ *
+ * It is declarations only, as perl's is: what it does is the initializer
+ * of one of them, so that a module built with
+ * -Werror=declaration-after-statement (C89 style) compiles. */
 #define dXSARGS                                            \
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave))); \
-    {                                                      \
+    const int goperl_xs_opened __attribute__((unused)) = ({ \
         goperl_frame_t *const goperl_frame_here = goperl_cur_frame_v; \
         if (goperl_frame_here->entry_jb &&                 \
             goperl_frame_here->entry_jb == goperl_frame_here->jb) \
             goperl_frame_here->entry_jb = 0;               \
         else                                               \
             GOPERL_XS_OPEN(goperl_frame_here, goperl_frame_here) \
-    }                                                      \
+        1;                                                 \
+    });                                                    \
     dSP;                                                   \
     dAXMARK;                                               \
     dITEMS
@@ -8211,6 +8216,11 @@ static const char PL_hexdigit[] = "0123456789abcdef0123456789ABCDEF";
 #define UTF8_WARN_SUPER 0
 #define UTF8_DISALLOW_ILLEGAL_INTERCHANGE \
     (UTF8_DISALLOW_SURROGATE | UTF8_DISALLOW_SUPER)
+/* what Unicode's Corrigendum #9 allows to be interchanged: the
+ * noncharacters too, which these flags never refuse */
+#define UTF8_DISALLOW_ILLEGAL_C9_INTERCHANGE \
+    (UTF8_DISALLOW_SURROGATE | UTF8_DISALLOW_SUPER)
+#define UTF8_WARN_ILLEGAL_C9_INTERCHANGE (UTF8_WARN_SURROGATE | UTF8_WARN_SUPER)
 static const U8 goperl_utf8skip_v[16] = {1, 1, 1, 1, 1, 1, 1, 1,
                                          1, 1, 1, 1, 2, 2, 3, 4};
 /* The length a start byte announces. Above U+1FFFFF perl's extended
@@ -9049,14 +9059,11 @@ static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len) {
 }
 #define sv_usepvn(sv, p, len) goperl_sv_usepvn(_gof, (SV *)(sv), (p), (len))
 
-/* sv_inc: numeric increment (string auto-increment is not modeled). */
-static void goperl_sv_inc(goperl_frame_t *f, SV *sv) {
-    goperl_flush(f);
-    int64_t v = goperl_direct_sv_iv(f, GOPERL_TOK(sv));
-    goperl_do_op(f, GOPERL_OP_SV_SETIV, GOPERL_TOK(sv), (uint64_t)(v + 1), 0,
-                 0);
-}
-#define sv_inc(sv) goperl_sv_inc(_gof, (SV *)(sv))
+/* sv_inc and sv_dec are the interpreter's: the magic increment of a
+ * string ("aa" to "ab"), an integer that overflows into a number, the
+ * overloaded ++ and --. */
+#define sv_inc(sv) ((void)GOPERL_SVCALL(63 /* GOPERL_SVCALL_INC */, sv, 0))
+#define sv_inc_nomg(sv) ((void)GOPERL_SVCALL(63 /* GOPERL_SVCALL_INC */, sv, 1))
 
 #define gv_fetchfile_flags(name, namelen, flags) \
     ({ GOPERL_ONCE(goperl_gv_fetchfile_flags_namelen_, namelen); \

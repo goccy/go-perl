@@ -6902,6 +6902,9 @@ XS(XS_PerlAPI_vstring_of) {
 
 /* small_names(which, arg): grok_atoUV of arg ("atouv", "ok value" or
  * "fail"; "atouv_end" with an end pointer: "ok value rest"),
+ * a copy of the value after sv_inc ("inc") and sv_dec ("dec"), cv_name
+ * of the sub, qualified and not ("cvname"), PERL_SHORT_MIN and the other
+ * limits ("limits"), STATUS_EXIT ("status"),
  * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
  * isinfnan of the number ("infnan"), whether Perl_error_log is the stderr
  * handle ("error_log"), TARGi of the number ("targi"), and the names that
@@ -6926,6 +6929,23 @@ XS(XS_PerlAPI_small_names) {
             } else {
                 sv_setpvs(out, "fail");
             }
+        } else if (strEQ(which, "cvname")) {
+            CV *const code = (CV *)SvRV(ST(1));
+            SV *const named = cv_name(code, NULL, 0);
+            sv_setsv(out, named);
+            sv_catpvs(out, "|");
+            sv_catsv(out, cv_name(code, sv_newmortal(), CV_NAME_NOTQUAL));
+        } else if (strEQ(which, "limits")) {
+            sv_setpvf(out, "%d %d %u %d %d", (int)PERL_SHORT_MIN, (int)PERL_SHORT_MAX,
+                      (unsigned)PERL_USHORT_MAX, (int)PERL_UCHAR_MAX,
+                      (int)UTF8_DISALLOW_ILLEGAL_C9_INTERCHANGE == (int)UTF8_DISALLOW_ILLEGAL_INTERCHANGE);
+        } else if (strEQ(which, "status")) {
+            sv_setiv(out, (IV)STATUS_EXIT);
+        } else if (strEQ(which, "inc") || strEQ(which, "dec")) {
+            SV *const copy = sv_mortalcopy(ST(1));
+            if (strEQ(which, "inc")) sv_inc(copy);
+            else sv_dec(copy);
+            sv_setsv(out, copy);
         } else if (strEQ(which, "invariant")) {
             STRLEN len;
             const U8 *const pv = (const U8 *)SvPV(ST(1), len);

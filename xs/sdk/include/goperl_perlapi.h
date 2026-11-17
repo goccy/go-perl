@@ -784,6 +784,15 @@ typedef Signal_t (*Sighandler3_t)(int, siginfo_t *, void *);
 #define PERL_INT_MAX INT_MAX
 #define PERL_INT_MIN INT_MIN
 #define PERL_UINT_MAX UINT_MAX
+#define PERL_UINT_MIN 0U
+#define PERL_SHORT_MAX SHRT_MAX
+#define PERL_SHORT_MIN SHRT_MIN
+#define PERL_USHORT_MAX USHRT_MAX
+#define PERL_USHORT_MIN 0
+#define PERL_UCHAR_MAX UCHAR_MAX
+#define PERL_UCHAR_MIN 0
+#define PERL_ULONG_MIN 0UL
+#define PERL_UQUAD_MIN 0
 #define PERL_LONG_MAX LONG_MAX
 #define PERL_LONG_MIN LONG_MIN
 #define PERL_ULONG_MAX ULONG_MAX
@@ -1311,6 +1320,7 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
     ((I32)(int64_t)GOPERL_SVCALL2(62 /* GOPERL_SVCALL_NUMCMP */, a, b, flags))
 #define sv_numcmp(a, b) sv_numcmp_flags((a), (b), SV_GMAGIC)
 #define sv_dec(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_DEC, sv, 0))
+#define sv_dec_nomg(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_DEC, sv, 1))
 #define sv_len_utf8(sv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_LEN_UTF8, sv, 0))
 #define sv_utf8_encode(sv) ((void)GOPERL_SVCALL(GOPERL_SVCALL_UTF8_ENCODE, sv, 0))
 #define sv_utf8_upgrade_flags(sv, flags) \
@@ -1825,6 +1835,21 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_localizing (*goperl_plint_ref(_gof, GOPERL_PL_LOCALIZING))
 #define GOPERL_PL_STATUSVALUE 62
 #define PL_statusvalue (*goperl_plint_ref(_gof, GOPERL_PL_STATUSVALUE))
+/* the status of the program as perl's perl.h gives it where it is not
+ * VMS: $? itself */
+#define STATUS_UNIX PL_statusvalue
+#define STATUS_CURRENT STATUS_UNIX
+#define STATUS_EXIT STATUS_UNIX
+/* cv_name: the name of a sub, "Package::name" (only "name" with
+ * CV_NAME_NOTQUAL), set into sv or a new mortal; a value that is no sub
+ * and no glob is itself, as perl's does (CALL 27: CV_NAME). */
+#ifndef CV_NAME_NOTQUAL
+#define CV_NAME_NOTQUAL 1
+#endif
+#define cv_name(cv, sv, flags)                                                   \
+    ((SV *)GOPERL_SV(goperl_do_op3(_gof, GOPERL_OP_CALL, GOPERL_TOK((SV *)(cv)), \
+                                   GOPERL_TOK((SV *)(sv)),                       \
+                                   (uint64_t)27 | ((uint64_t)(U32)(flags) << 32), 0, 0)))
 #define PL_perl_destruct_level (*goperl_plint_ref(_gof, GOPERL_PL_DESTRUCT_LEVEL))
 #define PL_unsafe (GOPERL_PLVAR(GOPERL_PL_UNSAFE) != 0)
 #define PL_cop_seqmax ((U32)GOPERL_PLVAR(GOPERL_PL_COP_SEQMAX))

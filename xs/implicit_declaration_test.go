@@ -21,6 +21,17 @@ import (
 // does not declare compiles, as it does on perl.
 func buildModuleSource(t *testing.T, name, code string) string {
 	t.Helper()
+	so, out, err := compileModuleSource(t, name, code)
+	if err != nil {
+		t.Fatalf("compile %s.so: %v\n%s", name, err, out)
+	}
+	return so
+}
+
+// compileModuleSource is buildModuleSource with more flags of the compiler,
+// which gives what the compiler said when the build fails.
+func compileModuleSource(t *testing.T, name, code string, flags ...string) (string, []byte, error) {
+	t.Helper()
 	cc, err := exec.LookPath("cc")
 	if err != nil {
 		t.Skip("no host C compiler available")
@@ -35,7 +46,8 @@ func buildModuleSource(t *testing.T, name, code string) string {
 		t.Fatal(err)
 	}
 	so := filepath.Join(dir, name+".so")
-	args := []string{"-shared", "-fPIC", "-std=gnu99", `-DXS_VERSION="1.00"`, "-I", sdk, "-o", so, src}
+	args := append([]string{"-shared", "-fPIC", "-std=gnu99", `-DXS_VERSION="1.00"`, "-I", sdk, "-o", so}, flags...)
+	args = append(args, src)
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-undefined", "dynamic_lookup", "-Wno-error=implicit-function-declaration")
 		switch runtime.GOARCH {
@@ -47,10 +59,8 @@ func buildModuleSource(t *testing.T, name, code string) string {
 	} else {
 		args = append([]string{"-D_GNU_SOURCE"}, args...)
 	}
-	if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
-		t.Fatalf("compile %s.so: %v\n%s", name, err, out)
-	}
-	return so
+	out, err := exec.Command(cc, args...).CombinedOutput()
+	return so, out, err
 }
 
 // requireModule puts the module at so where DynaLoader finds it
