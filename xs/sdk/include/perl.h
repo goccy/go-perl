@@ -2261,7 +2261,12 @@ static void goperl_pads_refresh(goperl_frame_t *f);
 static uint64_t goperl_do_opx(goperl_frame_t *f, int32_t op, uint64_t a,
                               uint64_t b, uint64_t c, const char *s,
                               uint64_t slen, uint64_t *second) {
+    const int32_t failed_before_flush = f->failed;
     goperl_flush(f);
+    /* what the flush found wrong (native code unlinked the interpreter's
+     * magic from the chain SvMAGIC showed) stops the operation before it
+     * runs: it may be the free of what native code meant to take off */
+    if (!failed_before_flush && f->failed && f->jb) goperl_raise(f);
     const int32_t failed_before = f->failed;
     uint64_t r = goperl_xs_opx(f, op, a, b, c, s, slen, second);
     /* any guest operation may have changed interpreter state the context
@@ -7364,12 +7369,31 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
 /* Replace the mirror chain's head (the SvMAGIC_set idiom for unlinking an
  * entry the module found via SvMAGIC). The unlinked node's cleanup stays
  * with the module (Safefree), exactly as with real perl. */
-#define SvMAGIC_set(sv, mg)                                                              \
-    ({ GOPERL_ONCE(goperl_svmagic_set_sv_, sv);                                          \
-       goperl_flush(_gof);                                                               \
-       goperl_api_magic_set_head(_gof, GOPERL_TOK(goperl_svmagic_set_sv_),               \
-                                 goperl_magic_chain_of_native(_gof, (MAGIC *)(mg)));     \
-       goperl_svmagic_changed(_gof, GOPERL_TOK(goperl_svmagic_set_sv_)); })
+static void goperl_magic_unlinked(goperl_frame_t *f, int type) __attribute__((noreturn));
+static void goperl_magic_unlinked(goperl_frame_t *f, int type) {
+    goperl_croakf(f,
+                  "SvMAGIC: native code unlinked magic '%c' that the interpreter keeps on "
+                  "the value from its chain; gperl cannot take the interpreter's own "
+                  "magic off a value that way (sv_unmagic can)",
+                  type);
+}
+/* The chain mg starts, as the head of sv's: every type of the
+ * interpreter's magic the chain SvMAGIC showed of sv has is still on it (a
+ * copy of it), as the write-back of the slot asks of an assignment to it. */
+static void goperl_svmagic_set(goperl_frame_t *f, SV *sv, MAGIC *mg) {
+    goperl_flush(f);
+    const goperl_shared_t *const sh = (const goperl_shared_t *)f->inst;
+    if (sh && sh->svmagic_sv == GOPERL_TOK(sv))
+        for (const MAGIC *c = sh->svmagic_orig; goperl_magic_is_interp_copy(f, c); c++) {
+            int on = 0;
+            for (const MAGIC *m = mg; m && !on; m = m->mg_moremagic)
+                on = goperl_magic_is_interp_copy(f, m) && m->mg_type == c->mg_type;
+            if (!on) goperl_magic_unlinked(f, c->mg_type);
+        }
+    goperl_api_magic_set_head(f, GOPERL_TOK(sv), goperl_magic_chain_of_native(f, mg));
+    goperl_svmagic_changed(f, GOPERL_TOK(sv));
+}
+#define SvMAGIC_set(sv, mg) goperl_svmagic_set(_gof, (SV *)(sv), (MAGIC *)(mg))
 #define PERL_MAGIC_backref '<'
 /* Plain sv_magic attaches BEHAVIORAL core magic (PERL_MAGIC_tied being
  * the load-bearing case: DBI ties its outer handles) — that must land on
@@ -9258,6 +9282,11 @@ static void *goperl_block_alloc(size_t n, int zero) {
 static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_safefree(void *p) {
     goperl_frame_t *f = goperl_cur_frame_v;
+    /* a copy SvMAGIC showed of the interpreter's magic is the SDK's, and
+     * the magic stays the interpreter's (a module that frees the MAGIC it
+     * unlinked meant to take it off the value) */
+    if (f && p && goperl_magic_is_interp_copy(f, (const MAGIC *)p))
+        goperl_magic_unlinked(f, ((const MAGIC *)p)->mg_type);
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
     if (g) {
         goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
