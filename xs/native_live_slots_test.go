@@ -92,6 +92,23 @@ XS(XS_LiveSlots_tied_fetch) {
         XSRETURN(1);
     }
 }
+XS(XS_LiveSlots_body_or_fetch) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "av");
+    {
+        AV *av = (AV *)SvRV(ST(0));
+        SV **vec = AvARRAY(av);
+        SV *out = sv_2mortal(newSVpvs(""));
+        IV i, n = av_len(av) + 1;
+        sv_catpv(out, vec ? "body:" : "fetched:");
+        for (i = 0; i < n; i++) {
+            SV **el = vec ? &vec[i] : av_fetch(av, i, 0);
+            if (el && *el) sv_catsv(out, *el);
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
 XS_EXTERNAL(boot_LiveSlots) {
     dXSBOOTARGSXSAPIVERCHK;
     newXS_deffile("LiveSlots::swap", XS_LiveSlots_swap);
@@ -100,6 +117,7 @@ XS_EXTERNAL(boot_LiveSlots) {
     newXS_deffile("LiveSlots::kept_lvalue", XS_LiveSlots_kept_lvalue);
     newXS_deffile("LiveSlots::localize", XS_LiveSlots_localize);
     newXS_deffile("LiveSlots::tied_fetch", XS_LiveSlots_tied_fetch);
+    newXS_deffile("LiveSlots::body_or_fetch", XS_LiveSlots_body_or_fetch);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
 `
@@ -121,6 +139,7 @@ func TestNativeFetchSlotsAreTheContainers(t *testing.T) {
 		{"lvalue slots kept and written later", `my %h; LiveSlots::kept_lvalue(\%h); join ",", map { "$_=$h{$_}" } sort keys %h`, "a=1,b=2,c=3"},
 		{"save_svref of an entry", `my %h = (var => "original"); my $in; LiveSlots::localize(\%h, sub { $in = $h{var} }); "$in,$h{var}"`, "temporary,original"},
 		{"an element of a tied array", `require Tie::Array; tie my @a, "Tie::StdArray"; @a = (5, 6); LiveSlots::tied_fetch(\@a)`, "6"},
+		{"AvARRAY of a tied array is NULL", `require Tie::Array; tie my @t, "Tie::StdArray"; @t = (1, 2); my @p = (3, 4); LiveSlots::body_or_fetch(\@t) . " " . LiveSlots::body_or_fetch(\@p)`, "fetched:12 body:34"},
 	} {
 		if got := requireModule(t, "LiveSlots", so, tc.code); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)

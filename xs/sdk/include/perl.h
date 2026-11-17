@@ -4131,6 +4131,18 @@ static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok)
 static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
     uint64_t n = 0;
     const uint64_t where = goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, &n);
+    if (!where) {
+        /* an array with no body, as a tied array has: AvARRAY is NULL,
+         * which is how code tells it to fetch the elements instead
+         * (Tree::RB::XS) */
+        if (m->val) {
+            goperl_avbody_t *const old = GOPERL_AVBODY_OF(m);
+            free(old->shadow);
+            free(old);
+        }
+        m->val = m->shadow = 0;
+        return;
+    }
     int32_t len = (int32_t)n;
     int32_t slots = goperl_av_slots(f, m->svtok);
     if (slots < len) slots = len;
