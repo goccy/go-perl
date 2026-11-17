@@ -3626,9 +3626,9 @@ static void goperl_lex_start(goperl_frame_t *f, SV *line, void *rsfp, U32 flags)
  * what it runs itself (the first two), in its own memory; the data of a
  * custom op stays with the module. */
 #define GOPERL_TREE_NEWUNOP_AUX 23
-static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
+static GOPERL_OP_BUILDER OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
                               UNOP_AUX_item *aux) __attribute__((unused));
-static OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
+static GOPERL_OP_BUILDER OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32 flags, OP *first,
                               UNOP_AUX_item *aux) {
     goperl_gword_t w[7] = {(goperl_gword_t)(int64_t)type, (goperl_gword_t)(int64_t)flags,
                            goperl_optok(f, first), 0, 0, 0, 0};

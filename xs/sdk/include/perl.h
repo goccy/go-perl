@@ -11075,10 +11075,25 @@ enum {
     GOPERL_OPC_ASSIGNOP = 13
 };
 
+/* The functions native code builds ops with are calls of their own, as
+ * perl's are, never inlined into the module's function nor changed by the
+ * compiler for the callers it sees: a builder may end without a return
+ * statement after its last call and hand back what that call returned,
+ * which perl's calling convention leaves in place
+ * (Syntax::Operator::ExistsOr's new_op ends with op_contextualize).
+ * Inlined, the call's result is not where the caller's caller reads it (the
+ * stack protector of an inlined buffer clears it), and gcc's copy of a
+ * function whose result no caller reads returns nothing. clang takes the
+ * end of such a builder for unreachable, with perl as with the SDK. */
+#if defined(__GNUC__) && !defined(__clang__)
+#define GOPERL_OP_BUILDER __attribute__((noipa))
+#else
+#define GOPERL_OP_BUILDER __attribute__((noinline))
+#endif
 /* Which operands of a constructor are ops. */
 #define GOPERL_OPERAND_OP1 1
 #define GOPERL_OPERAND_OP2 2
-static OP *goperl_newop_of(goperl_frame_t *f, int cls, I32 type, I32 flags,
+static GOPERL_OP_BUILDER OP *goperl_newop_of(goperl_frame_t *f, int cls, I32 type, I32 flags,
                            uint64_t k1, uint64_t k2, int operand_ops) {
     char kids[16];
     memcpy(kids, &k1, 8);
@@ -11135,7 +11150,7 @@ static inline __attribute__((unused)) OP *goperl_newop(
     ({ GOPERL_ONCE(goperl_newSLICEOP_subscript_, subscript); GOPERL_ONCE(goperl_newSLICEOP_listval_, listval); \
        goperl_newop(_gof, GOPERL_OPC_SLICEOP, 0, (flags), (goperl_newSLICEOP_subscript_) ? ((OP *)(goperl_newSLICEOP_subscript_))->gop : 0, (goperl_newSLICEOP_listval_) ? ((OP *)(goperl_newSLICEOP_listval_))->gop : 0); })
 
-static OP *goperl_newcondop(goperl_frame_t *f, I32 flags, OP *cond, OP *tru,
+static GOPERL_OP_BUILDER OP *goperl_newcondop(goperl_frame_t *f, I32 flags, OP *cond, OP *tru,
                             OP *fls) {
     char kids[24];
     uint64_t k1 = cond ? cond->gop : 0, k2 = tru ? tru->gop : 0,
@@ -11177,7 +11192,7 @@ enum {
     GOPERL_OPM_OP_CLASS = 11
 };
 
-static OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux, U32 aux2,
+static GOPERL_OP_BUILDER OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux, U32 aux2,
                            OP *a, OP *b) {
     char toks[16];
     uint64_t t1 = a ? a->gop : 0, t2 = b ? b->gop : 0;
@@ -11213,7 +11228,7 @@ static OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux, U32 aux2,
 
 /* op_sibling_splice: parent/start identify the splice point, del_count
  * kids come out, the insert chain goes in; returns the deleted chain. */
-static OP *goperl_op_sibling_splice(goperl_frame_t *f, OP *parent, OP *start,
+static GOPERL_OP_BUILDER OP *goperl_op_sibling_splice(goperl_frame_t *f, OP *parent, OP *start,
                                     int del_count, OP *insert) {
     char toks[24];
     uint64_t t1 = parent ? parent->gop : 0, t2 = start ? start->gop : 0,
@@ -11316,7 +11331,7 @@ enum {
     GOPERL_PARSE_LABEL = 8
 };
 
-static OP *goperl_parse(goperl_frame_t *f, int sel, U32 flags) {
+static GOPERL_OP_BUILDER OP *goperl_parse(goperl_frame_t *f, int sel, U32 flags) {
     goperl_parser_push(f);
     goperl_optree_flush(f);
     uint64_t tok = goperl_do_op(f, GOPERL_OP_PARSE, (uint64_t)(uint32_t)sel,
@@ -11343,7 +11358,7 @@ static I32 goperl_block_start(goperl_frame_t *f, int full) {
     goperl_parser_pull(f);
     return r;
 }
-static OP *goperl_block_end(goperl_frame_t *f, I32 floor, OP *seq) {
+static GOPERL_OP_BUILDER OP *goperl_block_end(goperl_frame_t *f, I32 floor, OP *seq) {
     char toks[8];
     uint64_t t1 = seq ? seq->gop : 0;
     memcpy(toks, &t1, 8);
@@ -12325,7 +12340,7 @@ static CV *goperl_rv2cv_op_cv(goperl_frame_t *f, OP *cvop, U32 flags) {
 }
 #define rv2cv_op_cv(cvop, flags) goperl_rv2cv_op_cv(_gof, (OP *)(cvop), (U32)(flags))
 
-static OP *goperl_ck_args(goperl_frame_t *f, int which, OP *o, GV *namegv,
+static GOPERL_OP_BUILDER OP *goperl_ck_args(goperl_frame_t *f, int which, OP *o, GV *namegv,
                           SV *protosv) {
     const goperl_gword_t w[4] = {(uint32_t)which, goperl_optok(f, o),
                            GOPERL_TOK(namegv),
@@ -12427,7 +12442,7 @@ static void goperl_cv_get_call_compiler(goperl_frame_t *f, CV *cv, U32 gflags,
 
 /* ---- more functions that build op trees -------------------------------------- */
 
-static OP *goperl_newref(goperl_frame_t *f, int kind, I32 arg, OP *o) {
+static GOPERL_OP_BUILDER OP *goperl_newref(goperl_frame_t *f, int kind, I32 arg, OP *o) {
     const goperl_gword_t w[3] = {(uint32_t)kind, (uint32_t)arg, goperl_optok(f, o)};
     return goperl_tree_op(f, goperl_tree(f, GOPERL_TREE_NEWREF, 3, w));
 }
@@ -12436,10 +12451,10 @@ static OP *goperl_newref(goperl_frame_t *f, int kind, I32 arg, OP *o) {
 #define newHVREF(o) goperl_newref(_gof, 2, 0, (OP *)(o))
 #define newSVREF(o) goperl_newref(_gof, 3, 0, (OP *)(o))
 #define newGVREF(type, o) goperl_newref(_gof, 4, (type), (OP *)(o))
-static OP *goperl_tree_ops(goperl_frame_t *f, int sel, I32 a, I32 b, OP *o1,
+static GOPERL_OP_BUILDER OP *goperl_tree_ops(goperl_frame_t *f, int sel, I32 a, I32 b, OP *o1,
                            OP *o2, OP *o3, OP *o4, I32 last)
     __attribute__((unused));
-static OP *goperl_tree_ops(goperl_frame_t *f, int sel, I32 a, I32 b, OP *o1,
+static GOPERL_OP_BUILDER OP *goperl_tree_ops(goperl_frame_t *f, int sel, I32 a, I32 b, OP *o1,
                            OP *o2, OP *o3, OP *o4, I32 last) {
     goperl_gword_t w[7];
     int n = 0;
@@ -12532,9 +12547,9 @@ static CV *goperl_newattrsub(goperl_frame_t *f, I32 floor, OP *o, OP *proto,
                            goperl_optok(f, block)};
     return (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWATTRSUB, 5, w));
 }
-static OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv)
+static GOPERL_OP_BUILDER OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv)
     __attribute__((unused));
-static OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv) {
+static GOPERL_OP_BUILDER OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv) {
     const size_t len = pv ? __builtin_strlen(pv) : 0;
     /* the two words, then the string */
     char *req = (char *)malloc(16 + len + 1);
