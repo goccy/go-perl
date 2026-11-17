@@ -66,3 +66,10 @@ func DieOfSignal(sig int) {
 	script := "kill -" + number + " $$; exit " + strconv.Itoa(128+int(hostSig))
 	_ = syscall.Exec(shell, []string{"sh", "-c", script}, os.Environ())
 }
+
+// hostChildEnded sends the host process the SIGCHLD of the end of a child
+// that the kernel does not know of: a pseudo-process of the program that is
+// the host process.
+func hostChildEnded() {
+	_ = syscall.Kill(os.Getpid(), syscall.SIGCHLD)
+}

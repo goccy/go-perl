@@ -94,6 +94,21 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 		return nil, err
 	}
 
+	if p.opts.HostProcess && !p.ForkChild() {
+		// The child is a child of the host process to the program, which
+		// the kernel does not know: the host process is told of its end
+		// as of any child's, with a SIGCHLD of its own, once the status is
+		// there for a wait to take. Native code's handler of the signal
+		// runs (an event loop's child watcher then reaps the child with
+		// waitpid). The program's own handler is told by the runtime
+		// (exited), which never passes the host's SIGCHLD on to it, so it
+		// runs once.
+		reported := exited
+		exited = func(status int32) {
+			reported(status)
+			hostChildEnded()
+		}
+	}
 	if !p.family.start(c, pid, exited) {
 		c.discard()
 		return nil, errFamilyOver

@@ -7,7 +7,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
@@ -321,6 +323,112 @@ func TestNativeCodeForksTheProcess(t *testing.T) {
 		{"a child that execs", `my ($status, $err) = PerlAPI::fork_and_call("exec"); join ",", $status >> 8, $status & 127, "[$err]"`, "7,0,[]"},
 		{"the parent goes on", `PerlAPI::sub_slot(4)`, "4"},
 	})
+}
+
+// childWatchProgram reports, line by line into the file report, what a
+// module's child watcher (PerlAPI::reap_children, run from the program's
+// SIGCHLD handler, and PerlAPI::count_sigchld, a handler of the signal in
+// native code) sees of the program's children: a fork child, a fork child
+// that execs, a command the program started, and a child the module
+// started itself.
+func childWatchProgram(report string) []string {
+	return []string{
+		`use strict; use warnings; use PerlAPI; use POSIX (); $| = 1;`,
+		`open my $log, '>', '` + report + `' or die "open: $!";`,
+		`sub note { print $log @_, "\n" }`,
+		`sub settle { my $done = shift; for (1 .. 1000) { return if $done->(); select undef, undef, undef, 0.01 } }`,
+		`PerlAPI::count_sigchld();`,
+		`my (@reaped, $handled);`,
+		`$SIG{CHLD} = sub { $handled++; push @reaped, PerlAPI::reap_children() };`,
+		`sub ended { my $pid = shift; join ",", map { /^$pid:(\d+)\z/ ? $1 : () } @reaped }`,
+		`my $pid = fork // die "fork: $!";`,
+		`POSIX::_exit(3) if !$pid;`,
+		`settle(sub { ended($pid) ne "" });`,
+		`select undef, undef, undef, 0.3;`,
+		`note "fork child: ", ended($pid), " then ", $reaped[-1], ", handled ", $handled, ", native handler ", PerlAPI::count_sigchld();`,
+		`$pid = fork // die "fork: $!";`,
+		`if (!$pid) { exec('/bin/sh', '-c', 'kill -USR1 $$') or POSIX::_exit(127) }`,
+		`settle(sub { ended($pid) ne "" });`,
+		`note "fork child that execs: ", ended($pid);`,
+		`$pid = open(my $from, '-|', '/bin/sh', '-c', 'exit 5') // die "open: $!";`,
+		`settle(sub { ended($pid) ne "" });`,
+		`note "command: ", ended($pid);`,
+		`$pid = PerlAPI::spawn_exit(4);`,
+		`my ($got, $status, $err) = split / /, PerlAPI::wait_child($pid, 0);`,
+		`note "module's own child: ", ($got == $pid ? "found" : "got $got"), " $status $err";`,
+		`note "no children: ", join(",", PerlAPI::reap_children()), " ", (split / /, PerlAPI::wait_child(-1, 1))[2];`,
+		`PerlAPI::count_sigchld(0);`,
+		`close $log or die "close: $!";`,
+	}
+}
+
+// Native code's waitpid is the program's (the module's own waitpid, wait3
+// and wait4 ask the interpreter): an event loop's child watcher, which
+// reaps with waitpid(-1, WNOHANG) when SIGCHLD comes, finds the program's
+// fork children, which run inside the process, and the commands it started,
+// with their status words in the host's numbers, and then ECHILD. The end
+// of a fork child reaches a handler of SIGCHLD in native code once, as a
+// real SIGCHLD, and the program's own handler once. A child the module
+// started itself is still its own to wait for. Before, waitpid was the C
+// library's: it knew no fork child (ECHILD at once) and took the commands
+// from under the runtime, and no SIGCHLD came for a fork child.
+func TestNativeWaitpidIsTheProgramsOwn(t *testing.T) {
+	so := buildPerlAPI(t)
+	report := filepath.Join(t.TempDir(), "report")
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, Fork: true, HostProcess: true, NativeModules: true, Stdout: &out, Stderr: &errOut,
+		Exec: func(string, []string) bool { return true }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loadXSModule(t, p, "PerlAPI", so)
+	libdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(libdir, "PerlAPI.pm"),
+		[]byte("package PerlAPI;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status, err := p.RunProgram(context.Background(), perl.Program{Code: childWatchProgram(report), Inc: []string{libdir}})
+	if err != nil {
+		p.Close()
+		t.Fatalf("RunProgram: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, _ := os.ReadFile(report)
+	want := strings.Join([]string{
+		"fork child: 768 then ECHILD, handled 1, native handler 1",
+		"fork child that execs: " + strconv.Itoa(int(syscall.SIGUSR1)),
+		"command: 1280",
+		"module's own child: found 1024 -",
+		"no children: ECHILD ECHILD",
+	}, "\n") + "\n"
+	if status != 0 || string(got) != want {
+		t.Fatalf("status %d, report:\n%s\nwant:\n%s\nstdout %q stderr %q", status, got, want, out.String(), errOut.String())
+	}
+}
+
+// The program that is not the host process: its fork child is found by
+// native code's waitpid(-1), and a child native code started itself (whose
+// pid is the host's, which such a program does not share) is the C
+// library's.
+func TestNativeWaitpidOfAnIsolatedProgram(t *testing.T) {
+	status, stdout, stderr := runForkingProgram(t,
+		`use PerlAPI; use POSIX (); $| = 1;`,
+		`my $pid = fork // die "fork: $!";`,
+		`POSIX::_exit(6) if !$pid;`,
+		`my @r; for (1 .. 1000) { @r = PerlAPI::reap_children(); last if grep /^$pid:/, @r; select undef, undef, undef, 0.01 }`,
+		`my $n = PerlAPI::spawn_exit(2);`,
+		`my ($got, $st) = split / /, PerlAPI::wait_child($n, 0);`,
+		`print join(",", map { s/^$pid:/child:/r } @r), " ", ($got == $n ? "own" : "got $got"), " $st\n";`,
+	)
+	if want := "child:1536,ECHILD own 512\n"; status != 0 || stdout != want {
+		t.Fatalf("status=%d stdout=%q stderr=%q, want %q", status, stdout, stderr, want)
+	}
 }
 
 // A function a module gave to call_atexit before a fork releases what the

@@ -8261,6 +8261,158 @@ static pid_t goperl_getpid(void) {
     return (pid_t)(int64_t)goperl_do_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_PID,
                                         0, 0, 0);
 }
+
+/* ---- waiting for children ------------------------------------------------
+ * The children of the program are the interpreter's: the processes its
+ * fork made (pseudo-processes, which run inside this process and which
+ * the C library knows nothing of) and the commands it started, which the
+ * runtime waits for itself. So waitpid, wait, wait3 and wait4, as a module
+ * calls them, are the interpreter's waitpid, as Perl's waitpid is: native
+ * code sees the program's children (an event loop's child watcher reaps a
+ * fork child with waitpid(-1, ...)), and a wait for any child never takes
+ * a command from under the runtime. A child native code started itself is
+ * found by its pid, as perl finds it.
+ *
+ * They are functions of the module itself (hidden), as sigaction is. Where
+ * the interpreter cannot be asked, the C library is asked for a child
+ * named by its pid, and a wait for any child finds none (ECHILD): in a
+ * child of fork(2) native code made, which is not the program; on a thread
+ * that runs no call of the interpreter's (a thread of the module's own);
+ * in a signal handler, which may have stopped the interpreter anywhere. A
+ * program that is not the host process (an interpreter embedded in a Go
+ * program) has no children of the host's: there a child native code
+ * started, named by its pid, is the C library's too.
+ *
+ * What is reported is a child that ended; the interpreter's children are
+ * not reported stopped or continued (WUNTRACED, WCONTINUED). wait3 and
+ * wait4 report no resource usage of the child (all zero). The status word
+ * is the host's: a signal is the host's number for it. An error is the
+ * interpreter's errno, which crosses as its number and is the host's
+ * errno for it here. */
+#include <sys/resource.h>
+#define GOPERL_INT_WAITPID 35 /* a: the pid; b: 1 for WNOHANG -> the pid
+                               * reaped (0: none has ended), second: its
+                               * status word; or -1, second: the errno */
+#define GOPERL_ERRNO_GUEST_ECHILD 12
+#if defined(__cplusplus) && defined(__THROWNL)
+#define GOPERL_LIBC_THROWNL __THROWNL
+#else
+#define GOPERL_LIBC_THROWNL
+#endif
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t (*goperl_libc_wait4)(
+    pid_t, int *, int, struct rusage *) = 0;
+/* The host's number for a signal of the interpreter's (Linux's numbers, on
+ * every host). */
+static int goperl_signal_host(int sig) __attribute__((unused));
+static int goperl_signal_host(int sig) {
+    switch (sig) {
+    case 1: return SIGHUP;
+    case 2: return SIGINT;
+    case 3: return SIGQUIT;
+    case 4: return SIGILL;
+    case 5: return SIGTRAP;
+    case 6: return SIGABRT;
+    case 7: return SIGBUS;
+    case 8: return SIGFPE;
+    case 9: return SIGKILL;
+    case 10: return SIGUSR1;
+    case 11: return SIGSEGV;
+    case 12: return SIGUSR2;
+    case 13: return SIGPIPE;
+    case 14: return SIGALRM;
+    case 15: return SIGTERM;
+    case 17: return SIGCHLD;
+    case 18: return SIGCONT;
+    case 19: return SIGSTOP;
+    case 20: return SIGTSTP;
+    case 21: return SIGTTIN;
+    case 22: return SIGTTOU;
+    case 23: return SIGURG;
+    case 24: return SIGXCPU;
+    case 25: return SIGXFSZ;
+    case 26: return SIGVTALRM;
+    case 27: return SIGPROF;
+    case 28: return SIGWINCH;
+    case 29: return SIGIO;
+    case 31: return SIGSYS;
+    }
+    return sig;
+}
+/* The host's status word for one of the interpreter's. */
+static int goperl_wait_status_host(int st) {
+    const int low = st & 0x7f;
+    if (low == 0) return st & 0xffff;
+    if (low == 0x7f) return (goperl_signal_host((st >> 8) & 0xff) << 8) | 0x7f;
+    return goperl_signal_host(low) | (st & 0x80);
+}
+/* The frame of the call of the interpreter's this thread runs, or NULL: a
+ * thread that runs none has no slot, and none is made for it. */
+static goperl_frame_t *goperl_thread_frame(void) {
+    void *tid = (void *)pthread_self();
+    goperl_tframe_t *tf = GOPERL_PROCESS->tf;
+    uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
+    for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS; i++) {
+        goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
+        if (e->tid == tid) return e->f;
+        if (e->tid == 0) return NULL;
+    }
+    return NULL;
+}
+/* Whether the thread runs a signal handler: the process's handlers all run
+ * on the alternate signal stack of the thread (see sigaction above). */
+static int goperl_in_signal_handler(void) {
+    stack_t ss;
+    return sigaltstack(NULL, &ss) == 0 && (ss.ss_flags & SS_ONSTACK) != 0;
+}
+static pid_t goperl_wait_child(pid_t pid, int *status, int options, struct rusage *usage) {
+    if (!goperl_libc_wait4) {
+        goperl_libc_wait4 = (pid_t (*)(pid_t, int *, int, struct rusage *))dlsym(RTLD_NEXT, "wait4");
+        if (!goperl_libc_wait4) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    goperl_frame_t *const f =
+        goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
+            ? goperl_thread_frame()
+            : NULL;
+    if (f) {
+        uint64_t second = 0;
+        const int64_t got = (int64_t)goperl_xs_opx(
+            f, GOPERL_OP_INTERNAL, (uint64_t)(int64_t)pid, (options & WNOHANG) ? 1 : 0,
+            GOPERL_INT_WAITPID, 0, 0, &second);
+        if (got >= 0) {
+            if (usage) memset(usage, 0, sizeof *usage);
+            if (got > 0 && status) *status = goperl_wait_status_host((int)(uint32_t)second);
+            return (pid_t)got;
+        }
+        if ((int)second != GOPERL_ERRNO_GUEST_ECHILD || pid <= 0 ||
+            (pid_t)(int64_t)goperl_xs_opx(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_PID, 0, 0, 0, 0, 0) ==
+                getpid()) {
+            errno = goperl_errno_host((int)second);
+            return -1;
+        }
+    } else if (pid <= 0) {
+        errno = ECHILD;
+        return -1;
+    }
+    return goperl_libc_wait4(pid, status, options, usage);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t waitpid(pid_t pid, int *status,
+                                                                   int options) {
+    return goperl_wait_child(pid, status, options, NULL);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait(int *status) {
+    return goperl_wait_child(-1, status, 0, NULL);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait3(
+    int *status, int options, struct rusage *usage) GOPERL_LIBC_THROWNL {
+    return goperl_wait_child(-1, status, options, usage);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait4(
+    pid_t pid, int *status, int options, struct rusage *usage) GOPERL_LIBC_THROWNL {
+    return goperl_wait_child(pid, status, options, usage);
+}
 #define getpid goperl_getpid
 #define PerlProc_getpid() ((int)goperl_getpid())
 #define PerlProc_getuid() ((int)getuid())

@@ -6502,6 +6502,92 @@ XS(XS_PerlAPI_fork_and_call) {
     }
 }
 
+/* Children as an event loop's child watcher sees them (libev's).
+ * count_sigchld() installs a handler of SIGCHLD of its own that counts the
+ * signals it gets, as libev's handler wakes its loop, and returns that
+ * count from then on. reap_children() takes every child that has ended,
+ * waitpid(-1, &status, WNOHANG) until it returns no more, and returns
+ * "pid:status" for each and how the loop ended: "none" (0, children that
+ * have not ended), "ECHILD", or the errno; count_sigchld(0) puts the action
+ * the signal had back. spawn_exit(code) starts
+ * /bin/sh -c 'exit code' by fork and exec, without the interpreter, and
+ * returns its pid; wait_child(pid, nohang) waits for one child and returns
+ * what waitpid returned, the status and the errno. */
+static volatile sig_atomic_t perlapi_sigchld_seen = -1;
+static struct sigaction perlapi_sigchld_before;
+static void perlapi_count_sigchld(int sig) {
+    PERL_UNUSED_VAR(sig);
+    perlapi_sigchld_seen++;
+}
+XS(XS_PerlAPI_count_sigchld) {
+    dXSARGS;
+    if (items == 1 && !SvTRUE(ST(0))) {
+        /* count_sigchld(0): the action the signal had is put back */
+        if (perlapi_sigchld_seen >= 0) sigaction(SIGCHLD, &perlapi_sigchld_before, NULL);
+        perlapi_sigchld_seen = -1;
+        XSRETURN_EMPTY;
+    }
+    if (perlapi_sigchld_seen < 0) {
+        struct sigaction act;
+        memset(&act, 0, sizeof act);
+        act.sa_handler = perlapi_count_sigchld;
+        sigemptyset(&act.sa_mask);
+        act.sa_flags = SA_RESTART;
+        if (sigaction(SIGCHLD, &act, &perlapi_sigchld_before) != 0) croak("sigaction: %s", strerror(errno));
+        perlapi_sigchld_seen = 0;
+    }
+    ST(0) = sv_2mortal(newSViv(perlapi_sigchld_seen));
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_reap_children) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    SP -= items;
+    for (;;) {
+        int status = -1;
+        errno = 0;
+        const pid_t pid = waitpid(-1, &status, WNOHANG);
+        if (pid > 0) {
+            XPUSHs(sv_2mortal(newSVpvf("%d:%d", (int)pid, status)));
+            continue;
+        }
+        if (pid == 0) XPUSHs(sv_2mortal(newSVpvs("none")));
+        else if (errno == ECHILD) XPUSHs(sv_2mortal(newSVpvs("ECHILD")));
+        else XPUSHs(sv_2mortal(newSVpvf("errno %d", errno)));
+        break;
+    }
+    PUTBACK;
+}
+XS(XS_PerlAPI_spawn_exit) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "code");
+    {
+        char script[32];
+        snprintf(script, sizeof script, "exit %d", (int)SvIV(ST(0)));
+        const pid_t pid = fork();
+        if (pid < 0) croak("fork: %s", strerror(errno));
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", script, (char *)0);
+            _exit(127);
+        }
+        ST(0) = sv_2mortal(newSViv(pid));
+        XSRETURN(1);
+    }
+}
+XS(XS_PerlAPI_wait_child) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "pid, nohang");
+    {
+        int status = -1;
+        errno = 0;
+        const pid_t got = waitpid((pid_t)SvIV(ST(0)), &status, SvTRUE(ST(1)) ? WNOHANG : 0);
+        const int e = errno;
+        ST(0) = sv_2mortal(newSVpvf("%d %d %s", (int)got, status,
+                                    got >= 0 ? "-" : e == ECHILD ? "ECHILD" : strerror(e)));
+        XSRETURN(1);
+    }
+}
+
 /* native_string(): the address of a string of this module's, "native
  * bytes", as a C function returns a buffer FFI::Platypus hands to
  * buffer_to_scalar (unpack 'P'). */
@@ -7332,6 +7418,10 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::void_calls", XS_PerlAPI_void_calls);
     newXS_deffile("PerlAPI::native_string", XS_PerlAPI_native_string);
     newXS_deffile("PerlAPI::fork_and_call", XS_PerlAPI_fork_and_call);
+    newXS_deffile("PerlAPI::count_sigchld", XS_PerlAPI_count_sigchld);
+    newXS_deffile("PerlAPI::reap_children", XS_PerlAPI_reap_children);
+    newXS_deffile("PerlAPI::spawn_exit", XS_PerlAPI_spawn_exit);
+    newXS_deffile("PerlAPI::wait_child", XS_PerlAPI_wait_child);
     newXS_deffile("PerlAPI::ssnew_after_scope", XS_PerlAPI_ssnew_after_scope);
     newXS_deffile("PerlAPI::entersub_seen", XS_PerlAPI_entersub_seen);
     Perl_xs_boot_epilog(aTHX_ ax);
