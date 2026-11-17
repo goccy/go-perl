@@ -92,6 +92,8 @@ static UV uflags_named(const char *name) {
     if (strstr(name, "warnnon")) flags |= UNICODE_WARN_NONCHAR;
     if (strstr(name, "nononchar")) flags |= UNICODE_DISALLOW_NONCHAR;
     if (strstr(name, "nosuper")) flags |= UNICODE_DISALLOW_SUPER;
+    if (strstr(name, "noillegal")) flags |= UNICODE_DISALLOW_ILLEGAL_INTERCHANGE;
+    if (strstr(name, "warnillegal")) flags |= UNICODE_WARN_ILLEGAL_INTERCHANGE;
     return flags;
 }
 /* encode(cp, flags, msgs): uvchr_to_utf8_flags_msgs, as the bytes in hex
@@ -185,7 +187,7 @@ push @got, Utf8Dec::buf("\xe3\x81\x82") . (@warned ? " [@warned]" : "");
 push @got, Utf8Dec::msgs("\xa0") . (@warned ? " [@warned]" : "");
 for my $case ([0x263A, "", 0], [0x1F600, "", 0], [0xD800, "", 0], [0xD800, "warnsur", 0],
               [0xD800, "nosur", 0], [0xD800, "warnsur", 1], [0xFFFF, "warnnon", 0], [0xFFFF, "nononchar", 0],
-              [0x110000, "", 0], [0x110000, "nosuper", 0]) {
+              [0x110000, "", 0], [0x110000, "nosuper", 0], [0xFFFF, "noillegal", 0], [0xD800, "warnillegal", 0]) {
     @warned = ();
     push @got, Utf8Dec::encode(@$case) . (@warned ? " [@warned]" : "");
 }
@@ -196,7 +198,7 @@ push @got, join ",", map { Utf8Dec::partial(@$_) ? 1 : 0 } ["\xe2\x82", ""], ["\
 push @got, join ",", map { Utf8Dec::strloc(@$_) } ["ab\xed\xa0\x80cd", "illegal"], ["ab\xed\xa0\x80cd", ""],
     ["a\xe3\x81\x82\xe2\x82", ""];
 join "|", @got`
-	if got, want := requireModule(t, "Utf8Dec", so, program), `e9/2/|1f600/4/|0/1/ continuation [Malformed UTF-8 character: \xa0 (unexpected continuation byte 0xa0, with no preceding start byte) in subroutine entry]|0/-1/ continuation|fffd/1/ continuation|0/-1/ short|0/-1/ short non-continuation|0/-1/ long|d800/3/|0/-1/ surrogate|d800/3/ surrogate [UTF-16 surrogate U+D800 in subroutine entry]|ffff/3/|ffff/3/ nonchar [Unicode non-character U+FFFF is not recommended for open interchange in subroutine entry]|0/-1/ nonchar|110000/4/|0/-1/ super|0/-1 [Malformed UTF-8 character: \xa0 (unexpected continuation byte 0xa0, with no preceding start byte) in subroutine entry]|fffd/1|3042/3|0/1/ continuation|e298ba|f09f9880|eda080|eda080 [UTF-16 surrogate U+D800]|NULL|eda080 msgs 1|efbfbf [Unicode non-character U+FFFF is not recommended for open interchange]|NULL|f4908080|NULL|3,0,0,4,0,0|1,0,1,0,0,0|0/2/2,1/7/5,0/4/2`; got != want {
+	if got, want := requireModule(t, "Utf8Dec", so, program), `e9/2/|1f600/4/|0/1/ continuation [Malformed UTF-8 character: \xa0 (unexpected continuation byte 0xa0, with no preceding start byte) in subroutine entry]|0/-1/ continuation|fffd/1/ continuation|0/-1/ short|0/-1/ short non-continuation|0/-1/ long|d800/3/|0/-1/ surrogate|d800/3/ surrogate [UTF-16 surrogate U+D800 in subroutine entry]|ffff/3/|ffff/3/ nonchar [Unicode non-character U+FFFF is not recommended for open interchange in subroutine entry]|0/-1/ nonchar|110000/4/|0/-1/ super|0/-1 [Malformed UTF-8 character: \xa0 (unexpected continuation byte 0xa0, with no preceding start byte) in subroutine entry]|fffd/1|3042/3|0/1/ continuation|e298ba|f09f9880|eda080|eda080 [UTF-16 surrogate U+D800]|NULL|eda080 msgs 1|efbfbf [Unicode non-character U+FFFF is not recommended for open interchange]|NULL|f4908080|NULL|NULL|eda080 [UTF-16 surrogate U+D800]|3,0,0,4,0,0|1,0,1,0,0,0|0/2/2,1/7/5,0/4/2`; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
