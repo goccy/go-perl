@@ -460,6 +460,17 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
 }
 static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
 static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
+/* CvXSUB of an XSUB of the interpreter's (B's, POSIX's): a function of
+ * this process that calls the sub through the interpreter, as calling the
+ * XSUB's function itself would (Runops::Trace in B::OPCheck calls
+ * B::UNOP::first so). The mark and the arguments are the caller's, the
+ * results land where the XSUB would leave them, and the call is in the
+ * caller's context (a list one in void context, where an XSUB still
+ * leaves what it returns). */
+static void goperl_interp_xsub(pTHX_ CV *cv) {
+    goperl_frame_t *const f = _gof;
+    (void)goperl_do_call(f, (SV *)cv, 0, GIMME_V == G_SCALAR ? G_SCALAR : G_LIST);
+}
 
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     if (GOPERL_LV_IS_IOWORD(field)) { /* FIELD 24 */
@@ -479,8 +490,11 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         /* the slot, as perl's SvRV reads it whatever the flags say (not
          * "the target if SvROK", which is SvROK's question) */
         return goperl_do_op3(f, GOPERL_OP_SV_SLOT_GET, tok, 0, (uint64_t)(0 /* GOPERL_SVSLOT_RV */), 0, 0);
-    case GOPERL_LV_CVXSUB:
-        return (uint64_t)(uintptr_t)goperl_api_cv_xsub(f, tok);
+    case GOPERL_LV_CVXSUB: {
+        void *const fn = goperl_api_cv_xsub(f, tok);
+        if (fn || !(goperl_do_op(f, GOPERL_OP_CV_INFO, tok, 0, 0, 0) & 1)) return (uint64_t)(uintptr_t)fn;
+        return (uint64_t)(uintptr_t)(void *)goperl_interp_xsub;
+    }
     case GOPERL_LV_GVSTASH:
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 0, 0, 0);
     case GOPERL_LV_GVHV:
@@ -568,6 +582,11 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
         goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, val, 0 /* GOPERL_SVSLOT_RV */, 0, 0, 0);
         break;
     case GOPERL_LV_CVXSUB:
+        /* the sub would call itself through the interpreter, for ever */
+        if (val == (uint64_t)(uintptr_t)(void *)goperl_interp_xsub)
+            goperl_croakf(f, "go-perl gives native code no access to this interpreter "
+                             "internal: the C function of an XSUB of the interpreter's, "
+                             "given to another sub");
         goperl_api_cv_set_xsub(f, tok, (void *)(uintptr_t)val);
         break;
     case GOPERL_LV_GVSTASH:
