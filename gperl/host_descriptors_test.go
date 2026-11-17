@@ -100,13 +100,14 @@ report("after closing 20: ", (defined POSIX::dup2(20, 21) ? "still open" : "clos
 // A forked process starts with its parent's descriptors, under the same
 // numbers. Where it puts a file of its own under a number its parent still
 // uses, the parent's stays what it was; a command it then runs has the
-// child's file there. After it closes its standard output, the next file it
-// opens is descriptor 1, whether or not the parent still has its own there.
-// Above the standard descriptors a new one is always the process's under
-// its number, which is what a native library is handed: the number of a
-// descriptor the parent still has is not given to the child for a file of
-// its own, and the parent that closed a connection its child still serves
-// accepts the next one under another number.
+// child's file there. After it closes a descriptor, its standard output or
+// another, the next file it opens has the number it closed, whether or not
+// the parent still has its own there, as a child process's does: a forked
+// process runs no native code (it dies there), which would be handed the
+// number for the descriptor of the host. The first process's new
+// descriptor is always the host's under its number, which is what a native
+// library is handed: the parent that closed a connection its child still
+// serves accepts the next one under another number.
 func TestForkedProcessDescriptors(t *testing.T) {
 	hostDescriptorsHere(t)
 	dir := t.TempDir()
@@ -179,7 +180,7 @@ for my $name ("child-out.txt", "child-own.txt", "child-again.txt") {
 `)
 	wantOutput(t, got,
 		"child sees the file as 3",
-		"after closing it, the child's next file is another number, the process's",
+		"after closing it, the child's next file is the parent's number, the process's",
 		"standard output closed and opened again is 1",
 		"child status: 0",
 		"the shared file: child,parent",
