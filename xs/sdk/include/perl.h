@@ -3180,13 +3180,17 @@ static STRLEN *goperl_svcur_lv(goperl_frame_t *f, SV *sv) {
     ({ GOPERL_ONCE(goperl_SvEND_sv_, sv); \
        SvPVX(goperl_SvEND_sv_) + SvCUR(goperl_SvEND_sv_); })
 
-static char *goperl_sv_grow(goperl_frame_t *f, SV *sv, STRLEN n) {
-    uint64_t gp = goperl_do_op(f, GOPERL_OP_SV_GROW, GOPERL_TOK(sv),
-                               (uint64_t)n, 0, 0);
+/* SvGROW and sv_grow, which differ as perl's do: the macro calls the
+ * function only when the buffer is short, and the function upgrades the
+ * scalar and gives it a buffer whatever the length (Text::Xslate makes ""
+ * by sv_grow(sv, 0) and SvPOK_on on a new scalar). */
+static char *goperl_sv_grow(goperl_frame_t *f, SV *sv, STRLEN n, int function) {
+    uint64_t gp = goperl_do_op3(f, GOPERL_OP_SV_GROW, GOPERL_TOK(sv),
+                                (uint64_t)n, (uint64_t)function, 0, 0);
     return (char *)goperl_guest_mem(f, gp);
 }
-#define SvGROW(sv, n) goperl_sv_grow(_gof, (SV *)(sv), (STRLEN)(n))
-#define sv_grow(sv, n) SvGROW((sv), (n))
+#define SvGROW(sv, n) goperl_sv_grow(_gof, (SV *)(sv), (STRLEN)(n), 0)
+#define sv_grow(sv, n) goperl_sv_grow(_gof, (SV *)(sv), (STRLEN)(n), 1)
 
 #define sv_2mortal(sv)                                        \
     ((SV *)(uintptr_t)(goperl_flush(_gof),                    \
