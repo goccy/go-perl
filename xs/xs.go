@@ -1357,7 +1357,26 @@ func releaseState(p *internal.Perl) {
 			mg = uintptr(binary.LittleEndian.Uint64(node[mgOffMore:]))
 		}
 	}
+	flushNativeStdio()
 }
+
+// flushNativeStdio writes out what native code left in the C library's
+// stdio buffers (printf to stdout): perl's exit flushes them, and a gperl
+// program ends without the C library's exit. The interpreter's own output
+// went out before, in its teardown, as on perl.
+func flushNativeStdio() {
+	fflushOnce.Do(func() {
+		fflushFn, _ = purego.Dlsym(purego.RTLD_DEFAULT, "fflush")
+	})
+	if fflushFn != 0 {
+		purego.SyscallN(fflushFn, 0)
+	}
+}
+
+var (
+	fflushOnce sync.Once
+	fflushFn   uintptr
+)
 
 // shareMagic makes the copy of the MAGIC at mg, which is one more holder of
 // what the original holds.
