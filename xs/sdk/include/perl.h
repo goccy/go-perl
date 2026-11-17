@@ -5621,6 +5621,17 @@ static void goperl_save_delete(goperl_frame_t *f, HV *hv, char *key,
                       GOPERL_TOK(keysv), (uint32_t)(flags)))
 #define save_helem(hv, keysv, svp) save_helem_flags((hv), (keysv), (svp), 0)
 
+/* The results of a call the interpreter handed over as words (CALL_SV,
+ * CALL_METHOD, EVAL_SV), pushed on the frame's stack: read at once, as the
+ * interpreter keeps them where it does only until its next call. */
+static void goperl_call_results_take(goperl_frame_t *f, uint64_t words, I32 count) {
+    goperl_stack_extend(f, f->psp, count);
+    const goperl_gword_t *const w =
+        count > 0 ? (const goperl_gword_t *)goperl_guest_mem(f, words) : 0;
+    if (count > 0 && !w) goperl_croakf(f, "the interpreter did not hand over the results of a call");
+    for (I32 i = 0; i < count; i++) *++f->psp = (SV *)(uintptr_t)w[i];
+}
+
 /* call_sv / call_method: arguments between the last PUSHMARK and the stack
  * top cross as a token list; results come back in a mortal AV and are
  * pushed where perl would leave them. G_EVAL is forced across the boundary
@@ -5650,21 +5661,17 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
     }
     /* the code called reads the ops as native code left them */
     goperl_optree_flush(f);
-    /* -> the mortal array of the results; second: died<<63 | count */
+    /* -> the address of the results, a word each; second: died<<63 |
+     * count */
     uint64_t second = 0;
-    const uint64_t avtok =
+    const uint64_t words =
         goperl_do_opx(f, method ? GOPERL_OP_CALL_METHOD : GOPERL_OP_CALL_SV,
                       method ? 0 : GOPERL_TOK(sv), o, (uint64_t)(uint32_t)flags, buf, o, &second);
     free(buf);
     int died = (int)(second >> 63);
     I32 count = (I32)(second & 0x7FFFFFFF);
     f->psp = f->stbase + markoff; /* args consumed */
-    goperl_stack_extend(f, f->psp, count);
-    for (I32 i = 0; i < count; i++) {
-        uint64_t tok = goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,
-                                           (uint64_t)(int64_t)i, 0, 0);
-        *++f->psp = (SV *)(uintptr_t)tok;
-    }
+    goperl_call_results_take(f, words, count);
     if (died && !(flags & G_EVAL)) goperl_croak_errsv(f);
     return count;
 }
@@ -8648,18 +8655,14 @@ static PerlIO *goperl_pio_import(goperl_frame_t *f, FILE *fp, const char *mode) 
 static I32 goperl_eval_sv(goperl_frame_t *f, SV *sv, I32 flags) {
     /* the code run reads the ops as native code left them */
     goperl_optree_flush(f);
-    /* -> the mortal array of the results; second: died<<63 | count */
+    /* -> the address of the results, a word each; second: died<<63 |
+     * count */
     uint64_t second = 0;
-    const uint64_t avtok = goperl_do_opx(f, GOPERL_OP_EVAL_SV, GOPERL_TOK(sv), 0,
+    const uint64_t words = goperl_do_opx(f, GOPERL_OP_EVAL_SV, GOPERL_TOK(sv), 0,
                                          (uint64_t)(uint32_t)flags, 0, 0, &second);
     int died = (int)(second >> 63);
     I32 count = (I32)(second & 0x7FFFFFFF);
-    goperl_stack_extend(f, f->psp, count);
-    for (I32 i = 0; i < count; i++) {
-        uint64_t tok = goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,
-                                           (uint64_t)(int64_t)i, 0, 0);
-        *++f->psp = (SV *)(uintptr_t)tok;
-    }
+    goperl_call_results_take(f, words, count);
     /* eval_sv traps the error in $@; only G_RETHROW asks for it to be
      * thrown again (perl.c) */
     if (died && (flags & G_RETHROW)) goperl_croak_errsv(f);
