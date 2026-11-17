@@ -3565,13 +3565,22 @@ static SV *goperl_newRV_noinc(goperl_frame_t *f, SV *sv) {
 }
 #define newRV_noinc(sv) goperl_newRV_noinc(_gof, (SV *)(sv))
 
+/* The op native code has as PL_op, for what the interpreter does that
+ * reads the context of PL_op (GIMME_V, amagic_call): 4 | its want bits,
+ * or 0 while native code has not looked at PL_op, which is then the
+ * interpreter's own. */
+static inline __attribute__((unused)) uint64_t goperl_plop_want(goperl_frame_t *f) {
+    return f->plop ? (uint64_t)(4 | (f->plop->op_flags & OPf_WANT)) : 0;
+}
 /* amagic_call: the overloaded operator of two operands (the right one is
- * undef for the operators of one). NULL when neither overloads it. */
+ * undef for the operators of one). NULL when neither overloads it. The
+ * context is PL_op's, as perl's amagic_call takes it (goperl_plop_want). */
 #define amagic_call(left, right, method, flags)                             \
     GOPERL_SV(goperl_op3(GOPERL_OP_SV_CALL, GOPERL_TOK(left), GOPERL_TOK(right), \
                          61 /* GOPERL_SVCALL_AMAGIC */ |                      \
                              ((uint64_t)(((uint32_t)(method) & 0xff) |        \
-                                         (((uint32_t)(flags) & 0xffff) << 8)) \
+                                         (((uint32_t)(flags) & 0xffff) << 8) | \
+                                         ((uint32_t)goperl_plop_want(_gof) << 24)) \
                               << 32)))
 #define amagic_deref_call(ref, method) \
     goperl_amagic_deref_call(_gof, (SV *)(ref), (method))
@@ -9167,7 +9176,17 @@ static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
 #define sv_setsv_mg_2(sv, s2) \
     ({ GOPERL_ONCE(goperl_sv_setsv_mg_2_sv_, sv); \
        (sv_setsv((goperl_sv_setsv_mg_2_sv_), (s2)), (void)mg_set(goperl_sv_setsv_mg_2_sv_)); })
-#define GIMME_V ((U8)goperl_op0(GOPERL_OP_GIMME_V, 0, 0))
+/* GIMME_V is perl's gimme_V: the want bits of PL_op, and only without
+ * them the context of the enclosing sub. PL_op is the op native code has
+ * as PL_op once it has looked at it, which may be an op of its own making
+ * (Algorithm::Heapify::XS makes a copy of PL_op with OPf_WANT_SCALAR
+ * PL_op, so that the overloading it calls returns a value in an XSUB
+ * called in void context); goperl_plop_want hands it over. */
+static inline __attribute__((unused)) U8 goperl_gimme_v(goperl_frame_t *f) {
+    if (f->plop && (f->plop->op_flags & OPf_WANT)) return (U8)(f->plop->op_flags & OPf_WANT);
+    return (U8)goperl_do_op(f, GOPERL_OP_GIMME_V, goperl_plop_want(f), 0, 0, 0);
+}
+#define GIMME_V goperl_gimme_v(_gof)
 #define GIMME GIMME_V
 #define ckWARN(w) ((int)goperl_op0(GOPERL_OP_CKWARN, (uint64_t)(w), 0))
 #define ckWARN_d(w) ((int)goperl_op0(GOPERL_OP_CKWARN, (uint64_t)(w), 1))
