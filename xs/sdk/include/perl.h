@@ -1861,8 +1861,16 @@ typedef struct goperl_shared {
                                * interpreter's own magic that SvMAGIC shows
                                * (goperl_svmagic_lv), which tells them from
                                * the chain native code attached */
+    /* The host save stack once it outgrew hostsave, as perl's save stack
+     * grows (native calls nested a hundred deep through callbacks, three
+     * saves for each activation: Promise::XS recursing until its own limit
+     * says so): a block of hostsave_cap entries, malloc'd, that holds them
+     * all from then on; 0 before. Freed with the instance. */
+    goperl_hostsave_t *hostsave_more;
+    int32_t hostsave_cap;
 } goperl_shared_t;
-#define goperl_hostsave_v (GOPERL_SHARED->hostsave)
+#define goperl_hostsave_v \
+    (GOPERL_SHARED->hostsave_more ? GOPERL_SHARED->hostsave_more : GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
 #define goperl_scope_v (GOPERL_SHARED->scope)
 
@@ -5471,9 +5479,23 @@ enum {
     GOPERL_SAVEK_INT = 3
 };
 static int goperl_save_routed(goperl_frame_t *f, void *loc, int kind, int width);
+/* Room for one more entry on the host save stack: it moves to a block
+ * twice the size when it is full (entries are taken by index, and no
+ * pointer to one is kept past a save). */
+static void goperl_hostsave_room(goperl_frame_t *f) {
+    goperl_shared_t *const sh = GOPERL_SHARED;
+    const int32_t cap = sh->hostsave_more ? sh->hostsave_cap : GOPERL_HOSTSAVE_MAX;
+    if (goperl_hostsave_n < cap) return;
+    goperl_hostsave_t *const more =
+        (goperl_hostsave_t *)malloc((size_t)cap * 2 * sizeof(goperl_hostsave_t));
+    if (!more) goperl_croakf(f, "Out of memory during save stack extend");
+    memcpy(more, goperl_hostsave_v, (size_t)cap * sizeof(goperl_hostsave_t));
+    free(sh->hostsave_more);
+    sh->hostsave_more = more;
+    sh->hostsave_cap = cap * 2;
+}
 static void goperl_hostsave_ptr(goperl_frame_t *f, void **loc) {
-    if (goperl_hostsave_n >= GOPERL_HOSTSAVE_MAX)
-        goperl_croakf(f, "host save stack overflow in native XS");
+    goperl_hostsave_room(f);
     goperl_hostsave_t *e = &goperl_hostsave_v[goperl_hostsave_n++];
     e->loc = loc;
     e->val = *loc;
@@ -5493,8 +5515,7 @@ static void goperl_save_int8(goperl_frame_t *f, void *loc) {
         goperl_hostsave_ptr(f, (void **)loc);
 }
 static void goperl_hostsave_i32(goperl_frame_t *f, int32_t *loc) {
-    if (goperl_hostsave_n >= GOPERL_HOSTSAVE_MAX)
-        goperl_croakf(f, "host save stack overflow in native XS");
+    goperl_hostsave_room(f);
     goperl_hostsave_t *e = &goperl_hostsave_v[goperl_hostsave_n++];
     e->loc = (void **)loc;
     e->val = (void *)(intptr_t)*loc;
@@ -5510,8 +5531,7 @@ static void goperl_hostsave_small(goperl_frame_t *f, void *loc, int width)
     __attribute__((unused));
 static void goperl_hostsave_small(goperl_frame_t *f, void *loc, int width) {
     if (goperl_save_routed(f, loc, GOPERL_SAVEK_INT, width)) return;
-    if (goperl_hostsave_n >= GOPERL_HOSTSAVE_MAX)
-        goperl_croakf(f, "host save stack overflow in native XS");
+    goperl_hostsave_room(f);
     goperl_hostsave_t *e = &goperl_hostsave_v[goperl_hostsave_n++];
     e->loc = (void **)loc;
     e->val = (void *)(intptr_t)(width == 1 ? *(int8_t *)loc : *(int16_t *)loc);
@@ -12379,6 +12399,8 @@ __goperl_shared_clone(void *dst_raw, const void *src_raw) {
 GOPERL_C __attribute__((weak, visibility("default"), used)) void
 __goperl_shared_release(void *raw) {
     goperl_hooks_t *const h = (goperl_hooks_t *)((goperl_shared_t *)raw)->hooks;
+    free(((goperl_shared_t *)raw)->hostsave_more);
+    ((goperl_shared_t *)raw)->hostsave_more = 0;
     for (int32_t i = 0; h && i < h->atexit_n; i++) {
         goperl_atexit_t *const a = &h->atexit[i];
         if (!a->fn || !a->holders) continue;
