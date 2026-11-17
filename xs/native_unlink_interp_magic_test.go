@@ -52,3 +52,47 @@ my $id = Hash::Util::FieldHash::id($key);
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// Native code that frees the data of the interpreter's own magic, as SvMAGIC
+// showed it (the ufuncs of a field hash's uvar magic), without unlinking
+// the MAGIC, fails saying gperl cannot, and frees nothing: the field hash
+// works on. Variable::Magic does so when it dispells from a field hash
+// whose cast was refused (it takes the first uvar magic's data for its
+// own). Before, the block was freed in the interpreter, whose magic went
+// on with it freed, and the interpreter crashed at the end of
+// Variable-Magic's t/16-huf.t in one run out of a few.
+func TestNativeCodeFreesTheInterpretersMagicData(t *testing.T) {
+	so := buildModuleSource(t, "FreeUData", `#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+XS(XS_FreeUData_uvar) {
+    dXSARGS;
+    SV *sv = SvRV(ST(0));
+    MAGIC *mg;
+    PERL_UNUSED_VAR(items);
+    for (mg = SvMAGIC(sv); mg; mg = mg->mg_moremagic)
+        if (mg->mg_type == PERL_MAGIC_uvar) break;
+    if (!mg) croak("no uvar magic");
+    Safefree(mg->mg_ptr);
+    XSRETURN_EMPTY;
+}
+XS_EXTERNAL(boot_FreeUData) {
+    dXSBOOTARGSXSAPIVERCHK;
+    newXS_deffile("FreeUData::uvar", XS_FreeUData_uvar);
+    Perl_xs_boot_epilog(aTHX_ ax);
+}
+`)
+	got := requireModule(t, "FreeUData", so, `use Hash::Util::FieldHash qw(fieldhash);
+fieldhash my %h;
+my $key = [];
+$h{$key} = "by ref";
+my $r = eval { FreeUData::uvar(\%h); 1 } ? "lived"
+    : $@ =~ /\ASafefree: native code freed the data of magic 'U' that the interpreter keeps on the value/ ? "refused" : $@;
+my @keys;
+for (1 .. 50) { my $k = [$_]; $h{$k} = $_; push @keys, $k }
+my $sum = 0; $sum += $h{$_} for @keys;
+"$r; " . $h{$key} . "; $sum"`)
+	if want := "refused; by ref; 1275"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

@@ -9349,6 +9349,20 @@ static void goperl_safefree(void *p) {
         goperl_magic_unlinked(f, ((const MAGIC *)p)->mg_type);
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
     if (g) {
+        /* nor is what such a copy has as its data (the ufuncs of uvar
+         * magic, a name): the interpreter's MAGIC holds it and would be
+         * left with it freed (Variable::Magic's dispell frees the data of
+         * the first uvar magic as its own, which on a field hash is
+         * Hash::Util::FieldHash's) */
+        const goperl_shared_t *const sh = (const goperl_shared_t *)f->inst;
+        if (sh && sh->svmagic_sv)
+            for (const MAGIC *c = sh->svmagic_orig; goperl_magic_is_interp_copy(f, c); c++)
+                if (c->mg_ptr == (const char *)p)
+                    goperl_croakf(f,
+                                  "Safefree: native code freed the data of magic '%c' that "
+                                  "the interpreter keeps on the value; gperl cannot free "
+                                  "what the interpreter's own magic holds",
+                                  c->mg_type);
         goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
     } else {
         goperl_block_forget(p, 0);
