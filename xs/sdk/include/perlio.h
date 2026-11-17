@@ -3,5 +3,6 @@
  * perlio.h on perl. */
 #ifndef GOPERL_XS_SDK_PERLIO_H
 #define GOPERL_XS_SDK_PERLIO_H
+#pragma GCC system_header
 #include "perl.h"
 #endif

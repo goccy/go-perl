@@ -18,6 +18,7 @@
  * at PerlIO_define_layer time rather than misbehaving quietly. */
 #ifndef GOPERL_XS_SDK_PERLIOL_H
 #define GOPERL_XS_SDK_PERLIOL_H
+#pragma GCC system_header
 
 #include "perl.h"
 #include <stddef.h>
@@ -518,7 +519,7 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
     uint32_t id = goperl_api_perlio_def(goperl_cur_frame_v, tab->name,
                                            (void *)tab);
     goperl_do_op(goperl_cur_frame_v, GOPERL_OP_PERLIO_DEF_LAYER, id, mask,
-                 tab->name, strlen(tab->name));
+                 tab->name, __builtin_strlen(tab->name));
 }
 
 /* ---- the hook dispatcher (called by the loader on method -6) ------------ */
@@ -568,7 +569,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
     f->jb = (void *)&jb;
     goperl_frame_enter(f);
     if (GOPERL_SETJMP(jb)) {
-        size_t ml = strlen(f->err);
+        size_t ml = __builtin_strlen(f->err);
         if (ml > respcap - 1) ml = respcap - 1;
         resp[0] = 0;
         memcpy(resp + 1, f->err, ml);

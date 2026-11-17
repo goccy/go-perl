@@ -7,6 +7,7 @@
  * own. */
 #ifndef GOPERL_XS_SDK_COMPILER_H
 #define GOPERL_XS_SDK_COMPILER_H
+#pragma GCC system_header
 
 #include <sys/mman.h>
 
@@ -717,7 +718,7 @@ static __attribute__((unused)) PADNAME *goperl_newpadname_pvn(goperl_frame_t *f,
 #define Perl_pad_new(ctx, flags) pad_new(flags)
 #define pad_findmy_pv(name, flags)                                         \
     ({ const char *const goperl_pfp_name_ = (name);                        \
-       pad_findmy_pvn(goperl_pfp_name_, strlen(goperl_pfp_name_), (flags)); })
+       pad_findmy_pvn(goperl_pfp_name_, __builtin_strlen(goperl_pfp_name_), (flags)); })
 #define pad_findmy_pvs(name, flags) pad_findmy_pvn("" name "", sizeof(name) - 1, (flags))
 
 /* The list of names of the pad in use; an lvalue. */
@@ -774,6 +775,7 @@ static __attribute__((unused)) int goperl_curpad_av(goperl_frame_t *f, uint64_t 
     return !val || (goperl_avbody_locate(f, (const void *)(uintptr_t)val, out, &ix) && ix == 0);
 }
 static uint64_t goperl_runops_out(goperl_frame_t *f, uint64_t val);
+static uint64_t goperl_sighandlerp_out(goperl_frame_t *f, uint64_t val);
 static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id, goperl_plshadow_t *s,
                                                        uint64_t *out) {
     if (id == GOPERL_PL_COMPPAD_NAME) {
@@ -782,6 +784,10 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
     }
     if (id == 99 /* GOPERL_PL_RUNOPS */) {
         *out = goperl_runops_out(f, s->val);
+        return 1;
+    }
+    if (id == 115 /* GOPERL_PL_SIGHANDLERP */) {
+        *out = goperl_sighandlerp_out(f, s->val);
         return 1;
     }
     if (id == 103 /* GOPERL_PL_OP_MASK */) {
@@ -886,7 +892,7 @@ static __attribute__((unused)) uint64_t goperl_cvfield_load(goperl_frame_t *f, u
         const uint64_t g = GOPERL_INTERNAL(f, GOPERL_INT_CV_GET, tok, GOPERL_CVF_FILE);
         if (!g) return 0;
         const char *const p = (const char *)(f->membase + g);
-        return (uint64_t)(uintptr_t)goperl_intern(p, strlen(p));
+        return (uint64_t)(uintptr_t)goperl_intern(p, __builtin_strlen(p));
     }
     }
     goperl_croakf(f, "no such field of a sub (%d)", field);
@@ -908,7 +914,7 @@ static __attribute__((unused)) uint64_t goperl_cv_file_tok(goperl_frame_t *f, ui
     if (g) return g;
     /* a name of this process's (a module's own copy, or the interned name
      * the field read as) */
-    const size_t len = strlen(p);
+    const size_t len = __builtin_strlen(p);
     const uint64_t copy = goperl_do_op(f, GOPERL_OP_MEM_REALLOC, 0, (uint64_t)len + 1, 0, 0);
     if (!copy) goperl_croakf(f, "Out of memory!");
     memcpy(f->membase + copy, p, len + 1);
@@ -1305,7 +1311,7 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
     cophh_fetch_pvn((cophh), "" key "", sizeof(key) - 1, 0, (flags))
 #define cophh_fetch_pv(cophh, key, hash, flags)                             \
     ({ const char *const goperl_cfp_k_ = (key);                             \
-       cophh_fetch_pvn((cophh), goperl_cfp_k_, strlen(goperl_cfp_k_), 0, (flags)); })
+       cophh_fetch_pvn((cophh), goperl_cfp_k_, __builtin_strlen(goperl_cfp_k_), 0, (flags)); })
 #define cophh_fetch_sv(cophh, keysv, hash, flags)                           \
     ({ STRLEN goperl_cfs_l_;                                                \
        SV *const goperl_cfs_k_ = (keysv);                                   \
@@ -1318,7 +1324,7 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
     cophh_exists_pvn((cophh), "" key "", sizeof(key) - 1, 0, (flags))
 #define cophh_exists_pv(cophh, key, hash, flags)                            \
     ({ const char *const goperl_cep_k_ = (key);                             \
-       cophh_exists_pvn((cophh), goperl_cep_k_, strlen(goperl_cep_k_), 0, (flags)); })
+       cophh_exists_pvn((cophh), goperl_cep_k_, __builtin_strlen(goperl_cep_k_), 0, (flags)); })
 #define cophh_exists_sv(cophh, keysv, hash, flags)                          \
     ({ STRLEN goperl_ces_l_;                                                \
        SV *const goperl_ces_k_ = (keysv);                                   \
@@ -1668,6 +1674,143 @@ static uint64_t goperl_runops_out(goperl_frame_t *f, uint64_t val) {
 }
 #define PL_runops (*goperl_runops_ref(_gof))
 
+/* PL_sortcop: the interpreter's, a word native code may keep what it likes
+ * in while it sorts with a comparator of its own (Sort::Key keeps its keys
+ * there for the comparator to find, under SAVEVPTR), as the interpreter's
+ * sort keeps the op of a sort block there. What native code stores is kept
+ * as it is, an address of this process's or the interpreter's. */
+#define GOPERL_PL_SORTCOP 114
+#define PL_sortcop (*(OP **)goperl_plint_ref(_gof, GOPERL_PL_SORTCOP))
+
+/* The signal handler the interpreter calls for a signal that has arrived
+ * (PL_sighandlerp): its own, which runs the %SIG handler, or a function of
+ * native code (Tk's Event, which marks a handler of its own instead). The
+ * function is given the host's number of the signal. */
+#define GOPERL_PL_SIGHANDLERP 115
+enum { GOPERL_HOST_SIGHANDLER = 10 };
+#define GOPERL_INT_SIGHANDLER 37 /* b: a signal of the interpreter's: its
+                                  * own handler runs for it */
+static Signal_t goperl_sighandler_of_interp(int sig) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    int guest = 0;
+    for (int s = 1; s < 65 && !guest; s++)
+        if (goperl_signal_host(s) == sig) guest = s;
+    if (f && guest) GOPERL_INTERNAL(f, GOPERL_INT_SIGHANDLER, 0, (uint64_t)guest);
+}
+static __attribute__((unused)) Sighandler_t *goperl_sighandlerp_ref(goperl_frame_t *f) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[GOPERL_PL_SIGHANDLERP];
+    if (!s->live || s->val == s->shadow) {
+        const uint32_t id = (uint32_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SIGHANDLERP, 0, 0, 0);
+        s->val = (uint64_t)(uintptr_t)(id ? (Sighandler_t)goperl_fn_of(f, id)
+                                          : goperl_sighandler_of_interp);
+        s->shadow = s->val;
+        goperl_plshadow_set_live(s);
+    }
+    return (Sighandler_t *)&s->val;
+}
+/* What PL_sighandlerp given a function is to the interpreter
+ * (goperl_plshadow_out): its own handler, or the id of the module's. */
+static uint64_t goperl_sighandlerp_out(goperl_frame_t *f, uint64_t val) {
+    if (!val || val == (uint64_t)(uintptr_t)goperl_sighandler_of_interp) return 0;
+    return goperl_fn_id(f, (void (*)(void))(uintptr_t)val);
+}
+#define PL_sighandlerp (*goperl_sighandlerp_ref(_gof))
+#define PL_sighandler1p PL_sighandlerp
+
+/* my_exit and my_failure_exit: the program ends as `exit` ends it (END
+ * blocks, global destruction), from inside the native call; neither
+ * returns. */
+#define GOPERL_INT_MY_EXIT 36 /* a: 0 for my_exit, with b the status; 1 for
+                               * my_failure_exit */
+static void goperl_my_exit(goperl_frame_t *f, int failure, U32 status) __attribute__((noreturn, unused));
+static void goperl_my_exit(goperl_frame_t *f, int failure, U32 status) {
+    GOPERL_INTERNAL(f, GOPERL_INT_MY_EXIT, (uint64_t)failure, (uint64_t)status);
+    goperl_croakf(f, "%s: the program did not end", failure ? "my_failure_exit" : "my_exit");
+}
+#define my_exit(status) goperl_my_exit(_gof, 0, (U32)(status))
+#define my_failure_exit() goperl_my_exit(_gof, 1, 0)
+#define Perl_my_failure_exit(...) my_failure_exit()
+
+/* rsignal, as perl's: the process's action for the signal becomes the
+ * handler (through the module's sigaction, see perl.h), and the handler it
+ * had is returned. */
+static __attribute__((unused)) Sighandler_t goperl_rsignal(goperl_frame_t *f, int signo, Sighandler_t handler) {
+    struct sigaction act, oact;
+    memset(&act, 0, sizeof act);
+    act.sa_handler = handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+#ifdef SA_RESTART
+    if (f && (PL_signals & PERL_SIGNALS_UNSAFE_FLAG)) act.sa_flags |= SA_RESTART;
+#endif
+#if defined(SA_NOCLDWAIT) && !defined(__APPLE__)
+    if (signo == SIGCHLD && handler == (Sighandler_t)SIG_IGN) act.sa_flags |= SA_NOCLDWAIT;
+#endif
+    if (sigaction(signo, &act, &oact) == -1) return (Sighandler_t)SIG_ERR;
+    return (Sighandler_t)oact.sa_handler;
+}
+static __attribute__((unused)) Sighandler_t goperl_rsignal_state(int signo) {
+    struct sigaction oact;
+    if (sigaction(signo, (struct sigaction *)0, &oact) == -1) return (Sighandler_t)SIG_ERR;
+    return (Sighandler_t)oact.sa_handler;
+}
+#define rsignal(signo, handler) goperl_rsignal(_gof, (signo), (Sighandler_t)(handler))
+#define Perl_rsignal(...) rsignal(__VA_ARGS__)
+#define rsignal_state(signo) goperl_rsignal_state(signo)
+#define Perl_rsignal_state(...) rsignal_state(__VA_ARGS__)
+
+/* save_svref: the value in a slot is saved, and a new one put there, as
+ * `local` does to it. The slot must be one the interpreter knows the place
+ * of (a variable of its own, a field that an accessor designates, a slot of
+ * an array's body); a slot that is only this process's copy of a value
+ * (the SV** an hv_fetch or av_fetch returns) cannot be saved where the
+ * value lies, and the call dies saying so. */
+static __attribute__((unused)) SV *goperl_save_svref(goperl_frame_t *f, SV **sptr) {
+    if (!sptr) goperl_croakf(f, "save_svref of no slot");
+    /* the save takes the slot's reference to the value with it, and puts
+     * the value back when the scope ends, releasing the new one */
+    if (!goperl_save_routed(f, (void *)sptr, GOPERL_SAVEK_GENERIC, (int)sizeof(void *)))
+        goperl_croakf(f, "save_svref: the slot is this process's copy of a value, not "
+                         "the place the interpreter keeps it in (save_helem or "
+                         "save_aelem saves an element of a hash or an array)");
+    SV *const sv = newSV(0);
+    *sptr = sv;
+    return sv;
+}
+#define save_svref(sptr) goperl_save_svref(_gof, (SV **)(sptr))
+#define Perl_save_svref(...) save_svref(__VA_ARGS__)
+
+/* scan_vstring: the v-string spelled from s up to e (v1.22.333, or 1.22.333)
+ * becomes sv, with its vstring magic, as the parser makes it; the end of
+ * what was read is returned. The interpreter reads a copy of the spelling,
+ * which ends there. */
+#define GOPERL_INT_SCAN_VSTRING 38 /* a: the SV; s+b: the spelling -> the
+                                    * number of bytes read */
+static __attribute__((unused)) char *goperl_scan_vstring(goperl_frame_t *f, const char *s,
+                                                         const char *e, SV *sv) {
+    const uint64_t n = (uint64_t)(e - s);
+    const uint64_t used = GOPERL_INTERNAL_S(f, GOPERL_INT_SCAN_VSTRING, GOPERL_TOK(sv), n, s, n);
+    return (char *)s + (used <= n ? used : n);
+}
+#define scan_vstring(s, e, sv) goperl_scan_vstring(_gof, (const char *)(s), (const char *)(e), (SV *)(sv))
+
+/* PL_stderrgv's handle, as perl's Perl_error_log is */
+#define Perl_error_log PerlIO_stderr()
+/* every handle flushed, as before a fork or a command */
+#define PERL_FLUSHALL_FOR_CHILD PerlIO_flush((PerlIO *)NULL)
+#define Direntry_t struct dirent
+/* a string the SV points at that is static (with SVf_IsCOW) */
+#define SVppv_STATIC 0x40000000
+#define CvISXSUB_on(cv) (CvFLAGS(cv) |= CVf_ISXSUB)
+#define CvISXSUB_off(cv) (CvFLAGS(cv) &= ~CVf_ISXSUB)
+/* TARG set to a number, as pp.h's (the cheap path of an IV target is the
+ * same set) */
+#ifndef TARGi
+#define TARGi(i, do_taint) sv_setiv_mg(TARG, (IV)(i))
+#define TARGu(u, do_taint) sv_setuv_mg(TARG, (UV)(u))
+#define TARGn(n, do_taint) sv_setnv_mg(TARG, (NV)(n))
+#endif
+
 /* Block hooks. */
 #define BHKf_bhk_start 0x01
 #define BHKf_bhk_pre_end 0x02
@@ -1722,6 +1865,13 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
         const runops_proc_t fn = (runops_proc_t)goperl_fn_of(f, (uint32_t)req[1]);
         goperl_flush(f);
         fn();
+        return 0;
+    }
+    case GOPERL_HOST_SIGHANDLER: { /* [id][signal of the interpreter's] */
+        if (reqlen < 24) goperl_croakf(f, "host call: short signal handler request");
+        const Sighandler_t fn = (Sighandler_t)goperl_fn_of(f, (uint32_t)req[1]);
+        goperl_flush(f);
+        fn(goperl_signal_host((int)(int64_t)req[2]));
         return 0;
     }
     case GOPERL_HOST_BHK: { /* [id][which][arg] -> [op] */

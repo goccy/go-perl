@@ -6588,6 +6588,345 @@ XS(XS_PerlAPI_wait_child) {
     }
 }
 
+/* sort_keyed(descending, values...): the values sorted by a comparator that
+ * finds its keys in PL_sortcop, as Sort::Key's does, set under SAVEVPTR;
+ * then "kept" when PL_sortcop is back as it was after the scope. */
+typedef struct {
+    int descending;
+} perlapi_sortkeys;
+static I32 perlapi_keyed_cmp(pTHX_ SV *a, SV *b) {
+    const perlapi_sortkeys *k = (const perlapi_sortkeys *)PL_sortcop;
+    const IV x = SvIV(a), y = SvIV(b);
+    const I32 r = x < y ? -1 : x > y ? 1 : 0;
+    return k->descending ? -r : r;
+}
+XS(XS_PerlAPI_sort_keyed) {
+    dXSARGS;
+    if (items < 1) croak_xs_usage(cv, "descending, values...");
+    {
+        perlapi_sortkeys k;
+        OP *const before = PL_sortcop;
+        k.descending = SvTRUE(ST(0));
+        ENTER;
+        SAVEVPTR(PL_sortcop);
+        PL_sortcop = (OP *)&k;
+        sortsv(&ST(1), (size_t)(items - 1), perlapi_keyed_cmp);
+        LEAVE;
+        for (I32 i = 1; i < items; i++) ST(i - 1) = ST(i);
+        ST(items - 1) = sv_2mortal(newSVpv(PL_sortcop == before ? "kept" : "lost", 0));
+        XSRETURN(items);
+    }
+}
+
+/* handle_signals(on): the interpreter's signal handler becomes the module's,
+ * which notes the signal (Tk's Event), and returns "interpreter's" when the
+ * one found was another; handle_signals(0) puts the one found back.
+ * signal_noted() returns the signal noted since it was last asked, 0 for
+ * none. rsignal_note(sig) makes the module's function the process's action
+ * for sig with rsignal, raises the signal on the thread and puts the action
+ * found back: the signal noted. */
+static volatile sig_atomic_t perlapi_signal_noted = 0;
+static Sighandler_t perlapi_handler_found = 0;
+static Signal_t perlapi_note_signal(int sig) { perlapi_signal_noted = sig; }
+XS(XS_PerlAPI_handle_signals) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "on");
+    if (SvTRUE(ST(0))) {
+        perlapi_handler_found = PL_sighandlerp;
+        PL_sighandlerp = perlapi_note_signal;
+        ST(0) = sv_2mortal(newSVpv(perlapi_handler_found != perlapi_note_signal ? "interpreter's" : "own", 0));
+        XSRETURN(1);
+    }
+    PL_sighandlerp = perlapi_handler_found;
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_signal_noted) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    const int sig = perlapi_signal_noted;
+    perlapi_signal_noted = 0;
+    ST(0) = sv_2mortal(newSViv(sig));
+    XSRETURN(1);
+}
+XS(XS_PerlAPI_rsignal_note) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sig");
+    {
+        const int sig = (int)SvIV(ST(0));
+        sigset_t mask, was;
+        perlapi_signal_noted = 0;
+        Sighandler_t old = rsignal(sig, (Sighandler_t)perlapi_note_signal);
+        if (old == (Sighandler_t)SIG_ERR) croak("rsignal: %s", strerror(errno));
+        /* the signal reaches this thread, whatever an earlier test left
+         * blocked on it (a siglongjmp out of a handler keeps the handler's
+         * mask) */
+        sigemptyset(&mask);
+        sigaddset(&mask, sig);
+        pthread_sigmask(SIG_UNBLOCK, &mask, &was);
+        raise(sig);
+        const int noted = perlapi_signal_noted;
+        const int state_was_ours = rsignal_state(sig) == (Sighandler_t)perlapi_note_signal;
+        rsignal(sig, old);
+        pthread_sigmask(SIG_SETMASK, &was, NULL);
+        ST(0) = sv_2mortal(newSVpvf("%d %s", noted, state_was_ours ? "state" : "no-state"));
+        XSRETURN(1);
+    }
+}
+
+/* note_with_rsignal(sig, on): with on true the module's function becomes the
+ * process's action for sig (rsignal), as an event loop's signal watcher's
+ * does, until note_with_rsignal(sig, 0) puts back the action it found. */
+static Sighandler_t perlapi_rsignal_found[65];
+XS(XS_PerlAPI_note_with_rsignal) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sig, on");
+    {
+        const int sig = (int)SvIV(ST(0));
+        if (sig <= 0 || sig > 64) croak("no signal %d", sig);
+        if (SvTRUE(ST(1))) {
+            perlapi_signal_noted = 0;
+            perlapi_rsignal_found[sig] = rsignal(sig, (Sighandler_t)perlapi_note_signal);
+        } else {
+            rsignal(sig, perlapi_rsignal_found[sig]);
+        }
+        XSRETURN_EMPTY;
+    }
+}
+
+/* exit_with(status) and exit_failing(): my_exit and my_failure_exit. */
+XS(XS_PerlAPI_exit_with) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "status");
+    my_exit((U32)SvIV(ST(0)));
+    XSRETURN_EMPTY;
+}
+XS(XS_PerlAPI_exit_failing) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    my_failure_exit();
+    XSRETURN_EMPTY;
+}
+
+/* char_classes(cps...): for each code point the letters of the classes it
+ * is in (A alpha, D digit, S space, U upper, W word), "-" for none; then
+ * UTF8_CHK_SKIP of "\xC3\xA9" and of "\xC3" ending the string. */
+XS(XS_PerlAPI_char_classes) {
+    dXSARGS;
+    SV *const out = sv_2mortal(newSVpvs(""));
+    for (I32 i = 0; i < items; i++) {
+        const UV c = SvUV(ST(i));
+        if (i) sv_catpvs(out, ",");
+        const STRLEN was = SvCUR(out);
+        if (isALPHA_uvchr(c)) sv_catpvs(out, "A");
+        if (isDIGIT_uvchr(c)) sv_catpvs(out, "D");
+        if (isSPACE_uvchr(c)) sv_catpvs(out, "S");
+        if (isUPPER_uvchr(c)) sv_catpvs(out, "U");
+        if (isWORDCHAR_uvchr(c)) sv_catpvs(out, "W");
+        if (SvCUR(out) == was) sv_catpvs(out, "-");
+    }
+    static const U8 two[] = {0xC3, 0xA9, 0}, cut[] = {0xC3, 0};
+    sv_catpvf(out, " %d %d", (int)UTF8_CHK_SKIP(two), (int)UTF8_CHK_SKIP(cut));
+    ST(0) = out;
+    XSRETURN(1);
+}
+
+/* private_pok(sv): the string flag made private (SvPOK_off, SvPOKp_on):
+ * "private" when only SVp_POK is set, and "shifts" when SVp_POK >>
+ * PRIVSHIFT is SVf_POK. */
+XS(XS_PerlAPI_private_pok) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *const sv = ST(0);
+        SvPOK_off(sv);
+        SvPOKp_on(sv);
+        const U32 fl = SvFLAGS(sv);
+        ST(0) = sv_2mortal(newSVpvf("%s %s", (fl & SVp_POK) && !(fl & SVf_POK) ? "private" : "public",
+                                    (SVp_POK >> PRIVSHIFT) == SVf_POK ? "shifts" : "no"));
+        XSRETURN(1);
+    }
+}
+
+/* local_slot(where): save_svref of a slot, the new value set to "inner",
+ * and what Perl code sees in the variable inside the scope: "gvsv", the
+ * scalar of $main::slot; "helem", the slot hv_fetch returns for
+ * $main::h{k}. */
+XS(XS_PerlAPI_local_slot) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "where");
+    {
+        const int helem = strEQ(SvPV_nolen(ST(0)), "helem");
+        SV *inside;
+        ENTER;
+        if (helem) {
+            SV **e = hv_fetchs(get_hv("main::h", GV_ADD), "k", 1);
+            sv_setpvs(save_svref(e), "inner");
+            inside = get_sv("main::h", 0);
+        } else {
+            GV *const gv = gv_fetchpvs("main::slot", GV_ADD, SVt_PV);
+            sv_setpvs(save_svref(&GvSV(gv)), "inner");
+            inside = get_sv("main::slot", 0);
+        }
+        SV *const seen = sv_2mortal(newSVsv(inside));
+        LEAVE;
+        ST(0) = seen;
+        XSRETURN(1);
+    }
+}
+
+/* uvar_trace(sv): uvar magic attached without its struct, then given the
+ * struct and perl's vtable of uvar magic, as Tk traces a variable; reads and
+ * writes of the variable are counted from then on. uvar_counts() returns
+ * "reads/writes". */
+static IV perlapi_uvar_reads = 0, perlapi_uvar_writes = 0;
+static I32 perlapi_uvar_read(pTHX_ IV ix, SV *sv) {
+    PERL_UNUSED_VAR(ix);
+    PERL_UNUSED_VAR(sv);
+    perlapi_uvar_reads++;
+    return 0;
+}
+static I32 perlapi_uvar_write(pTHX_ IV ix, SV *sv) {
+    PERL_UNUSED_VAR(ix);
+    PERL_UNUSED_VAR(sv);
+    perlapi_uvar_writes++;
+    return 0;
+}
+XS(XS_PerlAPI_uvar_trace) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    {
+        SV *const sv = SvRV(ST(0));
+        struct ufuncs *uf;
+        sv_magic(sv, 0, PERL_MAGIC_uvar, 0, 0);
+        MAGIC *mg = mg_find(sv, PERL_MAGIC_uvar);
+        if (!mg) croak("no uvar magic after sv_magic");
+        /* the magic owns a name with a length: it frees it, as on perl */
+        Newxz(uf, 1, struct ufuncs);
+        uf->uf_val = perlapi_uvar_read;
+        uf->uf_set = perlapi_uvar_write;
+        uf->uf_index = 7;
+        mg->mg_ptr = (char *)uf;
+        mg->mg_len = sizeof(struct ufuncs);
+        mg->mg_virtual = &PL_vtbl_uvar;
+        perlapi_uvar_reads = perlapi_uvar_writes = 0;
+        XSRETURN_EMPTY;
+    }
+}
+XS(XS_PerlAPI_uvar_counts) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("%d/%d", (int)perlapi_uvar_reads, (int)perlapi_uvar_writes));
+    XSRETURN(1);
+}
+
+/* event_like_thing(n): a blessed hash with a MAGIC of the module's own
+ * linked onto its (empty) chain through SvMAGIC, as Event's wrap_thing
+ * attaches its watchers; event_like_ptr(ref) finds it with mg_find and
+ * returns the number kept in it. */
+static int perlapi_things[4] = {11, 22, 33, 44};
+XS(XS_PerlAPI_event_like_thing) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "n");
+    {
+        HV *const temple = newHV();
+        SV *const ref = newRV_noinc((SV *)temple);
+        MAGIC **mgp, *mg;
+        sv_bless(ref, gv_stashpvs("PerlAPI::Thing", GV_ADD));
+        mgp = &SvMAGIC((SV *)temple);
+        while ((mg = *mgp)) mgp = &mg->mg_moremagic;
+        Newxz(mg, 1, MAGIC);
+        mg->mg_type = '~';
+        mg->mg_ptr = (char *)&perlapi_things[SvIV(ST(0)) & 3];
+        mg->mg_private = 0x6576;
+        *mgp = mg;
+        ST(0) = sv_2mortal(ref);
+        XSRETURN(1);
+    }
+}
+XS(XS_PerlAPI_event_like_ptr) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        MAGIC *const mg = mg_find(SvRV(ST(0)), '~');
+        if (!mg || mg->mg_private != 0x6576) croak("no magic of the module's found");
+        ST(0) = sv_2mortal(newSViv(*(int *)mg->mg_ptr));
+        XSRETURN(1);
+    }
+}
+
+/* vstring_of(spelling): the v-string scan_vstring makes of the spelling,
+ * and the number of bytes it read. */
+XS(XS_PerlAPI_vstring_of) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "spelling");
+    {
+        STRLEN len;
+        const char *const p = SvPV(ST(0), len);
+        SV *const v = sv_newmortal();
+        const char *const end = scan_vstring(p, p + len, v);
+        ST(0) = v;
+        ST(1) = sv_2mortal(newSViv((IV)(end - p)));
+        XSRETURN(2);
+    }
+}
+
+/* small_names(which, arg): grok_atoUV of arg ("atouv", "ok value" or
+ * "fail"; "atouv_end" with an end pointer: "ok value rest"),
+ * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
+ * isinfnan of the number ("infnan"), whether Perl_error_log is the stderr
+ * handle ("error_log"), TARGi of the number ("targi"), and the names that
+ * only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
+ * PERL_FLUSHALL_FOR_CHILD: "compiled"). */
+XS(XS_PerlAPI_small_names) {
+    dXSARGS;
+    dXSTARG;
+    if (items != 2) croak_xs_usage(cv, "which, arg");
+    {
+        const char *const which = SvPV_nolen(ST(0));
+        SV *const out = sv_newmortal();
+        if (strEQ(which, "atouv") || strEQ(which, "atouv_end")) {
+            STRLEN len;
+            const char *const pv = SvPV(ST(1), len);
+            const char *end = pv + len;
+            UV v = 0;
+            const bool with_end = strEQ(which, "atouv_end");
+            if (grok_atoUV(pv, &v, with_end ? &end : NULL)) {
+                if (with_end) sv_setpvf(out, "ok %" UVuf " %s", v, end);
+                else sv_setpvf(out, "ok %" UVuf, v);
+            } else {
+                sv_setpvs(out, "fail");
+            }
+        } else if (strEQ(which, "invariant")) {
+            STRLEN len;
+            const U8 *const pv = (const U8 *)SvPV(ST(1), len);
+            const U8 *ep = NULL;
+            if (is_utf8_invariant_string_loc(pv, len, &ep)) sv_setpvs(out, "yes");
+            else sv_setpvf(out, "no at %d", (int)(ep - pv));
+        } else if (strEQ(which, "infnan")) {
+            sv_setpv(out, isinfnan(SvNV(ST(1))) ? "infnan" : "finite");
+        } else if (strEQ(which, "error_log")) {
+            sv_setpv(out, Perl_error_log == PerlIO_stderr() ? "stderr" : "other");
+        } else if (strEQ(which, "targi")) {
+            TARGi(SvIV(ST(1)) * 2, 1);
+            ST(0) = TARG;
+            XSRETURN(1);
+        } else {
+            Direntry_t *d = NULL;
+            U32 flag = SVppv_STATIC;
+            PERL_UNUSED_VAR(d);
+            PERL_UNUSED_VAR(flag);
+            if (0) {
+                CvISXSUB_on(cv);
+                CvISXSUB_off(cv);
+            }
+            PERL_FLUSHALL_FOR_CHILD;
+            sv_setpvs(out, "compiled");
+        }
+        ST(0) = out;
+        XSRETURN(1);
+    }
+}
+
 /* native_string(): the address of a string of this module's, "native
  * bytes", as a C function returns a buffer FFI::Platypus hands to
  * buffer_to_scalar (unpack 'P'). */
@@ -7422,6 +7761,22 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::reap_children", XS_PerlAPI_reap_children);
     newXS_deffile("PerlAPI::spawn_exit", XS_PerlAPI_spawn_exit);
     newXS_deffile("PerlAPI::wait_child", XS_PerlAPI_wait_child);
+    newXS_deffile("PerlAPI::sort_keyed", XS_PerlAPI_sort_keyed);
+    newXS_deffile("PerlAPI::handle_signals", XS_PerlAPI_handle_signals);
+    newXS_deffile("PerlAPI::signal_noted", XS_PerlAPI_signal_noted);
+    newXS_deffile("PerlAPI::rsignal_note", XS_PerlAPI_rsignal_note);
+    newXS_deffile("PerlAPI::exit_with", XS_PerlAPI_exit_with);
+    newXS_deffile("PerlAPI::note_with_rsignal", XS_PerlAPI_note_with_rsignal);
+    newXS_deffile("PerlAPI::exit_failing", XS_PerlAPI_exit_failing);
+    newXS_deffile("PerlAPI::char_classes", XS_PerlAPI_char_classes);
+    newXS_deffile("PerlAPI::private_pok", XS_PerlAPI_private_pok);
+    newXS_deffile("PerlAPI::local_slot", XS_PerlAPI_local_slot);
+    newXS_deffile("PerlAPI::uvar_trace", XS_PerlAPI_uvar_trace);
+    newXS_deffile("PerlAPI::uvar_counts", XS_PerlAPI_uvar_counts);
+    newXS_deffile("PerlAPI::vstring_of", XS_PerlAPI_vstring_of);
+    newXS_deffile("PerlAPI::small_names", XS_PerlAPI_small_names);
+    newXS_deffile("PerlAPI::event_like_thing", XS_PerlAPI_event_like_thing);
+    newXS_deffile("PerlAPI::event_like_ptr", XS_PerlAPI_event_like_ptr);
     newXS_deffile("PerlAPI::ssnew_after_scope", XS_PerlAPI_ssnew_after_scope);
     newXS_deffile("PerlAPI::entersub_seen", XS_PerlAPI_entersub_seen);
     Perl_xs_boot_epilog(aTHX_ ax);

@@ -3,6 +3,7 @@
  * and opcode.h by gen_opnames.py; do not edit by hand. */
 #ifndef GOPERL_OPNAMES_H
 #define GOPERL_OPNAMES_H
+#pragma GCC system_header
 
 typedef enum opcode {
     OP_NULL = 0,

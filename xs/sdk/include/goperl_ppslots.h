@@ -8,6 +8,7 @@
  * goperl_newop_dispatch(pTHX_ int, OP *) declared. */
 #ifndef GOPERL_PPSLOTS_H
 #define GOPERL_PPSLOTS_H
+#pragma GCC system_header
 
 static OP *goperl_pp_slot_0(pTHX) { return goperl_pp_dispatch(aTHX_ 0); }
 static OP *goperl_pp_slot_1(pTHX) { return goperl_pp_dispatch(aTHX_ 1); }

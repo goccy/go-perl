@@ -431,6 +431,28 @@ func TestNativeWaitpidOfAnIsolatedProgram(t *testing.T) {
 	}
 }
 
+// my_exit ends the program from inside a native call with the status it is
+// given, as `exit` does (END blocks run); my_failure_exit ends it with 255
+// when neither $! nor $? says otherwise. Before, neither name existed in
+// the SDK.
+func TestNativeCodeEndsTheProgram(t *testing.T) {
+	for _, tc := range []struct {
+		name, call, out string
+		status          int
+	}{
+		{"my_exit", `PerlAPI::exit_with(3)`, "end ran\n", 3},
+		{"my_failure_exit", `$! = 0; $? = 0; PerlAPI::exit_failing()`, "end ran\n", 255},
+	} {
+		status, stdout, stderr := runForkingProgram(t,
+			`use PerlAPI; $| = 1; END { print "end ran\n" }`,
+			tc.call+`; print "not here\n";`,
+		)
+		if status != tc.status || stdout != tc.out {
+			t.Errorf("%s: status=%d stdout=%q stderr=%q, want status=%d stdout=%q", tc.name, status, stdout, stderr, tc.status, tc.out)
+		}
+	}
+}
+
 // A function a module gave to call_atexit before a fork releases what the
 // module keeps: it runs once, when the parent ends, and not when the child
 // does.

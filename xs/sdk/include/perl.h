@@ -44,6 +44,13 @@
  * refuses a mismatch. */
 #ifndef GOPERL_XS_SDK_PERL_H
 #define GOPERL_XS_SDK_PERL_H
+/* The SDK's headers are compiled as the system's are: a module built
+ * with warnings made errors (-Werror, -Wextra,
+ * -Werror=declaration-after-statement) compiles against them as it does
+ * against perl's, whose headers are declarations and macros only; the
+ * functions and initializers of these headers warn of nothing in the
+ * module's code. Each header says so of itself. */
+#pragma GCC system_header
 
 /* The loader's entry points and the state the translation units of a module
  * share have C linkage in whatever language includes the header: a C++
@@ -3064,7 +3071,7 @@ static SV *goperl_newSVnv(goperl_frame_t *f, double d) {
 
 static SV *goperl_newSVpv(goperl_frame_t *f, const char *s, STRLEN len) {
     if (!s) return GOPERL_SV(goperl_do_op(f, GOPERL_OP_NEW_SV, 0, 0, 0, 0));
-    if (len == 0) len = strlen(s);
+    if (len == 0) len = __builtin_strlen(s);
     goperl_flush(f);
     return (SV *)(uintptr_t)goperl_direct_new_pvn(f, s, (uint64_t)len);
 }
@@ -3176,7 +3183,7 @@ static void goperl_sv_setpvn(goperl_frame_t *f, SV *sv, const char *p,
 static void goperl_sv_setpv(goperl_frame_t *f, SV *sv, const char *p)
     __attribute__((unused));
 static void goperl_sv_setpv(goperl_frame_t *f, SV *sv, const char *p) {
-    goperl_sv_setpvn(f, sv, p, p ? strlen(p) : 0);
+    goperl_sv_setpvn(f, sv, p, p ? __builtin_strlen(p) : 0);
 }
 #define sv_setpvn(sv, p, l) \
     goperl_sv_setpvn(_gof, (SV *)(sv), (p), (STRLEN)(l))
@@ -3222,8 +3229,8 @@ static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p)
     __attribute__((unused));
 static void goperl_sv_catpv(goperl_frame_t *f, SV *sv, const char *p) {
     if (!p) return;
-    goperl_do_op(f, GOPERL_OP_SV_CATPVN, GOPERL_TOK(sv), (uint64_t)strlen(p),
-                 p, (uint64_t)strlen(p));
+    goperl_do_op(f, GOPERL_OP_SV_CATPVN, GOPERL_TOK(sv), (uint64_t)__builtin_strlen(p),
+                 p, (uint64_t)__builtin_strlen(p));
 }
 #define sv_catpv(d, p) goperl_sv_catpv(_gof, (SV *)(d), (p))
 #define sv_catpvs(d, s) sv_catpvn((d), "" s "", sizeof(s) - 1)
@@ -3558,28 +3565,28 @@ static SV **goperl_hv_store(goperl_frame_t *f, HV *hv, const char *key,
 
 #define gv_stashpv(name, flags) \
     ({ GOPERL_ONCE(goperl_gv_stashpv_name_, name); \
-       ((HV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_STASHPV, (uint64_t)(int64_t)(flags), 0, (goperl_gv_stashpv_name_), strlen(goperl_gv_stashpv_name_)))); })
+       ((HV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_STASHPV, (uint64_t)(int64_t)(flags), 0, (goperl_gv_stashpv_name_), __builtin_strlen(goperl_gv_stashpv_name_)))); })
 #define sv_bless(rv, stash) \
     GOPERL_SV(goperl_op0(GOPERL_OP_SV_BLESS, GOPERL_TOK(rv), GOPERL_TOK(stash)))
 #define sv_isa(sv, name) \
     ({ GOPERL_ONCE(goperl_sv_isa_name_, name); \
-       ((int)goperl_ops(GOPERL_OP_SV_ISA, GOPERL_TOK(sv), 0, (goperl_sv_isa_name_), strlen(goperl_sv_isa_name_))); })
+       ((int)goperl_ops(GOPERL_OP_SV_ISA, GOPERL_TOK(sv), 0, (goperl_sv_isa_name_), __builtin_strlen(goperl_sv_isa_name_))); })
 #define sv_derived_from(sv, name) \
     ({ GOPERL_ONCE(goperl_sv_derived_from_name_, name); \
-       ((int)goperl_ops(GOPERL_OP_SV_DERIVED_FROM, GOPERL_TOK(sv), 0, (goperl_sv_derived_from_name_), strlen(goperl_sv_derived_from_name_))); })
+       ((int)goperl_ops(GOPERL_OP_SV_DERIVED_FROM, GOPERL_TOK(sv), 0, (goperl_sv_derived_from_name_), __builtin_strlen(goperl_sv_derived_from_name_))); })
 #define get_sv(name, flags) \
     ({ GOPERL_ONCE(goperl_get_sv_name_, name); \
-       GOPERL_SV(goperl_ops(GOPERL_OP_GET_SV, (uint64_t)(int64_t)(flags), 0, (goperl_get_sv_name_), strlen(goperl_get_sv_name_))); })
+       GOPERL_SV(goperl_ops(GOPERL_OP_GET_SV, (uint64_t)(int64_t)(flags), 0, (goperl_get_sv_name_), __builtin_strlen(goperl_get_sv_name_))); })
 #define get_cv(name, flags) \
     ({ GOPERL_ONCE(goperl_get_cv_name_, name); \
-       ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_GET_CV, (uint64_t)(int64_t)(flags), 0, (goperl_get_cv_name_), strlen(goperl_get_cv_name_)))); })
+       ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_GET_CV, (uint64_t)(int64_t)(flags), 0, (goperl_get_cv_name_), __builtin_strlen(goperl_get_cv_name_)))); })
 #define get_cvs(name, flags) get_cv("" name "", (flags))
 #define get_hv(name, flags) \
     ({ GOPERL_ONCE(goperl_get_hv_name_, name); \
-       ((HV *)GOPERL_SV(goperl_ops(GOPERL_OP_GET_HV, (uint64_t)(int64_t)(flags), 0, (goperl_get_hv_name_), strlen(goperl_get_hv_name_)))); })
+       ((HV *)GOPERL_SV(goperl_ops(GOPERL_OP_GET_HV, (uint64_t)(int64_t)(flags), 0, (goperl_get_hv_name_), __builtin_strlen(goperl_get_hv_name_)))); })
 #define gv_fetchpv(name, flags, svt) \
     ({ GOPERL_ONCE(goperl_gv_fetchpv_name_, name); \
-       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCH, (uint64_t)(int64_t)(flags), (uint64_t)(int64_t)(svt), (goperl_gv_fetchpv_name_), strlen(goperl_gv_fetchpv_name_)))); })
+       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCH, (uint64_t)(int64_t)(flags), (uint64_t)(int64_t)(svt), (goperl_gv_fetchpv_name_), __builtin_strlen(goperl_gv_fetchpv_name_)))); })
 #define gv_fetchpvs(name, flags, svt) gv_fetchpv("" name "", (flags), (svt))
 
 static SV *goperl_sv_2cv(goperl_frame_t *f, SV *sv, HV **stash, GV **gvp,
@@ -3601,7 +3608,7 @@ static SV *goperl_sv_setref_iv(goperl_frame_t *f, SV *rv,
                                const char *classname, int64_t iv) {
     /* newSVrv (selector 1 of SV_STR; flag bit 0: no class), then the value */
     uint64_t sv = goperl_do_op3(f, GOPERL_OP_SV_STR, GOPERL_TOK(rv), ((uint64_t)(classname ? 0 : 1) << 32) |
-            (uint32_t)(classname ? strlen(classname) : 0), (uint64_t)(1), classname ? classname : "", classname ? strlen(classname) : 0);
+            (uint32_t)(classname ? __builtin_strlen(classname) : 0), (uint64_t)(1), classname ? classname : "", classname ? __builtin_strlen(classname) : 0);
     goperl_do_op(f, GOPERL_OP_SV_SETIV, sv, (uint64_t)iv, 0, 0);
     return rv;
 }
@@ -3925,7 +3932,18 @@ static void goperl_curcop_writeback(goperl_frame_t *f);
 static void goperl_pads_flush(goperl_frame_t *f);
 static void goperl_cx_writeback(goperl_frame_t *f);
 static void goperl_statcache_writeback(goperl_frame_t *f);
+/* The head of an SV's chain of magic that native code stored through
+ * SvMAGIC (Event and Tk link a MAGIC of their own onto the end of a chain
+ * that was empty): what the loader keeps is that head from then on. */
+static void goperl_svmagic_writeback(goperl_frame_t *f) {
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    if (sh && sh->svmagic_sv && sh->svmagic_val != sh->svmagic_orig) {
+        goperl_api_magic_set_head(f, sh->svmagic_sv, sh->svmagic_val);
+        sh->svmagic_orig = sh->svmagic_val;
+    }
+}
 static void goperl_flush(goperl_frame_t *f) {
+    goperl_svmagic_writeback(f);
     goperl_svcur_writeback(f);
     goperl_curcop_writeback(f);
     goperl_parser_push(f);
@@ -4592,7 +4610,7 @@ static int PerlIO_binmode(pTHX_ const void *h, int iotype, int omode,
     const uint64_t ok = goperl_pio(
         _gof, GOPERL_PIO_BINMODE, h,
         ((uint64_t)(uint32_t)iotype << 32) | (uint32_t)omode,
-        names ? names : "", names ? strlen(names) : 0);
+        names ? names : "", names ? __builtin_strlen(names) : 0);
     if (!ok) goperl_errno_from_interp(_gof);
     return ok ? 1 : 0;
 }
@@ -4600,7 +4618,7 @@ static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
                                const char *names) __attribute__((unused));
 static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
                                const char *names) {
-    const size_t ml = mode ? strlen(mode) : 0, nl = names ? strlen(names) : 0;
+    const size_t ml = mode ? __builtin_strlen(mode) : 0, nl = names ? __builtin_strlen(names) : 0;
     char *req = (char *)malloc(ml + nl + 2);
     if (!req) goperl_croakf(_gof, "%s", "Out of memory!");
     if (ml) memcpy(req, mode, ml);
@@ -4625,7 +4643,7 @@ static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
 static int goperl_pio_puts(goperl_frame_t *f, const void *h, const char *s2)
     __attribute__((unused));
 static int goperl_pio_puts(goperl_frame_t *f, const void *h, const char *s2) {
-    return (int)goperl_pio_write(f, h, s2, strlen(s2));
+    return (int)goperl_pio_write(f, h, s2, __builtin_strlen(s2));
 }
 #define PerlIO_puts(io, s2) goperl_pio_puts(_gof, (io), (s2))
 #define PerlIO_putc(io, c) \
@@ -4800,18 +4818,19 @@ static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
 #define STR_WITH_LEN(s) ("" s ""), (sizeof(s) - 1)
 #define CALL_FPTR(fptr) (*(fptr))
 
-#define XSPROTO(name) void name(pTHX_ CV *cv)
+/* as perl's XSUB.h: the CV an XSUB is called for may go unused */
+#define XSPROTO(name) void name(pTHX_ CV *cv __attribute__((unused)))
 /* as perl's XSUB.h: an exported XSUB has C linkage in C++ (the boot
  * function XSLoader looks up by name among them) */
 #ifdef __cplusplus
 #define XS_EXTERNAL(name) \
-    extern "C" __attribute__((visibility("default"))) void name(pTHX_ CV *cv)
+    extern "C" __attribute__((visibility("default"))) void name(pTHX_ CV *cv __attribute__((unused)))
 #else
 #define XS_EXTERNAL(name) \
-    __attribute__((visibility("default"))) void name(pTHX_ CV *cv)
+    __attribute__((visibility("default"))) void name(pTHX_ CV *cv __attribute__((unused)))
 #endif
 #define XS(name) XS_EXTERNAL(name)
-#define XS_INTERNAL(name) static void name(pTHX_ CV *cv)
+#define XS_INTERNAL(name) static void name(pTHX_ CV *cv __attribute__((unused)))
 
 static void goperl_arena_free_all(void);
 static void goperl_opreg_clear(void);
@@ -5216,7 +5235,7 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
     size_t o = 0;
     if (!buf) goperl_croakf(f, "Out of memory!");
     if (method) {
-        size_t ml = strlen(method) + 1;
+        size_t ml = __builtin_strlen(method) + 1;
         if (ml > 255) ml = 255;
         memcpy(buf, method, ml);
         buf[ml - 1] = '\0';
@@ -5251,7 +5270,7 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
 #define call_sv(sv, flags) goperl_do_call(_gof, (SV *)(sv), 0, (flags))
 static I32 goperl_call_pv(goperl_frame_t *f, const char *name, I32 flags) {
     uint64_t cv =
-        goperl_do_op(f, GOPERL_OP_GET_CV, GV_ADD, 0, name, strlen(name));
+        goperl_do_op(f, GOPERL_OP_GET_CV, GV_ADD, 0, name, __builtin_strlen(name));
     return goperl_do_call(f, (SV *)(uintptr_t)cv, 0, flags);
 }
 #define call_pv(name, flags) goperl_call_pv(_gof, (name), (flags))
@@ -5298,7 +5317,7 @@ static const char *goperl_intern(const char *p, size_t n) {
     for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)p[i]) * 16777619u;
     h %= GOPERL_INTERN_BUCKETS;
     for (goperl_intern_ent_t *e = goperl_intern_v[h]; e; e = e->next)
-        if (strlen(e->s) == n && memcmp(e->s, p, n) == 0) return e->s;
+        if (__builtin_strlen(e->s) == n && memcmp(e->s, p, n) == 0) return e->s;
     goperl_intern_ent_t *e =
         (goperl_intern_ent_t *)malloc(sizeof(goperl_intern_ent_t) + n);
     if (!e) return "";
@@ -6926,15 +6945,13 @@ static const PERL_CONTEXT *goperl_caller_cx(goperl_frame_t *f, I32 level,
                              (const char *)(name), (int64_t)(namlen)))
 /* SvMAGIC is WRITABLE (DBI splices tie magic by assigning the chain
  * head): reads load a synced slot; a changed slot is written back through
- * magic_set_head on the next SvMAGIC use. Guest-attached magic (ties) is
- * not mirrored, so such splices see only host-attached entries. */
+ * magic_set_head at the next flush (before the next operation, and when the
+ * native call ends). Guest-attached magic (ties) is not mirrored, so such
+ * splices see only host-attached entries. */
 #define goperl_svmagic_sv_v (GOPERL_SHARED->svmagic_sv)
 #define goperl_svmagic_val_v (GOPERL_SHARED->svmagic_val)
 #define goperl_svmagic_orig_v (GOPERL_SHARED->svmagic_orig)
 static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
-    if (goperl_svmagic_sv_v && goperl_svmagic_val_v != goperl_svmagic_orig_v)
-        goperl_api_magic_set_head(f, goperl_svmagic_sv_v,
-                                     goperl_svmagic_val_v);
     goperl_flush(f);
     goperl_svmagic_val_v = goperl_api_magic_chain(f, GOPERL_TOK(sv));
     goperl_svmagic_orig_v = goperl_svmagic_val_v;
@@ -7008,16 +7025,33 @@ struct ufuncs {
     IV uf_index;
 };
 #define PERL_MAGIC_uvar 'U'
+/* perl's vtable of uvar magic: the functions of the MAGIC's struct ufuncs
+ * with its index. A module that attaches the magic without the struct and
+ * fills the MAGIC in afterwards (Tk's variable traces) puts this one in
+ * it. */
+static int goperl_uvar_get(SV *sv, MAGIC *mg) {
+    const struct ufuncs *uf = (const struct ufuncs *)mg->mg_ptr;
+    if (uf && uf->uf_val) uf->uf_val(uf->uf_index, sv);
+    return 0;
+}
+static int goperl_uvar_set(SV *sv, MAGIC *mg) {
+    const struct ufuncs *uf = (const struct ufuncs *)mg->mg_ptr;
+    if (uf && uf->uf_set) uf->uf_set(uf->uf_index, sv);
+    return 0;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) MGVTBL PL_vtbl_uvar = {
+    goperl_uvar_get, goperl_uvar_set, 0, 0, 0, 0, 0, 0};
 static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                             const char *name, I32 namlen) {
-    if (how == PERL_MAGIC_uvar && name) {
+    if (how == PERL_MAGIC_uvar) {
         /* The name is the module's struct ufuncs, copied (namlen is its
-         * size) or kept (0). A shorter one is not: a module that attaches
-         * the magic with some other name puts its own vtable in the MAGIC
-         * afterwards (SWIG's variables), and the interpreter then reports
-         * both reads and writes, for that vtable to handle. */
+         * size) or kept (0). A shorter one is not, nor is none: a module
+         * that attaches the magic with some other name, or with none,
+         * puts its own vtable or struct in the MAGIC afterwards (SWIG's
+         * variables, Tk's traces), and the interpreter then reports both
+         * reads and writes, for that vtable to handle. */
         uint64_t calls = 3;
-        if (namlen == 0 || namlen >= (I32)sizeof(struct ufuncs)) {
+        if (name && (namlen == 0 || namlen >= (I32)sizeof(struct ufuncs))) {
             const struct ufuncs *uf = (const struct ufuncs *)name;
             calls = (uf->uf_val ? 1 : 0) | (uf->uf_set ? 2 : 0);
         }
@@ -7146,10 +7180,10 @@ static U32 goperl_key_hash(goperl_frame_t *f, const char *key, uint64_t len)
 /* Method resolution with ISA walk (returns the method's GV, or NULL). */
 #define gv_fetchmethod(stash, name) \
     ({ GOPERL_ONCE(goperl_gv_fetchmethod_name_, name); \
-       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHMETHOD, GOPERL_TOK(stash), 1, (goperl_gv_fetchmethod_name_), strlen(goperl_gv_fetchmethod_name_)))); })
+       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHMETHOD, GOPERL_TOK(stash), 1, (goperl_gv_fetchmethod_name_), __builtin_strlen(goperl_gv_fetchmethod_name_)))); })
 #define gv_fetchmethod_autoload(stash, name, autoload) \
     ({ GOPERL_ONCE(goperl_gv_fetchmethod_autoload_name_, name); \
-       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHMETHOD, GOPERL_TOK(stash), (autoload) ? 1 : 0, (goperl_gv_fetchmethod_autoload_name_), strlen(goperl_gv_fetchmethod_autoload_name_)))); })
+       ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHMETHOD, GOPERL_TOK(stash), (autoload) ? 1 : 0, (goperl_gv_fetchmethod_autoload_name_), __builtin_strlen(goperl_gv_fetchmethod_autoload_name_)))); })
 
 /* sv_reftype: the "HASH"/"ARRAY"/"Class::Name" string. Interned host
  * copies, stable for the process like every SDK-returned name. */
@@ -7336,7 +7370,7 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
                  sizeof("require attributes") - 1);
     goperl_gword_t toks[16];
     int n = 0;
-    size_t pl = strlen(stashpv);
+    size_t pl = __builtin_strlen(stashpv);
     uint64_t classsv = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0,
                                     sizeof("attributes") - 1, "attributes",
                                     sizeof("attributes") - 1);
@@ -7349,7 +7383,7 @@ static void apply_attrs_string(const char *stashpv, CV *cv,
         goperl_do_op(f, GOPERL_OP_NEW_RV_INC, GOPERL_TOK(cv), 0, 0, 0);
     goperl_do_op(f, GOPERL_OP_SV_MORTAL, rv, 0, 0, 0);
     toks[n++] = rv;
-    const char *p = attrstr, *e = attrstr + (len ? len : strlen(attrstr));
+    const char *p = attrstr, *e = attrstr + (len ? len : __builtin_strlen(attrstr));
     while (p < e && n < 15) {
         while (p < e && *p == ' ') p++;
         const char *q = p;
@@ -7474,7 +7508,7 @@ static void goperl_save_defsv(goperl_frame_t *f) {
 #define hv_undef(hv) ((void)goperl_op0(GOPERL_OP_HV_CLEAR, GOPERL_TOK(hv), 0))
 static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
     uint64_t gv = goperl_do_op(f, GOPERL_OP_GV_FETCH, (uint64_t)(int64_t)flags,
-                               (uint64_t)SVt_PVAV, name, strlen(name));
+                               (uint64_t)SVt_PVAV, name, __builtin_strlen(name));
     if (!gv) return 0;
     return (AV *)GOPERL_SV(
         goperl_do_op(f, GOPERL_OP_GV_PTR, gv, 3 /* GvAV */, 0, 0));
@@ -7494,7 +7528,7 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
     ((void)(PL_tainting && (GOPERL_SVCALL(GOPERL_SVCALL_TAINT_ENV, 0, 0), 0)))
 #define TAINT_PROPER(s) \
     ({ GOPERL_ONCE(goperl_taint_proper_s_, s); \
-       (void)(PL_tainting && (GOPERL_SVSTR(GOPERL_SVSTR_TAINT_PROPER, 0, 0, (goperl_taint_proper_s_), strlen(goperl_taint_proper_s_)), 0)); })
+       (void)(PL_tainting && (GOPERL_SVSTR(GOPERL_SVSTR_TAINT_PROPER, 0, 0, (goperl_taint_proper_s_), __builtin_strlen(goperl_taint_proper_s_)), 0)); })
 #define I_STDARG 1
 #define POPi ((IV)SvIV(POPs))
 #define POPu ((UV)SvUV(POPs))
@@ -7564,8 +7598,8 @@ static void goperl_gv_efullname(goperl_frame_t *f, SV *sv, GV *gv) {
     char buf[512];
     snprintf(buf, sizeof buf, "%s::%s", pkg && *pkg ? pkg : "main",
              name ? name : "?");
-    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), strlen(buf), buf,
-                 strlen(buf));
+    goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), __builtin_strlen(buf), buf,
+                 __builtin_strlen(buf));
 }
 #define gv_efullname(sv, gv) goperl_gv_efullname(_gof, (SV *)(sv), (GV *)(gv))
 /* The key of an entry (hv.c's hv_iterkey): its bytes where the entry's key
@@ -7724,7 +7758,7 @@ static FILE *goperl_pio_stdio(goperl_frame_t *f, const void *h, int sel,
                               const char *mode, goperl_gword_t *gstream) {
     const char *m = mode ? mode : "";
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
-        f, goperl_pio(f, sel, h, 0, m, strlen(m) + 1));
+        f, goperl_pio(f, sel, h, 0, m, __builtin_strlen(m) + 1));
     *gstream = 0;
     if (!w || (int32_t)w[0] < 0) return 0;
     *gstream = w[1];
@@ -7866,7 +7900,7 @@ static void goperl_pio_forget(goperl_frame_t *f, const void *h) {
 static PerlIO *goperl_perlio_open(goperl_frame_t *f, const char *path,
                                   const char *mode) {
     char buf[1024];
-    size_t ml = strlen(mode), pl = strlen(path);
+    size_t ml = __builtin_strlen(mode), pl = __builtin_strlen(path);
     if (ml + pl + 2 > sizeof buf) return 0;
     memcpy(buf, mode, ml + 1);
     memcpy(buf + ml + 1, path, pl + 1);
@@ -7896,7 +7930,7 @@ static PerlIO *goperl_pio_fdopen(goperl_frame_t *f, int fd, const char *mode) {
     if (!mode) mode = "r";
     PerlIO *const io = (PerlIO *)(uintptr_t)goperl_pio(
         f, GOPERL_PIO_FDOPEN, 0, (uint64_t)(int64_t)fd, mode,
-        strlen(mode) + 1);
+        __builtin_strlen(mode) + 1);
     if (!io) goperl_errno_from_interp(f);
     return io;
 }
@@ -8463,7 +8497,7 @@ static void goperl_load_module(goperl_frame_t *f, U32 flags, SV *name,
         goperl_croakf(f, "load_module: a module name of %llu bytes",
                       (unsigned long long)len);
     snprintf(buf, sizeof buf, "require %.*s", (int)len, p ? p : "");
-    goperl_do_op(f, GOPERL_OP_EVAL_PV, 1, 0, buf, strlen(buf));
+    goperl_do_op(f, GOPERL_OP_EVAL_PV, 1, 0, buf, __builtin_strlen(buf));
     if (ver) {
         dSP;
         ENTER;
@@ -8801,10 +8835,10 @@ static SV *goperl_hv_iternextsv(goperl_frame_t *f, HV *hv, char **keyp,
 #define eval_pv(code, croak_on_err) \
     ({ GOPERL_ONCE(goperl_eval_pv_code_, code); \
        goperl_optree_flush(_gof); /* the code run reads the ops as native code left them */ \
-       GOPERL_SV(goperl_ops(GOPERL_OP_EVAL_PV, (uint64_t)(int64_t)(croak_on_err), 0, (goperl_eval_pv_code_), strlen(goperl_eval_pv_code_))); })
+       GOPERL_SV(goperl_ops(GOPERL_OP_EVAL_PV, (uint64_t)(int64_t)(croak_on_err), 0, (goperl_eval_pv_code_), __builtin_strlen(goperl_eval_pv_code_))); })
 #define newCONSTSUB(stash, name, sv) \
     ({ GOPERL_ONCE(goperl_newCONSTSUB_name_, name); \
-       ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_NEW_CONSTSUB, GOPERL_TOK(stash), GOPERL_TOK(sv), (goperl_newCONSTSUB_name_), strlen(goperl_newCONSTSUB_name_)))); })
+       ((CV *)GOPERL_SV(goperl_ops(GOPERL_OP_NEW_CONSTSUB, GOPERL_TOK(stash), GOPERL_TOK(sv), (goperl_newCONSTSUB_name_), __builtin_strlen(goperl_newCONSTSUB_name_)))); })
 static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
                                  STRLEN len, U32 flags)
     __attribute__((unused));
@@ -8877,14 +8911,14 @@ static void goperl_sv_inc(goperl_frame_t *f, SV *sv) {
        ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCHFILE, 0, (uint64_t)(goperl_gv_fetchfile_flags_namelen_), (name), (uint64_t)(goperl_gv_fetchfile_flags_namelen_)))); })
 #define gv_fetchfile(name) \
     ({ GOPERL_ONCE(goperl_gv_fetchfile_name_, name); \
-       gv_fetchfile_flags((goperl_gv_fetchfile_name_), strlen(goperl_gv_fetchfile_name_), 0); })
+       gv_fetchfile_flags((goperl_gv_fetchfile_name_), __builtin_strlen(goperl_gv_fetchfile_name_), 0); })
 
 /* my_strlcat (perl's bundled strlcat) */
 static Size_t my_strlcat(char *dst, const char *src, Size_t size)
     __attribute__((unused));
 static Size_t my_strlcat(char *dst, const char *src, Size_t size) {
-    Size_t used = strlen(dst);
-    Size_t length = strlen(src);
+    Size_t used = __builtin_strlen(dst);
+    Size_t length = __builtin_strlen(src);
     if (size > 0 && used < size - 1) {
         Size_t copy = size - used - 1;
         if (copy > length) copy = length;
@@ -8963,7 +8997,7 @@ static char *goperl_savepvn(const char *p, size_t n) {
 #define savepvn(p, n) goperl_savepvn((p), (size_t)(n))
 #define savepv(p) \
     ({ GOPERL_ONCE(goperl_savepv_p_, p); \
-       goperl_savepvn((goperl_savepv_p_), strlen(goperl_savepv_p_)); })
+       goperl_savepvn((goperl_savepv_p_), __builtin_strlen(goperl_savepv_p_)); })
 #define memEQ(a, b, n) (memcmp((a), (b), (n)) == 0)
 #define strEQ(a, b) (strcmp((a), (b)) == 0)
 
@@ -10611,7 +10645,7 @@ static void goperl_custom_op_register(goperl_frame_t *f, Perl_ppaddr_t pp,
         goperl_croakf(f, "too many custom ops registered");
     const char *name = XopENTRY(xop, xop_name);
     const char *desc = XopENTRY(xop, xop_desc);
-    const size_t nl = strlen(name) + 1, dl = strlen(desc) + 1;
+    const size_t nl = __builtin_strlen(name) + 1, dl = __builtin_strlen(desc) + 1;
     char *req = (char *)malloc(nl + dl);
     if (!req) goperl_croakf(f, "Out of memory!");
     memcpy(req, name, nl);
@@ -10651,12 +10685,34 @@ enum {
     GOPERL_CC_WORDCHAR = 2,
     GOPERL_CC_SPACE = 3,
     GOPERL_CC_DIGIT = 4,
-    GOPERL_CC_ALPHA = 5
+    GOPERL_CC_ALPHA = 5,
+    GOPERL_CC_UPPER = 6
 };
 static int goperl_charclass_uv(goperl_frame_t *f, int cls, UV cp) {
     return (int)goperl_do_op(f, GOPERL_OP_CHARCLASS,
                              (uint64_t)(uint32_t)cls, (uint64_t)cp, 0, 0);
 }
+/* The classes of a code point, as the interpreter's Unicode tables have
+ * them. */
+#define isALPHA_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_ALPHA, (UV)(c))
+#define isDIGIT_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_DIGIT, (UV)(c))
+#define isSPACE_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_SPACE, (UV)(c))
+#define isUPPER_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_UPPER, (UV)(c))
+#define isWORDCHAR_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_WORDCHAR, (UV)(c))
+#define isALNUM_uvchr(c) isWORDCHAR_uvchr(c)
+#define isIDFIRST_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_IDFIRST, (UV)(c))
+#define isIDCONT_uvchr(c) goperl_charclass_uv(_gof, GOPERL_CC_IDCONT, (UV)(c))
+#define isALPHA_uni(c) isALPHA_uvchr(c)
+#define isDIGIT_uni(c) isDIGIT_uvchr(c)
+#define isUPPER_uni(c) isUPPER_uvchr(c)
+#define isWORDCHAR_uni(c) isWORDCHAR_uvchr(c)
+/* The length of the character at s, but not past a NUL that ends the
+ * string inside it. */
+#define UTF8_CHK_SKIP(s)                                                   \
+    ({ const U8 *const goperl_ucs_ = (const U8 *)(s);                      \
+       goperl_ucs_[0] == 0 ? (STRLEN)1                                     \
+                           : (STRLEN)strnlen((const char *)goperl_ucs_,    \
+                                             (size_t)UTF8SKIP(goperl_ucs_)); })
 static UV goperl_utf8_cp(goperl_frame_t *f, const U8 *p, const U8 *e) {
     /* decode one UTF-8 char (the buffer is guest linestr text, always
      * well-formed by the time the lexer hands it out) */
@@ -10799,7 +10855,7 @@ static const char *goperl_scan_version(goperl_frame_t *f, const char *s, SV *rv,
     const uint64_t sel = 17 | ((uint64_t)(qv ? 1 : 0) << 32);
     const uint64_t taken = g ? goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(rv), g, sel, 0, 0)
                              : goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(rv), 0, sel, s,
-                                             strlen(s));
+                                             __builtin_strlen(s));
     return s + taken;
 }
 #define scan_version(s, rv, qv) \
@@ -11086,7 +11142,7 @@ static CV *goperl_newattrsub(goperl_frame_t *f, I32 floor, OP *o, OP *proto,
 static OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv)
     __attribute__((unused));
 static OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv) {
-    const size_t len = pv ? strlen(pv) : 0;
+    const size_t len = pv ? __builtin_strlen(pv) : 0;
     /* the two words, then the string */
     char *req = (char *)malloc(16 + len + 1);
     if (!req) goperl_croakf(f, "Out of memory!");

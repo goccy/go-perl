@@ -4,6 +4,7 @@
  * cross to the interpreter unchanged, so they must be its own. */
 #ifndef GOPERL_XS_SDK_CONSTS_H
 #define GOPERL_XS_SDK_CONSTS_H
+#pragma GCC system_header
 #ifndef CVf_ANONCONST
 #define CVf_ANONCONST 0x20000
 #endif

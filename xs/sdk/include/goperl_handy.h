@@ -8,6 +8,7 @@
  * locale forms are the ASCII ones. */
 #ifndef GOPERL_XS_SDK_HANDY_H
 #define GOPERL_XS_SDK_HANDY_H
+#pragma GCC system_header
 
 #ifndef CC_WORDCHAR_
 #define CC_WORDCHAR_ 0

@@ -3,14 +3,19 @@
 package xs_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
+
+	perl "github.com/goccy/go-perl"
+	goperlfs "github.com/goccy/go-perl/fs"
 )
 
 // A module that sets a signal aside for a moment — it keeps the handler it
@@ -471,4 +476,100 @@ func TestNativeModuleIsNotInItsPackageUntilLoaded(t *testing.T) {
 		{"after", `join ",", (defined &PerlAPI::bootstrap ? "bootstrap" : "no bootstrap"), (defined &PerlAPI::flags ? "functions" : "no functions")`, "bootstrap,functions"},
 		{"a module nobody registered", `eval { XSLoader::load("No::Such::Native::Module") }; $@ ? "refused" : "loaded"`, "refused"},
 	})
+}
+
+// The signal handler of the interpreter (PL_sighandlerp) may be a function
+// of a module's own, as Tk's Event makes it: a signal that arrives for a
+// %SIG handler is given to that function, with the host's number of the
+// signal, in place of the handler; with the interpreter's own put back, the
+// %SIG handler runs again. rsignal makes a function the process's action
+// for a signal, as on perl, and rsignal_state reports it. Before, neither
+// name existed in the SDK.
+func TestNativeSignalHandlerOfTheInterpreter(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	usr1 := strconv.Itoa(int(syscall.SIGUSR1))
+	runEvalCases(t, p, []evalCase{
+		{"the module's handler gets the signal", `my $got = "none"; local $SIG{USR1} = sub { $got = "perl" }; my $was = PerlAPI::handle_signals(1); kill USR1 => $$; my ($n, $noted) = (0, 0); select undef, undef, undef, 0.01 until $n++ > 200 || $got ne "none" || ($noted = PerlAPI::signal_noted()); PerlAPI::handle_signals(0); "$was $got $noted"`, "interpreter's none " + usr1},
+		{"the %SIG handler with the interpreter's put back", `my $got = "none"; local $SIG{USR1} = sub { $got = "perl" }; kill USR1 => $$; my $n = 0; select undef, undef, undef, 0.01 until $got ne "none" || $n++ > 200; $got . " " . PerlAPI::signal_noted()`, "perl 0"},
+		{"rsignal", `PerlAPI::rsignal_note(` + strconv.Itoa(int(syscall.SIGUSR2)) + `)`, strconv.Itoa(int(syscall.SIGUSR2)) + " state"},
+	})
+}
+
+// Names of the perl API that Tk, Event and Sort::Key use: PL_sortcop, a
+// word native code keeps its comparator's keys in under SAVEVPTR; the
+// character classes of a code point (isUPPER_uvchr and the others) and
+// UTF8_CHK_SKIP; SvPOKp_on and PRIVSHIFT; save_svref of a slot the
+// interpreter knows the place of, and a clear error for one it does not;
+// uvar magic attached without its struct and given perl's vtable
+// afterwards, as Tk traces a variable.
+func TestNativeNamesOfTkEventAndSortKey(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"PL_sortcop ascending", `join ",", PerlAPI::sort_keyed(0, 3, 1, 2)`, "1,2,3,kept"},
+		{"PL_sortcop descending", `join ",", PerlAPI::sort_keyed(1, 3, 1, 2)`, "3,2,1,kept"},
+		{"character classes", `PerlAPI::char_classes(0xC0, 0x3C9, 0x20, 0x663, 0x2D)`, "AUW,AW,S,DW,- 2 1"},
+		{"private string flag", `my $s = "x"; PerlAPI::private_pok($s)`, "private shifts"},
+		{"save_svref of a variable's scalar", `our $slot = "outer"; my $in = PerlAPI::local_slot("gvsv"); "$in/$slot"`, "inner/outer"},
+		{"save_svref of hv_fetch's slot", `our %h = (k => "outer"); eval { PerlAPI::local_slot("helem") }; $@ =~ /^save_svref: the slot is this process's copy of a value/ ? "refused, " . $h{k} : "[$@]"`, "refused, outer"},
+		{"uvar magic traced as Tk does", `my $v = 1; PerlAPI::uvar_trace(\$v); my $x = $v; $v = 2; $x = $v + 1; PerlAPI::uvar_counts()`, "2/1"},
+	})
+}
+
+// A program that is the host process sends itself a signal for which native
+// code made its own handler the process's action (an event loop's signal
+// watcher, EV's or Event's): the process takes the signal, and the native
+// handler runs, also after the program changed what it does with another
+// signal (which makes the Go runtime install its handlers again). Before,
+// the signal was given to the program, whose default action for it ended
+// the program (EV's t/11_signal.t, Event's t/signal.t). Linux only: the
+// runtime asks the kernel for the process's action of a signal.
+func TestNativeSignalActionOfTheHostProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the runtime knows a native signal action from the kernel on Linux")
+	}
+	so := buildPerlAPI(t)
+	report := filepath.Join(t.TempDir(), "report")
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, HostProcess: true, NativeModules: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loadXSModule(t, p, "PerlAPI", so)
+	libdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(libdir, "PerlAPI.pm"),
+		[]byte("package PerlAPI;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usr2 := strconv.Itoa(int(syscall.SIGUSR2))
+	status, err := p.RunProgram(context.Background(), perl.Program{Inc: []string{libdir}, Code: []string{
+		`use PerlAPI; use POSIX ();`,
+		`open my $log, '>', '` + report + `' or die "open: $!";`,
+		`sub noted { for (1 .. 300) { my $n = PerlAPI::signal_noted(); return $n if $n; select undef, undef, undef, 0.01 } 0 }`,
+		`PerlAPI::note_with_rsignal(` + usr2 + `, 1);`,
+		`kill USR2 => $$;`,
+		`print $log "first ", noted(), "\n";`,
+		`local $SIG{ALRM} = sub { };`,
+		`kill USR2 => $$;`,
+		`print $log "after a %SIG change ", noted(), "\n";`,
+		`PerlAPI::note_with_rsignal(` + usr2 + `, 0);`,
+		`close $log or die "close: $!";`,
+	}})
+	if err != nil {
+		p.Close()
+		t.Fatalf("RunProgram: %v (stderr %q)", err, errOut.String())
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, _ := os.ReadFile(report)
+	want := "first " + usr2 + "\nafter a %SIG change " + usr2 + "\n"
+	if status != 0 || string(got) != want {
+		t.Fatalf("status %d, report %q, want %q; stderr %q", status, got, want, errOut.String())
+	}
 }

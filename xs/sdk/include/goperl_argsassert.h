@@ -3,6 +3,7 @@
  * that copy one of those functions. */
 #ifndef GOPERL_XS_SDK_ARGSASSERT_H
 #define GOPERL_XS_SDK_ARGSASSERT_H
+#pragma GCC system_header
 #ifndef PERL_ARGS_ASSERT_ABORT_EXECUTION
 #define PERL_ARGS_ASSERT_ABORT_EXECUTION assert(name)
 #endif

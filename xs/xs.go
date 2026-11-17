@@ -1756,12 +1756,50 @@ func (s *state) keywordHook(req []byte) []byte {
 // magicSetHead implements SvMAGIC_set over the mirror chain: the module
 // relinked the chain itself (typically to unlink the head) and hands us the
 // new head. Unlinked nodes are the module's to free.
-func (s *state) magicSetHead(sv uint64, mg uintptr) {
+//
+// An SV that had no chain gets one: a module links a MAGIC of its own onto
+// the empty chain (Event's watchers, Tk's traces), and the SV has that MAGIC
+// from then on, anchored in the interpreter as one sv_magicext attaches is,
+// so that the chain goes when the SV is freed. Its nodes are the module's:
+// it frees what it allocated, as on perl.
+func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 	s.mu.Lock()
-	if rec := s.magicBySV[sv]; rec != nil {
-		rec.head = mg
+	if rec := s.magicBySV[sv]; rec != nil || mg == 0 {
+		if rec != nil {
+			rec.head = mg
+		}
+		s.mu.Unlock()
+		return
 	}
+	s.nextMagicID++
+	rec := &magicRec{svTok: sv, head: mg, anchorID: s.nextMagicID}
+	s.magicBySV[sv] = rec
+	s.magicByID[rec.anchorID] = rec
 	s.mu.Unlock()
+	if _, err := s.p.XSHelperOp(opMagicAttach, sv, 0, uint64(rec.anchorID), ""); err != nil {
+		f.fail("SvMAGIC_set: " + err.Error())
+		return
+	}
+	// The interpreter reports the accesses the vtables of the chain have
+	// hooks for, as for the magic sv_magicext attaches.
+	var hooks uint64
+	for node := mg; node != 0; {
+		buf := copyIn(node, mgAllocSize)
+		if vtbl := uintptr(binary.LittleEndian.Uint64(buf[mgOffVirtual:])); vtbl != 0 {
+			fns := copyIn(vtbl, 8*8)
+			for bit, off := range []int{vtblOffGet, vtblOffSet, vtblOffLen, vtblOffClear, vtblOffCopy} {
+				if binary.LittleEndian.Uint64(fns[off:]) != 0 {
+					hooks |= 1 << bit
+				}
+			}
+		}
+		node = uintptr(binary.LittleEndian.Uint64(buf[mgOffMore:]))
+	}
+	if hooks != 0 {
+		if _, err := s.p.XSHelperOp(opMagicSetHook, sv, hooks, 0, ""); err != nil {
+			f.fail("SvMAGIC_set: " + err.Error())
+		}
+	}
 }
 
 // magicFreed runs when the guest frees an SV carrying the anchor magic:
@@ -2211,7 +2249,7 @@ func buildVtable() {
 		if f == nil {
 			return 0
 		}
-		stateFor(f.p).magicSetHead(uint64(sv), mg)
+		stateFor(f.p).magicSetHead(f, uint64(sv), mg)
 		return 0
 	})
 	vtable.ppHookSet = purego.NewCallback(func(fr uintptr, opType int32, fn uintptr) uintptr {
