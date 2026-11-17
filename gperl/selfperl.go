@@ -141,11 +141,27 @@ func withInterpreter(program []byte, path string) []byte {
 
 // startedAsPerl reports whether the process was started by the name
 // selfPerl gives the executable: the name the system passed as the
-// command's own (the path on a #! line, or the path a program ran).
+// command's own (the path on a #! line, or the path a program ran). That
+// is also the link in the cache of another home directory: a program's #!
+// line names the link of the home directory it was written under, and a
+// program run with HOME changed (as a test runs one) has another cache. Its
+// directory has the same name, which follows from the executable and the
+// standard library alone, and it is a link to this executable.
 func startedAsPerl() bool {
 	if len(os.Args) == 0 || !filepath.IsAbs(os.Args[0]) || filepath.Base(os.Args[0]) != "perl" {
 		return false
 	}
-	link, _, _, ok := selfPerlPath()
-	return ok && filepath.Clean(os.Args[0]) == link
+	link, exe, _, ok := selfPerlPath()
+	if !ok {
+		return false
+	}
+	arg := filepath.Clean(os.Args[0])
+	if arg == link {
+		return true
+	}
+	if filepath.Base(filepath.Dir(arg)) != filepath.Base(filepath.Dir(link)) {
+		return false
+	}
+	target, err := filepath.EvalSymlinks(arg)
+	return err == nil && target == exe
 }
