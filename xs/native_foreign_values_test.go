@@ -114,7 +114,7 @@ XS_EXTERNAL(boot_Foreign) {
 		name, code, want string
 	}{
 		{"an address of the host process as a scalar", `Foreign::type("host")`, "SV_TYPE: a scalar"},
-		{"an address inside a scalar's head", `Foreign::type("inside")`, "SV_TYPE: a scalar"},
+		{"an address inside a scalar's head mortalized", `Foreign::mortal("inside")`, "SV_MORTAL: a scalar"},
 		{"a stray pointer mortalized", `Foreign::mortal("host")`, "SV_MORTAL: a scalar"},
 		{"a freed scalar set", `Foreign::set("freed")`, "SV_SETIV: a scalar freed already"},
 		{"a stray pointer as an array", `Foreign::store("host")`, "AV_STORE: a scalar"},
@@ -130,6 +130,13 @@ my @a = (1, 2, 3);
 				t.Errorf("got %q, want %q", got, want)
 			}
 		})
+	}
+	// SvTYPE of an address in the interpreter's memory that is no scalar
+	// reads the byte there, as perl's does (XML::Bare asks it of the SvRV
+	// of a string, Overload::FileCheck of `arg + AvMAX(arg)`), and the
+	// program goes on
+	if got, want := requireModule(t, "Foreign", so, `my $t = Foreign::type("inside"); ($t =~ /\A\d+\z/ && $t < 256 ? "a type" : "got $t") . "; then " . join(",", map { $_ * 2 } 1, 2, 3)`), "a type; then 2,4,6"; got != want {
+		t.Errorf("type of an address inside a scalar: got %q, want %q", got, want)
 	}
 	// a null argument of call_sv is perl's too: the sub finds that element
 	// of @_ missing (BEGIN::Lift calls with one)
