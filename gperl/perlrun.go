@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	perl "github.com/goccy/go-perl"
 )
@@ -44,7 +45,8 @@ type perlRunOpts struct {
 // knows itself by ($^X), and the build pipeline's %Config overlay.
 const startupGlue = `sub {
     my ($dir, $exe, $preload) = @_;
-    chdir $dir or die "chdir $dir: $!\n";
+    # the directory the process was started in, which it may not search
+    Internals::start_directory($dir) or die "chdir $dir: $!\n";
     $^X = $exe if defined $exe;
     if (defined $preload) {
         # do FILE returns undef for an unreadable file and for a file whose
@@ -202,7 +204,14 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	dir := opts.dir
 	if dir == "" {
 		if dir, err = os.Getwd(); err != nil {
-			return 1, err
+			// os.Getwd looks at "." when PWD is set, which a directory
+			// the user may not search refuses; getcwd(2) names it (on
+			// Linux), and perl runs there.
+			wd, werr := syscall.Getwd()
+			if werr != nil {
+				return 1, fmt.Errorf("the working directory: %w", err)
+			}
+			dir = wd
 		}
 	}
 	// The path the program can run its own perl by: the one the
