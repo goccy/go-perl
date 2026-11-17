@@ -8,7 +8,7 @@ import (
 // RemoveSelfPerl removes the name the test binary has as the perl command:
 // a test binary is gone after its run, and its name would point nowhere.
 func RemoveSelfPerl() {
-	link, _, ok := selfPerlPath()
+	link, _, _, ok := selfPerlPath()
 	if !ok {
 		return
 	}
