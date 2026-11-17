@@ -6055,14 +6055,21 @@ static inline uint64_t goperl_op_fields_word(const OP *o) {
  * a keyword plugin of native code was handed, after it returned (an
  * assignment to a lexical becomes a padsv_store), and a run loop of native
  * code that ran the op by its shadow would run the pp function of the type
- * the op had before. */
+ * the op had before.
+ * An op whose pp function is native code's own (a custom op's, LRU::Cache's)
+ * is described with what is below it every time, as a pp hook's op is
+ * (__goperl_pp_invoke): the function reads the op's links and kids, which
+ * the interpreter set after native code made the op (its op_next, by which
+ * the function says what runs next, was none when the checker made it). */
 static OP *goperl_op_shadow_as(goperl_frame_t *f, uint64_t tok, uint64_t fields) {
     if (!tok) return 0;
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e && goperl_op_fields_word(&e->op) == fields) return &e->op;
-    return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+    const int native_pp = e && e->op.op_type < OP_max &&
+                          e->op.op_ppaddr != goperl_ppaddr_base(f, e->op.op_type);
+    if (e && !native_pp && goperl_op_fields_word(&e->op) == fields) return &e->op;
+    return goperl_op_describe(f, tok, native_pp ? GOPERL_OPDUMP_SUBTREE : GOPERL_OPDUMP_ONE);
 }
 
 /* An op as a number: its address in the interpreter with the tag, or for
@@ -11296,6 +11303,9 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     f->hostsave_base = goperl_hostsave_n;
     if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
+        /* the copy of the stack a run loop's frame kept */
+        free(f->st_seen);
+        f->st_seen = 0;
         goperl_xs_leave(f);
         return 0;
     }

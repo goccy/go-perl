@@ -1915,7 +1915,18 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
         if (reqlen < 16) goperl_croakf(f, "host call: short run loop request");
         const runops_proc_t fn = (runops_proc_t)goperl_fn_of(f, (uint32_t)req[1]);
         goperl_flush(f);
+        /* The ops the loop runs work on the interpreter's stack, and the
+         * pp function of a custom op (LRU::Cache's) is the module's own,
+         * which the loop calls itself: the frame keeps a copy of the stack
+         * as a pp function's does, fetched when it is first looked at,
+         * handed back before the interpreter runs an op
+         * (goperl_pp_dispatch) and when the loop returns. */
+        f->pp_frame = 1;
+        f->st_stale = 1;
         fn();
+        goperl_pp_stack_push(f);
+        free(f->st_seen);
+        f->st_seen = 0;
         return 0;
     }
     case GOPERL_HOST_SIGHANDLER: { /* [id][signal of the interpreter's] */
