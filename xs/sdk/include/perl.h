@@ -6160,9 +6160,19 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr
 GOPERL_C __attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
 
+/* An op is a shadow of the interpreter's when the registry has it under its
+ * token. An op of the module's own making leaves the SDK's fields of the
+ * struct as they happen to be (`OP cmpop;` on the C stack, as
+ * Syntax::Operator::In makes its comparison op), so its gop says nothing. */
+static int goperl_op_is_shadow(goperl_frame_t *f, const OP *o) {
+    if (!o || !o->gop || !goperl_opreg_v) return 0;
+    const goperl_opreg_ent_t *e = goperl_opreg_find(goperl_opreg_get(f), o->gop);
+    return e && &e->op == o;
+}
+
 static OP *goperl_pp_dispatch(pTHX_ int type) {
     OP *cur = _gof->plop;
-    if (cur && cur->gop) {
+    if (goperl_op_is_shadow(_gof, cur)) {
         /* real guest op under execution: run the true pp for `type`, on
          * the stack as this function leaves it */
         goperl_pp_stack_push(_gof);
