@@ -7635,6 +7635,8 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 #define HV_DELETE 0x40
 static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
                             I32 klen);
+static I32 goperl_hv_exists_flags(goperl_frame_t *f, HV *hv, const char *key, I32 klen,
+                                  int action);
 static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
                               const char *key, STRLEN klen, int kflags,
                               int action, SV *val, U32 hash) {
@@ -7655,7 +7657,7 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
             f, GOPERL_OP_HV_DELETE, GOPERL_TOK(hv), (uint64_t)(uint32_t)(action & ~HV_DELETE),
             (uint64_t)(int64_t)signed_klen, key, (uint64_t)klen));
     if (action & HV_FETCH_ISEXISTS)
-        return goperl_hv_exists(f, hv, key, signed_klen) ? (void *)hv : 0;
+        return goperl_hv_exists_flags(f, hv, key, signed_klen, action) ? (void *)hv : 0;
     if (action & HV_FETCH_JUST_SV) {
         if (action & HV_FETCH_ISSTORE)
             return (void *)goperl_hv_store(f, hv, key, signed_klen, val);
@@ -8595,13 +8597,20 @@ static U32 *goperl_hints_ref(goperl_frame_t *f) {
  * and hv_store. */
 static I32 goperl_hv_exists(goperl_frame_t *f, HV *hv, const char *key,
                             I32 klen) {
+    return goperl_hv_exists_flags(f, hv, key, klen, 0);
+}
+/* action: hv_common's, of which HV_DISABLE_UVAR_XKEY is taken (a uvar
+ * magic's function that looks a key up in its own hash asks for it, or it
+ * would be called again for ever: English::Name) */
+static I32 goperl_hv_exists_flags(goperl_frame_t *f, HV *hv, const char *key, I32 klen,
+                                  int action) {
     const int utf8 = klen < 0;
     const uint64_t len = utf8 ? (uint64_t)-(int64_t)klen : (uint64_t)klen;
     uint64_t k = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, len, key, len);
     goperl_do_op(f, GOPERL_OP_SV_MORTAL, k, 0, 0, 0);
     if (utf8) goperl_do_op(f, GOPERL_OP_SV_UTF8_ON, k, 0, 0, 0);
-    return (I32)goperl_do_op(f, GOPERL_OP_HV_EXISTS_ENT, GOPERL_TOK(hv), k,
-                             0, 0);
+    return (I32)goperl_do_op3(f, GOPERL_OP_HV_EXISTS_ENT, GOPERL_TOK(hv), k,
+                              (uint64_t)(uint32_t)(action & HV_DISABLE_UVAR_XKEY), 0, 0);
 }
 #define hv_exists(hv, key, klen) \
     goperl_hv_exists(_gof, (HV *)(hv), (key), (I32)(klen))
