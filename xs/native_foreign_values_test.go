@@ -107,8 +107,8 @@ XS_EXTERNAL(boot_Foreign) {
 `)
 	const died = `sub died { my $code = shift;
     my $r = eval { $code->(); 1 } ? "lived" : $@;
-    return $r =~ /\Anative code handed the interpreter 0x[0-9a-f]+ as (.+?) in the operation (\w+) \(\d+\), and it is not one of this interpreter's at /
-        ? "$2: $1" : $r }
+    return $r =~ /\Anative code handed the interpreter 0x[0-9a-f]+ as (.+?) in the operation (\w+) \(\d+\), and (?:it is not one of this interpreter's|(that scalar was freed already)) at /
+        ? "$2: $1" . ($3 ? " freed already" : "") : $r }
 `
 	for _, tc := range []struct {
 		name, code, want string
@@ -116,12 +116,11 @@ XS_EXTERNAL(boot_Foreign) {
 		{"an address of the host process as a scalar", `Foreign::type("host")`, "SV_TYPE: a scalar"},
 		{"an address inside a scalar's head", `Foreign::type("inside")`, "SV_TYPE: a scalar"},
 		{"a stray pointer mortalized", `Foreign::mortal("host")`, "SV_MORTAL: a scalar"},
-		{"a freed scalar set", `Foreign::set("freed")`, "SV_SETIV: a scalar"},
+		{"a freed scalar set", `Foreign::set("freed")`, "SV_SETIV: a scalar freed already"},
 		{"a stray pointer as an array", `Foreign::store("host")`, "AV_STORE: a scalar"},
 		{"a null sub called", `Foreign::call("null")`, "CALL_SV: the sub to call"},
 		{"a stray pointer called", `Foreign::call("host")`, "CALL_SV: a scalar"},
 		{"a stray pointer as an argument", `Foreign::call_with(sub {}, "host")`, "CALL_SV: a scalar"},
-		{"a null argument", `Foreign::call_with(sub {}, "null")`, "CALL_SV: an argument"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := requireModule(t, "Foreign", so, died+`my $r = died(sub { `+tc.code+` });
@@ -131,6 +130,11 @@ my @a = (1, 2, 3);
 				t.Errorf("got %q, want %q", got, want)
 			}
 		})
+	}
+	// a null argument of call_sv is perl's too: the sub finds that element
+	// of @_ missing (BEGIN::Lift calls with one)
+	if got, want := requireModule(t, "Foreign", so, `my $seen; Foreign::call_with(sub { $seen = scalar(@_) . " " . (defined $_[0] ? "defined" : "undef") }, "null"); $seen`), "1 undef"; got != want {
+		t.Errorf("null argument: got %q, want %q", got, want)
 	}
 	// the type of a freed scalar is perl's: reading the head alone is
 	// allowed, and it says the scalar is freed
