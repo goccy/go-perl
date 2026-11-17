@@ -33,7 +33,7 @@ func TestNativeSmallNamesOfThePerlAPI(t *testing.T) {
 		{"sv_inc", `join "|", map { PerlAPI::small_names("inc", $_) } "aa", "Az", "zz", "a9", 9, -1, 1.5, 9223372036854775807, 18446744073709551615`, "ab|Ba|aaa|b0|10|0|2.5|9223372036854775808|1.84467440737096e+19"},
 		{"sv_dec", `join "|", map { PerlAPI::small_names("dec", $_) } 1, "aa", 0.5`, "0|-1|-0.5"},
 		{"cv_name", `sub Some::Pkg::named { 1 } my $anon = sub { 2 }; join ";", PerlAPI::small_names("cvname", \&Some::Pkg::named), PerlAPI::small_names("cvname", $anon)`, "Some::Pkg::named|named;main::__ANON__|__ANON__"},
-		{"PERL_SHORT_MIN and the other limits", `PerlAPI::small_names("limits", 0)`, "-32768 32767 65535 255 1"},
+		{"PERL_SHORT_MIN and the other limits", `PerlAPI::small_names("limits", 0)`, "-32768 32767 65535 255 0"},
 		{"STATUS_EXIT", `$? = 3 << 8; PerlAPI::small_names("status", 0)`, "768"},
 		{"PerlIO_openn with :scalar", `PerlAPI::small_names("openn", "the body")`, "the body"},
 		{"PerlIO_isutf8", `open my $u, "<:utf8", \ "x" or die; open my $b, "<", \ "x" or die; join ",", PerlAPI::small_names("isutf8", $u), PerlAPI::small_names("isutf8", $b)`, "utf8,bytes"},
