@@ -3978,7 +3978,25 @@ static void goperl_statcache_writeback(goperl_frame_t *f);
  * which this cannot do, and the call fails saying so. */
 static MAGIC *goperl_magic_chain_of_native(goperl_frame_t *f, MAGIC *mg);
 static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg);
-static void goperl_svmagic_writeback(goperl_frame_t *f) {
+/* Whether native code took the chain SvMAGIC showed off the value whole,
+ * the interpreter's magic with it: Tk's trace of a variable sets SvMAGIC
+ * to NULL, attaches a magic of its own with sv_magic (which would not add
+ * a second of its type) and puts the chain back with the new magic at its
+ * end. Until it is put back, the chain is native code's alone. */
+static int goperl_svmagic_detached(goperl_frame_t *f) {
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    if (!sh || !sh->svmagic_sv || !goperl_magic_is_interp_copy(f, sh->svmagic_orig)) return 0;
+    for (const MAGIC *mg = sh->svmagic_val; mg; mg = mg->mg_moremagic)
+        if (goperl_magic_is_interp_copy(f, mg)) return 0;
+    return 1;
+}
+/* The head of native code's chain on the value is head from now on. */
+static void goperl_svmagic_head(goperl_frame_t *f, uint64_t sv, MAGIC *head) {
+    if (goperl_api_magic_chain(f, sv) != head) goperl_api_magic_set_head(f, sv, head);
+}
+/* settle: the outermost native call ends, and a chain native code took off
+ * whole is not put back any more */
+static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
     goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
     if (!sh || !sh->svmagic_sv) return;
     MAGIC *const shown = sh->svmagic_orig;
@@ -3986,9 +4004,16 @@ static void goperl_svmagic_writeback(goperl_frame_t *f) {
     if (!goperl_magic_is_interp_copy(f, shown)) {
         if (val == shown) return;
         MAGIC *const head = goperl_magic_chain_of_native(f, val);
-        if (head != shown) goperl_api_magic_set_head(f, sh->svmagic_sv, head);
+        goperl_svmagic_head(f, sh->svmagic_sv, head);
         sh->svmagic_orig = head;
         if (head != val) sh->svmagic_val = head;
+        return;
+    }
+    if (!settle && goperl_svmagic_detached(f)) {
+        /* the native part of the chain is what native code made it; the
+         * interpreter's magic stays where it is until the chain is put
+         * back or the call ends */
+        goperl_svmagic_head(f, sh->svmagic_sv, goperl_magic_chain_of_native(f, val));
         return;
     }
     /* every type of the interpreter's magic shown is still on the chain (a
@@ -4013,7 +4038,7 @@ static void goperl_svmagic_writeback(goperl_frame_t *f) {
     }
     /* end is the zeroed MAGIC after the copies */
     MAGIC *const head = goperl_magic_chain_of_native(f, val);
-    if (head != end->mg_moremagic) goperl_api_magic_set_head(f, sh->svmagic_sv, head);
+    goperl_svmagic_head(f, sh->svmagic_sv, head);
     /* whether the copies are still the front of the chain, as shown */
     MAGIC *c = shown;
     for (MAGIC *mg = val; mg == c && c != end; mg = mg->mg_moremagic) c++;
@@ -4026,6 +4051,7 @@ static void goperl_svmagic_writeback(goperl_frame_t *f) {
         sh->svmagic_val = head;
     }
 }
+static void goperl_svmagic_writeback(goperl_frame_t *f) { goperl_svmagic_writeback_at(f, 0); }
 static void goperl_flush(goperl_frame_t *f) {
     goperl_svmagic_writeback(f);
     goperl_svcur_writeback(f);
@@ -4985,6 +5011,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
     /* the entry's activation ends here if no XSUB took it over */
     if (f->entry_jb == f->jb) f->entry_jb = 0;
     goperl_errno_leave(f); /* what the XSUB left in errno */
+    if (goperl_xs_depth_v <= 1) goperl_svmagic_writeback_at(f, 1);
     goperl_flush(f); /* pending mirror writes must land before teardown */
     /* Host-location saves (SAVEVPTR/save_hptr) made at the XSUB's top-level
      * scope have no host LEAVE to restore them; real perl restores them when
@@ -7149,6 +7176,12 @@ static MAGIC *goperl_magic_chain_of_native(goperl_frame_t *f, MAGIC *mg) {
     return head;
 }
 static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
+    /* a chain native code took off whole is native code's until it puts
+     * it back (see goperl_svmagic_detached) */
+    if (goperl_svmagic_sv_v == GOPERL_TOK(sv) && goperl_svmagic_detached(f)) {
+        goperl_flush(f);
+        return &goperl_svmagic_val_v;
+    }
     goperl_flush(f);
     MAGIC *const native = goperl_api_magic_chain(f, GOPERL_TOK(sv));
     MAGIC *head = native;
@@ -7326,6 +7359,10 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
     goperl_flush(f);
     goperl_api_magic_ext(f, GOPERL_TOK(sv), GOPERL_TOK(obj), how, 0,
                             name, name ? (int64_t)namlen : 0);
+    /* on a chain native code took off whole, SvMAGIC is the new magic in
+     * front of what native code had there, as perl's sv_magic leaves it */
+    if (goperl_svmagic_sv_v == GOPERL_TOK(sv) && goperl_svmagic_detached(f))
+        goperl_svmagic_val_v = goperl_api_magic_chain(f, GOPERL_TOK(sv));
 }
 #define sv_magic(sv, obj, how, name, namlen)                          \
     goperl_sv_magic(_gof, (SV *)(sv), (SV *)(obj), (int)(how),        \
@@ -10948,42 +10985,50 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
         break;
     }
     case GOPERL_HOST_UVAR: {
-        /* [is_set][arg][sv][key] -> [key][result] */
+        /* [is_set][arg][sv][key] -> [key][result]. The interpreter has one
+         * uvar magic for the value, which stands for every one native code
+         * attached (its sv_magic adds no second): perl calls each of them,
+         * in the order of the chain, and so does this. One native code took
+         * off since is not called (Tk untraces a variable so); nor is one
+         * whose ufuncs it has not put in yet. */
         if (reqlen < 40) goperl_croakf(f, "host call: short uvar request");
         SV *sv = GOPERL_SV(req[3]);
-        MAGIC *mg = 0;
-        goperl_flush(f);
-        for (MAGIC *m = goperl_api_magic_chain(f, req[3]); m && !mg; m = m->mg_moremagic)
-            if (m->mg_type == PERL_MAGIC_uvar) mg = m;
-        if (!mg || !mg->mg_ptr) goperl_croakf(f, "host call: no uvar magic on the value");
-        const struct ufuncs *uf = (const struct ufuncs *)mg->mg_ptr;
         int32_t r = 0;
         goperl_gword_t key = req[4];
-        if (SvTYPE(sv) == SVt_PVHV) {
-            /* perl's hash access calls uf_val itself, with the kind of
-             * access; the key is in mg_obj, where the function may leave
-             * another */
-            SV *const kept = mg->mg_obj;
-            mg->mg_obj = GOPERL_SV(req[4]);
-            if (uf->uf_val) r = uf->uf_val((IV)(int64_t)req[2], sv);
-            key = GOPERL_TOK(mg->mg_obj);
-            mg->mg_obj = kept;
-        } else if (mg->mg_virtual) {
-            /* a scalar's magic runs through the MAGIC's vtable, as with
-             * perl's mg_get and mg_set: a module may have put its own there
-             * (SWIG's variables) */
-            const MGVTBL *v = mg->mg_virtual;
-            if (req[1]) {
-                if (v->svt_set) r = v->svt_set(sv, mg);
-            } else if (v->svt_get) {
-                r = v->svt_get(sv, mg);
+        goperl_flush(f);
+        for (MAGIC *mg = goperl_api_magic_chain(f, req[3]), *next; mg; mg = next) {
+            /* a function may take its own magic off the chain */
+            next = mg->mg_moremagic;
+            if (mg->mg_type != PERL_MAGIC_uvar || !mg->mg_ptr) continue;
+            const struct ufuncs *uf = (const struct ufuncs *)mg->mg_ptr;
+            if (SvTYPE(sv) == SVt_PVHV) {
+                /* perl's hash access calls uf_val itself, with the kind of
+                 * access, of the first uvar magic; the key is in mg_obj,
+                 * where the function may leave another */
+                SV *const kept = mg->mg_obj;
+                mg->mg_obj = GOPERL_SV(req[4]);
+                if (uf->uf_val) r = uf->uf_val((IV)(int64_t)req[2], sv);
+                key = GOPERL_TOK(mg->mg_obj);
+                mg->mg_obj = kept;
+                break;
             }
-        } else if (req[1]) {
-            /* the mirror has no vtable of its own: perl's PL_vtbl_uvar,
-             * which calls the ufuncs with their index */
-            if (uf->uf_set) r = uf->uf_set(uf->uf_index, sv);
-        } else {
-            if (uf->uf_val) r = uf->uf_val(uf->uf_index, sv);
+            if (mg->mg_virtual) {
+                /* a scalar's magic runs through the MAGIC's vtable, as with
+                 * perl's mg_get and mg_set: a module may have put its own
+                 * there (SWIG's variables) */
+                const MGVTBL *v = mg->mg_virtual;
+                if (req[1]) {
+                    if (v->svt_set) r = v->svt_set(sv, mg);
+                } else if (v->svt_get) {
+                    r = v->svt_get(sv, mg);
+                }
+            } else if (req[1]) {
+                /* the mirror has no vtable of its own: perl's PL_vtbl_uvar,
+                 * which calls the ufuncs with their index */
+                if (uf->uf_set) r = uf->uf_set(uf->uf_index, sv);
+            } else {
+                if (uf->uf_val) r = uf->uf_val(uf->uf_index, sv);
+            }
         }
         resp[0] = key;
         resp[1] = (goperl_gword_t)(int64_t)r;
