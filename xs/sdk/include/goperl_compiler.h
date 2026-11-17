@@ -686,6 +686,17 @@ static __attribute__((unused)) void goperl_pads_rest(goperl_frame_t *f) {
 #define PadnameIsSTATE_on(pn) (PadnameFLAGS(pn) |= PADNAMEf_STATE)
 #define PadnameOUTER_on(pn) (PadnameFLAGS(pn) |= PADNAMEf_OUTER)
 #define PadnameOUTER_off(pn) (PadnameFLAGS(pn) &= ~PADNAMEf_OUTER)
+#define PadnameOURSTASH_set(pn, s) (PadnameOURSTASH(pn) = (s))
+#define PadnameTYPE_set(pn, s) (PadnameTYPE(pn) = (s))
+/* pad.h's names from before pad names were structures of their own (a
+ * module that does not find PadnameIsOUR_on falls back to SvPAD_OUR_on,
+ * and to SvFLAGS when that is missing too: Lexical::Var) */
+#define SvPAD_STATE PadnameIsSTATE
+#define SvPAD_STATE_on PadnameIsSTATE_on
+#define SvPAD_TYPED_on(pn) (PadnameFLAGS(pn) |= PADNAMEf_TYPED)
+#define SvPAD_OUR_on(pn) (PadnameFLAGS(pn) |= PADNAMEf_OUR)
+#define SvOURSTASH PadnameOURSTASH
+#define SvOURSTASH_set PadnameOURSTASH_set
 #define PADNAMEt_OUTER PADNAMEf_OUTER
 #define PADNAMEt_STATE PADNAMEf_STATE
 #define PADNAMEt_LVALUE PADNAMEf_LVALUE
@@ -705,10 +716,23 @@ static __attribute__((unused)) void goperl_pads_rest(goperl_frame_t *f) {
            goperl_seq_ <= COP_SEQ_RANGE_HIGH(goperl_pnis_); })
 /* A new pad name, the interpreter's: its own copy of the name. */
 static __attribute__((unused)) PADNAME *goperl_newpadname_pvn(goperl_frame_t *f, const char *s, STRLEN len) {
-    return goperl_padname_shadow(
-        f, GOPERL_INTERNAL_S(f, GOPERL_INT_PADNAME_NEW, 0, (uint64_t)len, s, len));
+    /* read now: a module sets its fields straight away (xpadn_low) */
+    return (PADNAME *)goperl_padent_fresh(
+        f, goperl_padname_shadow(
+               f, GOPERL_INTERNAL_S(f, GOPERL_INT_PADNAME_NEW, 0, (uint64_t)len, s, len)));
 }
 #define newPADNAMEpvn(s, len) goperl_newpadname_pvn(_gof, (const char *)(s), (STRLEN)(len))
+/* The list takes the name over, and makes room for it. */
+static __attribute__((unused)) PADNAME **goperl_padnamelist_store(goperl_frame_t *f,
+                                                                  PADNAMELIST *pnl, SSize_t key,
+                                                                  PADNAME *val) {
+    const goperl_gword_t pn = goperl_padstruct_tok(val);
+    goperl_do_op3(f, GOPERL_OP_PAD, 11 /* GOPERL_PAD_NAMELIST_STORE */, goperl_padstruct_tok(pnl),
+                  (uint64_t)(int64_t)key, (const char *)&pn, sizeof pn);
+    return &PadnamelistARRAY(pnl)[key];
+}
+#define padnamelist_store(pnl, key, val) \
+    goperl_padnamelist_store(_gof, (pnl), (SSize_t)(key), (val))
 /* pad_new: the flags of pad.h. */
 #define padnew_CLONE 1
 #define padnew_SAVE 2
