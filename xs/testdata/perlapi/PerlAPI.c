@@ -6993,6 +6993,9 @@ XS(XS_PerlAPI_small_names) {
             SvREFCNT_dec((SV *)hv);
         } else if (strEQ(which, "lvret")) {
             sv_setpvf(out, "%d,%d", (int)LVRET, (int)is_lvalue_sub());
+        } else if (strEQ(which, "nonblock")) {
+            sv_setpv(out, VAL_O_NONBLOCK == O_NONBLOCK && VAL_EAGAIN == EAGAIN && RD_NODATA == -1
+                              ? "same" : "other");
         } else if (strEQ(which, "ssptrt")) {
             SSize_t ix;
             int *p;

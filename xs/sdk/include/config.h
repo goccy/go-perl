@@ -219,5 +219,13 @@
 #define NVSIZE 8
 #define NV_PRESERVES_UV_BITS 53
 #define USE_64_BIT_INT
+/* non-blocking I/O as perl's Configure finds it on this system: the flag
+ * that makes a descriptor non-blocking, the error a read without data
+ * gets, what read returns then, and that end of file is told apart from
+ * no data (Filter::Util::Exec) */
+#define VAL_O_NONBLOCK O_NONBLOCK
+#define VAL_EAGAIN EAGAIN
+#define RD_NODATA -1
+#define EOF_NONBLOCK
 
 #endif /* GOPERL_XS_SDK_CONFIG_H */

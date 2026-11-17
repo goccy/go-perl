@@ -37,6 +37,7 @@ func TestNativeSmallNamesOfThePerlAPI(t *testing.T) {
 		{"Perl_hv_common", `PerlAPI::small_names("hvcommon", "stored")`, "stored"},
 		{"LVRET and is_lvalue_sub", `PerlAPI::small_names("lvret", 0)`, "0,0"},
 		{"SSNEWt and SSPTRt", `PerlAPI::small_names("ssptrt", 4)`, "7"},
+		{"VAL_O_NONBLOCK and VAL_EAGAIN", `PerlAPI::small_names("nonblock", 0)`, "same"},
 		{"TARGi", `PerlAPI::small_names("targi", 21)`, "42"},
 		{"names that compile", `PerlAPI::small_names("compile", 0)`, "compiled"},
 		{"a MAGIC linked onto an empty chain", `my $t = PerlAPI::event_like_thing(2); PerlAPI::event_like_ptr($t)`, "33"},
