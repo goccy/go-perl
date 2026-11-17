@@ -1834,8 +1834,19 @@ static __attribute__((unused)) char *goperl_scan_vstring(goperl_frame_t *f, cons
 }
 #define scan_vstring(s, e, sv) goperl_scan_vstring(_gof, (const char *)(s), (const char *)(e), (SV *)(sv))
 
-/* PL_stderrgv's handle, as perl's Perl_error_log is */
-#define Perl_error_log PerlIO_stderr()
+/* PL_stderrgv's handle, as perl's Perl_error_log is: the output handle of
+ * STDERR as the program has it now (`open local(*STDERR), '>', \$buf`
+ * captures what Test::LeakTrace reports), else the process's stderr */
+static __attribute__((unused)) PerlIO *goperl_error_log(goperl_frame_t *f) {
+    GV *const gv = PL_stderrgv;
+    (void)f;
+    if (gv && isGV(gv) && GvIOp(gv)) {
+        PerlIO *const ofp = IoOFP(GvIOp(gv));
+        if (ofp) return ofp;
+    }
+    return PerlIO_stderr();
+}
+#define Perl_error_log goperl_error_log(_gof)
 /* every handle flushed, as before a fork or a command */
 #define PERL_FLUSHALL_FOR_CHILD PerlIO_flush((PerlIO *)NULL)
 #define Direntry_t struct dirent

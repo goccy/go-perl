@@ -6917,11 +6917,11 @@ XS(XS_PerlAPI_vstring_of) {
  * of the sub, qualified and not ("cvname"), PERL_SHORT_MIN and the other
  * limits ("limits"), STATUS_EXIT ("status"),
  * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
- * isinfnan of the number ("infnan"), whether Perl_error_log is the stderr
- * handle ("error_log"), TARGi of the number ("targi"), and the names that
- * only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
- * PERL_FLUSHALL_FOR_CHILD, the pointer table types PTR_TBL_t and
- * PTR_TBL_ENT_t: "compiled"). */
+ * isinfnan of the number ("infnan"), a line written to Perl_error_log, the
+ * program's STDERR as it has it now ("error_log"), TARGi of the number
+ * ("targi"), and the names that only need to compile (Direntry_t,
+ * SVppv_STATIC, CvISXSUB_on, PERL_FLUSHALL_FOR_CHILD, the pointer table
+ * types PTR_TBL_t and PTR_TBL_ENT_t: "compiled"). */
 XS(XS_PerlAPI_small_names) {
     dXSARGS;
     dXSTARG;
@@ -7032,7 +7032,8 @@ XS(XS_PerlAPI_small_names) {
         } else if (strEQ(which, "infnan")) {
             sv_setpv(out, isinfnan(SvNV(ST(1))) ? "infnan" : "finite");
         } else if (strEQ(which, "error_log")) {
-            sv_setpv(out, Perl_error_log == PerlIO_stderr() ? "stderr" : "other");
+            PerlIO_printf(Perl_error_log, "to the error log\n");
+            sv_setpv(out, "written");
         } else if (strEQ(which, "targi")) {
             TARGi(SvIV(ST(1)) * 2, 1);
             ST(0) = TARG;

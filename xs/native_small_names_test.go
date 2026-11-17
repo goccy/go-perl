@@ -6,8 +6,9 @@ import "testing"
 
 // Names of the perl API that distributions use and the SDK lacked:
 // scan_vstring (Math::GMP, Sereal), grok_atoUV, is_utf8_invariant_string_loc,
-// isinfnan, Perl_error_log, TARGi, sv_inc (which only counted: "aa" became
-// 1, not "ab") and sv_dec, and names that only need to compile
+// isinfnan, Perl_error_log (STDERR as the program has it now, which
+// Test::LeakTrace's tests capture), TARGi, sv_inc (which only counted: "aa"
+// became 1, not "ab") and sv_dec, and names that only need to compile
 // (Direntry_t, SVppv_STATIC, CvISXSUB_on, PERL_FLUSHALL_FOR_CHILD, the
 // pointer table types Test::LeakTrace keeps its table in). And a
 // MAGIC of a module's own linked onto an empty chain through SvMAGIC, as
@@ -24,7 +25,7 @@ func TestNativeSmallNamesOfThePerlAPI(t *testing.T) {
 		{"grok_atoUV with an end", `PerlAPI::small_names("atouv_end", "12ab")`, "ok 12 ab"},
 		{"is_utf8_invariant_string_loc", `join "|", PerlAPI::small_names("invariant", "abc"), PerlAPI::small_names("invariant", "ab\xC3\xA9")`, "yes|no at 2"},
 		{"isinfnan", `my $inf = 9**9**9; join "|", map { PerlAPI::small_names("infnan", $_) } $inf, -$inf, $inf - $inf, 1.5`, "infnan|infnan|infnan|finite"},
-		{"Perl_error_log", `PerlAPI::small_names("error_log", 0)`, "stderr"},
+		{"Perl_error_log", `my $buf = ""; { open local(*STDERR), '>', \$buf or die "open: $!"; PerlAPI::small_names("error_log", 0); } $buf`, "to the error log\n"},
 		{"sv_inc", `join "|", map { PerlAPI::small_names("inc", $_) } "aa", "Az", "zz", "a9", 9, -1, 1.5, 9223372036854775807, 18446744073709551615`, "ab|Ba|aaa|b0|10|0|2.5|9223372036854775808|1.84467440737096e+19"},
 		{"sv_dec", `join "|", map { PerlAPI::small_names("dec", $_) } 1, "aa", 0.5`, "0|-1|-0.5"},
 		{"cv_name", `sub Some::Pkg::named { 1 } my $anon = sub { 2 }; join ";", PerlAPI::small_names("cvname", \&Some::Pkg::named), PerlAPI::small_names("cvname", $anon)`, "Some::Pkg::named|named;main::__ANON__|__ANON__"},
