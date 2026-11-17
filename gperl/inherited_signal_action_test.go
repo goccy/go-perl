@@ -9,9 +9,10 @@ import (
 )
 
 // A signal the process ignores by an action it did not get from the
-// program (here, inherited: started under nohup, or `trap '' HUP`) reads as
-// ignored in the program, as on perl: $SIG{HUP} is IGNORE and
-// POSIX::sigaction reports it, and the signal does nothing to the program.
+// program (here, inherited: started under nohup, or by a shell's trap with
+// an empty action) reads as ignored in the program, as on perl: $SIG{HUP}
+// is IGNORE and POSIX::sigaction reports it, and the signal does nothing to
+// the program.
 // Native code that ignores a signal (a network library ignores SIGPIPE)
 // leaves the program the same action.
 func TestProgramSeesTheIgnoredActionOfTheProcess(t *testing.T) {
