@@ -8508,8 +8508,18 @@ static STRLEN goperl_utf8_length(const U8 *s, const U8 *e) {
 #define utf8_length(s, e) goperl_utf8_length((const U8 *)(s), (const U8 *)(e))
 #define utf8_distance(a, b) \
     ((IV)goperl_utf8_length((const U8 *)(b), (const U8 *)(a)))
+/* off characters on, or back for a negative off, as perl's utf8_hop: a
+ * step back passes the continuation bytes of the character before (pTk's
+ * Tcl_UtfPrev is utf8_hop(s, -1)). */
 static U8 *goperl_utf8_hop(const U8 *s, SSize_t off) {
-    while (off-- > 0) s += UTF8SKIP(s);
+    if (off >= 0) {
+        while (off-- > 0) s += UTF8SKIP(s);
+    } else {
+        while (off++ < 0) {
+            s--;
+            while ((*s & 0xC0) == 0x80) s--;
+        }
+    }
     return (U8 *)s;
 }
 #define utf8_hop(s, off) goperl_utf8_hop((const U8 *)(s), (off))
