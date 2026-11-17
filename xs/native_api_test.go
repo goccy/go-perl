@@ -18,11 +18,13 @@ import (
 	goperlfs "github.com/goccy/go-perl/fs"
 )
 
-// A module that sets a signal aside for a moment — it keeps the handler it
-// finds, sets the default action and puts the handler back, as IO::Tty
-// does with SIGCHLD around grantpt — leaves the process's handling of the
-// signal as it was: the next such signal is delivered to the process, not
-// the end of it. The signal is sent to the thread the test runs on where
+// A module that sets a signal aside for a moment — it keeps the action it
+// finds, sets the default action and puts the one it found back, as
+// IO::Tty does with SIGCHLD around grantpt — leaves the process's handling
+// of the signal as it was: the next such signal is delivered to the
+// process, not the end of it. What the module finds is the program's
+// action, the default one here; the default it puts back is the process's
+// runtime's handler again. The signal is sent to the thread the test runs on where
 // the host has a way: a thread that is running the program is where a
 // handler that is not the process's own does its damage.
 func TestNativeModuleSetsASignalAside(t *testing.T) {
@@ -33,7 +35,7 @@ func TestNativeModuleSetsASignalAside(t *testing.T) {
 	defer signal.Stop(delivered)
 	for _, how := range []string{"sigaction", "signal"} {
 		runEvalCases(t, p, []evalCase{
-			{"a handler is found and put back with " + how, `PerlAPI::set_signal_aside("` + how + `", ` + strconv.Itoa(int(syscall.SIGCHLD)) + `) ? "handler" : "none"`, "handler"},
+			{"the default action is found and put back with " + how, `PerlAPI::set_signal_aside("` + how + `", ` + strconv.Itoa(int(syscall.SIGCHLD)) + `) ? "handler" : "default"`, "default"},
 		})
 		if err := signalThisThread(syscall.SIGCHLD); err != nil {
 			t.Fatal(err)

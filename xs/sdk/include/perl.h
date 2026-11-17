@@ -221,6 +221,28 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) struct sigaction goperl_see
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigaction)(
     int, const struct sigaction *, struct sigaction *) = 0;
 
+/* The action of the process's runtime: the handler it has for every
+ * signal, SIGURG's among them, which nothing else takes. 0 when it has
+ * none there. */
+static int goperl_runtime_handler(struct sigaction *rt) {
+    return goperl_libc_sigaction(SIGURG, NULL, rt) == 0 && (rt->sa_flags & SA_SIGINFO) &&
+           rt->sa_sigaction;
+}
+/* Whether an action is the runtime's. */
+static int goperl_runtime_action(const struct sigaction *a) {
+    struct sigaction rt;
+    return (a->sa_flags & SA_SIGINFO) && goperl_runtime_handler(&rt) &&
+           rt.sa_sigaction == a->sa_sigaction;
+}
+static int goperl_program_action(int sig);
+
+/* A signal whose action is the runtime's is the program's: its action is
+ * shown as the program has it, the default (SIG_DFL) or ignored (SIG_IGN),
+ * or the runtime's handler when the program has a handler of its own
+ * (EV::ClickHouse ignores SIGPIPE when it finds the default action). The
+ * default native code puts back is the runtime's handler again, which takes
+ * the program's default action (IO::Tty sets SIGCHLD to the default around
+ * grantpt and puts back what it found). */
 GOPERL_C __attribute__((weak, visibility("hidden"))) int sigaction(
     int sig, const struct sigaction *act, struct sigaction *old) GOPERL_LIBC_THROW {
     struct sigaction current, with;
@@ -237,16 +259,29 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int sigaction(
     if (goperl_libc_sigaction(sig, NULL, &current) == 0 &&
         current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN)
         goperl_seen_action[sig] = current;
-    if (act != NULL && act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN) {
-        if (act->sa_handler == goperl_seen_action[sig].sa_handler) {
-            with = goperl_seen_action[sig];
+    if (act != NULL && act->sa_handler != SIG_IGN) {
+        if (act->sa_handler == SIG_DFL) {
+            if (goperl_runtime_handler(&with)) act = &with;
         } else {
-            with = *act;
-            with.sa_flags |= SA_ONSTACK;
+            if (act->sa_handler == goperl_seen_action[sig].sa_handler) {
+                with = goperl_seen_action[sig];
+            } else {
+                with = *act;
+                with.sa_flags |= SA_ONSTACK;
+            }
+            act = &with;
         }
-        act = &with;
     }
-    return goperl_libc_sigaction(sig, act, old);
+    const int r = goperl_libc_sigaction(sig, act, old);
+    if (r == 0 && old != NULL && goperl_runtime_action(old)) {
+        const int program = goperl_program_action(sig);
+        if (program == 0 || program == 1) {
+            memset(old, 0, sizeof *old);
+            sigemptyset(&old->sa_mask);
+            old->sa_handler = program ? SIG_IGN : SIG_DFL;
+        }
+    }
+    return r;
 }
 
 /* a handler named by a type of its own: in the declarator signal's own,
@@ -8706,6 +8741,28 @@ static goperl_frame_t *goperl_thread_frame(void) {
 static int goperl_in_signal_handler(void) {
     stack_t ss;
     return sigaltstack(NULL, &ss) == 0 && (ss.ss_flags & SS_ONSTACK) != 0;
+}
+/* The interpreter's number for a signal of the host's. */
+static int goperl_signal_guest(int sig) {
+    for (int g = 1; g < 32; g++)
+        if (goperl_signal_host(g) == sig) return g;
+    return sig;
+}
+/* The program's action of a signal of the host's, as its C library has it:
+ * 0 the default, 1 ignored, 2 a handler; -1 where the interpreter cannot
+ * be asked (see goperl_wait_child). */
+#define GOPERL_INT_SIGACTION 40 /* b: a signal -> 0 default, 1 ignored, 2 a handler */
+static int goperl_program_action(int sig) {
+    goperl_frame_t *const f =
+        goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
+            ? goperl_thread_frame()
+            : NULL;
+    if (!f) return -1;
+    const int e = errno;
+    const int r = (int)goperl_xs_opx(f, GOPERL_OP_INTERNAL, 0, (uint64_t)goperl_signal_guest(sig),
+                                     GOPERL_INT_SIGACTION, 0, 0, 0);
+    errno = e;
+    return r;
 }
 static pid_t goperl_wait_child(pid_t pid, int *status, int options, struct rusage *usage) {
     if (!goperl_libc_wait4) {
