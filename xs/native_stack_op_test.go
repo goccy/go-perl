@@ -50,14 +50,32 @@ XS(XS_StackOp_seq) {
     ST(0) = r ? &PL_sv_yes : &PL_sv_no;
     XSRETURN(1);
 }
+/* PL_op pointed at an op of the module's own in a scope, and the scope
+ * left: PL_op is the op it was before, as SAVEVPTR(PL_op) puts it back
+ * (Syntax::Operator::In returns the op after its own then) */
+XS(XS_StackOp_restored) {
+    dXSARGS;
+    OP *before = PL_op;
+    OP fake;
+    PERL_UNUSED_VAR(items);
+    memset(&fake, 0xA5, sizeof fake);
+    fake.op_type = OP_NULL;
+    ENTER;
+    SAVEVPTR(PL_op);
+    PL_op = &fake;
+    LEAVE;
+    ST(0) = PL_op == before ? &PL_sv_yes : &PL_sv_no;
+    XSRETURN(1);
+}
 XS_EXTERNAL(boot_StackOp) {
     dXSBOOTARGSXSAPIVERCHK;
     newXS_deffile("StackOp::seq", XS_StackOp_seq);
+    newXS_deffile("StackOp::restored", XS_StackOp_restored);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
 `)
-	got := requireModule(t, "StackOp", so, `join ",", map { StackOp::seq(@$_) ? "eq" : "ne" } ["a", "a"], ["a", "b"], [10, "10"]`)
-	if want := "eq,ne,eq"; got != want {
+	got := requireModule(t, "StackOp", so, `join ",", (map { StackOp::seq(@$_) ? "eq" : "ne" } ["a", "a"], ["a", "b"], [10, "10"]), (StackOp::restored() ? "restored" : "not restored")`)
+	if want := "eq,ne,eq,restored"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

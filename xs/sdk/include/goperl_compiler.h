@@ -174,7 +174,12 @@ static __attribute__((unused)) int goperl_save_routed(goperl_frame_t *f, void *l
         return 1;
     }
     if (loc == (void *)&f->plop) {
+        /* the interpreter puts its PL_op back, and the op native code has
+         * as PL_op is put back with it: a module that points PL_op at an op
+         * of its own around a call (Syntax::Operator::In) returns the op
+         * after its own when the scope has ended */
         GOPERL_INTERNAL(f, GOPERL_INT_SAVE_PLVAR, GOPERL_PL_OP, kind);
+        goperl_hostsave_ptr(f, (void **)&f->plop);
         return 1;
     }
     if (loc == (void *)&goperl_parser_ptr_v) {
