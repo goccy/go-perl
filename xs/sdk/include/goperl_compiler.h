@@ -1227,7 +1227,14 @@ static __attribute__((unused)) void *goperl_sv_any(goperl_frame_t *f, SV *sv, co
     if (t == SVt_PVCV || t == SVt_PVFM)
         return (void *)(uintptr_t)*goperl_lv_ref(f, sv, GOPERL_LV_CVBODY, site, frame);
     if (t == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
-    return t == SVt_NULL ? (void *)0 : goperl_no_body();
+    if (t == SVt_NULL) {
+        /* a head without a body has none (NULL), but for the header of an
+         * SV arena, whose any is the next arena: what the head says, as
+         * the interpreter's token of it */
+        const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
+        return head ? (void *)(uintptr_t)head[0] : 0;
+    }
+    return goperl_no_body();
 }
 #undef SvANY
 #define SvANY(sv) goperl_sv_any(_gof, (SV *)(sv), GOPERL_LV_AT)

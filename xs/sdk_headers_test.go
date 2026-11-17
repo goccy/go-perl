@@ -114,37 +114,6 @@ func TestSDKHeaderThatCannotBeGiven(t *testing.T) {
 	}
 }
 
-// A walk of the SV arenas (Devel::Gladiator, Devel::Leak,
-// Devel::FindBlessedRefs list every SV so) dies with the fixed phrase when
-// it starts; it builds, as Moose's, which it runs only on perls before
-// 5.18, has to. Before, the arena root was NULL and the walk found nothing,
-// silently.
-func TestSDKArenaWalkDies(t *testing.T) {
-	so := buildModuleSource(t, "ArenaWalk", `#include "EXTERN.h"
-#include "perl.h"
-#include "XSUB.h"
-XS(XS_ArenaWalk_count) {
-    dXSARGS;
-    {
-        SV *sva;
-        IV n = 0;
-        for (sva = PL_sv_arenaroot; sva; sva = (SV *)SvANY(sva)) n++;
-        ST(0) = sv_2mortal(newSViv(n));
-        XSRETURN(1);
-    }
-}
-XS_EXTERNAL(boot_ArenaWalk) {
-    dXSBOOTARGSXSAPIVERCHK;
-    newXS_deffile("ArenaWalk::count", XS_ArenaWalk_count);
-    Perl_xs_boot_epilog(aTHX_ ax);
-}
-`)
-	const code = `my $n = eval { ArenaWalk::count() }; defined $n ? "walked $n" : $@ =~ /^go-perl gives native code no access to this interpreter internal: PL_sv_arenaroot/ ? "refused" : "[$@]"`
-	if got := requireModule(t, "ArenaWalk", so, code); got != "refused" {
-		t.Errorf("got %q, want %q", got, "refused")
-	}
-}
-
 // A module that uses an internal of perl's that go-perl does not give
 // native code (the save stack, the bodies of SVs, the tmps stack, the
 // layers of a PerlIO handle) stops building with one fixed phrase and the

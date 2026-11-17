@@ -356,11 +356,18 @@ typedef int64_t SSize_t;
 #endif
 
 /* Opaque handles: guest SVs are linear-memory offsets widened to pointer
- * width. Never dereference at runtime. The struct carries one dummy field
- * so legacy code that does SV pointer arithmetic or names sv_flags (the
- * pre-5.18 overload-flag arena walk, see the v5 compat section) still
- * COMPILES; no live path reads it. */
-struct goperl_sv { uint32_t sv_flags; };
+ * width. Never dereference at runtime. The struct is laid out as the
+ * interpreter's SV head is (any, refcnt, flags, the union), so that
+ * arithmetic on SV pointers strides as on perl: a walk of the SV arenas
+ * goes from slot to slot with sva + 1 and ends at &sva[SvREFCNT(sva)]
+ * (Devel::Leak). No live path reads the fields; sv_flags is named so that
+ * legacy code that names it still compiles. */
+struct goperl_sv {
+    void *goperl_sv_any_;
+    uint32_t goperl_sv_refcnt_;
+    uint32_t sv_flags;
+    void *goperl_sv_u_;
+};
 typedef struct goperl_sv SV;
 typedef struct goperl_sv CV;
 typedef struct goperl_sv AV;
@@ -9164,16 +9171,14 @@ static void load_module(U32 flags, SV *name, SV *ver, ...) {
 }
 
 /* The SV arenas, which XS walks to list every SV (Devel::Gladiator,
- * Devel::Leak, Devel::FindBlessedRefs): go-perl does not give native code
- * the interpreter's arenas, and a walk dies saying so when it starts. It
- * is not refused where it is compiled: Moose compiles such a walk (its
- * fix-up of overloading after a role is applied to an object) that it runs
- * only on perls before 5.18, where overloading was a flag of every
- * reference. */
+ * Devel::Leak, Devel::FindBlessedRefs): the first one, as the interpreter
+ * has it. A walk goes on as on perl: the slots of an arena are sva + 1 up
+ * to &sva[SvREFCNT(sva)] (the SV struct is the interpreter's size), a slot
+ * whose SvTYPE is SVTYPEMASK is free, and SvANY(sva) is the next arena. */
+#define GOPERL_PL_SV_ARENAROOT 116
 static SV *goperl_sv_arenaroot(goperl_frame_t *f) __attribute__((unused));
 static SV *goperl_sv_arenaroot(goperl_frame_t *f) {
-    goperl_croakf(f, "go-perl gives native code no access to this interpreter internal: "
-                     "PL_sv_arenaroot");
+    return GOPERL_SV(goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_SV_ARENAROOT, 0, 0, 0));
 }
 #define PL_sv_arenaroot (goperl_sv_arenaroot(_gof))
 #define SvANY(sv) ((void *)0)

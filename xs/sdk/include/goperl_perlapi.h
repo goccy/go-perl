@@ -3133,7 +3133,15 @@ static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
 #define ReANY(rx) goperl_reany(_gof, (REGEXP *)(rx))
 static void *goperl_svany(goperl_frame_t *f, SV *sv) __attribute__((unused));
 static void *goperl_svany(goperl_frame_t *f, SV *sv) {
-    if (sv && SvTYPE(sv) == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
+    if (!sv) return 0;
+    const svtype t = (svtype)SvTYPE(sv);
+    if (t == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
+    if (t == SVt_NULL) {
+        /* the header of an SV arena: its any is the next arena (see
+         * goperl_sv_arenaroot) */
+        const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
+        return head ? (void *)(uintptr_t)head[0] : 0;
+    }
     return 0;
 }
 #undef SvANY
