@@ -4,6 +4,7 @@ package gperl_test
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -11,10 +12,15 @@ import (
 // user may not search fails with EACCES (it needs search permission, not
 // reading permission), and rename of a file onto a directory fails with
 // EISDIR, as rename(2) has it; a directory renamed onto an empty one
-// replaces it.
+// replaces it; rmdir of / is the system's answer.
 func TestErrorsOfFileCalls(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root may search any directory")
+	}
+	// rmdir(2) of / is EBUSY on Linux and EISDIR on darwin.
+	rootRmdirError := "EBUSY"
+	if runtime.GOOS == "darwin" {
+		rootRmdirError = "EISDIR"
 	}
 	out, status := hostPerl(t, "-MErrno", "-MFile::Temp=tempdir", "-e", `
 sub errname { my $e = $! + 0; (grep { $!{$_} } sort keys %!)[0] // $e }
@@ -35,7 +41,7 @@ print "rmdir of the root: ", (rmdir("/") ? "done" : errname()), "\n";
 		"chdir into it with search permission: done\n" +
 		"rename of a file onto a directory: EISDIR\n" +
 		"rename of a directory onto an empty one: done\n" +
-		"rmdir of the root: EBUSY\n"
+		"rmdir of the root: " + rootRmdirError + "\n"
 	if status != 0 || out != want {
 		t.Fatalf("status %d, output:\n%s\nwant:\n%s", status, out, want)
 	}
