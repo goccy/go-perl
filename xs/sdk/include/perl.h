@@ -6088,21 +6088,34 @@ static COP **goperl_curcop_ref(goperl_frame_t *f) {
     return &goperl_curcop_slot_v;
 }
 
+/* Whether the shadow of an op of the interpreter's has what the
+ * interpreter has now: it was described in full since native code was last
+ * entered. A shadow kept from an earlier call has the links of then — that
+ * of an op a module's check function saw while the op was being built has
+ * no op_next yet, which the compiler set after (autobox's method calls,
+ * whose entersub Want looks for by its op_next) — and is described again. */
+static inline int goperl_op_current(const OP *o) {
+    if (!o->gop_full) return 0;
+    const goperl_opreg_t *const r = goperl_opreg_v;
+    return !r || GOPERL_OPENT(o)->gen == r->gen;
+}
+
 /* A COP at the edge of what was described gets its fields now, as an op
  * gets its links in OpSIBLING. Outside a call of native code there is no
  * interpreter to ask, and the shadow is as it is. */
 static COP *goperl_cop_fields(COP *c) {
     goperl_frame_t *const f = goperl_cur_frame_v;
-    if (c && c->gop && !c->gop_full && f) goperl_op_describe(f, c->gop, GOPERL_OPDUMP_ONE);
+    if (c && c->gop && f && !goperl_op_current((const OP *)c))
+        goperl_op_describe(f, c->gop, GOPERL_OPDUMP_ONE);
     return c;
 }
 
 static OP *goperl_op_sibling(goperl_frame_t *f, OP *o) {
     if (!o) return 0;
     /* an op at the edge of what was described gets its links now */
-    if (o->gop && !o->gop_full) goperl_op_describe(f, o->gop, GOPERL_OPDUMP_SUBTREE);
+    if (o->gop && !goperl_op_current(o)) goperl_op_describe(f, o->gop, GOPERL_OPDUMP_SUBTREE);
     OP *sib = o->op_moresib ? o->op_sibparent : 0;
-    if (sib && sib->gop && !sib->gop_full)
+    if (sib && sib->gop && !goperl_op_current(sib))
         goperl_op_describe(f, sib->gop, GOPERL_OPDUMP_SUBTREE);
     return sib;
 }
