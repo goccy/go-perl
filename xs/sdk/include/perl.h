@@ -1009,10 +1009,13 @@ static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
 }
 /* One operation; with second, the second value of an operation that
  * answers two is stored there (0 when the operation failed). */
+static void goperl_pending_block_string(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b);
+static void *goperl_pending_blocks_any(void);
 static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint64_t slen, uint64_t *second) {
     goperl_forked_check();
+    if (goperl_pending_blocks_any()) goperl_pending_block_string(f, op, a, b);
     const int goperl_e_ = errno;
     const int32_t failed_before = f->failed;
     const uint64_t r = slen <= GOPERL_OPBOX_STR
@@ -4950,6 +4953,7 @@ static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
 #define XS_INTERNAL(name) static void name(pTHX_ CV *cv __attribute__((unused)))
 
 static void goperl_arena_free_all(void);
+static void goperl_blocks_handed_free(void);
 static void goperl_opreg_clear(void);
 static void goperl_opreg_enter(void);
 static void goperl_pads_rest(goperl_frame_t *f);
@@ -4982,6 +4986,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
         goperl_xs_depth_v = 0;
         goperl_lvslot_flush(f);
         goperl_lvslot_reset();
+        goperl_blocks_handed_free();
         goperl_arena_free_all(); /* context-stack shadows */
         goperl_opreg_clear();
         goperl_pads_rest(f);
@@ -7476,6 +7481,7 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 
 /* HePV is defined with the HE-shadow machinery below. */
 
+
 /* Legacy arena-walk compat: pre-5.18 perls tracked overload flags per-RV,
  * and old XS (Moose's ToInstance) walks PL_sv_arenaroot to fix up every
  * reference after toggling. On modern perl the flag lives on the STASH, so
@@ -7506,7 +7512,7 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 #endif
 #define Gconvert(x, n, t, b) snprintf((b), 64, "%.*g", (int)(n), (double)(x))
 #define PTR2ul(p) ((unsigned long)GOPERL_PTR_NUMBER(p))
-#define safecalloc(n, sz) calloc((size_t)(n), (size_t)(sz))
+#define safecalloc(n, sz) goperl_block_alloc((size_t)(n) * (size_t)(sz), 1)
 #define SVfARG(sv) ((SV *)(sv))
 #define SvIOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_IOKp) != 0)
 #define SvNOKp(sv) ((GOPERL_SVINFO(sv) & GOPERL_INFO_NOKp) != 0)
@@ -8801,27 +8807,149 @@ static inline __attribute__((unused)) uint64_t goperl_guest_addr(
     const uintptr_t d = (uintptr_t)p - (uintptr_t)f->membase;
     return (p && d < *f->memsize) ? (uint64_t)d : 0;
 }
+/* The blocks this module's allocators gave (Newx, Newxz, Newxc, Renew,
+ * safemalloc, savepv, ...), with their sizes. On perl they are blocks of
+ * the interpreter's allocator, and a module hands one to an SV as the SV's
+ * buffer (SvPV_set and SvLEN_set, the sv_usepvn idiom: CBOR::Free's
+ * encoder, JSON::XS::ByteString's strings): the SV owns it from then on.
+ * Here they are the C library's, which the interpreter cannot reach, so a
+ * block handed to an SV becomes a block of the interpreter's of the same
+ * size and contents (goperl_sv_pvx_store). Only the address says that a
+ * pointer is such a block, and how big it is: this table. It is the
+ * module's own (every module has its copy of these functions), guarded for
+ * the threads native code may allocate on. */
+typedef struct goperl_block {
+    void *p;
+    size_t n;
+} goperl_block_t;
+#define GOPERL_BLOCK_GONE ((void *)1)
+static goperl_block_t *goperl_blocks_v;
+static size_t goperl_blocks_cap, goperl_blocks_fill; /* fill: live and gone */
+static int goperl_blocks_lock_v;
+static void goperl_blocks_lock(void) {
+    while (__atomic_exchange_n(&goperl_blocks_lock_v, 1, __ATOMIC_ACQUIRE)) {
+    }
+}
+static void goperl_blocks_unlock(void) { __atomic_store_n(&goperl_blocks_lock_v, 0, __ATOMIC_RELEASE); }
+static size_t goperl_block_hash(const void *p, size_t cap) {
+    uint64_t x = (uint64_t)(uintptr_t)p >> 4;
+    x ^= x >> 29;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 32;
+    return (size_t)x & (cap - 1);
+}
+/* The slot of p, or the empty one it would go in (under the lock). */
+static goperl_block_t *goperl_block_slot(const void *p) {
+    size_t i = goperl_block_hash(p, goperl_blocks_cap);
+    goperl_block_t *gone = 0;
+    for (;;) {
+        goperl_block_t *b = &goperl_blocks_v[i];
+        if (b->p == p) return b;
+        if (!b->p) return gone ? gone : b;
+        if (b->p == GOPERL_BLOCK_GONE && !gone) gone = b;
+        i = (i + 1) & (goperl_blocks_cap - 1);
+    }
+}
+static void goperl_block_note(void *p, size_t n) {
+    if (!p) return;
+    goperl_blocks_lock();
+    if ((goperl_blocks_fill + 1) * 2 > goperl_blocks_cap) {
+        /* a table twice as big as the live blocks need, gone slots dropped */
+        size_t live = 0, cap = 64;
+        for (size_t i = 0; i < goperl_blocks_cap; i++)
+            if (goperl_blocks_v[i].p && goperl_blocks_v[i].p != GOPERL_BLOCK_GONE) live++;
+        while (cap < (live + 1) * 4) cap *= 2;
+        goperl_block_t *old = goperl_blocks_v;
+        const size_t oldcap = goperl_blocks_cap;
+        goperl_block_t *tab = (goperl_block_t *)calloc(cap, sizeof(goperl_block_t));
+        if (!tab) { /* the block stays unnoted: a buffer handed over is refused */
+            goperl_blocks_unlock();
+            return;
+        }
+        goperl_blocks_v = tab;
+        goperl_blocks_cap = cap;
+        goperl_blocks_fill = 0;
+        for (size_t i = 0; i < oldcap; i++)
+            if (old[i].p && old[i].p != GOPERL_BLOCK_GONE) {
+                *goperl_block_slot(old[i].p) = old[i];
+                goperl_blocks_fill++;
+            }
+        free(old);
+    }
+    goperl_block_t *b = goperl_block_slot(p);
+    if (b->p != p) {
+        if (!b->p) goperl_blocks_fill++;
+        b->p = p;
+    }
+    b->n = n;
+    goperl_blocks_unlock();
+}
+/* Forgets p; with size, says whether it was a block and how big. */
+static int goperl_block_forget(const void *p, size_t *size) {
+    int was = 0;
+    if (!p) return 0;
+    goperl_blocks_lock();
+    if (goperl_blocks_cap) {
+        goperl_block_t *b = goperl_block_slot(p);
+        if (b->p == p) {
+            if (size) *size = b->n;
+            b->p = GOPERL_BLOCK_GONE;
+            was = 1;
+        }
+    }
+    goperl_blocks_unlock();
+    return was;
+}
+/* Whether p is a block, and how big. */
+static int goperl_block_size(const void *p, size_t *size) {
+    int is = 0;
+    if (!p) return 0;
+    goperl_blocks_lock();
+    if (goperl_blocks_cap) {
+        goperl_block_t *b = goperl_block_slot(p);
+        if (b->p == p) {
+            *size = b->n;
+            is = 1;
+        }
+    }
+    goperl_blocks_unlock();
+    return is;
+}
+static void *goperl_block_alloc(size_t n, int zero) {
+    void *p = zero ? calloc(1, n ? n : 1) : malloc(n ? n : 1);
+    goperl_block_note(p, n);
+    return p;
+}
 static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_safefree(void *p) {
     goperl_frame_t *f = goperl_cur_frame_v;
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
-    if (g)
+    if (g) {
         goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
-    else
+    } else {
+        goperl_block_forget(p, 0);
         free(p);
+    }
 }
 static void *goperl_saferealloc(void *p, size_t n) __attribute__((unused));
 static void *goperl_saferealloc(void *p, size_t n) {
     goperl_frame_t *f = goperl_cur_frame_v;
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
-    if (!g) return realloc(p, n);
+    if (!g) {
+        void *q = realloc(p, n ? n : 1);
+        if (q) {
+            goperl_block_forget(p, 0);
+            goperl_block_note(q, n);
+        }
+        return q;
+    }
     const uint64_t moved = goperl_do_op(f, GOPERL_OP_MEM_REALLOC, g, n, 0, 0);
     return moved ? f->membase + moved : 0;
 }
-#define Newx(ptr, n, t) ((ptr) = (t *)malloc((size_t)(n) * sizeof(t)))
-#define Newxz(ptr, n, t) ((ptr) = (t *)calloc((size_t)(n), sizeof(t)))
-#define Newxc(ptr, n, t, c) ((ptr) = (c *)malloc((size_t)(n) * sizeof(t)))
-#define safemalloc(n) malloc((size_t)(n))
+#define Newx(ptr, n, t) ((ptr) = (t *)goperl_block_alloc((size_t)(n) * sizeof(t), 0))
+#define Newxz(ptr, n, t) ((ptr) = (t *)goperl_block_alloc((size_t)(n) * sizeof(t), 1))
+#define Newxc(ptr, n, t, c) ((ptr) = (c *)goperl_block_alloc((size_t)(n) * sizeof(t), 0))
+#define safemalloc(n) goperl_block_alloc((size_t)(n), 0)
 #define safefree(p) goperl_safefree((void *)(p))
 #define SETERRNO(e, x) (errno = (e))
 #define Renew(ptr, n, t) \
@@ -9113,7 +9241,7 @@ static SV *goperl_newSVpvn_flags(goperl_frame_t *f, const char *p,
  * safemalloc`): the macros above are function-like, so the bare name is
  * the function. */
 static __attribute__((unused)) void *(safemalloc)(size_t n) { return malloc(n); }
-static __attribute__((unused)) void *(safecalloc)(size_t n, size_t sz) { return calloc(n, sz); }
+static __attribute__((unused)) void *(safecalloc)(size_t n, size_t sz) { return goperl_block_alloc(n * sz, 1); }
 static __attribute__((unused)) void *(saferealloc)(void *p, size_t n) { return goperl_saferealloc(p, n); }
 static __attribute__((unused)) void(safefree)(void *p) { goperl_safefree(p); }
 #ifndef NV_DIG
@@ -9129,6 +9257,7 @@ static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len)
 static void goperl_sv_usepvn(goperl_frame_t *f, SV *sv, char *p, STRLEN len) {
     goperl_do_op(f, GOPERL_OP_SV_SETPVN, GOPERL_TOK(sv), (uint64_t)len, p,
                  (uint64_t)len);
+    goperl_block_forget(p, 0);
     free(p);
 }
 #define sv_usepvn(sv, p, len) goperl_sv_usepvn(_gof, (SV *)(sv), (p), (len))
@@ -9220,7 +9349,7 @@ typedef struct stat Stat_t;
 #endif
 
 static char *goperl_savepvn(const char *p, size_t n) {
-    char *out = (char *)malloc(n + 1);
+    char *out = (char *)goperl_block_alloc(n + 1, 0);
     if (out) {
         memcpy(out, p, n);
         out[n] = '\0';

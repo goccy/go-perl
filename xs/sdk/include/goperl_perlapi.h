@@ -328,10 +328,109 @@ enum {
  * GOPERL_LV_IV), and the store of one. 0, 2, 3 and 4 are GOPERL_SVSLOT_RV,
  * _IV, _UV and _NV; 2, 3 and 5 name the hash, the array and the scalar of
  * a glob for GV_PTR. */
+/* A block of this module's allocators (see goperl_block_t) put in the
+ * buffer slot of an SV stays the module's pointer there, as any pointer of
+ * this process (a structure behind an SV), until the SV makes it its
+ * string: a length (SvCUR_set, SvCUR) or the flag of a string (SvPOK_on,
+ * SvPOK_only, SvFLAGS) given to it, or the size of its buffer (SvLEN_set,
+ * SvLEN), whichever comes first, in whatever order the module gives them.
+ * Then a block of the interpreter's with the same size and contents takes
+ * its place, which the interpreter owns. The size of the buffer is perl's
+ * sign that the block is the SV's from then on: the module's block is
+ * freed when an outermost native call of this module's returns (so that a
+ * write through the module's own pointer before then does not reach freed
+ * memory). Without it the module's block stays the module's to free.
+ * The pending ones are the SVs given such a block in this native call. */
+typedef struct goperl_pending_block {
+    struct goperl_pending_block *next;
+    uint64_t tok;
+    void *p;
+    size_t n;
+    int copied;
+} goperl_pending_block_t;
+static goperl_pending_block_t *goperl_pending_blocks_v;
+typedef struct goperl_handed {
+    struct goperl_handed *next;
+    void *p;
+} goperl_handed_t;
+static goperl_handed_t *goperl_handed_v;
+static void goperl_blocks_handed_free(void) {
+    while (goperl_handed_v) {
+        goperl_handed_t *const h = goperl_handed_v;
+        goperl_handed_v = h->next;
+        free(h->p);
+        free(h);
+    }
+    while (goperl_pending_blocks_v) {
+        goperl_pending_block_t *const b = goperl_pending_blocks_v;
+        goperl_pending_blocks_v = b->next;
+        free(b);
+    }
+}
+static void goperl_pending_block_note(goperl_frame_t *f, uint64_t tok, const void *p) {
+    size_t n = 0;
+    (void)f;
+    if (!goperl_block_size(p, &n)) return;
+    goperl_pending_block_t *b = (goperl_pending_block_t *)calloc(1, sizeof *b);
+    if (!b) return; /* stays a pointer of this process's: refused as a string */
+    b->tok = tok;
+    b->p = (void *)p;
+    b->n = n;
+    b->next = goperl_pending_blocks_v;
+    goperl_pending_blocks_v = b;
+}
+/* The SV tok makes its pending block its string (owned: the buffer's size
+ * was given): the copy is made the first time, the module's block goes
+ * when the SV owns it. */
+static void goperl_pending_block_take(goperl_frame_t *f, uint64_t tok, int owned) {
+    goperl_pending_block_t **pp = &goperl_pending_blocks_v, *b;
+    while ((b = *pp) && b->tok != tok) pp = &b->next;
+    if (!b) return;
+    if (!b->copied) {
+        void **kept = goperl_pv_host_of(f, tok);
+        const svtype t = (svtype)goperl_xs_opx(f, GOPERL_OP_SV_TYPE, tok, 0, 0, 0, 0, 0);
+        if (!kept || kept[0] != b->p || t < SVt_PV || t == SVt_INVLIST || t == SVt_REGEXP ||
+            (t > SVt_PVMG && t != SVt_PVLV)) {
+            /* another pointer by now, or no string: the module's pointer */
+            *pp = b->next;
+            free(b);
+            return;
+        }
+        const uint64_t g = goperl_xs_opx(f, GOPERL_OP_MEM_REALLOC, 0, b->n ? b->n : 1, 0, 0, 0, 0);
+        if (!g) goperl_croakf(f, "Out of memory!");
+        memcpy(goperl_guest_mem(f, g), b->p, b->n);
+        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, g, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
+        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, b->n ? b->n : 1, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
+        b->copied = 1;
+    }
+    if (owned) {
+        goperl_handed_t *h = (goperl_handed_t *)malloc(sizeof(goperl_handed_t));
+        if (h) {
+            goperl_block_forget(b->p, 0);
+            h->p = b->p;
+            h->next = goperl_handed_v;
+            goperl_handed_v = h;
+        }
+        *pp = b->next;
+        free(b);
+    }
+}
+static void *goperl_pending_blocks_any(void) { return goperl_pending_blocks_v; }
+/* Before an operation that makes an SV a string (a length, the flag of a
+ * string) the SV's pending block is handed over. */
+static void goperl_pending_block_string(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b) {
+    int makes_string = 0;
+    if (op == GOPERL_OP_SV_CUR_SET) makes_string = b != 0;
+    else if (op == GOPERL_OP_SV_POK_ON) makes_string = 1;
+    else if (op == GOPERL_OP_SV_FLAGS) makes_string = ((uint32_t)b & (SVf_POK | SVp_POK)) != 0;
+    if (makes_string) goperl_pending_block_take(f, a, 0);
+}
 /* Stores a pointer in the buffer slot of an SV: one into the interpreter's
- * memory as its address there, any other with the loader. */
+ * memory as its address there, any other with the loader (a block of this
+ * module's allocators waits to be handed over, goperl_pending_block_t). */
 static void goperl_sv_pvx_store(goperl_frame_t *f, uint64_t tok, const void *p) {
     uint64_t g = goperl_guest_addr(f, p);
+    if (p && !g) goperl_pending_block_note(f, tok, p);
     if (p && !g) {
         void **kept = f->api->pv_host(f, tok, 1);
         if (!kept) goperl_croakf(f, "out of memory for the buffer slot of an SV");
@@ -351,6 +450,7 @@ static uint64_t goperl_sv_len_load(goperl_frame_t *f, uint64_t tok) {
     return kept ? (uint64_t)(uintptr_t)kept[1] : 0;
 }
 static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
+    if (goperl_pending_blocks_v && len) goperl_pending_block_take(f, tok, 1);
     void **kept = goperl_pv_host_of(f, tok);
     if (kept) {
         kept[1] = (void *)(uintptr_t)len;
