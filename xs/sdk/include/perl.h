@@ -7482,13 +7482,6 @@ static inline __attribute__((unused)) PerlInterpreter *goperl_interp_cur(void) {
 /* HePV is defined with the HE-shadow machinery below. */
 
 
-/* Legacy arena-walk compat: pre-5.18 perls tracked overload flags per-RV,
- * and old XS (Moose's ToInstance) walks PL_sv_arenaroot to fix up every
- * reference after toggling. On modern perl the flag lives on the STASH, so
- * one SvAMAGIC_on covers all references and the walk is vestigial — a NULL
- * arena root makes it compile to a no-op loop, which is the CORRECT result
- * here, not an approximation. */
-
 /* ---- v6 groundwork: the Cpanel::JSON::XS / HTML::Parser surface -------- */
 
 #ifndef NV_MAX
@@ -8789,7 +8782,19 @@ static void load_module(U32 flags, SV *name, SV *ver, ...) {
     va_end(args);
 }
 
-#define PL_sv_arenaroot ((SV *)0)
+/* The SV arenas, which XS walks to list every SV (Devel::Gladiator,
+ * Devel::Leak, Devel::FindBlessedRefs): go-perl does not give native code
+ * the interpreter's arenas, and a walk dies saying so when it starts. It
+ * is not refused where it is compiled: Moose compiles such a walk (its
+ * fix-up of overloading after a role is applied to an object) that it runs
+ * only on perls before 5.18, where overloading was a flag of every
+ * reference. */
+static SV *goperl_sv_arenaroot(goperl_frame_t *f) __attribute__((unused));
+static SV *goperl_sv_arenaroot(goperl_frame_t *f) {
+    goperl_croakf(f, "go-perl gives native code no access to this interpreter internal: "
+                     "PL_sv_arenaroot");
+}
+#define PL_sv_arenaroot (goperl_sv_arenaroot(_gof))
 #define SvANY(sv) ((void *)0)
 #define SVTYPEMASK 0xff
 

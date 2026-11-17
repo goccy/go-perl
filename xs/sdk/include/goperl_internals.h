@@ -288,7 +288,7 @@
 #undef AvALLOC
 #define AvALLOC GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: AvALLOC") 0
 
-/* the SV arenas (PL_sv_arenaroot stays the empty list: the walk old XS such as Moose makes after toggling overloading has nothing to do on this perl, perl.h) */
+/* the SV arenas (PL_sv_arenaroot dies when a walk starts instead, perl.h: Moose compiles a walk it never runs on this perl) */
 #undef PL_sv_root
 #define PL_sv_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_sv_root") 0
 
