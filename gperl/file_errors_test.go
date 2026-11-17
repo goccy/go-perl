@@ -46,3 +46,26 @@ print "rmdir of the root: ", (rmdir("/") ? "done" : errname()), "\n";
 		t.Fatalf("status %d, output:\n%s\nwant:\n%s", status, out, want)
 	}
 }
+
+// A command started in a working directory the user may no longer search
+// starts there, as the child of fork and exec does (it inherits the
+// directory, it does not change into it).
+func TestCommandStartsInADirectoryThatCannotBeSearched(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may search any directory")
+	}
+	out, status := hostPerl(t, "-MFile::Temp=tempdir", "-e", `
+my $dir = tempdir(CLEANUP => 1);
+mkdir "$dir/here" or die "mkdir: $!";
+chdir "$dir/here" or die "chdir: $!";
+chmod 0644, "$dir/here" or die "chmod: $!";
+my $out = qx(/bin/echo started);
+my $status = $?;
+chmod 0755, "$dir/here";
+chdir "/";
+print "command: ", ($status == 0 ? $out : "status $status\n");
+`)
+	if want := "command: started\n"; status != 0 || out != want {
+		t.Fatalf("status %d, output %q, want %q", status, out, want)
+	}
+}
