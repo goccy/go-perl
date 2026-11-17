@@ -1579,38 +1579,43 @@ func (s *state) magicChainHead(sv uint64) uintptr {
 }
 
 // callSvtHook invokes a node's vtbl entry at vtblOff — int (*)(SV*,
-// MAGIC*), the shared shape of svt_set and svt_free — if present.
-func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) {
+// MAGIC*), the shared shape of svt_set and svt_free — if present. died
+// says the hook died, with the message msg.
+func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) (msg string, died bool) {
 	node := copyIn(mg, mgSize)
 	vtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
 	if vtbl == 0 {
-		return
+		return "", false
 	}
 	fnBytes := copyIn(vtbl+vtblOff, 8)
 	fn := uintptr(binary.LittleEndian.Uint64(fnBytes))
 	if fn == 0 {
-		return
+		return "", false
 	}
 	s.mu.Lock()
 	invoke := s.svtInvoke
 	s.mu.Unlock()
 	if invoke == 0 {
-		return
+		return "", false
 	}
 	f, fp := s.bootFrame()
+	defer unpinFrame(fp)
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
 	// The SDK-side entry installs the current frame and a croak guard
-	// before running the hook; interpreter macros inside it need both.
-	purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
+	// before running the hook; interpreter macros inside it need both. It
+	// returns 0 when the hook died, with the message in the frame.
+	ran, _, _ := purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
-	_ = f
-	unpinFrame(fp)
+	if uint32(ran) == 0 {
+		return f.errString(), true
+	}
+	return "", false
 }
 
-func (s *state) callSvtFree(sv uint64, mg uintptr) {
-	s.callSvtHook(sv, mg, vtblOffFree)
+func (s *state) callSvtFree(sv uint64, mg uintptr) (msg string, died bool) {
+	return s.callSvtHook(sv, mg, vtblOffFree)
 }
 
 // magicLocalized runs when `local` puts the SV nsv in the place of the
@@ -1641,7 +1646,10 @@ func (s *state) magicLocalized(id uint32, nsv uint64) []byte {
 		switch {
 		case isValue != 0:
 		case node[mgOffFlags]&mgfLocal != 0 && vtbl != 0 && binary.LittleEndian.Uint64(copyIn(vtbl+vtblOffLocal, 8)) != 0:
-			s.callSvtHook(nsv, mg, vtblOffLocal)
+			if msg, died := s.callSvtHook(nsv, mg, vtblOffLocal); died {
+				// `local` dies with it, as perl's mg_localize lets it out
+				return append([]byte{0}, msg...)
+			}
 		default:
 			f, fp := s.bootFrame()
 			s.magicExt(f, nsv, binary.LittleEndian.Uint64(node[mgOffObj:]), how, vtbl,
@@ -1826,12 +1834,20 @@ func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 // mg_free, the SV has its chain while a MAGIC's svt_free runs, starting at
 // that MAGIC (a hook that looks its MAGIC up with mg_findext finds it, as
 // Linux::Epoll's does), and loses it once every MAGIC is freed.
-func (s *state) magicFreed(id uint32) {
+//
+// A hook that dies ends it, as a die ends perl's mg_free: the response is
+// [0] and the message, which the guest's anchor dies with; the MAGIC is
+// not freed (perl's mg_free never gets to it), nor what is after it. A
+// MAGIC the hook took off the chain itself is the hook's, whether it dies
+// or not: Variable::Magic takes its MAGIC off and frees it, has the SV
+// freed once more for the rest of the chain, and dies. The response is [1]
+// otherwise.
+func (s *state) magicFreed(id uint32) []byte {
 	s.mu.Lock()
 	rec := s.magicByID[id]
 	s.mu.Unlock()
 	if rec == nil {
-		return
+		return []byte{1}
 	}
 	defer func() {
 		s.mu.Lock()
@@ -1861,7 +1877,19 @@ func (s *state) magicFreed(id uint32) {
 			fmt.Fprintf(os.Stderr, "[magicFreed] sv=%#x mg=%#x vtbl=%#x any=%#x\n", rec.svTok, mg, vtblp, val)
 		}
 		if lastMagicHolder(node) {
-			s.callSvtFree(rec.svTok, mg)
+			msg, died := s.callSvtFree(rec.svTok, mg)
+			if died {
+				return append([]byte{0}, msg...)
+			}
+			s.mu.Lock()
+			head := rec.head
+			s.mu.Unlock()
+			if head != mg {
+				// the hook took its MAGIC off: the chain goes on as the
+				// hook left it
+				mg = head
+				continue
+			}
 			// What svt_free left in the MAGIC is what is given up.
 			node = copyIn(mg, mgAllocSize)
 		}
@@ -1874,6 +1902,7 @@ func (s *state) magicFreed(id uint32) {
 		cFree(mg)
 		mg = next
 	}
+	return []byte{1}
 }
 
 // magicTakesObj reports whether sv_magicext takes a reference on obj for a
@@ -1933,7 +1962,11 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 		nodeVtbl := uintptr(binary.LittleEndian.Uint64(node[mgOffVirtual:]))
 		if typ == byte(how) && (vtbl == 0 || nodeVtbl == vtbl) {
 			if lastMagicHolder(node) {
-				s.callSvtFree(sv, mg)
+				if msg, died := s.callSvtFree(sv, mg); died {
+					// sv_unmagic of native code goes on: its caller is
+					// native code, which a die cannot reach from here
+					fmt.Fprintf(os.Stderr, "goperl xs: svt_free died in sv_unmagic: %s\n", msg)
+				}
 				node = copyIn(mg, mgAllocSize)
 			}
 			s.releaseMagicObj(node)

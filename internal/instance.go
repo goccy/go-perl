@@ -147,7 +147,7 @@ type Perl struct {
 	nativeXS func(req []byte) []byte
 	// magicFree handles teardown of host-side MAGIC mirrors when the guest
 	// frees an anchored SV (reserved callback method id -2).
-	magicFree func(id uint32)
+	magicFree func(id uint32) []byte
 	// ppHook handles pp-hook dispatch for op types a native module claimed
 	// (reserved callback method id -3).
 	ppHook func(req []byte) []byte

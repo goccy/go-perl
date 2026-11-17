@@ -6421,7 +6421,9 @@ __goperl_xs_epilogue(goperl_frame_t *f) {
 /* Loader entry: run one mirror-MAGIC hook (svt_free, svt_local — the
  * int (*)(pTHX_ SV*, MAGIC*) shape) with the current frame installed and a
  * croak guard armed. The loader calls this instead of the raw function
- * pointer so interpreter macros inside the hook see the right frame. */
+ * pointer so interpreter macros inside the hook see the right frame. It
+ * returns 0 when the hook croaked, with the message in f->err: the loader
+ * has the free or the `local` die with it, as perl lets it out. */
 GOPERL_C __attribute__((weak, visibility("default"), used)) uint32_t
 __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     int (*fn)(pTHX_ SV *, MAGIC *) = (int (*)(pTHX_ SV *, MAGIC *))fnv;
@@ -6431,7 +6433,6 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     f->jb = (void *)&jb;
     goperl_frame_enter(f);
     if (GOPERL_SETJMP(jb)) {
-        fprintf(stderr, "goperl native XS: croak in magic hook: %s\n", f->err);
         f->failed = 0;
         f->jb = prev_jb;
         goperl_cur_frame_v = prev_frame;

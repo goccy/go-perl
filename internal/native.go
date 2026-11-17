@@ -87,8 +87,9 @@ func (p *Perl) SetNativeXSHandler(fn func(req []byte) []byte) error {
 // SetMagicFreeHandler installs the teardown hook for host-side MAGIC: when
 // the guest frees an SV carrying the native SDK's anchor magic, id (the one
 // the loader stored at attach time) is delivered here so the loader can run
-// the native module's svt_free chain and release its mirrors.
-func (p *Perl) SetMagicFreeHandler(fn func(id uint32)) error {
+// the native module's svt_free chain and release its mirrors. The hook's
+// result is the response: [1], or [0]+message for the free to die with.
+func (p *Perl) SetMagicFreeHandler(fn func(id uint32) []byte) error {
 	if err := p.EnsureDispatcher(); err != nil {
 		return err
 	}
@@ -503,7 +504,7 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 		free := d.p.magicFree
 		d.p.hookMu.RUnlock()
 		if free != nil && len(req) >= 8 {
-			free(uint32(binary.LittleEndian.Uint64(req)))
+			return free(uint32(binary.LittleEndian.Uint64(req))), nil
 		}
 		return []byte{1}, nil
 	}

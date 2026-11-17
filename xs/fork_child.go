@@ -118,7 +118,7 @@ func (s *state) adoptForkChild(child *internal.Perl) error {
 	if err := child.SetNativeXSHandler(cs.childXSUB); err != nil {
 		return err
 	}
-	if err := child.SetMagicFreeHandler(func(uint32) {}); err != nil {
+	if err := child.SetMagicFreeHandler(func(uint32) []byte { return []byte{1} }); err != nil {
 		return err
 	}
 	if err := child.SetMagicLocalHandler(cs.childMagicLocal); err != nil {
