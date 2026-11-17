@@ -11024,12 +11024,21 @@ enum {
     GOPERL_LEX_STUFF_SV = 6
 };
 
+/* The lexer counts the lines it reads in PL_curcop (COPLINE_INC): the
+ * shadow of the COP native code has as PL_curcop is read again after a
+ * call of the lexer, for CopLINE(PL_curcop) to be the line the lexer is
+ * on (Quote::Code numbers the lines of a here-doc so). */
 static int64_t goperl_lex(goperl_frame_t *f, int sel, uint64_t b,
                           const char *s, uint64_t slen) {
     goperl_parser_push(f);
     int64_t r = (int64_t)goperl_do_op(f, GOPERL_OP_LEX,
                                       (uint64_t)(uint32_t)sel, b, s, slen);
     goperl_parser_pull(f);
+    {
+        COP *const cop = goperl_curcop_slot_v;
+        if (cop && ((const OP *)cop)->gop && goperl_op_is_shadow(f, (const OP *)cop))
+            GOPERL_OPENT((const OP *)cop)->gen = 0; /* no generation is 0 */
+    }
     return r;
 }
 

@@ -2969,9 +2969,25 @@ static char *goperl_new_warnings_bitfield(goperl_frame_t *f, char *buffer,
 #define new_warnings_bitfield(buffer, bits, size) \
     goperl_new_warnings_bitfield(_gof, (buffer), (bits), (size))
 
-#define CopLINE_set(c, l) (goperl_cop_fields((COP *)(c))->cop_line = (l))
-#define CopLINE_inc(c) (++goperl_cop_fields((COP *)(c))->cop_line)
-#define CopLINE_dec(c) (--goperl_cop_fields((COP *)(c))->cop_line)
+/* The line of a COP: the interpreter's COP is given it at once, as a
+ * module sets the line of PL_curcop for the message it croaks with next
+ * (Quote::Code names the line a here-doc began on); a COP of the module's
+ * own making keeps it. */
+static __attribute__((unused)) U32 goperl_cop_line_set(COP *c, U32 line) {
+    COP *const o = goperl_cop_fields(c);
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    o->cop_line = line;
+    if (o->gop && f && goperl_op_is_shadow(f, (const OP *)o)) {
+        goperl_do_op3(f, GOPERL_OP_CALL, o->gop, line, GOPERL_CALL_COP_SET | ((uint64_t)0 << 32), 0, 0);
+        if (GOPERL_OPENT(o)->base) GOPERL_OPENT(o)->base->cop_line = line;
+    }
+    return line;
+}
+#define CopLINE_set(c, l) goperl_cop_line_set((COP *)(c), (U32)(l))
+#define CopLINE_inc(c) \
+    ({ GOPERL_ONCE(goperl_CopLINE_inc_c_, c); goperl_cop_line_set((COP *)goperl_CopLINE_inc_c_, CopLINE(goperl_CopLINE_inc_c_) + 1); })
+#define CopLINE_dec(c) \
+    ({ GOPERL_ONCE(goperl_CopLINE_dec_c_, c); goperl_cop_line_set((COP *)goperl_CopLINE_dec_c_, CopLINE(goperl_CopLINE_dec_c_) - 1); })
 static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv)
     __attribute__((unused));
 static void goperl_cop_file_set(goperl_frame_t *f, COP *c, const char *pv) {
