@@ -847,8 +847,9 @@ XS(XS_PerlAPI_release_pair) {
  * string of sv, as File::Map does with the mapping of a file: the buffer
  * slot through SvPVX with no room and the length, then SvPOK_only_UTF8
  * (how 0); SvPV_set into a scalar that is a string already (how 1); the
- * slot, then the flags through SvFLAGS (how 2). A call that is not refused
- * says so. */
+ * slot, then the flags through SvFLAGS (how 2); an empty string whose
+ * buffer slot keeps a structure (how 3), then given a length (how 4). A
+ * call that is not refused says so. */
 static char native_string_block[] = "the bytes of a native block";
 XS(XS_PerlAPI_string_in_native_memory) {
     dXSARGS;
@@ -859,6 +860,16 @@ XS(XS_PerlAPI_string_in_native_memory) {
         SvUPGRADE(sv, SVt_PV);
         if (how == 1) {
             SvPV_set(sv, native_string_block);
+        } else if (how == 3 || how == 4) {
+            /* an empty string with a structure behind it (Object::Pad's
+             * embedding), then given a length (how 4) */
+            SvPOK_on(sv);
+            SvLEN(sv) = 0;
+            SvPVX(sv) = native_string_block;
+            if (how == 4) SvCUR_set(sv, 3);
+            ST(0) = sv_2mortal(newSVpvf("not refused %s",
+                                        SvPVX(sv) == native_string_block ? "kept" : "lost"));
+            XSRETURN(1);
         } else {
             SvPVX(sv) = native_string_block;
             SvLEN(sv) = 0;
