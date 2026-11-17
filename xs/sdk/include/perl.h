@@ -7575,9 +7575,13 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
         return (void *)goperl_he_at(
             f, goperl_do_op3(f, GOPERL_OP_HV_STORE_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
                              GOPERL_TOK(val), 0, 0));
+    /* HV_FETCH_EMPTY_HE: an entry the fetch makes has no value yet, as
+     * List::Util's uniqnum tells a new key by */
     return (void *)goperl_he_at(
         f, goperl_do_op3(f, GOPERL_OP_HV_FETCH_ENT, GOPERL_TOK(hv), GOPERL_TOK(keysv),
-                         (action & HV_FETCH_LVALUE) ? 1 : 0, 0, 0));
+                         ((action & HV_FETCH_LVALUE) ? 1 : 0) |
+                             ((action & HV_FETCH_LVALUE) && (action & HV_FETCH_EMPTY_HE) ? 2 : 0),
+                         0, 0));
 }
 #define hv_common(hv, keysv, key, klen, kflags, action, val, hash)        \
     goperl_hv_common(_gof, (HV *)(hv), (SV *)(keysv), (key),              \
