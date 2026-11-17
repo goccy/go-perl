@@ -7162,11 +7162,18 @@ static const PERL_CONTEXT *goperl_caller_cx(goperl_frame_t *f, I32 level,
 
 /* ---- MAGIC --------------------------------------------------------------- */
 
-#define sv_magicext(sv, obj, how, vtbl, name, namlen)                     \
-    (goperl_flush(_gof),                                                  \
-     goperl_api_magic_ext(_gof, GOPERL_TOK(sv), GOPERL_TOK(obj),       \
-                             (int32_t)(how), (const void *)(vtbl),        \
-                             (const char *)(name), (int64_t)(namlen)))
+static void goperl_svmagic_changed(goperl_frame_t *f, uint64_t sv);
+static MAGIC *goperl_sv_magicext(goperl_frame_t *f, SV *sv, SV *obj, int how,
+                                 const MGVTBL *vtbl, const char *name, I32 namlen) {
+    goperl_flush(f);
+    MAGIC *const mg = goperl_api_magic_ext(f, GOPERL_TOK(sv), GOPERL_TOK(obj), (int32_t)how,
+                                           (const void *)vtbl, name, (int64_t)namlen);
+    goperl_svmagic_changed(f, GOPERL_TOK(sv));
+    return mg;
+}
+#define sv_magicext(sv, obj, how, vtbl, name, namlen)                                  \
+    goperl_sv_magicext(_gof, (SV *)(sv), (SV *)(obj), (int)(how), (const MGVTBL *)(vtbl), \
+                       (const char *)(name), (I32)(namlen))
 /* SvMAGIC is WRITABLE (DBI splices tie magic by assigning the chain
  * head): reads load a synced slot; a changed slot is written back through
  * magic_set_head at the next flush (before the next operation, and when the
@@ -7184,6 +7191,18 @@ static const PERL_CONTEXT *goperl_caller_cx(goperl_frame_t *f, I32 level,
 #define goperl_svmagic_sv_v (GOPERL_SHARED->svmagic_sv)
 #define goperl_svmagic_val_v (GOPERL_SHARED->svmagic_val)
 #define goperl_svmagic_orig_v (GOPERL_SHARED->svmagic_orig)
+/* The SDK itself changed the chain of sv: an SvMAGIC view of it is done
+ * with, as a write-back would put the chain the view showed back over the
+ * change (Variable::Magic casts with sv_magicext and reads SvMAGIC after);
+ * a chain native code took off whole stays native code's, with the change
+ * in front (see goperl_svmagic_detached). */
+static void goperl_svmagic_changed(goperl_frame_t *f, uint64_t sv) {
+    if (goperl_svmagic_sv_v != sv) return;
+    if (goperl_svmagic_detached(f))
+        goperl_svmagic_val_v = goperl_api_magic_chain(f, sv);
+    else
+        goperl_svmagic_sv_v = 0;
+}
 #define GOPERL_CALL_MG_LIST 26
 static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg) {
     return mg && mg->mg_virtual == &((goperl_shared_t *)f->inst)->interp_magic_vtbl;
@@ -7294,19 +7313,22 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
 #define mg_find(sv, type) goperl_mg_find(_gof, (sv), (type))
 #define sv_unmagic(sv, how) \
     ({ GOPERL_ONCE(goperl_sv_unmagic_sv_, sv); GOPERL_ONCE(goperl_sv_unmagic_how_, how); \
-       (goperl_flush(_gof), goperl_api_magic_del(_gof, GOPERL_TOK(goperl_sv_unmagic_sv_), (int32_t)(goperl_sv_unmagic_how_), 0), (void)goperl_op0(GOPERL_OP_SV_UNMAGIC, GOPERL_TOK(goperl_sv_unmagic_sv_), (uint64_t)(uint32_t)(goperl_sv_unmagic_how_)), 0); })
+       (goperl_flush(_gof), goperl_api_magic_del(_gof, GOPERL_TOK(goperl_sv_unmagic_sv_), (int32_t)(goperl_sv_unmagic_how_), 0), goperl_svmagic_changed(_gof, GOPERL_TOK(goperl_sv_unmagic_sv_)), (void)goperl_op0(GOPERL_OP_SV_UNMAGIC, GOPERL_TOK(goperl_sv_unmagic_sv_), (uint64_t)(uint32_t)(goperl_sv_unmagic_how_)), 0); })
 #define sv_unmagicext(sv, how, vtbl)                                   \
-    (goperl_flush(_gof),                                               \
-     goperl_api_magic_del(_gof, GOPERL_TOK(sv), (int32_t)(how),     \
+    ({ GOPERL_ONCE(goperl_sv_unmagicext_sv_, sv);                      \
+       (goperl_flush(_gof),                                            \
+        goperl_api_magic_del(_gof, GOPERL_TOK(goperl_sv_unmagicext_sv_), (int32_t)(how), \
                              (const void *)(vtbl)),                    \
-     0)
+        goperl_svmagic_changed(_gof, GOPERL_TOK(goperl_sv_unmagicext_sv_)), 0); })
 /* Replace the mirror chain's head (the SvMAGIC_set idiom for unlinking an
  * entry the module found via SvMAGIC). The unlinked node's cleanup stays
  * with the module (Safefree), exactly as with real perl. */
-#define SvMAGIC_set(sv, mg) \
-    (goperl_flush(_gof),    \
-     goperl_api_magic_set_head(_gof, GOPERL_TOK(sv),  \
-                               goperl_magic_chain_of_native(_gof, (MAGIC *)(mg))))
+#define SvMAGIC_set(sv, mg)                                                              \
+    ({ GOPERL_ONCE(goperl_svmagic_set_sv_, sv);                                          \
+       goperl_flush(_gof);                                                               \
+       goperl_api_magic_set_head(_gof, GOPERL_TOK(goperl_svmagic_set_sv_),               \
+                                 goperl_magic_chain_of_native(_gof, (MAGIC *)(mg)));     \
+       goperl_svmagic_changed(_gof, GOPERL_TOK(goperl_svmagic_set_sv_)); })
 #define PERL_MAGIC_backref '<'
 /* Plain sv_magic attaches BEHAVIORAL core magic (PERL_MAGIC_tied being
  * the load-bearing case: DBI ties its outer handles) — that must land on
@@ -7390,8 +7412,7 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                             name, name ? (int64_t)namlen : 0);
     /* on a chain native code took off whole, SvMAGIC is the new magic in
      * front of what native code had there, as perl's sv_magic leaves it */
-    if (goperl_svmagic_sv_v == GOPERL_TOK(sv) && goperl_svmagic_detached(f))
-        goperl_svmagic_val_v = goperl_api_magic_chain(f, GOPERL_TOK(sv));
+    goperl_svmagic_changed(f, GOPERL_TOK(sv));
 }
 #define sv_magic(sv, obj, how, name, namlen)                          \
     goperl_sv_magic(_gof, (SV *)(sv), (SV *)(obj), (int)(how),        \
