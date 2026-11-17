@@ -141,6 +141,15 @@ XS(XS_MagicWalk_name_sv) {
     sv_magic(SvRV(ST(0)), NULL, PERL_MAGIC_ext, (const char *)ST(1), HEf_SVKEY);
     XSRETURN_EMPTY;
 }
+XS(XS_MagicWalk_name_of) {
+    dXSARGS;
+    if (items != 1) croak_xs_usage(cv, "ref");
+    {
+        MAGIC *mg = mg_find(SvRV(ST(0)), PERL_MAGIC_ext);
+        ST(0) = mg && mg->mg_len == HEf_SVKEY ? (SV *)mg->mg_ptr : &PL_sv_undef;
+        XSRETURN(1);
+    }
+}
 XS(XS_MagicWalk_marked) {
     dXSARGS;
     if (items != 1) croak_xs_usage(cv, "ref");
@@ -160,6 +169,7 @@ XS_EXTERNAL(boot_MagicWalk) {
     newXS_deffile("MagicWalk::unlink_head", XS_MagicWalk_unlink_head);
     newXS_deffile("MagicWalk::utf8_cache", XS_MagicWalk_utf8_cache);
     newXS_deffile("MagicWalk::name_sv", XS_MagicWalk_name_sv);
+    newXS_deffile("MagicWalk::name_of", XS_MagicWalk_name_of);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
 `
@@ -188,7 +198,7 @@ func TestNativeMagicChainShowsTheInterpretersMagic(t *testing.T) {
 		{"tied values in an array", ties + ` my $c = MagicWalk::clone([\%h, \@a, \$s]); join ",", map(ref, @$c), $c->[0]{b}, $c->[1][1], ${$c->[2]}, ref(tied(@{$c->[1]})), ref(tied(${$c->[2]}))`, "HASH,ARRAY,SCALAR,2,4,5,Tie::StdArray,Tie::StdScalar"},
 		{"the UTF-8 cache", `require B; my $v = "a\r\n"; utf8::upgrade($v); index($v, "\n"); my $c = MagicWalk::clone(\$v); my $m = B::svref_2object($c)->MAGIC; ($m ? $m->TYPE : "none") . " " . $$c`, "w a\r\n"},
 		{"the positions in the UTF-8 cache", `my $v = "\x{263a}b\x{263a}cd" x 3; index($v, "c"); my $c = MagicWalk::clone(\$v); my ($o, $k) = (MagicWalk::utf8_cache(\$v), MagicWalk::utf8_cache($c)); ($o eq $k ? "same" : "$o vs $k") . " " . ($o =~ /^-1:[1-9]/ ? "cached" : $o) . " " . length($$c) . " " . ord(substr($$c, 7, 1))`, "same cached 15 9786"},
-		{"a name that is an SV", `require B; my $v = 1; MagicWalk::name_sv(\$v, "the name"); my $m = B::svref_2object(\$v)->MAGIC; my $found = "none"; while ($m) { my $p = $m->PTR; if (ref($p) && $p->isa("B::PV") && $p->PV eq "the name") { $found = $m->TYPE; last } $m = $m->MOREMAGIC } $found`, "~"},
+		{"a name that is an SV", `my $v = 1; MagicWalk::name_sv(\$v, "the name"); MagicWalk::name_of(\$v) // "none"`, "the name"},
 		{"a MAGIC of the module's after the interpreter's", ties + ` MagicWalk::mark(\%h); MagicWalk::marked(\%h) . " " . (tied(%h) ? "still tied" : "untied") . " " . $h{b}`, "42 still tied 2"},
 		{"a MAGIC of the module's before the interpreter's", ties + ` MagicWalk::mark_head(\%h); join ",", MagicWalk::marked(\%h), MagicWalk::types(\%h), (tied(%h) ? "still tied" : "untied"), $h{b}`, "42,P~,still tied,2"},
 		{"the module's MAGIC on an untied value", `my %h = (a => 1); MagicWalk::mark_head(\%h); MagicWalk::mark(\%h); join ",", MagicWalk::marked(\%h), MagicWalk::types(\%h)`, "42,~~"},

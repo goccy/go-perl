@@ -1796,19 +1796,25 @@ func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 			rec.head = mg
 		}
 		s.mu.Unlock()
-		return
-	}
-	s.nextMagicID++
-	rec := &magicRec{svTok: sv, head: mg, anchorID: s.nextMagicID}
-	s.magicBySV[sv] = rec
-	s.magicByID[rec.anchorID] = rec
-	s.mu.Unlock()
-	if _, err := s.p.XSHelperOp(opMagicAttach, sv, 0, uint64(rec.anchorID), ""); err != nil {
-		f.fail("SvMAGIC_set: " + err.Error())
-		return
+		if mg == 0 {
+			return
+		}
+	} else {
+		s.nextMagicID++
+		rec := &magicRec{svTok: sv, head: mg, anchorID: s.nextMagicID}
+		s.magicBySV[sv] = rec
+		s.magicByID[rec.anchorID] = rec
+		s.mu.Unlock()
+		if _, err := s.p.XSHelperOp(opMagicAttach, sv, 0, uint64(rec.anchorID), ""); err != nil {
+			f.fail("SvMAGIC_set: " + err.Error())
+			return
+		}
 	}
 	// The interpreter reports the accesses the vtables of the chain have
-	// hooks for, as for the magic sv_magicext attaches.
+	// hooks for, as for the magic sv_magicext attaches: a chain spliced
+	// with a MAGIC of another vtable, or one whose MAGIC was given a vtable
+	// after it was attached (mg_magical of the SDK sets the head the chain
+	// has for this look), gets the hooks of its vtables.
 	var hooks uint64
 	for node := mg; node != 0; {
 		buf := copyIn(node, mgAllocSize)

@@ -7390,6 +7390,12 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                       PERL_MAGIC_UTF8_CACHESIZE * 2 * sizeof(STRLEN));
         goperl_safefree((void *)name);
         return;
+    } else if (how == PERL_MAGIC_ext) {
+        /* extension magic has no behaviour of the interpreter's: the
+         * mirror below is all of it. A second MAGIC in the interpreter
+         * would be one more to take off when the module takes its own off
+         * from inside a hook (pTk's TclObj_set does sv_unmagic of '~'),
+         * and the interpreter's mg_set would step onto the freed one. */
     } else if (name && namlen == HEf_SVKEY) {
         /* the name is an SV, which the interpreter's magic holds a
          * reference to: its token, in the bytes of the text */
