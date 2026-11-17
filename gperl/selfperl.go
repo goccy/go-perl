@@ -28,10 +28,10 @@ import (
 // from the standard library, which ships them (bin/ in it).
 //
 // The place of the directory follows from the place of the executable and
-// of the standard library alone, so a directory that was removed is the
-// same directory again after the next run, and a standard library of
-// another version (the executable replaced by a newer one) has its
-// programs in a directory of its own.
+// the version of the standard library alone, so a directory that was
+// removed is the same directory again after the next run, and a standard
+// library of another version (the executable replaced by a newer one) has
+// its programs in a directory of its own.
 
 // selfPerlPath returns where the link to this executable is (whether or not
 // it exists), the executable it points at and the standard library whose
@@ -53,7 +53,12 @@ func selfPerlPath() (link, exe, stdlib string, ok bool) {
 	if stdlib, err = perl.ExtractStdlib(); err != nil {
 		return "", "", "", false
 	}
-	sum := sha256.Sum256([]byte(exe + "\x00" + stdlib))
+	// The standard library is named by its directory's own name, which
+	// says what it holds (stdlib-<digest>): the directory is reached by
+	// different paths (another home directory whose caches are the same
+	// ones), and a process extracts it once, so a path would name another
+	// link in a process whose environment has changed since.
+	sum := sha256.Sum256([]byte(exe + "\x00" + filepath.Base(stdlib)))
 	return filepath.Join(cache, "go-perl", "perl-"+hex.EncodeToString(sum[:8]), "perl"), exe, stdlib, true
 }
 
