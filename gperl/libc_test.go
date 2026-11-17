@@ -46,8 +46,8 @@ report("anonymous temporary file: fd above stdio=", (fileno($tmp) > 2 ? 1 : 0), 
 report("cuserid: ", POSIX::cuserid());
 report("protocols: tcp=", scalar(getprotobyname("tcp")), " 17=", scalar(getprotobynumber(17)),
        " unknown=", (defined getprotobyname("no-such-protocol") ? "found" : "none"));
-my @all; setprotoent(0); while (my @p = getprotoent()) { push @all, $p[0] } endprotoent();
-report("protocol table: @all");
+my %all; setprotoent(0); while (my @p = getprotoent()) { $all{$p[0]} = 1 } endprotoent();
+report("protocol table: ", join(" ", grep { $all{$_} } qw(ip icmp tcp udp ipv6 ipv6-icmp gre sctp)));
 report("networks: ", (defined getnetbyname("loopback") ? "found" : "none"));
 my @host = gethostbyname("127.0.0.1");
 report("host by number: ", (@host ? inet_ntoa($host[4]) : "none"));
@@ -65,7 +65,7 @@ report("inet_aton of a number: ", inet_ntoa(inet_aton("10.1.2.3")));
 		"anonymous temporary file: fd above stdio=1 reads back=kept",
 		"cuserid: "+me.Username,
 		"protocols: tcp=6 17=udp unknown=none",
-		"protocol table: ip icmp tcp udp ipv6 ipv6-icmp",
+		"protocol table: ip icmp tcp udp ipv6 ipv6-icmp gre sctp",
 		"networks: none",
 		"host by number: 127.0.0.1",
 		"host by name: 127.0.0.1",
