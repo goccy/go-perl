@@ -3332,9 +3332,13 @@ static CV *goperl_cv_clone_fn(pTHX_ CV *proto) { return cv_clone(proto); }
 #define PL_errors (*goperl_plsv_ref(_gof, GOPERL_PL_ERRORS))
 /* The interpreter's mark stack, where it is: what a context's
  * blk_oldmarksp indexes. (The marks of the running native function are its
- * own: PL_markstack_ptr, TOPMARK.) */
-#define PL_markstack \
-    ((I32 *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_MARKSTACK)))
+ * own: PL_markstack_ptr, TOPMARK.) A mark there is an index of the
+ * interpreter's stack, which PL_stack_base is by index (goperl_stack_below). */
+static inline __attribute__((unused)) I32 *goperl_markstack_guest(goperl_frame_t *f) {
+    goperl_stack_below(f);
+    return (I32 *)goperl_guest_mem(f, GOPERL_PLVAR(GOPERL_PL_MARKSTACK));
+}
+#define PL_markstack (goperl_markstack_guest(_gof))
 #define PL_savebegin (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_SAVEBEGIN))
 /* The scope stack is the interpreter's array, read where it is. */
 #define PL_scopestack \

@@ -54,7 +54,16 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 34
+const abiVersion = 35
+
+// nativeHdrWords is the number of header words of a native-XSUB request
+// (GOPERL_NATIVE_HDR_WORDS in perl-wasm): the function id, the CV, the
+// item count, the interpreter's stack index of the first item (ax) and
+// where its stack is; the items follow.
+const nativeHdrWords = 5
+
+// maxStackIndex bounds the stack index a request may name.
+const maxStackIndex = 1 << 28
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -228,6 +237,12 @@ type cFrame struct {
 	// (goperl_tmpblock_t: the block before it, then the slots), which the
 	// SDK mallocs and releaseStack frees with the frame.
 	tmpMore uintptr
+	// The stack of an XSUB is the interpreter's by index: gstack is where
+	// the interpreter's stack is in its memory, and below the number of
+	// its values under the arguments (ax), which the SDK reads into
+	// st[0..below-1] when native code may index them, setting below to 0.
+	gstack uint64
+	below  int32
 
 	// Go-only:
 	p *internal.Perl
@@ -1034,10 +1049,14 @@ func (s *state) dispatch(req []byte) []byte {
 	id := int32(int64(wordAt(req, 0)))
 	cvTok := wordAt(req, 1)
 	nitems := wordAt(req, 2)
-	if nitems > uint64(len(req)/8) || len(req) < 8*(3+int(nitems)) {
+	if len(req) < nativeHdrWords*8 || nitems > uint64(len(req)/8) || len(req) < 8*(nativeHdrWords+int(nitems)) {
 		return fail("native XS dispatch: truncated payload")
 	}
 	items := int(nitems)
+	ax := int(int64(wordAt(req, 3)))
+	if ax < 1 || ax > maxStackIndex {
+		return fail(fmt.Sprintf("native XS dispatch: no stack index %d", ax))
+	}
 	s.mu.Lock()
 	var fn, subname uintptr
 	if id >= 0 && int(id) < len(s.fns) {
@@ -1055,15 +1074,20 @@ func (s *state) dispatch(req []byte) []byte {
 	f := s.newFrame()
 	f.subname = subname
 	f.items = int32(items)
-	// Stack layout mirrors a real XS entry: a mark at offset 0, arguments
-	// at st[1..items] (so ax == 1), sp at the last argument.
-	f.marks[0] = 0
+	// The stack is the interpreter's by index, as a real XS entry's is:
+	// the arguments at st[ax..ax+items-1], ax being the interpreter's
+	// index of the first, a mark at ax-1, sp at the last argument. The
+	// values below the arguments are the interpreter's, at gstack; the SDK
+	// reads them in when native code may look at them.
+	f.marks[0] = int32(ax - 1)
 	f.markidx = 0
-	f.initStack(items)
+	f.initStack(ax - 1 + items)
 	for i := 0; i < items; i++ {
-		f.setStack(1+i, wordAt(req, 3+i))
+		f.setStack(ax+i, wordAt(req, nativeHdrWords+i))
 	}
-	f.psp = f.stBase + uintptr(items)*8
+	f.psp = f.stBase + uintptr(ax-1+items)*8
+	f.gstack = wordAt(req, 4)
+	f.below = int32(ax)
 	fp := pinFrame(f)
 	defer unpinFrame(fp)
 	// The XSUB call and the epilogue that closes its activation must run
@@ -1107,12 +1131,15 @@ func (s *state) dispatch(req []byte) []byte {
 	if top < 0 || int64(top) >= f.stCap {
 		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d)", top))
 	}
-	n := top // ax == 1: return values are st[1..top]
+	n := top - (ax - 1) // the return values are st[ax..top]
+	if n < 0 {
+		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d below ax %d)", top, ax))
+	}
 	resp := make([]byte, 1+8+8*n)
 	resp[0] = 1
 	binary.LittleEndian.PutUint64(resp[1:], uint64(n))
 	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint64(resp[1+8+8*i:], f.stackAt(1+i))
+		binary.LittleEndian.PutUint64(resp[1+8+8*i:], f.stackAt(ax+i))
 	}
 	if xsTrace {
 		fmt.Fprintf(os.Stderr, "[xsub] %s returns %d: % x\n", cString(subname), n, resp[1+8:])
