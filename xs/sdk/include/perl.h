@@ -5039,7 +5039,10 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
 /* Opens an activation on the frame: the frame becomes current, what the
  * previous activation had in it is parked on the host save-stack, and the
  * catch point of croak is the buffer declared here. */
-#define GOPERL_XS_OPEN(frame, prev_cur)                    \
+#define GOPERL_XS_OPEN(frame, prev_cur) GOPERL_XS_OPEN_WITH(frame, prev_cur, GOPERL_XS_OPEN_RETURN)
+/* GOPERL_XS_OPEN with what a croak does in the function, once the
+ * activation is closed */
+#define GOPERL_XS_OPEN_WITH(frame, prev_cur, after_croak)  \
     {                                                      \
         int32_t goperl_entry_base = goperl_hostsave_n;     \
         errno = GOPERL_ERRNO_UNSET;                        \
@@ -5060,7 +5063,7 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
             /* xs_leave unwinds the host saves itself, after reading \
              * the frame to return to: that link is one of them */  \
             goperl_xs_leave(frame);                        \
-            GOPERL_XS_OPEN_RETURN                          \
+            after_croak                                    \
         }                                                  \
     }
 /* Real XSUBs are void; the sole non-void dXSARGS user in C (DBI's bounce)
@@ -5068,7 +5071,9 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
  * setjmp instead. C++ makes `return;` an error in a function that returns
  * a value (Inline::CPP's functions with variable arguments use dXSARGS):
  * there the croak goes on to the outer activation, as perl's croak goes
- * past every function of native code to the interpreter. */
+ * past every function of native code to the interpreter. dXSARGS opens an
+ * activation of its own only inside another one, the entry's at least,
+ * which returns (__goperl_xs_invoke). */
 #ifdef __cplusplus
 #define GOPERL_XS_OPEN_RETURN goperl_raise(goperl_cur_frame_v);
 #else
@@ -6331,7 +6336,9 @@ __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave)));
     goperl_frame_t *prev_cur = goperl_cur_frame_v;
     goperl_frame_enter(f);
-    GOPERL_XS_OPEN(f, prev_cur)
+    /* the outermost activation: a croak returns to the loader, also when
+     * the module is C++ */
+    GOPERL_XS_OPEN_WITH(f, prev_cur, return;)
     f->entry_jb = (void *)&_gof_jb;
     fn((CV *)(uintptr_t)cv);
 }
