@@ -123,3 +123,21 @@ join " ", @r`)
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// Loading a module under a run loop of native code: the BEGIN blocks of its
+// file run the loop while the file is compiled, and ops of the file change
+// after native code saw them (Getopt::Long's `($REQUIRE_ORDER, $PERMUTE,
+// $RETURN_IN_ORDER) = (0..2)` died with "Bizarre copy of ARRAY in list
+// assignment", Data::Dumper warned of an uninitialized value in chr).
+func TestNativeRunLoopLoadsAModule(t *testing.T) {
+	so := buildModuleSource(t, "MyKw", runloopKeywordSource)
+	got := requireModule(t, "MyKw", so, `my @w;
+local $SIG{__WARN__} = sub { push @w, @_ };
+eval { die "start\n" };
+my $gl = eval q{ use Getopt::Long (); 1 } ? "ok" : "died: $@";
+my $dd = eval q{ use Data::Dumper (); 1 } ? "ok" : "died: $@";
+"getopt=$gl dumper=$dd warnings=" . scalar(@w)`)
+	if want := "getopt=ok dumper=ok warnings=0"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
