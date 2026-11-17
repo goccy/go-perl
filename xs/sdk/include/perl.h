@@ -1046,11 +1046,17 @@ static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
  * answers two is stored there (0 when the operation failed). */
 static void goperl_pending_block_string(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b);
 static void *goperl_pending_blocks_any(void);
+/* Whether the buffer slot of an SV was set to memory of native code's own
+ * in this native call, which a scalar made a string over gets a copy of
+ * (goperl_pv_view_hook). */
+GOPERL_C __attribute__((weak, visibility("hidden"))) int goperl_pv_views_g = 0;
+static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b);
 static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint64_t slen, uint64_t *second) {
     goperl_forked_check();
     if (goperl_pending_blocks_any()) goperl_pending_block_string(f, op, a, b);
+    if (goperl_pv_views_g) goperl_pv_view_hook(f, op, a, b);
     const int goperl_e_ = errno;
     const int32_t failed_before = f->failed;
     const uint64_t r = slen <= GOPERL_OPBOX_STR
@@ -5053,6 +5059,10 @@ static void goperl_xs_leave(goperl_frame_t *f) {
     goperl_errno_leave(f); /* what the XSUB left in errno */
     if (goperl_xs_depth_v <= 1) goperl_svmagic_writeback_at(f, 1);
     goperl_flush(f); /* pending mirror writes must land before teardown */
+    /* a string over native code's buffer that perl could write through
+     * fails before Perl code runs (goperl_pv_view_hook) */
+    if (goperl_pv_views_g) goperl_pv_view_hook(f, -1, 0, 0);
+    if (goperl_xs_depth_v <= 1) goperl_pv_views_g = 0;
     /* Host-location saves (SAVEVPTR/save_hptr) made at the XSUB's top-level
      * scope have no host LEAVE to restore them; real perl restores them when
      * the CALLER's scope pops, which the host cannot observe. Restoring at

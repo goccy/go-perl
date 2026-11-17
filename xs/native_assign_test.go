@@ -84,13 +84,15 @@ func TestNativeStructureBehindAnSV(t *testing.T) {
 	})
 }
 
-// The string of a scalar cannot be memory of native code's process: the
-// interpreter has no access to it. A module that makes it one (File::Map
-// makes the mapping of a file the string of a scalar) gets an error that
-// says so, whichever order it sets the buffer and the flags in, and the
-// scalar keeps what it had. Before, the scalar read as the interpreter's
-// own memory at an address no buffer has: blanks instead of the file's
-// bytes, and writes that never reached the file.
+// The string of a scalar cannot be memory of native code's process that
+// perl could write through: the interpreter has no access to it. A module
+// that makes it one (File::Map makes the writable mapping of a file the
+// string of a scalar) gets an error that says so, whichever order it sets
+// the buffer and the flags in, and the scalar is left no string, with the
+// module's pointer in its buffer slot (a read-only one gets a copy:
+// TestNativeReadOnlyViewOfNativeMemory). Before, the scalar read as the
+// interpreter's own memory at an address no buffer has: blanks instead of
+// the file's bytes, and writes that never reached the file.
 func TestNativeStringInNativeMemory(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
@@ -101,7 +103,7 @@ func TestNativeStringInNativeMemory(t *testing.T) {
 		{"the buffer, then SvFLAGS", `my $s; my $r = eval { PerlAPI::string_in_native_memory($s, 2) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . "," . (defined $s ? "defined" : "undef")`, "refused,undef"},
 		{"a structure behind an SV is still no string", `my $kept = PerlAPI::keep_pair(5, 0); PerlAPI::kept_pair($kept)`, "5,10,no string,0"},
 		{"or an empty string", `my $s; my $r = PerlAPI::string_in_native_memory($s, 3); "$r," . (defined $s ? "defined" : "undef") . ",[$s]," . length($s)`, "not refused kept,defined,[],0"},
-		{"which is refused a length", `my $s; my $r = eval { PerlAPI::string_in_native_memory($s, 4) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . "," . length($s)`, "refused,0"},
+		{"which is refused a length", `my $s; my $r = eval { PerlAPI::string_in_native_memory($s, 4) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . "," . (defined $s ? length($s) : "undef")`, "refused,undef"},
 	})
 }
 
