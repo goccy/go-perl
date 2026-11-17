@@ -75,6 +75,14 @@ XS(XS_Foreign_call_with) {
     call_sv(code, G_DISCARD);
     XSRETURN_EMPTY;
 }
+XS(XS_Foreign_freed_flags) {
+    dXSARGS;
+    SV *sv = foreign_value(aTHX_ "freed");
+    PERL_UNUSED_VAR(items);
+    ST(0) = sv_2mortal(newSVpvf("rok:%d pok:%d ok:%d", SvROK(sv) ? 1 : 0, SvPOK(sv) ? 1 : 0,
+                                SvOK(sv) ? 1 : 0));
+    XSRETURN(1);
+}
 XS(XS_Foreign_bop) {
     dXSARGS;
     static OP op_of_its_own;
@@ -92,6 +100,7 @@ XS_EXTERNAL(boot_Foreign) {
     newXS_deffile("Foreign::store", XS_Foreign_store);
     newXS_deffile("Foreign::call", XS_Foreign_call);
     newXS_deffile("Foreign::call_with", XS_Foreign_call_with);
+    newXS_deffile("Foreign::freed_flags", XS_Foreign_freed_flags);
     newXS_deffile("Foreign::bop", XS_Foreign_bop);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
@@ -127,6 +136,11 @@ my @a = (1, 2, 3);
 	// allowed, and it says the scalar is freed
 	if got, want := requireModule(t, "Foreign", so, `Foreign::type("freed")`), "255"; got != want {
 		t.Errorf("type of a freed scalar: got %q, want %q", got, want)
+	}
+	// so are its flags, which it has none of left: Tk asks SvROK and SvPOK
+	// of a scalar its Tcl_SetVar has just freed
+	if got, want := requireModule(t, "Foreign", so, `Foreign::freed_flags()`), "rok:0 pok:0 ok:0"; got != want {
+		t.Errorf("flags of a freed scalar: got %q, want %q", got, want)
 	}
 	if got, want := requireModule(t, "Foreign", so, `require B;
 my $op = Foreign::bop();
