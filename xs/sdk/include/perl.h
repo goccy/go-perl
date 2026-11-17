@@ -5253,6 +5253,10 @@ typedef union goperl_any {
 static CV *goperl_newXS(goperl_frame_t *f, const char *name,
                         void (*fn)(pTHX_ CV *)) {
     goperl_flush(f);
+    /* a sub named BEGIN, INIT, CHECK, UNITCHECK or END is one of perl's
+     * blocks, which the warnings of PL_curcop say about (Tk turns them off
+     * around its INIT): what native code wrote into the COP first */
+    goperl_optree_flush(f);
     return (CV *)(uintptr_t)goperl_api_new_xs(f, name, (void *)fn);
 }
 #define newXS(name, fn, file) goperl_newXS(_gof, (name), (fn))
