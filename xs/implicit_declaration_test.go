@@ -68,11 +68,20 @@ func compileModuleSource(t *testing.T, name, code string, flags ...string) (stri
 // requires it, returning what code then returns, or why the require died.
 func requireModule(t *testing.T, name, so, code string) string {
 	t.Helper()
+	return requireModuleWith(t, perl.Config{}, name, so, code)
+}
+
+// requireModuleWith is requireModule in an interpreter of the given
+// configuration, with the host's files, the standard library and native
+// modules.
+func requireModuleWith(t *testing.T, cfg perl.Config, name, so, code string) string {
+	t.Helper()
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
 		t.Fatalf("extract stdlib: %v", err)
 	}
-	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, NativeModules: true})
+	cfg.FS, cfg.StdlibDir, cfg.NativeModules = goperlfs.NewHostFS(), stdlib, true
+	p, err := perl.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
