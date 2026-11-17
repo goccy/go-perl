@@ -4017,6 +4017,10 @@ static OPclass goperl_op_class_of(const OP *o) {
 #ifndef BIT_DIGITS
 #define BIT_DIGITS(N) (((N) * 146) / 485 + 1)
 #endif
+/* the digits of an integer type, and the characters of its decimal string
+ * with a sign and the NUL (Stats::LikeR: `char tmp[TYPE_DIGITS(UV) + 1]`) */
+#define TYPE_DIGITS(T) BIT_DIGITS(sizeof(T) * 8)
+#define TYPE_CHARS(T) (TYPE_DIGITS(T) + 2)
 #define IV_DIG (BIT_DIGITS(IV_BITS))
 #define UV_DIG (BIT_DIGITS(UV_BITS))
 #define PERL_VERSION_STRING \

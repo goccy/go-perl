@@ -27,6 +27,7 @@ func TestNativeSmallNamesOfThePerlAPI(t *testing.T) {
 		{"is_utf8_invariant_string_loc", `join "|", PerlAPI::small_names("invariant", "abc"), PerlAPI::small_names("invariant", "ab\xC3\xA9")`, "yes|no at 2"},
 		{"isinfnan", `my $inf = 9**9**9; join "|", map { PerlAPI::small_names("infnan", $_) } $inf, -$inf, $inf - $inf, 1.5`, "infnan|infnan|infnan|finite"},
 		{"Perl_error_log", `my $buf = ""; { open local(*STDERR), '>', \$buf or die "open: $!"; PerlAPI::small_names("error_log", 0); } $buf`, "to the error log\n"},
+		{"TYPE_DIGITS and TYPE_CHARS", `PerlAPI::small_names("type_digits", 0)`, "21 20 22"},
 		{"toLOWER_utf8_safe in place", `my $s = "ABC\x{C9}D Search"; utf8::upgrade($s); PerlAPI::small_names("lower_in_place", $s) eq "abc\x{E9}d search" ? "lowered" : "got " . PerlAPI::small_names("lower_in_place", $s)`, "lowered"},
 		{"do_sv_dump into a handle", `my $buf = ""; { open local(*STDERR), '>', \$buf or die "open: $!"; PerlAPI::small_names("dump", 42); } $buf =~ /\ASV = IV\(0x[0-9a-f]+\) at 0x[0-9a-f]+\n.*\n  IV = 42\n\z/s ? "dumped" : $buf`, "dumped"},
 		{"sv_inc", `join "|", map { PerlAPI::small_names("inc", $_) } "aa", "Az", "zz", "a9", 9, -1, 1.5, 9223372036854775807, 18446744073709551615`, "ab|Ba|aaa|b0|10|0|2.5|9223372036854775808|1.84467440737096e+19"},

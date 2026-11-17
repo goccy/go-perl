@@ -6919,7 +6919,8 @@ XS(XS_PerlAPI_vstring_of) {
  * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
  * isinfnan of the number ("infnan"), a line written to Perl_error_log, the
  * program's STDERR as it has it now ("error_log"), do_sv_dump of the value
- * into Perl_error_log ("dump"), the UTF-8 of the value lowercased in place
+ * into Perl_error_log ("dump"), TYPE_DIGITS and TYPE_CHARS of the
+ * integer types ("type_digits"), the UTF-8 of the value lowercased in place
  * a character at a time, as Tk does ("lower_in_place"), TARGi of the
  * number ("targi"), and the
  * names that only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
@@ -7037,6 +7038,10 @@ XS(XS_PerlAPI_small_names) {
         } else if (strEQ(which, "error_log")) {
             PerlIO_printf(Perl_error_log, "to the error log\n");
             sv_setpv(out, "written");
+        } else if (strEQ(which, "type_digits")) {
+            /* Stats::LikeR's `char tmp[TYPE_DIGITS(UV) + 1]` */
+            char tmp[TYPE_DIGITS(UV) + 1];
+            sv_setpvf(out, "%d %d %d", (int)sizeof tmp, (int)TYPE_DIGITS(UV), (int)TYPE_CHARS(IV));
         } else if (strEQ(which, "lower_in_place")) {
             /* Tk's Tcl_UtfToLower: the string is changed in place, a
              * character at a time */
