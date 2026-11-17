@@ -167,7 +167,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 33u
+#define GOPERL_XS_ABI 34u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -1776,6 +1776,10 @@ typedef struct goperl_shared {
     void *rx_bodies; /* goperl_rxbody_t: the bodies of regexps ReANY
                       * handed out in this call of native code, in the
                       * arena (goperl_perlapi.h) */
+    MGVTBL interp_magic_vtbl; /* all zero: the vtable of the copies of the
+                               * interpreter's own magic that SvMAGIC shows
+                               * (goperl_svmagic_lv), which tells them from
+                               * the chain native code attached */
 } goperl_shared_t;
 #define goperl_hostsave_v (GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -3934,12 +3938,62 @@ static void goperl_cx_writeback(goperl_frame_t *f);
 static void goperl_statcache_writeback(goperl_frame_t *f);
 /* The head of an SV's chain of magic that native code stored through
  * SvMAGIC (Event and Tk link a MAGIC of their own onto the end of a chain
- * that was empty): what the loader keeps is that head from then on. */
+ * that was empty): what the loader keeps is that head from then on.
+ *
+ * svmagic_orig is the head SvMAGIC showed. When that is a copy of the
+ * interpreter's magic (see goperl_svmagic_lv), the head of native code's
+ * chain behind the copies is kept in the zeroed MAGIC after the last copy,
+ * and every type the copies have must still be on the chain: native code
+ * that unlinked one meant to take the interpreter's magic off the value,
+ * which this cannot do, and the call fails saying so. */
+static MAGIC *goperl_magic_chain_of_native(goperl_frame_t *f, MAGIC *mg);
+static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg);
 static void goperl_svmagic_writeback(goperl_frame_t *f) {
     goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
-    if (sh && sh->svmagic_sv && sh->svmagic_val != sh->svmagic_orig) {
-        goperl_api_magic_set_head(f, sh->svmagic_sv, sh->svmagic_val);
-        sh->svmagic_orig = sh->svmagic_val;
+    if (!sh || !sh->svmagic_sv) return;
+    MAGIC *const shown = sh->svmagic_orig;
+    MAGIC *const val = sh->svmagic_val;
+    if (!goperl_magic_is_interp_copy(f, shown)) {
+        if (val == shown) return;
+        MAGIC *const head = goperl_magic_chain_of_native(f, val);
+        if (head != shown) goperl_api_magic_set_head(f, sh->svmagic_sv, head);
+        sh->svmagic_orig = head;
+        if (head != val) sh->svmagic_val = head;
+        return;
+    }
+    /* every type of the interpreter's magic shown is still on the chain (a
+     * copy of it: the one shown, or one an earlier SvMAGIC of the value
+     * showed, which a MAGIC native code put before the head links to) */
+    MAGIC *end = shown;
+    for (; goperl_magic_is_interp_copy(f, end); end++) {
+        int on = 0;
+        for (MAGIC *mg = val; mg && !on; mg = mg->mg_moremagic)
+            on = goperl_magic_is_interp_copy(f, mg) && mg->mg_type == end->mg_type;
+        if (on) continue;
+        sh->svmagic_sv = 0; /* the slot is done with */
+        if (!f->failed) {
+            snprintf(f->err, sizeof f->err,
+                     "SvMAGIC: native code unlinked magic '%c' that the interpreter keeps on "
+                     "the value from its chain; gperl cannot take the interpreter's own "
+                     "magic off a value that way (sv_unmagic can)",
+                     end->mg_type);
+            f->failed = 1;
+        }
+        return;
+    }
+    /* end is the zeroed MAGIC after the copies */
+    MAGIC *const head = goperl_magic_chain_of_native(f, val);
+    if (head != end->mg_moremagic) goperl_api_magic_set_head(f, sh->svmagic_sv, head);
+    /* whether the copies are still the front of the chain, as shown */
+    MAGIC *c = shown;
+    for (MAGIC *mg = val; mg == c && c != end; mg = mg->mg_moremagic) c++;
+    if (c == end) {
+        end->mg_moremagic = head;
+    } else {
+        /* native code linked a MAGIC of its own before or among the
+         * copies, which are off its chain now */
+        sh->svmagic_orig = head;
+        sh->svmagic_val = head;
     }
 }
 static void goperl_flush(goperl_frame_t *f) {
@@ -6559,6 +6613,11 @@ static void goperl_arena_free_all(void) {
     goperl_si_gen_v = 0;
     goperl_pio_views_v = 0; /* they were in the arena */
     GOPERL_SHARED->rx_bodies = 0; /* so were they */
+    /* and so may the chain SvMAGIC showed be (its copies of the
+     * interpreter's magic): the slot was written back before */
+    GOPERL_SHARED->svmagic_sv = 0;
+    GOPERL_SHARED->svmagic_val = 0;
+    GOPERL_SHARED->svmagic_orig = 0;
 }
 
 /* ---- entries of hashes (see the HE/HEK typedefs near the top) ---------- */
@@ -6946,15 +7005,82 @@ static const PERL_CONTEXT *goperl_caller_cx(goperl_frame_t *f, I32 level,
 /* SvMAGIC is WRITABLE (DBI splices tie magic by assigning the chain
  * head): reads load a synced slot; a changed slot is written back through
  * magic_set_head at the next flush (before the next operation, and when the
- * native call ends). Guest-attached magic (ties) is not mirrored, so such
- * splices see only host-attached entries. */
+ * native call ends).
+ *
+ * The chain it shows is the SV's whole chain: copies of the MAGIC the
+ * interpreter itself keeps there (a tie, the UTF-8 cache, ...), as
+ * goperl_mg_find gives one, then the chain native code attached, which is
+ * the loader's. Clone walks it to copy a value's magic, ties among it. A
+ * type native code's chain has (sv_magic attaches the interpreter's magic
+ * and a mirror of it) is shown once, as the mirror. A copy is good until
+ * the outermost native call returns; its vtable is interp_magic_vtbl (all
+ * zero), which is how the write-back and SvMAGIC_set leave the copies out
+ * of the chain native code keeps. */
 #define goperl_svmagic_sv_v (GOPERL_SHARED->svmagic_sv)
 #define goperl_svmagic_val_v (GOPERL_SHARED->svmagic_val)
 #define goperl_svmagic_orig_v (GOPERL_SHARED->svmagic_orig)
+#define GOPERL_CALL_MG_LIST 26
+static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg) {
+    return mg && mg->mg_virtual == &((goperl_shared_t *)f->inst)->interp_magic_vtbl;
+}
+/* The chain native code keeps of one SvMAGIC shows: the nodes that are not
+ * copies of the interpreter's magic, in their order. A node of native
+ * code's linked to a copy (a MAGIC put before the head of the chain
+ * SvMAGIC showed) is linked past the copies instead, so that native code's
+ * chain holds none of them. */
+static MAGIC *goperl_magic_chain_of_native(goperl_frame_t *f, MAGIC *mg) {
+    MAGIC *head = 0;
+    MAGIC **link = &head;
+    for (; mg; mg = mg->mg_moremagic) {
+        if (goperl_magic_is_interp_copy(f, mg)) continue;
+        if (*link != mg) *link = mg;
+        link = &mg->mg_moremagic;
+    }
+    if (*link) *link = 0;
+    return head;
+}
 static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
     goperl_flush(f);
-    goperl_svmagic_val_v = goperl_api_magic_chain(f, GOPERL_TOK(sv));
-    goperl_svmagic_orig_v = goperl_svmagic_val_v;
+    MAGIC *const native = goperl_api_magic_chain(f, GOPERL_TOK(sv));
+    MAGIC *head = native;
+    /* CALL 26: MG_LIST */
+    const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+        f, goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), 0, (uint64_t)(GOPERL_CALL_MG_LIST), 0, 0));
+    if (w && w[0] > 0) {
+        const uint64_t all = w[0];
+        uint64_t n = 0;
+        /* a zeroed MAGIC before the copies and one after them bound them
+         * (see goperl_svmagic_writeback) */
+        MAGIC *copies = (MAGIC *)goperl_arena_alloc((size_t)(all + 2) * sizeof(MAGIC));
+        if (!copies) goperl_croakf(f, "Out of memory!");
+        copies++;
+        for (uint64_t i = 0; i < all; i++) {
+            goperl_gword_t c[6];
+            memcpy(c, w + 1 + i * 6, sizeof c);
+            /* sv_magic of native code attached it and mirrored it */
+            int mirrored = 0;
+            for (const MAGIC *m = native; m && !mirrored; m = m->mg_moremagic)
+                mirrored = m->mg_type == (char)c[0];
+            if (mirrored) continue;
+            MAGIC *mg = &copies[n++];
+            mg->mg_virtual = &((goperl_shared_t *)f->inst)->interp_magic_vtbl;
+            mg->mg_type = (char)c[0];
+            mg->mg_flags = (U8)c[1];
+            mg->mg_len = (I32)c[2];
+            mg->mg_obj = GOPERL_SV(c[3]);
+            mg->mg_private = (U16)c[5];
+            if (mg->mg_len == HEf_SVKEY)
+                mg->mg_ptr = (char *)GOPERL_SV(c[4]); /* the name is an SV */
+            else
+                mg->mg_ptr = c[4] ? (char *)goperl_guest_mem(f, c[4]) : 0;
+        }
+        for (uint64_t i = 0; i < n; i++)
+            copies[i].mg_moremagic = i + 1 < n ? &copies[i + 1] : native;
+        copies[n].mg_moremagic = native; /* the head behind the copies */
+        if (n) head = copies;
+    }
+    goperl_svmagic_val_v = head;
+    goperl_svmagic_orig_v = head;
     goperl_svmagic_sv_v = GOPERL_TOK(sv);
     return &goperl_svmagic_val_v;
 }
@@ -7008,7 +7134,8 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
  * with the module (Safefree), exactly as with real perl. */
 #define SvMAGIC_set(sv, mg) \
     (goperl_flush(_gof),    \
-     goperl_api_magic_set_head(_gof, GOPERL_TOK(sv), (MAGIC *)(mg)))
+     goperl_api_magic_set_head(_gof, GOPERL_TOK(sv),  \
+                               goperl_magic_chain_of_native(_gof, (MAGIC *)(mg))))
 #define PERL_MAGIC_backref '<'
 /* Plain sv_magic attaches BEHAVIORAL core magic (PERL_MAGIC_tied being
  * the load-bearing case: DBI ties its outer handles) — that must land on
@@ -7041,6 +7168,7 @@ static int goperl_uvar_set(SV *sv, MAGIC *mg) {
 }
 GOPERL_C __attribute__((weak, visibility("hidden"))) MGVTBL PL_vtbl_uvar = {
     goperl_uvar_get, goperl_uvar_set, 0, 0, 0, 0, 0, 0};
+static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                             const char *name, I32 namlen) {
     if (how == PERL_MAGIC_uvar) {
@@ -7057,9 +7185,33 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
         }
         /* CALL 11: UVAR; bit 0: uf_val, bit 1: uf_set */
         goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), calls, (uint64_t)(11), 0, 0);
-    } else
-    goperl_do_op3(f, GOPERL_OP_SV_MAGIC_STD, GOPERL_TOK(sv), GOPERL_TOK(obj),
-                  (uint64_t)(int64_t)how, name ? name : "", name ? (uint64_t)namlen : 0);
+    } else if (how == PERL_MAGIC_utf8 && name && namlen < 0) {
+        /* the UTF-8 cache of positions, which the magic owns from now on
+         * and frees (Clone copies one into a block of its own): the
+         * interpreter keeps a copy of its own, and the block is freed as
+         * the magic would. Nothing is mirrored: mg_find finds the
+         * interpreter's. */
+        goperl_do_op3(f, GOPERL_OP_SV_MAGIC_STD, GOPERL_TOK(sv), GOPERL_TOK(obj),
+                      (uint64_t)(uint32_t)how | ((uint64_t)1 << 32), name,
+                      PERL_MAGIC_UTF8_CACHESIZE * 2 * sizeof(STRLEN));
+        goperl_safefree((void *)name);
+        return;
+    } else if (name && namlen == HEf_SVKEY) {
+        /* the name is an SV, which the interpreter's magic holds a
+         * reference to: its token, in the bytes of the text */
+        const uint64_t tok = GOPERL_TOK((SV *)name);
+        goperl_do_op3(f, GOPERL_OP_SV_MAGIC_STD, GOPERL_TOK(sv), GOPERL_TOK(obj),
+                      (uint64_t)(uint32_t)how | ((uint64_t)2 << 32), (const char *)&tok,
+                      sizeof tok);
+    } else {
+        /* A name of a length of 0 or below other than those is a pointer
+         * the magic keeps as it is, into this process's memory: the
+         * interpreter's magic goes without it, and the mirror below, which
+         * mg_find finds, keeps it. */
+        goperl_do_op3(f, GOPERL_OP_SV_MAGIC_STD, GOPERL_TOK(sv), GOPERL_TOK(obj),
+                      (uint64_t)(int64_t)how, name && namlen > 0 ? name : "",
+                      name && namlen > 0 ? (uint64_t)namlen : 0);
+    }
     /* Mirror it too: XS reads the attachment back with mg_find (DBI
      * resolves its inner handle through the tie's mg_obj). */
     goperl_flush(f);
