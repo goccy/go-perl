@@ -3845,12 +3845,15 @@ static SV **goperl_hook_ref(goperl_frame_t *f, int which /* 0 die, 1 warn */) {
  * lvalue: a module points it at an op of its own around a call of a pp
  * function. */
 static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok);
+static OP *goperl_op_shadow_as(goperl_frame_t *f, uint64_t tok, uint64_t fields);
 static OP **goperl_plop_ref(goperl_frame_t *f) __attribute__((unused));
 static OP **goperl_plop_ref(goperl_frame_t *f) {
     if (!f->plop) {
-        const uint64_t tok =
-            goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_OP, 0, 0, 0);
-        if (tok) f->plop = goperl_op_shadow(f, tok);
+        /* -> the op; second: what it is now */
+        uint64_t fields = 0;
+        const uint64_t tok = goperl_do_opx(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_OP, 0,
+                                           0, 0, 0, &fields);
+        if (tok) f->plop = goperl_op_shadow_as(f, tok, fields);
     }
     return &f->plop;
 }
@@ -6039,6 +6042,29 @@ static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
 }
 
+/* What an op is, as a word: targ<<32 | private<<24 | flags<<16 | type, as
+ * the interpreter answers it of its own op. */
+static inline uint64_t goperl_op_fields_word(const OP *o) {
+    return ((uint64_t)(uint32_t)o->op_targ << 32) | ((uint64_t)o->op_private << 24) |
+           ((uint64_t)o->op_flags << 16) | (uint64_t)o->op_type;
+}
+/* The shadow of an op of which the interpreter said what it is now
+ * (fields, as goperl_op_fields_word): described again when the shadow says
+ * otherwise. The interpreter may change an op without native code being
+ * entered in between: the peephole optimizer rewrites the ops a checker or
+ * a keyword plugin of native code was handed, after it returned (an
+ * assignment to a lexical becomes a padsv_store), and a run loop of native
+ * code that ran the op by its shadow would run the pp function of the type
+ * the op had before. */
+static OP *goperl_op_shadow_as(goperl_frame_t *f, uint64_t tok, uint64_t fields) {
+    if (!tok) return 0;
+    goperl_opreg_t *r = goperl_opreg_get(f);
+    goperl_opreg_sync(f, r);
+    goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
+    if (e && goperl_op_fields_word(&e->op) == fields) return &e->op;
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+}
+
 /* An op as a number: its address in the interpreter with the tag, or for
  * an op of the module's own its address here (see PTR2IV). */
 static IV goperl_op_number(const OP *o) {
@@ -6240,10 +6266,14 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
         goperl_pp_stack_push(_gof);
         /* the op is PL_op while its pp runs (it is already, unless a run
          * loop of native code made it PL_op) */
-        uint64_t next = goperl_do_op(_gof, GOPERL_OP_RUN_ORIGINAL,
-                                     (uint64_t)(uint32_t)type, cur->gop, 0, 0);
+        /* -> the next op; second: what it is now */
+        uint64_t fields = 0;
+        uint64_t next = goperl_do_opx(_gof, GOPERL_OP_RUN_ORIGINAL,
+                                      (uint64_t)(uint32_t)type, cur->gop, 0, 0, 0, &fields);
         _gof->st_stale = _gof->pp_frame;
-        return goperl_op_shadow(_gof, next);
+        /* the op a run loop of native code runs next, as the interpreter
+         * has it now: the loop calls the pp function of the shadow's type */
+        return goperl_op_shadow_as(_gof, next, fields);
     }
     /* An op of the module's own making (`BINOP myop; ... PL_op = (OP *)&myop;
      * PL_ppaddr[myop.op_type](aTHX)`: Tie::Hash::Indexed adds to a value
