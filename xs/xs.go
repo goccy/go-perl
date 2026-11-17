@@ -1843,11 +1843,13 @@ func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 //
 // A hook that dies ends it, as a die ends perl's mg_free: the response is
 // [0] and the message, which the guest's anchor dies with; the MAGIC is
-// not freed (perl's mg_free never gets to it), nor what is after it. A
-// MAGIC the hook took off the chain itself is the hook's, whether it dies
-// or not: Variable::Magic takes its MAGIC off and frees it, has the SV
-// freed once more for the rest of the chain, and dies. The response is [1]
-// otherwise.
+// not freed (perl's mg_free never gets to it), nor what is after it:
+// Variable::Magic's free takes its MAGIC off and frees it, has the SV
+// freed once more for the rest of the chain, and dies. A hook that
+// returns has its MAGIC freed and the chain go on after it, as in perl's
+// mg_free, whatever the hook did to the chain (Variable::Magic's dispell
+// of the MAGIC being freed leaves the MAGIC to mg_free; magic cast from
+// the hook is dropped). The response is [1] otherwise.
 func (s *state) magicFreed(id uint32) []byte {
 	s.mu.Lock()
 	rec := s.magicByID[id]
@@ -1883,18 +1885,8 @@ func (s *state) magicFreed(id uint32) []byte {
 			fmt.Fprintf(os.Stderr, "[magicFreed] sv=%#x mg=%#x vtbl=%#x any=%#x\n", rec.svTok, mg, vtblp, val)
 		}
 		if lastMagicHolder(node) {
-			msg, died := s.callSvtFree(rec.svTok, mg)
-			if died {
+			if msg, died := s.callSvtFree(rec.svTok, mg); died {
 				return append([]byte{0}, msg...)
-			}
-			s.mu.Lock()
-			head := rec.head
-			s.mu.Unlock()
-			if head != mg {
-				// the hook took its MAGIC off: the chain goes on as the
-				// hook left it
-				mg = head
-				continue
 			}
 			// What svt_free left in the MAGIC is what is given up.
 			node = copyIn(mg, mgAllocSize)

@@ -19,6 +19,7 @@ func TestNativeMagicFreeThatDies(t *testing.T) {
 #include "perl.h"
 #include "XSUB.h"
 static int freed;
+static MGVTBL other_vtbl = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 static int die_free(pTHX_ SV *sv, MAGIC *mg) {
     freed++;
     switch (mg->mg_private) {
@@ -33,6 +34,15 @@ static int die_free(pTHX_ SV *sv, MAGIC *mg) {
         SvREFCNT_dec(sv);
         croak("died in free, its magic gone");
     }
+    case 3:
+        /* Variable::Magic's dispell from its free: the MAGIC off the
+         * chain, and left to mg_free */
+        if (SvMAGIC(sv) == mg) SvMAGIC_set(sv, mg->mg_moremagic);
+        break;
+    case 4:
+        /* magic cast from the free (dropped, as perl's mg_free drops it) */
+        sv_magicext(sv, NULL, PERL_MAGIC_ext, &other_vtbl, NULL, 0);
+        break;
     }
     return 0;
 }
@@ -65,6 +75,8 @@ XS_EXTERNAL(boot_MagicDie) {
 		{"a free that returns", "0", regexp.MustCompile(`\Alived, freed 1; then 2,4,6\z`)},
 		{"a free that dies", "1", regexp.MustCompile(`\Adied in free at .* line \d+\.\n, freed 1; then 2,4,6\z`)},
 		{"a free that takes its magic off and dies", "2", regexp.MustCompile(`\Adied in free, its magic gone at .* line \d+\.\n, freed 1; then 2,4,6\z`)},
+		{"a free that takes its magic off and returns", "3", regexp.MustCompile(`\Alived, freed 1; then 2,4,6\z`)},
+		{"a free that casts magic", "4", regexp.MustCompile(`\Alived, freed 1; then 2,4,6\z`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := requireModule(t, "MagicDie", so, `my $r = eval { my $x = 1; MagicDie::cast(\$x, `+tc.mode+`); 1 } ? "lived" : $@;
