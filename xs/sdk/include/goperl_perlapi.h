@@ -4262,6 +4262,20 @@ static SV *goperl_newSVhek(goperl_frame_t *f, const HEK *hek) {
 #endif
 #define UTF8_ACCUMULATE(old, new) \
     (((old) << UTF_ACCUMULATION_SHIFT) | (NATIVE_UTF8_TO_I8(new) & UTF_CONTINUATION_MASK))
+/* The marks and masks of the bytes of a sequence, and the code points
+ * that are surrogates (utf8.h); on this ASCII platform a Latin-1 character
+ * is itself. */
+#define UTF_CONTINUATION_MARK (~(0x40 | UTF_CONTINUATION_MASK) & 0xff)
+#define UTF_START_MARK(len) ((U8) ~(0xFF >> (len)))
+#define UTF_START_MASK(len) (0xFF >> (len))
+#define UNICODE_IS_SURROGATE(uv) \
+    ((UV)(uv) >= UNICODE_SURROGATE_FIRST && (UV)(uv) <= UNICODE_SURROGATE_LAST)
+#define LATIN1_TO_NATIVE(ch) ((U8)(ch))
+#define NATIVE_TO_LATIN1(ch) ((U8)(ch))
+#define ASCII_TO_NATIVE(ch) LATIN1_TO_NATIVE(ch)
+#define NATIVE_TO_ASCII(ch) NATIVE_TO_LATIN1(ch)
+#define NATIVE_TO_UTF(ch) NATIVE_UTF8_TO_I8(ch)
+#define UTF_TO_NATIVE(ch) I8_TO_NATIVE_UTF8(ch)
 
 /* Bytes compared with a UTF-8 string of the same characters (utf8.c):
  * -1 or +1 when one is a prefix of the other, -2 or +2 when they differ

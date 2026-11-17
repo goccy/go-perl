@@ -8990,24 +8990,54 @@ static const char PL_hexdigit[] = "0123456789abcdef0123456789ABCDEF";
 #define UTF8_MAXBYTES UTF8_MAXLEN
 #define UTF8_IS_START(c) (((U8)(c)) >= 0xc2)
 #define UTF8_IS_CONTINUATION(c) ((((U8)(c)) & 0xc0) == 0x80)
-#define UTF8_CHECK_ONLY 0x1
-#define UTF8_DISALLOW_SUPER 0x2
-#define UTF8_ALLOW_ANY 0x4
-/* An overlong sequence (more bytes than its character needs) is malformed
- * unless one of these allows it; the first makes it U+FFFD, the second
- * gives the character it spells. */
-#define UTF8_ALLOW_LONG 0x10
-#define UTF8_ALLOW_LONG_AND_ITS_VALUE (UTF8_ALLOW_LONG | 0x20)
-#define UTF8_DISALLOW_SURROGATE 0x8
-#define UTF8_WARN_SURROGATE 0
-#define UTF8_WARN_SUPER 0
-#define UTF8_DISALLOW_ILLEGAL_INTERCHANGE \
-    (UTF8_DISALLOW_SURROGATE | UTF8_DISALLOW_SUPER)
-/* what Unicode's Corrigendum #9 allows to be interchanged: the
- * noncharacters too, which these flags never refuse */
+/* The flags of the decoder (utf8n_to_uvchr and the others), with perl's
+ * values (utf8.h): the interpreter's decoder takes them as they are. */
+#define UTF8_GOT_OVERFLOW (1U << UTF8_GOT_OVERFLOW_BIT_POS_)
+#define UTF8_ALLOW_OVERFLOW UTF8_GOT_OVERFLOW
+#define UTF8_GOT_EMPTY (1U << UTF8_GOT_EMPTY_BIT_POS_)
+#define UTF8_ALLOW_EMPTY UTF8_GOT_EMPTY
+#define UTF8_GOT_CONTINUATION (1U << UTF8_GOT_CONTINUATION_BIT_POS_)
+#define UTF8_ALLOW_CONTINUATION UTF8_GOT_CONTINUATION
+#define UTF8_GOT_SHORT (1U << UTF8_GOT_SHORT_BIT_POS_)
+#define UTF8_ALLOW_SHORT UTF8_GOT_SHORT
+#define UTF8_GOT_NON_CONTINUATION (1U << UTF8_GOT_NON_CONTINUATION_BIT_POS_)
+#define UTF8_ALLOW_NON_CONTINUATION UTF8_GOT_NON_CONTINUATION
+#define UTF8_GOT_SURROGATE (1U << UTF8_GOT_SURROGATE_BIT_POS_)
+#define UTF8_DISALLOW_SURROGATE UTF8_GOT_SURROGATE
+#define UTF8_WARN_SURROGATE (1U << UTF8_WARN_SURROGATE_BIT_POS_)
+#define UTF8_GOT_PERL_EXTENDED (1U << UTF8_GOT_PERL_EXTENDED_BIT_POS_)
+#define UTF8_DISALLOW_PERL_EXTENDED UTF8_GOT_PERL_EXTENDED
+#define UTF8_WARN_PERL_EXTENDED (1U << UTF8_WARN_PERL_EXTENDED_BIT_POS_)
+#define UTF8_GOT_SUPER (1U << UTF8_GOT_SUPER_BIT_POS_)
+#define UTF8_DISALLOW_SUPER UTF8_GOT_SUPER
+#define UTF8_WARN_SUPER (1U << UTF8_WARN_SUPER_BIT_POS_)
+#define UTF8_GOT_NONCHAR (1U << UTF8_GOT_NONCHAR_BIT_POS_)
+#define UTF8_DISALLOW_NONCHAR UTF8_GOT_NONCHAR
+#define UTF8_WARN_NONCHAR (1U << UTF8_WARN_NONCHAR_BIT_POS_)
+#define UTF8_GOT_LONG (1U << UTF8_GOT_LONG_BIT_POS_)
+#define UTF8_ALLOW_LONG UTF8_GOT_LONG
+#define UTF8_GOT_LONG_WITH_VALUE (1U << UTF8_GOT_LONG_WITH_VALUE_BIT_POS_)
+#define UTF8_ALLOW_LONG_AND_ITS_VALUE UTF8_GOT_LONG_WITH_VALUE
+#define UTF8_DISALLOW_ABOVE_31_BIT UTF8_DISALLOW_PERL_EXTENDED
+#define UTF8_GOT_ABOVE_31_BIT UTF8_GOT_PERL_EXTENDED
+#define UTF8_WARN_ABOVE_31_BIT UTF8_WARN_PERL_EXTENDED
+#define UTF8_DISALLOW_FE_FF UTF8_DISALLOW_PERL_EXTENDED
+#define UTF8_WARN_FE_FF UTF8_WARN_PERL_EXTENDED
+#define UTF8_CHECK_ONLY (1U << UTF8_CHECK_ONLY_BIT_POS_)
+#define UTF8_DIE_IF_MALFORMED (1U << UTF8_DIE_IF_MALFORMED_BIT_POS_)
+#define UTF8_FORCE_WARN_IF_MALFORMED (1U << UTF8_FORCE_WARN_IF_MALFORMED_BIT_POS_)
 #define UTF8_DISALLOW_ILLEGAL_C9_INTERCHANGE \
-    (UTF8_DISALLOW_SURROGATE | UTF8_DISALLOW_SUPER)
-#define UTF8_WARN_ILLEGAL_C9_INTERCHANGE (UTF8_WARN_SURROGATE | UTF8_WARN_SUPER)
+    (UTF8_DISALLOW_SUPER | UTF8_DISALLOW_PERL_EXTENDED | UTF8_DISALLOW_SURROGATE)
+#define UTF8_WARN_ILLEGAL_C9_INTERCHANGE \
+    (UTF8_WARN_SUPER | UTF8_WARN_PERL_EXTENDED | UTF8_WARN_SURROGATE)
+#define UTF8_DISALLOW_ILLEGAL_INTERCHANGE \
+    (UTF8_DISALLOW_ILLEGAL_C9_INTERCHANGE | UTF8_DISALLOW_NONCHAR)
+#define UTF8_WARN_ILLEGAL_INTERCHANGE \
+    (UTF8_WARN_ILLEGAL_C9_INTERCHANGE | UTF8_WARN_NONCHAR)
+#define UTF8_ALLOW_ANY \
+    (UTF8_ALLOW_CONTINUATION | UTF8_ALLOW_NON_CONTINUATION | UTF8_ALLOW_SHORT | \
+     UTF8_ALLOW_LONG | UTF8_ALLOW_OVERFLOW)
+#define UTF8_ALLOW_DEFAULT UTF8_ALLOW_ANYUV
 static const U8 goperl_utf8skip_v[16] = {1, 1, 1, 1, 1, 1, 1, 1,
                                          1, 1, 1, 1, 2, 2, 3, 4};
 /* The length a start byte announces. Above U+1FFFFF perl's extended
@@ -9044,48 +9074,92 @@ static U8 *goperl_utf8_hop(const U8 *s, SSize_t off) {
     return (U8 *)s;
 }
 #define utf8_hop(s, off) goperl_utf8_hop((const U8 *)(s), (off))
-static UV goperl_utf8n_to_uvchr(const U8 *s, STRLEN curlen, STRLEN *retlen,
-                                U32 flags) {
-    STRLEN n = curlen ? UTF8SKIP(s) : 0;
-    if (n == 0 || n > curlen) goto fail;
-    if (n == 1) {
-        /* the skip table gives 1 for a continuation byte too; only an
-         * invariant is a character by itself */
-        if (s[0] & 0x80) goto fail;
-        if (retlen) *retlen = 1;
-        return s[0];
+/* UTF-8 decoding is perl's (inline.h, utf8.c). A character perl's own fast
+ * path takes is decoded here: an invariant, or well-formed UTF-8 of a code
+ * point that is no surrogate, no noncharacter and not above Unicode. Any
+ * other goes to the interpreter's decoder (GOPERL_INT_UTF8_DECODE), which
+ * gives what perl gives under the flags: the code point, the length, the
+ * errors and messages, and the warnings ("Malformed UTF-8 character"). */
+static inline __attribute__((always_inline, unused)) int goperl_utf8_strict(const U8 *s,
+                                                                            STRLEN curlen, UV *cp,
+                                                                            STRLEN *len) {
+    const U8 c = s[0];
+    UV uv;
+    if (c < 0x80) {
+        *cp = c;
+        *len = 1;
+        return 1;
     }
-    {
-        UV uv = s[0] & (0x7f >> n);
-        for (STRLEN i = 1; i < n; i++) {
-            if (!UTF8_IS_CONTINUATION(s[i])) goto fail;
-            uv = (uv << 6) | (s[i] & 0x3f);
-        }
-        /* non-minimal encodings are malformed, as in the real decoder,
-         * unless the caller allows them */
-        if ((n == 2 && uv < 0x80) || (n == 3 && uv < 0x800) ||
-            (n == 4 && uv < 0x10000) || (n == 5 && uv < 0x200000) ||
-            (n == 6 && uv < 0x4000000) || (n >= 7 && uv < 0x80000000)) {
-            if (!(flags & UTF8_ALLOW_LONG)) goto fail;
-            if ((flags & UTF8_ALLOW_LONG_AND_ITS_VALUE) != UTF8_ALLOW_LONG_AND_ITS_VALUE)
-                uv = 0xFFFD;
-        }
-        if ((flags & UTF8_DISALLOW_SURROGATE) && uv >= 0xD800 && uv <= 0xDFFF)
-            goto fail;
-        if ((flags & UTF8_DISALLOW_SUPER) && uv > 0x10FFFF)
-            goto fail;
-        if (retlen) *retlen = n;
-        return uv;
+    if (c < 0xC2 || c > 0xF4) return 0;
+    if (c < 0xE0) {
+        if (curlen < 2 || !UTF8_IS_CONTINUATION(s[1])) return 0;
+        *cp = ((UV)(c & 0x1F) << 6) | (s[1] & 0x3F);
+        *len = 2;
+        return 1;
     }
-fail:
-    if (retlen) *retlen = (STRLEN)-1;
-    return 0;
+    if (c < 0xF0) {
+        if (curlen < 3 || !UTF8_IS_CONTINUATION(s[1]) || !UTF8_IS_CONTINUATION(s[2])) return 0;
+        uv = ((UV)(c & 0x0F) << 12) | ((UV)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        /* below the surrogates and above them up to the noncharacters,
+         * and not overlong */
+        if ((uv >= 0x800 && uv < 0xD800) || (uv >= 0xE000 && uv < 0xFDD0) ||
+            (uv > 0xFDEF && uv < 0xFFFE)) {
+            *cp = uv;
+            *len = 3;
+            return 1;
+        }
+        return 0;
+    }
+    if (curlen < 4 || !UTF8_IS_CONTINUATION(s[1]) || !UTF8_IS_CONTINUATION(s[2]) ||
+        !UTF8_IS_CONTINUATION(s[3]))
+        return 0;
+    uv = ((UV)(c & 0x07) << 18) | ((UV)(s[1] & 0x3F) << 12) | ((UV)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+    /* not overlong, not above Unicode, no noncharacter */
+    if (uv < 0x10000 || uv > 0x10FFFF || (uv & 0xFFFE) == 0xFFFE) return 0;
+    *cp = uv;
+    *len = 4;
+    return 1;
 }
+/* the interpreter's decoder for one character (goperl_compiler.h); mode 1
+ * is utf8_to_uvchr_buf, whose flags are perl's own choice. It stays out of
+ * the decoding loops, and they inline the rest. */
+static __attribute__((noinline, cold)) UV goperl_utf8_decode_interp(goperl_frame_t *f, const U8 *s, STRLEN curlen, STRLEN *retlen,
+                                    U32 flags, U32 *errors, AV **msgs, uint32_t mode);
+/* The frame is asked for only when the interpreter decodes: a decoding
+ * loop does not pay for it on every character. */
+static inline __attribute__((always_inline, unused)) UV goperl_utf8n_to_uvchr_msgs(
+    const U8 *s, STRLEN curlen, STRLEN *retlen, U32 flags, U32 *errors, AV **msgs) {
+    UV cp;
+    STRLEN len;
+    if (curlen && goperl_utf8_strict(s, curlen, &cp, &len)) {
+        if (retlen) *retlen = len;
+        if (errors) *errors = 0;
+        if (msgs) *msgs = NULL;
+        return cp;
+    }
+    return goperl_utf8_decode_interp(_gof, s, curlen, retlen, flags, errors, msgs, 0);
+}
+#define utf8n_to_uvchr_msgs(s, len, retlen, flags, errors, msgs)                          \
+    goperl_utf8n_to_uvchr_msgs((const U8 *)(s), (STRLEN)(len), (retlen), (U32)(flags), \
+                               (errors), (msgs))
+#define utf8n_to_uvchr_error(s, len, retlen, flags, errors) \
+    utf8n_to_uvchr_msgs((s), (len), (retlen), (flags), (errors), (AV **)0)
 #define utf8n_to_uvchr(s, len, retlen, flags) \
-    goperl_utf8n_to_uvchr((const U8 *)(s), (len), (retlen), (flags))
+    utf8n_to_uvchr_msgs((s), (len), (retlen), (flags), (U32 *)0, (AV **)0)
+static inline __attribute__((always_inline, unused)) UV goperl_utf8_to_uvchr_buf(const U8 *s,
+                                                                                 const U8 *e,
+                                                                                 STRLEN *retlen) {
+    UV cp;
+    STRLEN len;
+    if (e > s && goperl_utf8_strict(s, (STRLEN)(e - s), &cp, &len)) {
+        if (retlen) *retlen = len;
+        return cp;
+    }
+    return goperl_utf8_decode_interp(_gof, s, e > s ? (STRLEN)(e - s) : 0, retlen, 0, (U32 *)0,
+                                     (AV **)0, 1);
+}
 #define utf8_to_uvchr_buf(s, e, retlen) \
-    ({ GOPERL_ONCE(goperl_utf8_to_uvchr_buf_s_, s); \
-       utf8n_to_uvchr((goperl_utf8_to_uvchr_buf_s_), (STRLEN)((const U8 *)(e) - (const U8 *)(goperl_utf8_to_uvchr_buf_s_)), (retlen), 0); })
+    goperl_utf8_to_uvchr_buf((const U8 *)(s), (const U8 *)(e), (retlen))
 static U8 *goperl_uvchr_to_utf8(U8 *d, UV uv) {
     if (uv < 0x80) {
         *d++ = (U8)uv;
@@ -9115,9 +9189,8 @@ static U8 *goperl_uvchr_to_utf8(U8 *d, UV uv) {
     return d;
 }
 #define uvchr_to_utf8(d, uv) goperl_uvchr_to_utf8((U8 *)(d), (UV)(uv))
-#define uvchr_to_utf8_flags(d, uv, flags) uvchr_to_utf8((d), (uv))
 #define uvuni_to_utf8(d, uv) uvchr_to_utf8((d), (uv))
-#define uvuni_to_utf8_flags(d, uv, flags) uvchr_to_utf8((d), (uv))
+#define uvuni_to_utf8_flags(d, uv, flags) uvchr_to_utf8_flags((d), (uv), (flags))
 static U8 *goperl_bytes_to_utf8(const U8 *s, STRLEN *lenp) {
     STRLEN len = *lenp, out = 0;
     for (STRLEN i = 0; i < len; i++) out += s[i] < 0x80 ? 1 : 2;
@@ -9130,12 +9203,17 @@ static U8 *goperl_bytes_to_utf8(const U8 *s, STRLEN *lenp) {
 #define bytes_to_utf8(s, lenp) goperl_bytes_to_utf8((const U8 *)(s), (lenp))
 static U8 *goperl_utf8_to_bytes(U8 *s, STRLEN *lenp) {
     U8 *d = s, *p = s, *e = s + *lenp;
+    /* as perl's: every character an invariant or one of the two bytes of a
+     * code point below 0x100 */
     while (p < e) {
-        STRLEN rl;
-        UV uv = goperl_utf8n_to_uvchr(p, (STRLEN)(e - p), &rl, 0);
-        if (rl == (STRLEN)-1 || uv > 0xff) return 0;
-        *d++ = (U8)uv;
-        p += rl;
+        if (UTF8_IS_INVARIANT(*p)) {
+            *d++ = *p++;
+        } else if ((*p == 0xC2 || *p == 0xC3) && p + 1 < e && UTF8_IS_CONTINUATION(p[1])) {
+            *d++ = (U8)(((*p & 0x1F) << 6) | (p[1] & 0x3F));
+            p += 2;
+        } else {
+            return 0;
+        }
     }
     *lenp = (STRLEN)(d - s);
     return s;
@@ -9190,6 +9268,10 @@ static inline __attribute__((unused)) U8 goperl_gimme_v(goperl_frame_t *f) {
 #define GIMME GIMME_V
 #define ckWARN(w) ((int)goperl_op0(GOPERL_OP_CKWARN, (uint64_t)(w), 0))
 #define ckWARN_d(w) ((int)goperl_op0(GOPERL_OP_CKWARN, (uint64_t)(w), 1))
+/* the functions under ckWARN and ckWARN_d (warnings.h), which take packed
+ * categories as they do */
+#define Perl_ckwarn(w) ckWARN(w)
+#define Perl_ckwarn_d(w) ckWARN_d(w)
 #define ckWARN2(a, b) ckWARN(packWARN2(a, b))
 #define ckWARN3(a, b, c) ckWARN(packWARN3(a, b, c))
 #define ckWARN4(a, b, c, d) ckWARN(packWARN4(a, b, c, d))

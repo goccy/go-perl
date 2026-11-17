@@ -40,8 +40,20 @@ enum {
     GOPERL_INT_SAVE_FIELD = 31, /* a: an SV; b: field<<8 | kind: a save of the field */
     GOPERL_INT_HASH = 32,       /* s+b: a key's bytes -> its hash (PERL_HASH) */
     GOPERL_INT_PUSHSTACK = 33,  /* b: the stackinfo type: PUSHSTACKi */
-    GOPERL_INT_POPSTACK = 34    /* POPSTACK */
+    GOPERL_INT_POPSTACK = 34,   /* POPSTACK */
+    GOPERL_INT_UTF8 = 42        /* a: the flags | (GOPERL_UTF8_* | GOPERL_UTF8_MSGS)
+                                 * << 32; s+b: one character's bytes, or b: a
+                                 * code point -> words */
 };
+/* The operations of INTERNAL UTF8 (perl-wasm's perl.cc). */
+enum {
+    GOPERL_UTF8_DECODE = 0,
+    GOPERL_UTF8_DECODE_BUF = 1,
+    GOPERL_UTF8_CHAR = 2,
+    GOPERL_UTF8_PARTIAL = 3,
+    GOPERL_UTF8_ENCODE = 4
+};
+#define GOPERL_UTF8_MSGS 0x100
 /* The fields of a sub (INTERNAL CV_GET / CV_SET). */
 enum {
     GOPERL_CVF_FLAGS = 0,
@@ -2116,6 +2128,113 @@ static __attribute__((unused)) UV goperl_case_utf8(goperl_frame_t *f, int which,
     goperl_case_utf8(_gof, GOPERL_CASE_TITLE, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
 #define toFOLD_utf8_safe(p, e, s, l) \
     goperl_case_utf8(_gof, GOPERL_CASE_FOLD, (const U8 *)(p), (const U8 *)(e), (U8 *)(s), (l))
+/* One character's UTF-8 by the interpreter's own functions: the bytes go
+ * over up to the length the start byte announces (perl reads no further),
+ * or the code point to encode, with the flags. Back come the words: the
+ * result, the length (or -1), the errors, the messages (an array or a hash
+ * the caller owns, or none), then the bytes of an encoded character. */
+static __attribute__((noinline, cold)) const goperl_gword_t *
+goperl_utf8_interp(goperl_frame_t *f, uint32_t what, U32 flags, const U8 *s, STRLEN n, uint64_t b) {
+    const uint64_t r = GOPERL_INTERNAL_S(f, GOPERL_INT_UTF8, (uint64_t)flags | ((uint64_t)what << 32),
+                                         b, s, s ? n : 0);
+    const goperl_gword_t *const w = (const goperl_gword_t *)goperl_guest_mem(f, r);
+    if (!w) goperl_croakf(f, "the interpreter did not hand back a UTF-8 character");
+    return w;
+}
+static __attribute__((noinline, cold)) UV goperl_utf8_decode_interp(goperl_frame_t *f, const U8 *s,
+                                                                STRLEN curlen, STRLEN *retlen,
+                                                                U32 flags, U32 *errors, AV **msgs,
+                                                                uint32_t mode) {
+    const STRLEN skip = curlen ? UTF8SKIP(s) : 0;
+    const STRLEN n = curlen < skip ? curlen : skip;
+    const goperl_gword_t *const w =
+        goperl_utf8_interp(f, (mode ? GOPERL_UTF8_DECODE_BUF : GOPERL_UTF8_DECODE) |
+                                  (msgs ? GOPERL_UTF8_MSGS : 0),
+                           flags, s, n, n);
+    if (retlen) *retlen = (STRLEN)w[1];
+    if (errors) *errors = (U32)w[2];
+    if (msgs) *msgs = (AV *)GOPERL_SV(w[3]);
+    return (UV)w[0];
+}
+/* isUTF8_CHAR_flags: the length of the character at s under the flags, or 0
+ * when it is no complete, allowed one (inline.h) */
+static inline __attribute__((always_inline, unused)) STRLEN goperl_isutf8_char_flags(const U8 *s,
+                                                                                   const U8 *e,
+                                                                                   U32 flags) {
+    UV cp;
+    STRLEN len;
+    if (e <= s) return 0;
+    if (goperl_utf8_strict(s, (STRLEN)(e - s), &cp, &len)) return len;
+    {
+        const STRLEN skip = UTF8SKIP(s);
+        const STRLEN n = (STRLEN)(e - s) < skip ? (STRLEN)(e - s) : skip;
+        return (STRLEN)goperl_utf8_interp(_gof, GOPERL_UTF8_CHAR, flags, s, n, n)[0];
+    }
+}
+#define isUTF8_CHAR_flags(s, e, flags) \
+    goperl_isutf8_char_flags((const U8 *)(s), (const U8 *)(e), (U32)(flags))
+/* is_utf8_valid_partial_char_flags: whether s..e is the start of a
+ * character allowed under the flags that goes on beyond e */
+static inline __attribute__((unused)) bool goperl_utf8_valid_partial(const U8 *s, const U8 *e,
+                                                                     U32 flags) {
+    if (s >= e || (STRLEN)(e - s) >= UTF8SKIP(s)) return FALSE;
+    return goperl_utf8_interp(_gof, GOPERL_UTF8_PARTIAL, flags, s, (STRLEN)(e - s),
+                              (uint64_t)(e - s))[0] != 0;
+}
+#define is_utf8_valid_partial_char_flags(s, e, flags) \
+    goperl_utf8_valid_partial((const U8 *)(s), (const U8 *)(e), (U32)(flags))
+#define is_utf8_valid_partial_char(s, e) is_utf8_valid_partial_char_flags((s), (e), 0)
+/* is_utf8_string_loclen_flags: whether the string is all characters allowed
+ * under the flags, where the first that is not begins, and how many there
+ * are before it; a length of 0 is the string's strlen, as perl has it */
+static inline __attribute__((unused)) bool goperl_utf8_string_flags(const U8 *s, STRLEN len,
+                                                                    const U8 **ep, STRLEN *el,
+                                                                    U32 flags) {
+    const U8 *p = s, *send;
+    STRLEN count = 0;
+    if (len == 0) len = strlen((const char *)s);
+    send = s + len;
+    while (p < send) {
+        const STRLEN l = goperl_isutf8_char_flags(p, send, flags);
+        if (!l) break;
+        p += l;
+        count++;
+    }
+    if (ep) *ep = p;
+    if (el) *el = count;
+    return p == send;
+}
+#define is_utf8_string_loclen_flags(s, len, ep, el, flags) \
+    goperl_utf8_string_flags((const U8 *)(s), (STRLEN)(len), (const U8 **)(ep), (el), (U32)(flags))
+#define is_utf8_string_loc_flags(s, len, ep, flags) \
+    is_utf8_string_loclen_flags((s), (len), (ep), (STRLEN *)0, (flags))
+#define is_utf8_string_flags(s, len, flags) \
+    is_utf8_string_loclen_flags((s), (len), (const U8 **)0, (STRLEN *)0, (flags))
+/* uvchr_to_utf8_flags_msgs: perl's encoder (utf8.c). A code point that is
+ * no surrogate, no noncharacter and not above Unicode, or any one up to
+ * IV_MAX under no flags, is encoded here; any other by the interpreter,
+ * which warns, refuses (NULL) or gives the message under the flags as perl
+ * does, and dies above IV_MAX. */
+static inline __attribute__((unused)) U8 *goperl_uvchr_to_utf8_flags_msgs(U8 *d, UV uv, UV flags,
+                                                                          HV **msgs) {
+    if (msgs) *msgs = NULL;
+    if ((flags == 0 && uv <= (UV)IV_MAX) || uv < 0xD800 || (uv >= 0xE000 && uv < 0xFDD0) ||
+        (uv > 0xFDEF && uv <= 0x10FFFF && (uv & 0xFFFE) != 0xFFFE))
+        return goperl_uvchr_to_utf8(d, uv);
+    {
+        const goperl_gword_t *const w =
+            goperl_utf8_interp(_gof, GOPERL_UTF8_ENCODE | (msgs ? GOPERL_UTF8_MSGS : 0), (U32)flags,
+                               (const U8 *)0, 0, (uint64_t)uv);
+        const STRLEN n = (STRLEN)w[1];
+        if (msgs) *msgs = (HV *)GOPERL_SV(w[3]);
+        if (n == (STRLEN)-1) return (U8 *)0;
+        memcpy(d, (const U8 *)(w + 4), n);
+        return d + n;
+    }
+}
+#define uvchr_to_utf8_flags_msgs(d, uv, flags, msgs) \
+    goperl_uvchr_to_utf8_flags_msgs((U8 *)(d), (UV)(uv), (UV)(flags), (msgs))
+#define uvchr_to_utf8_flags(d, uv, flags) uvchr_to_utf8_flags_msgs((d), (uv), (flags), (HV **)0)
 /* foldEQ_utf8 (utf8.c): whether the leading portions of two strings,
  * either or both of which may be UTF-8, are the same case-insensitively,
  * how far into them given by l1/pe1 and l2/pe2 as perl has it, and on a
