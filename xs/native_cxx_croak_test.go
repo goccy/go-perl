@@ -42,7 +42,7 @@ extern "C" XS_EXTERNAL(boot_CxxCroak) {
     newXS_deffile("CxxCroak::nested", XS_CxxCroak_nested);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
-`, "-x", "c++", "-std=gnu++17")
+`, "-x", "c++", "-std=gnu++17", "-fno-exceptions") // no C++ runtime to link
 	if err != nil {
 		t.Fatalf("compile CxxCroak.so: %v\n%s", err, out)
 	}
