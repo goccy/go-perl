@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // readLines returns the lines of a report file.
@@ -375,7 +373,7 @@ system($perl, '-e', 'kill USR2 => getppid()');
 report("USR2 from the child: handler ran=$got ", status());
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
@@ -414,7 +412,7 @@ system($perl, '-e', "sub Guard::DESTROY { kill TERM => \$\$ } $guard");
 report("is killed: ", status());
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

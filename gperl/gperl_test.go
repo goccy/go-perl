@@ -32,7 +32,7 @@ func writeScript(t *testing.T, name, src string) string {
 
 func TestRunSuccess(t *testing.T) {
 	script := writeScript(t, "ok.pl", `my $x = 40 + 2; exit 0 if $x != 42; 1;`)
-	status, err := gperl.Run(script, nil)
+	status, err := runInThisProcess(t, script, nil)
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
@@ -42,14 +42,14 @@ func TestRunSuccess(t *testing.T) {
 // evaluates to and whatever errno an earlier, handled failure left behind.
 func TestRunLastStatementUndefAfterFailedSyscall(t *testing.T) {
 	script := writeScript(t, "undef.pl", `open(my $fh, '<', '/nonexistent/file') and die "opened"; undef;`)
-	status, err := gperl.Run(script, nil)
+	status, err := runInThisProcess(t, script, nil)
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
 }
 
 func TestRunMissingScript(t *testing.T) {
-	status, err := gperl.Run(filepath.Join(t.TempDir(), "absent.pl"), nil)
+	status, err := runInThisProcess(t, filepath.Join(t.TempDir(), "absent.pl"), nil)
 	if err == nil || status == 0 {
 		t.Fatalf("Run = (%d, %v), want a failure", status, err)
 	}
@@ -57,7 +57,7 @@ func TestRunMissingScript(t *testing.T) {
 
 func TestRunExitStatus(t *testing.T) {
 	script := writeScript(t, "exit.pl", `exit 7;`)
-	status, err := gperl.Run(script, nil)
+	status, err := runInThisProcess(t, script, nil)
 	if err != nil || status != 7 {
 		t.Fatalf("Run = (%d, %v), want (7, nil)", status, err)
 	}
@@ -65,7 +65,7 @@ func TestRunExitStatus(t *testing.T) {
 
 func TestRunUncaughtDie(t *testing.T) {
 	script := writeScript(t, "die.pl", `$! = 0; die "kaboom\n";`)
-	status, err := gperl.Run(script, nil)
+	status, err := runInThisProcess(t, script, nil)
 	// perl reports the die on stderr itself; the run only carries its
 	// status.
 	if status != 255 || err != nil {

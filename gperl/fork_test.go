@@ -6,8 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // runForkScript runs a Perl program that reports what it observed, one
@@ -33,7 +31,7 @@ sub report { open(my $fh, '>>', $REPORT) or die "report: $!"; syswrite($fh, join
 `
 	script := writeScript(t, "fork.pl", prelude+src)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, append([]string{report}, args...))
+	status, err := runInThisProcess(t, script, append([]string{report}, args...))
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

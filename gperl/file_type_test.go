@@ -5,8 +5,6 @@ package gperl_test
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // The file tests tell a character device, a FIFO or pipe, a socket, a
@@ -53,7 +51,7 @@ open(my $out, '<', "$dir/out") or die "open: $!";
 report("stdin from a file, stdout into a file: ", scalar(<$out>));
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

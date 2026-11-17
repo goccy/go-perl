@@ -5,8 +5,6 @@ package gperl_test
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // select and poll report a socket or pipe writable only while it can take
@@ -121,7 +119,7 @@ close $out;
 report("read '$first' and closed the pipe: the writer ended with signal=", $? & 127, " exit=", $? >> 8);
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

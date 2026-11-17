@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // A process whose parent has ended is adopted by process 1.
@@ -153,7 +151,7 @@ report("survived its own group's TERM");
 PROGRAM
 open(my $fh, '>>', $report) or die; syswrite($fh, "signal=" . ($? & 127) . "\n"); close $fh;
 `)
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
