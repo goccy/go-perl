@@ -6,23 +6,31 @@ import "testing"
 
 // A forked process that makes a process group of its own (setpgrp) and
 // execs a command is replaced by a command that leads that group: a signal
-// to the group (kill -9 => $pid, as a timeout wrapper sends it) reaches the
-// command and what the command started, as on perl.
+// to the group (kill -9 => $pid, or SIGTERM, as a timeout wrapper sends
+// them) reaches the command and what the command started, as on perl. So
+// it does when the command is found on PATH, after the directories before
+// the one that has it.
 func TestExecdCommandLeadsTheGroupOfTheProcess(t *testing.T) {
+	for _, tc := range []struct{ shell, signal string }{{"/bin/sh", "-9 => "}, {"sh", "-9 => "}, {"sh", "'TERM', -"}} {
+		t.Run(tc.shell+" "+tc.signal, func(t *testing.T) { execdCommandLeadsTheGroup(t, tc.shell, tc.signal) })
+	}
+}
+
+func execdCommandLeadsTheGroup(t *testing.T, shell, signal string) {
 	out, status := hostPerl(t, "-MFile::Temp=tempdir", "-e", `
 my $dir = tempdir(CLEANUP => 1);
 my $file = "$dir/pids";
 my $pid = fork // die "fork: $!";
 if (!$pid) {
     setpgrp(0, 0);
-    exec "/bin/sh", "-c", "sleep 30 & echo \$\$ \$! > $file.tmp; mv $file.tmp $file; wait";
+    exec "`+shell+`", "-c", "sleep 30 & echo \$\$ \$! > $file.tmp; mv $file.tmp $file; wait";
 }
 select(undef, undef, undef, 0.05) until -s $file;
 open(my $fh, '<', $file) or die "open: $!";
 my ($sh, $sleep) = split ' ', scalar <$fh>;
-kill -9 => $pid;
+kill `+signal+`$pid;
 waitpid $pid, 0;
-print "the process: ", ($? & 127) == 9 ? "killed" : "status $?", "\n";
+print "the process: ", ($? & 127) ? "killed" : "status $?", "\n";
 # a process is gone when it is no more, or a zombie nobody reaps
 sub gone {
     my $p = shift;
