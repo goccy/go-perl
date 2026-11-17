@@ -7998,6 +7998,25 @@ static AV *goperl_get_av(goperl_frame_t *f, const char *name, I32 flags) {
 
 
 #define PL_ptr_table ((void *)0)
+/* The types of perl's pointer tables (sv.h), which a module that keeps a
+ * table of its own uses with functions of its own (Test::LeakTrace's
+ * ptr_table.h, from sv.c): data of native code's, laid out as perl's. */
+struct ptr_tbl_ent {
+    struct ptr_tbl_ent *next;
+    const void *oldval;
+    void *newval;
+};
+typedef struct ptr_tbl_ent PTR_TBL_ENT_t;
+struct ptr_tbl_arena;
+struct ptr_tbl {
+    struct ptr_tbl_ent **tbl_ary;
+    UV tbl_max;
+    UV tbl_items;
+    struct ptr_tbl_arena *tbl_arena;
+    struct ptr_tbl_ent *tbl_arena_next;
+    struct ptr_tbl_ent *tbl_arena_end;
+};
+typedef struct ptr_tbl PTR_TBL_t;
 #define PL_sub_generation \
     ((U32)goperl_op0(GOPERL_OP_PLVAR_GET, GOPERL_PL_SUB_GENERATION, 0))
 #define SVt_PVBM SVt_PVMG /* pre-5.10 name */

@@ -6920,7 +6920,8 @@ XS(XS_PerlAPI_vstring_of) {
  * isinfnan of the number ("infnan"), whether Perl_error_log is the stderr
  * handle ("error_log"), TARGi of the number ("targi"), and the names that
  * only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
- * PERL_FLUSHALL_FOR_CHILD: "compiled"). */
+ * PERL_FLUSHALL_FOR_CHILD, the pointer table types PTR_TBL_t and
+ * PTR_TBL_ENT_t: "compiled"). */
 XS(XS_PerlAPI_small_names) {
     dXSARGS;
     dXSTARG;
@@ -7039,8 +7040,13 @@ XS(XS_PerlAPI_small_names) {
         } else {
             Direntry_t *d = NULL;
             U32 flag = SVppv_STATIC;
+            PTR_TBL_ENT_t ent = {NULL, NULL, NULL};
+            PTR_TBL_ENT_t *ary[1] = {&ent};
+            PTR_TBL_t tbl = {ary, 0, 1, NULL, NULL, NULL};
             PERL_UNUSED_VAR(d);
             PERL_UNUSED_VAR(flag);
+            ent.oldval = &tbl;
+            ent.newval = tbl.tbl_ary[0];
             if (0) {
                 CvISXSUB_on(cv);
                 CvISXSUB_off(cv);

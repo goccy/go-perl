@@ -8,7 +8,8 @@ import "testing"
 // scan_vstring (Math::GMP, Sereal), grok_atoUV, is_utf8_invariant_string_loc,
 // isinfnan, Perl_error_log, TARGi, sv_inc (which only counted: "aa" became
 // 1, not "ab") and sv_dec, and names that only need to compile
-// (Direntry_t, SVppv_STATIC, CvISXSUB_on, PERL_FLUSHALL_FOR_CHILD). And a
+// (Direntry_t, SVppv_STATIC, CvISXSUB_on, PERL_FLUSHALL_FOR_CHILD, the
+// pointer table types Test::LeakTrace keeps its table in). And a
 // MAGIC of a module's own linked onto an empty chain through SvMAGIC, as
 // Event attaches its watchers, which mg_find finds in the next call. Before,
 // the names did not compile, and the MAGIC was not found ("sv_2thing: can't
