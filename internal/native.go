@@ -239,7 +239,7 @@ func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 	// stops at its first call that may raise one and leaves the rest
 	// undone.
 	parked := false
-	resp, err := p.invoke(0, midXSHelper, buf, func(g *base.Module, req, n wptr) (int64, error) {
+	resp, err := p.opInvoke(midXSHelper, buf, func(g *base.Module, req, n wptr) (int64, error) {
 		r, err := wasm2go.Inv_0_24(g, req, n)
 		parked = p.parkGuestJump()
 		return r, err
@@ -276,7 +276,7 @@ func (p *Perl) XSOpBox() (uint64, error) {
 // XSHelperOp runs one; its result is in the box when it returns nil.
 func (p *Perl) XSOpRun() error {
 	parked := false
-	_, err := p.invoke(0, midXSOp, nil, func(g *base.Module, req, n wptr) (int64, error) {
+	_, err := p.opInvoke(midXSOp, nil, func(g *base.Module, req, n wptr) (int64, error) {
 		r, err := wasm2go.Inv_0_25(g, req, n)
 		parked = p.parkGuestJump()
 		return r, err
@@ -285,6 +285,21 @@ func (p *Perl) XSOpRun() error {
 		return ErrGuestJump
 	}
 	return err
+}
+
+// opInvoke runs an operation of native code (XSHelperOp, XSOpRun). Native
+// code makes its operations inside a callback of the instance, from the
+// goroutine that runs the callback, which is on the instance's thread: while
+// a callback is running the operation runs in place. Otherwise it is an
+// entry like any other (invoke), which finds out which thread it is on.
+// That costs a system call on Linux (gettid), and native code makes
+// thousands of operations where a program makes one entry: every one of
+// them paid it, and loading Moose took a sixth longer.
+func (p *Perl) opInvoke(mid int32, req []byte, call invoker) ([]byte, error) {
+	if p.callbackDepth > 0 {
+		return p.m.invoke(0, mid, req, call)
+	}
+	return p.invoke(0, mid, req, call)
 }
 
 // RawMemory exposes the instance's linear memory. Native XSUBs read guest
