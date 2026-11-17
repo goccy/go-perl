@@ -167,7 +167,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 34u
+#define GOPERL_XS_ABI 35u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -936,6 +936,16 @@ struct goperl_frame {
     goperl_tmpblock_t *tmp_more; /* the last block of SV** result slots
                                   * beyond tmp (malloc'd; the loader frees
                                   * the blocks when the frame ends) */
+    /* The perl stack of an XSUB is the interpreter's by index: the
+     * arguments are at st[ax..], ax being the interpreter's index of the
+     * first, as on perl, so that an index of the interpreter's (a mark of
+     * PL_markstack, a context's blk_oldsp) reads the value it reads there.
+     * The values below them, st[0..below-1], are the interpreter's, read
+     * from its stack (at gstack in its memory) the first time native code
+     * may index it so (goperl_stack_below), and below is 0 from then on, as
+     * it is for a frame whose stack is no such copy. */
+    uint64_t gstack;
+    int32_t below;
 };
 
 /* ---- shared module state (weak: one copy across a multi-TU .so) ---------
@@ -1128,6 +1138,20 @@ static inline __attribute__((unused)) void *goperl_guest_mem(
         if (!failed_before && f->failed && f->jb) goperl_raise(f);
         return p;
     }
+}
+/* The values of the interpreter's stack below the arguments of an XSUB
+ * (goperl_frame.below), read into the frame's stack the first time they may
+ * be looked at: the stack is the interpreter's by index, and native code
+ * that has an index of the interpreter's — a mark of PL_markstack, the
+ * blk_oldsp of a context — reads the value there (Want reads the value an
+ * assignment assigns, below the arguments of the sub it was called in). */
+static inline __attribute__((unused)) void goperl_stack_below(goperl_frame_t *f) {
+    const int32_t below = f->below;
+    if (below <= 0) return;
+    f->below = 0;
+    const uint64_t *const g = (const uint64_t *)goperl_guest_mem(f, f->gstack);
+    if (!g) return;
+    for (int32_t i = 0; i < below; i++) f->stbase[i] = (SV *)(uintptr_t)g[i];
 }
 /* The interpreter's memory, read and written where it is: a word of four
  * bytes at an address of it (a U32, an I32, an int), a word of eight bytes
@@ -6325,6 +6349,7 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
      * function's stack from then on. */
     goperl_frame_t *const f = _gof;
     goperl_marks_adopt(f);
+    goperl_stack_below(f); /* the values below an XSUB's arguments too */
     const I32 n = (I32)(f->psp - f->stbase); /* the values are st[1..n] */
     const I32 nmarks = f->markidx + 1 > 0 ? f->markidx + 1 : 0;
     /* words: [marks][op_targ][an offset for each mark][the values] */
@@ -7226,6 +7251,8 @@ static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, i
 }
 
 static PERL_SI *goperl_si_cur(goperl_frame_t *f) {
+    /* the contexts index the stack by the interpreter's indices */
+    goperl_stack_below(f);
     if (goperl_si_cache_v && goperl_si_gen_v == goperl_gen_v)
         return goperl_si_cache_v;
     goperl_si_cache_v = goperl_si_materialize(f, 0, 0);
