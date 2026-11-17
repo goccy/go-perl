@@ -87,4 +87,20 @@ my @a = (1, 2, 3);
 			}
 		})
 	}
+	// The free that has the value freed once more and dies, many times, a
+	// referenced value freed at the end of a string eval among them
+	// (Variable::Magic's t/17-ctl.t): the inner free frees the
+	// interpreter's anchor of the magic, which the outer one must not
+	// touch as it dies. Before, it wrote into the freed MAGIC, and the
+	// interpreter crashed now and then, later on.
+	got := requireModule(t, "MagicDie", so, `my $died = 0;
+for my $i (1 .. 300) {
+    eval { my $x = 1; MagicDie::cast(\$x, 2); 1 } or $died++;
+    eval q{ my $x = 1; my $y = \$x; MagicDie::cast($y, 2); 1 } or $died++;
+    my @junk = map { "pad $_" x 3 } 1 .. 5;
+}
+"died $died, freed " . MagicDie::freed()`)
+	if want := "died 600, freed 600"; got != want {
+		t.Errorf("many times: got %q, want %q", got, want)
+	}
 }
