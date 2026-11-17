@@ -6,5 +6,5 @@
  * reads the program wrongly. */
 #ifndef GOPERL_XS_SDK_REGCOMP_H
 #define GOPERL_XS_SDK_REGCOMP_H
-#error "regcomp.h: the program of a compiled regexp (its regnodes) is the interpreter's own on go-perl, and native code cannot walk it"
+#error "go-perl gives native code no access to this interpreter internal: regcomp.h (the program of a compiled regexp, its regnodes)"
 #endif

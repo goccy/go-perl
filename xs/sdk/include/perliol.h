@@ -491,8 +491,10 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
 #define GOPERL_IOL_REQ(slot, stock)                                        \
     if (tab->slot && (void *)tab->slot != (void *)stock)                   \
     goperl_croakf(goperl_cur_frame_v,                                      \
-                  "PerlIO layer '%s': custom '" #slot                      \
-                  "' slot is not supported by the goperl SDK yet",         \
+                  "go-perl gives native code no access to this "            \
+                  "interpreter internal: PerlIO layer '%s' customizes "     \
+                  "the '" #slot "' slot (a layer of native code runs its "  \
+                  "own Pushed and Fill on a buffered layer, no other)",    \
                   tab->name)
     GOPERL_IOL_REQ(Popped, PerlIOBuf_popped);
     GOPERL_IOL_REQ(Open, PerlIOBuf_open);

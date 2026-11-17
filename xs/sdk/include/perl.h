@@ -11648,5 +11648,8 @@ __goperl_shared_release(void *raw) {
 #endif
 #include "goperl_longnames.h"
 #include "goperl_argsassert.h"
+/* last: the internals go-perl does not give native code (their names stay
+ * out of every header above) */
+#include "goperl_internals.h"
 
 #endif /* GOPERL_XS_SDK_PERL_H */

@@ -108,8 +108,52 @@ func TestSDKHeaderThatCannotBeGiven(t *testing.T) {
 	if err == nil {
 		t.Fatal("a module including regcomp.h built")
 	}
-	const want = "regcomp.h: the program of a compiled regexp (its regnodes) is the interpreter's own on go-perl"
+	const want = "go-perl gives native code no access to this interpreter internal: regcomp.h"
 	if !strings.Contains(string(out), want) {
 		t.Errorf("the compiler said:\n%s\nwant it to say %q", out, want)
+	}
+}
+
+// A module that uses an internal of perl's that go-perl does not give
+// native code (the save stack, the bodies of SVs, the tmps stack, the
+// layers of a PerlIO handle) stops building with one fixed phrase and the
+// name, for each use; #ifdef sees the name defined, and a module that does
+// not use one builds (TestSDKHeadersCompileWherePerlsDo). Before, such a
+// build failed with "implicit declaration" or "undeclared", which said
+// nothing of why.
+func TestSDKInternalsGoPerlDoesNotGive(t *testing.T) {
+	_, out, err := compileModuleSource(t, "Internals", `#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+#include "perliol.h"
+#ifndef SAVEt_ALLOC
+#error "SAVEt_ALLOC is not defined"
+#endif
+static int uses(SV *sv, PerlIO *f) {
+    I32 base = PL_savestack_ix;
+    int t = SAVEt_ALLOC;
+    void *top = PL_savestack;
+    SSize_t n = sizeof(XPVIV);
+    SV **tmps = PL_tmps_stack;
+    PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1);
+    save_alloc(8, 0);
+    (void)sv; (void)f; (void)top; (void)n; (void)tmps; (void)tab;
+    return (int)base + t;
+}
+`)
+	if err == nil {
+		t.Fatal("a module using perl's internals built")
+	}
+	const phrase = "go-perl gives native code no access to this interpreter internal: "
+	for _, name := range []string{"SAVEt_ALLOC", "PL_savestack", "XPVIV", "PL_tmps_stack", "PerlIO_find_layer", "save_alloc"} {
+		if !strings.Contains(string(out), phrase+name) {
+			t.Errorf("no %q in what the compiler said:\n%s", phrase+name, out)
+		}
+	}
+	if strings.Contains(string(out), phrase+"PL_savestack_ix") {
+		t.Errorf("PL_savestack_ix, which the SDK gives, was refused:\n%s", out)
+	}
+	if strings.Contains(string(out), "is not defined") {
+		t.Errorf("#ifdef did not see the name defined:\n%s", out)
 	}
 }
