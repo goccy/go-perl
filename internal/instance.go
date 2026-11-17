@@ -296,6 +296,10 @@ func (f *forkFamily) end() {
 // Closed reports whether Close has run.
 func (p *Perl) Closed() bool { return p.closed.Load() }
 
+// Environment is the environment the instance was made with: the program's
+// as it starts, before the program changes %ENV.
+func (p *Perl) Environment() []string { return p.opts.Env }
+
 // QueueRelease records a handle whose host wrapper is gone. Safe from any
 // goroutine, including the runtime's finalizer goroutine.
 func (p *Perl) QueueRelease(id uint64) {

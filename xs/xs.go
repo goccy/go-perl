@@ -661,6 +661,7 @@ func loaderState(p *internal.Perl) (*state, error) {
 	if libcErr != nil {
 		return nil, libcErr
 	}
+	setHostLocale(p.Environment())
 	if err := memoryAboveCeiling(p); err != nil {
 		return nil, err
 	}
