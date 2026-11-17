@@ -1714,6 +1714,13 @@ static void goperl_errno_leave(goperl_frame_t *f) {
 
 static goperl_frame_t **goperl_curframe_slot(void) {
     goperl_forked_check();
+    if (!goperl_api_v) {
+        /* the module is not booted yet: code that runs while it is being
+         * loaded (a C++ static initializer) has no frame */
+        static goperl_frame_t *goperl_no_frame;
+        goperl_no_frame = 0;
+        return &goperl_no_frame;
+    }
     void *tid = (void *)pthread_self();
     goperl_tframe_t *tf = GOPERL_PROCESS->tf;
     uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
@@ -3871,7 +3878,22 @@ template <> struct goperl_number_ptr<const OP *> {
 
 /* ---- interpreter variables ---------------------------------------------- */
 
+/* &PL_sv_undef, &PL_sv_yes and &PL_sv_no for code that runs before the
+ * module is booted, when there is no interpreter to ask where they are: a
+ * C++ static initializer (Geo::GDAL's `static SV *VSIStdoutSetRedirectionFct
+ * = &PL_sv_undef;`, which perl evaluates as the module loads). They are
+ * small numbers that are the address of no scalar, and the interpreter
+ * takes them for the three wherever native code hands it a value. */
+#define GOPERL_STATIC_SV_UNDEF 0x18u
+#define GOPERL_STATIC_SV_YES 0x28u
+#define GOPERL_STATIC_SV_NO 0x38u
 static SV **goperl_immortal(goperl_frame_t *f, int ix /* 0 undef 1 yes 2 no */) {
+    if (!f) {
+        static SV *const goperl_static_imm[3] = {
+            (SV *)(uintptr_t)GOPERL_STATIC_SV_UNDEF, (SV *)(uintptr_t)GOPERL_STATIC_SV_YES,
+            (SV *)(uintptr_t)GOPERL_STATIC_SV_NO};
+        return (SV **)&goperl_static_imm[ix];
+    }
     if (!f->imm[ix])
         f->imm[ix] = goperl_do_op(f, GOPERL_OP_PLVAR_GET,
                                   (uint64_t)(GOPERL_PL_SV_UNDEF + ix), 0, 0, 0);
