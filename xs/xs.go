@@ -272,6 +272,14 @@ type magicRec struct {
 	svTok    uint64
 	head     uintptr // C-heap MAGIC* chain head
 	anchorID uint32
+	// freeing is set while the interpreter frees the anchor (magicFreed).
+	// perl's mg_free keeps the anchor on the SV's chain while its free
+	// runs, and frees it after: a module that empties its chain from a
+	// svt_free then (SvMAGIC_set to NULL, sv_unmagic of the last MAGIC)
+	// must not have the anchor taken off under that free. Nothing else
+	// tells that the free is running: the interpreter's chain looks as it
+	// does at any other time, and the maps stay for mg_find in the hooks.
+	freeing bool
 }
 
 func init() {
@@ -1789,16 +1797,34 @@ func (s *state) keywordHook(req []byte) []byte {
 // from then on, anchored in the interpreter as one sv_magicext attaches is,
 // so that the chain goes when the SV is freed. Its nodes are the module's:
 // it frees what it allocated, as on perl.
+//
+// A chain the module empties (Variable::Magic's dispell unlinks the last
+// MAGIC it cast) leaves the SV with no magic of native code's: the
+// interpreter's anchor goes, as with sv_unmagic of the last MAGIC
+// (magicDel), and mg_magical finds no magic of it any more. While the
+// anchor is being freed, the free takes it off (see magicRec.freeing).
 func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 	s.mu.Lock()
-	if rec := s.magicBySV[sv]; rec != nil || mg == 0 {
+	if rec := s.magicBySV[sv]; mg == 0 {
+		detach := rec != nil && !rec.freeing
 		if rec != nil {
-			rec.head = mg
+			rec.head = 0
+		}
+		if detach {
+			delete(s.magicBySV, sv)
+			delete(s.magicByID, rec.anchorID)
 		}
 		s.mu.Unlock()
-		if mg == 0 {
-			return
+		if detach {
+			// As in magicDel: the anchor's free finds nothing to do.
+			if _, err := s.p.XSHelperOp(opMagicUnattach, sv, 0, 0, ""); err != nil {
+				f.fail("SvMAGIC_set: " + err.Error())
+			}
 		}
+		return
+	} else if rec != nil {
+		rec.head = mg
+		s.mu.Unlock()
 	} else {
 		s.nextMagicID++
 		rec := &magicRec{svTok: sv, head: mg, anchorID: s.nextMagicID}
@@ -1853,6 +1879,9 @@ func (s *state) magicSetHead(f *cFrame, sv uint64, mg uintptr) {
 func (s *state) magicFreed(id uint32) []byte {
 	s.mu.Lock()
 	rec := s.magicByID[id]
+	if rec != nil {
+		rec.freeing = true
+	}
 	s.mu.Unlock()
 	if rec == nil {
 		return []byte{1}
@@ -1984,7 +2013,10 @@ func (s *state) magicDel(sv uint64, how int32, vtbl uintptr) {
 		prev = mg
 		mg = next
 	}
-	if rec.head == 0 {
+	s.mu.Lock()
+	detach := rec.head == 0 && !rec.freeing
+	s.mu.Unlock()
+	if detach {
 		s.mu.Lock()
 		delete(s.magicBySV, sv)
 		delete(s.magicByID, rec.anchorID)
