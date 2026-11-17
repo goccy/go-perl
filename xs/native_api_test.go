@@ -500,7 +500,7 @@ func TestNativeSignalHandlerOfTheInterpreter(t *testing.T) {
 // word native code keeps its comparator's keys in under SAVEVPTR; the
 // character classes of a code point (isUPPER_uvchr and the others) and
 // UTF8_CHK_SKIP; SvPOKp_on and PRIVSHIFT; save_svref of a slot the
-// interpreter knows the place of, and a clear error for one it does not;
+// interpreter knows the place of (a variable's scalar, a hash's entry);
 // uvar magic attached without its struct and given perl's vtable
 // afterwards, as Tk traces a variable.
 func TestNativeNamesOfTkEventAndSortKey(t *testing.T) {
@@ -512,7 +512,7 @@ func TestNativeNamesOfTkEventAndSortKey(t *testing.T) {
 		{"character classes", `PerlAPI::char_classes(0xC0, 0x3C9, 0x20, 0x663, 0x2D)`, "AUW,AW,S,DW,- 2 1"},
 		{"private string flag", `my $s = "x"; PerlAPI::private_pok($s)`, "private shifts"},
 		{"save_svref of a variable's scalar", `our $slot = "outer"; my $in = PerlAPI::local_slot("gvsv"); "$in/$slot"`, "inner/outer"},
-		{"save_svref of hv_fetch's slot", `our %h = (k => "outer"); eval { PerlAPI::local_slot("helem") }; $@ =~ /^save_svref: the slot is this process's copy of a value/ ? "refused, " . $h{k} : "[$@]"`, "refused, outer"},
+		{"save_svref of hv_fetch's slot", `our %h = (k => "outer"); my $in = PerlAPI::local_slot("helem"); "$in/$h{k}"`, "inner/outer"},
 		{"uvar magic traced as Tk does", `my $v = 1; PerlAPI::uvar_trace(\$v); my $x = $v; $v = 2; $x = $v + 1; PerlAPI::uvar_counts()`, "2/1"},
 	})
 }

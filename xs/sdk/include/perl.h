@@ -3477,25 +3477,42 @@ static SV **goperl_tmp_slot(goperl_frame_t *f, uint64_t tok) {
     return (SV **)slot;
 }
 
+/* The SV** of av_fetch, hv_fetch, av_store and hv_store is the slot perl's
+ * gave: the element's own in the array, HeVAL of the entry, a field of the
+ * temporary perl makes for a tied container. It is in the interpreter's
+ * memory, so what native code stores through it is the container's (an
+ * element swapped or replaced, `*svp = sv`, without a reference counted, as
+ * on perl), and what it reads through it is what the container holds now,
+ * after an av_store of the same element too. It is good for as long as
+ * perl's would be: until the container's storage is reallocated or freed.
+ * A slot the operation could not give stays a temporary of the call's
+ * (goperl_tmp_slot). */
+static SV **goperl_live_slot(goperl_frame_t *f, uint64_t tok, uint64_t addr) {
+    SV **slot = addr ? (SV **)goperl_guest_mem(f, addr) : 0;
+    return slot ? slot : goperl_tmp_slot(f, tok);
+}
+
 /* av_store returns the slot when the array took the value and NULL when
  * it did not (a tied array hands it to STORE): callers release the value
  * themselves on NULL, so the result has to tell the two apart. */
 static SV **goperl_av_store(goperl_frame_t *f, AV *av, SSize_t i, SV *sv) {
-    uint64_t tok;
+    uint64_t tok, addr = 0;
     goperl_do_op3(f, GOPERL_OP_AV_STORE, GOPERL_TOK(av), GOPERL_TOK(sv), (uint64_t)(int64_t)i,
                   0, 0);
-    tok = goperl_do_op(f, GOPERL_OP_AV_FETCH, GOPERL_TOK(av), (uint64_t)(int64_t)i, 0, 0);
+    tok = goperl_do_opx(f, GOPERL_OP_AV_FETCH, GOPERL_TOK(av), (uint64_t)(int64_t)i, 0, 0, 0,
+                        &addr);
     if (tok != GOPERL_TOK(sv)) return 0;
-    return goperl_tmp_slot(f, tok);
+    return goperl_live_slot(f, tok, addr);
 }
 #define av_store(av, i, sv) \
     goperl_av_store(_gof, (AV *)(av), (SSize_t)(i), (SV *)(sv))
 
 static SV **goperl_av_fetch(goperl_frame_t *f, AV *av, SSize_t i, I32 lval) {
-    uint64_t tok = goperl_do_op(f, lval ? GOPERL_OP_AV_READ : GOPERL_OP_AV_FETCH, GOPERL_TOK(av),
-                                (uint64_t)(int64_t)i, 0, 0);
+    uint64_t addr = 0;
+    uint64_t tok = goperl_do_opx(f, lval ? GOPERL_OP_AV_READ : GOPERL_OP_AV_FETCH, GOPERL_TOK(av),
+                                 (uint64_t)(int64_t)i, 0, 0, 0, &addr);
     if (!tok) return 0;
-    return goperl_tmp_slot(f, tok);
+    return goperl_live_slot(f, tok, addr);
 }
 #define av_fetch(av, i, lval) goperl_av_fetch(_gof, (AV *)(av), (i), (lval))
 
@@ -3519,8 +3536,9 @@ static SV **goperl_hv_fetch(goperl_frame_t *f, HV *hv, const char *key,
                             I32 klen, I32 lval) {
     int utf8 = klen < 0;
     if (utf8) klen = -klen;
-    uint64_t tok = goperl_do_op3(f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_TOK(hv), lval ? 1 : 0,
-                                 GOPERL_HV_KLEN(utf8, klen), key, (uint64_t)(uint32_t)klen);
+    uint64_t addr = 0;
+    uint64_t tok = goperl_do_opx(f, GOPERL_OP_HV_FETCH_KLEN, GOPERL_TOK(hv), lval ? 1 : 0,
+                                 GOPERL_HV_KLEN(utf8, klen), key, (uint64_t)(uint32_t)klen, &addr);
     if (!tok && lval) {
         /* An lvalue fetch only fails on a hash being torn down (core's
          * hv_common bails on SvIS_FREED). XS deref-s the result without
@@ -3532,7 +3550,7 @@ static SV **goperl_hv_fetch(goperl_frame_t *f, HV *hv, const char *key,
         return goperl_tmp_slot(f, u);
     }
     if (!tok) return 0;
-    return goperl_tmp_slot(f, tok);
+    return goperl_live_slot(f, tok, addr);
 }
 #define hv_fetch(hv, key, klen, lval) \
     goperl_hv_fetch(_gof, (HV *)(hv), (key), (I32)(klen), (lval))
@@ -3553,10 +3571,11 @@ static SV **goperl_hv_store(goperl_frame_t *f, HV *hv, const char *key,
     /* Negative klen = UTF-8 key (real hv_store convention). */
     int utf8 = klen < 0;
     if (utf8) klen = -klen;
-    uint64_t tok = goperl_do_op3(f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(hv), GOPERL_TOK(sv),
-                                 GOPERL_HV_KLEN(utf8, klen), key, (uint64_t)(uint32_t)klen);
+    uint64_t addr = 0;
+    uint64_t tok = goperl_do_opx(f, GOPERL_OP_HV_STORE_KLEN, GOPERL_TOK(hv), GOPERL_TOK(sv),
+                                 GOPERL_HV_KLEN(utf8, klen), key, (uint64_t)(uint32_t)klen, &addr);
     if (!tok) return 0;
-    return goperl_tmp_slot(f, tok);
+    return goperl_live_slot(f, tok, addr);
 }
 #define hv_store(hv, key, klen, sv, hash) \
     goperl_hv_store(_gof, (HV *)(hv), (key), (I32)(klen), (SV *)(sv))

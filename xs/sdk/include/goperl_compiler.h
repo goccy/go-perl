@@ -1761,12 +1761,16 @@ static __attribute__((unused)) Sighandler_t goperl_rsignal_state(int signo) {
 
 /* save_svref: the value in a slot is saved, and a new one put there, as
  * `local` does to it. The slot must be one the interpreter knows the place
- * of (a variable of its own, a field that an accessor designates, a slot of
- * an array's body); a slot that is only this process's copy of a value
- * (the SV** an hv_fetch or av_fetch returns) cannot be saved where the
- * value lies, and the call dies saying so. */
+ * of: a slot of its memory (the SV** an hv_fetch or av_fetch returns, see
+ * goperl_live_slot), which the interpreter saves itself, or a variable of
+ * its own, a field that an accessor designates, a slot of an array's body;
+ * a slot that is only this process's copy of a value cannot be saved where
+ * the value lies, and the call dies saying so. */
+#define GOPERL_INT_SAVE_SVREF 39 /* a: the slot's address -> the new SV */
 static __attribute__((unused)) SV *goperl_save_svref(goperl_frame_t *f, SV **sptr) {
     if (!sptr) goperl_croakf(f, "save_svref of no slot");
+    const uint64_t addr = goperl_guest_addr(f, (const void *)sptr);
+    if (addr) return GOPERL_SV(GOPERL_INTERNAL(f, GOPERL_INT_SAVE_SVREF, addr, 0));
     /* the save takes the slot's reference to the value with it, and puts
      * the value back when the scope ends, releasing the new one */
     if (!goperl_save_routed(f, (void *)sptr, GOPERL_SAVEK_GENERIC, (int)sizeof(void *)))

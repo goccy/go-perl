@@ -6802,7 +6802,7 @@ XS(XS_PerlAPI_local_slot) {
         if (helem) {
             SV **e = hv_fetchs(get_hv("main::h", GV_ADD), "k", 1);
             sv_setpvs(save_svref(e), "inner");
-            inside = get_sv("main::h", 0);
+            inside = *hv_fetchs(get_hv("main::h", 0), "k", 0);
         } else {
             GV *const gv = gv_fetchpvs("main::slot", GV_ADD, SVt_PV);
             sv_setpvs(save_svref(&GvSV(gv)), "inner");
