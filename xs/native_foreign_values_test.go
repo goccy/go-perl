@@ -79,8 +79,8 @@ XS(XS_Foreign_freed_flags) {
     dXSARGS;
     SV *sv = foreign_value(aTHX_ "freed");
     PERL_UNUSED_VAR(items);
-    ST(0) = sv_2mortal(newSVpvf("rok:%d pok:%d ok:%d", SvROK(sv) ? 1 : 0, SvPOK(sv) ? 1 : 0,
-                                SvOK(sv) ? 1 : 0));
+    ST(0) = sv_2mortal(newSVpvf("rok:%d pok:%d ok:%d inc:%d", SvROK(sv) ? 1 : 0, SvPOK(sv) ? 1 : 0,
+                                SvOK(sv) ? 1 : 0, SvREFCNT_inc(sv) == sv));
     XSRETURN(1);
 }
 XS(XS_Foreign_bop) {
@@ -137,9 +137,10 @@ my @a = (1, 2, 3);
 	if got, want := requireModule(t, "Foreign", so, `Foreign::type("freed")`), "255"; got != want {
 		t.Errorf("type of a freed scalar: got %q, want %q", got, want)
 	}
-	// so are its flags, which it has none of left: Tk asks SvROK and SvPOK
-	// of a scalar its Tcl_SetVar has just freed
-	if got, want := requireModule(t, "Foreign", so, `Foreign::freed_flags()`), "rok:0 pok:0 ok:0"; got != want {
+	// so are its flags, which it has none of left, and its count: Tk asks
+	// SvROK and SvPOK of a scalar its Tcl_SetVar has just freed, and counts
+	// a reference to it
+	if got, want := requireModule(t, "Foreign", so, `Foreign::freed_flags()`), "rok:0 pok:0 ok:0 inc:1"; got != want {
 		t.Errorf("flags of a freed scalar: got %q, want %q", got, want)
 	}
 	if got, want := requireModule(t, "Foreign", so, `require B;
