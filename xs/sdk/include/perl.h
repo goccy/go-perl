@@ -9421,9 +9421,13 @@ typedef U16 OPCODE;
                                (uint64_t)(goperl_hv_delete_klen_ < 0 ? -goperl_hv_delete_klen_ \
                                                                      : goperl_hv_delete_klen_))); })
 #define Perl_debug_log PerlIO_stderr()
-#define do_sv_dump(level, fp, sv, nest, maxnest, dumpops, pvlim)           \
-    goperl_perlio_printf((fp),                     \
-                         "<sv dump unavailable in the go-perl XS SDK>\n")
+/* The dump of an SV into a handle, as perl's do_sv_dump makes it (the
+ * level, the ops and the length of strings are perl's defaults: 0, none,
+ * 0); Test::LeakTrace reports the SVs that leaked so. */
+#define do_sv_dump(level, fp, sv, nest, maxnest, dumpops, pvlim)                 \
+    ((void)(level), (void)(nest), (void)(dumpops), (void)(pvlim),               \
+     (void)goperl_op3(GOPERL_OP_SV_DUMP, GOPERL_TOK(sv), (uint64_t)(uintptr_t)(fp), \
+                      (uint64_t)(int64_t)(maxnest)))
 
 /* grok_number (numeric.c): classifies a decimal number, with the integer
  * limits of the interpreter (UV_MAX above). The radix is '.': the

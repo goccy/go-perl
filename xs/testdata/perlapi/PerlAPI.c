@@ -6918,10 +6918,11 @@ XS(XS_PerlAPI_vstring_of) {
  * limits ("limits"), STATUS_EXIT ("status"),
  * is_utf8_invariant_string_loc ("invariant": "yes" or "no at offset"),
  * isinfnan of the number ("infnan"), a line written to Perl_error_log, the
- * program's STDERR as it has it now ("error_log"), TARGi of the number
- * ("targi"), and the names that only need to compile (Direntry_t,
- * SVppv_STATIC, CvISXSUB_on, PERL_FLUSHALL_FOR_CHILD, the pointer table
- * types PTR_TBL_t and PTR_TBL_ENT_t: "compiled"). */
+ * program's STDERR as it has it now ("error_log"), do_sv_dump of the value
+ * into Perl_error_log ("dump"), TARGi of the number ("targi"), and the
+ * names that only need to compile (Direntry_t, SVppv_STATIC, CvISXSUB_on,
+ * PERL_FLUSHALL_FOR_CHILD, the pointer table types PTR_TBL_t and
+ * PTR_TBL_ENT_t: "compiled"). */
 XS(XS_PerlAPI_small_names) {
     dXSARGS;
     dXSTARG;
@@ -7034,6 +7035,9 @@ XS(XS_PerlAPI_small_names) {
         } else if (strEQ(which, "error_log")) {
             PerlIO_printf(Perl_error_log, "to the error log\n");
             sv_setpv(out, "written");
+        } else if (strEQ(which, "dump")) {
+            do_sv_dump(0, Perl_error_log, ST(1), 0, 4, FALSE, 0);
+            sv_setpv(out, "dumped");
         } else if (strEQ(which, "targi")) {
             TARGi(SvIV(ST(1)) * 2, 1);
             ST(0) = TARG;
