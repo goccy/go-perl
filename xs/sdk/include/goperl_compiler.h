@@ -1308,7 +1308,8 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
         return;
     }
     goperl_marks_adopt(f);
-    const int32_t n = (int32_t)(f->psp - f->stbase);
+    const int32_t lo = goperl_stack_lo(f);
+    const int32_t n = (int32_t)(f->psp - f->stbase) - lo; /* st[lo+1..lo+n] */
     const int32_t nmarks = f->markidx + 1 > 0 ? f->markidx + 1 : 0;
     /* words: [marks][values], the marks, the values; -> the address of the
      * words [count][marks][the array of the values], the marks */
@@ -1317,8 +1318,9 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     if (!w) goperl_croakf(f, "Out of memory!");
     w[0] = (goperl_gword_t)nmarks;
     w[1] = (goperl_gword_t)(n > 0 ? n : 0);
-    for (int32_t i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)goperl_marks(f)[i];
-    for (int32_t i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[1 + i]);
+    for (int32_t i = 0; i < nmarks; i++)
+        w[2 + i] = (goperl_gword_t)(int64_t)(goperl_marks(f)[i] - lo);
+    for (int32_t i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[lo + 1 + i]);
     const uint64_t r = goperl_do_op3(f, GOPERL_OP_INTERNAL, tok, bytes, (uint64_t)(GOPERL_INT_RUNOPS), (const char *)w, bytes);
     free(w);
     f->plop = 0;
@@ -1330,10 +1332,10 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     /* the marks, before the fetches below run code that may move the
      * interpreter's memory */
     while (nm > goperl_marks_cap(f)) goperl_marks_grow(f);
-    for (int32_t i = 0; i < nm; i++) goperl_marks(f)[i] = (int32_t)(int64_t)a[3 + i];
+    for (int32_t i = 0; i < nm; i++) goperl_marks(f)[i] = lo + (int32_t)(int64_t)a[3 + i];
     f->markidx = nm - 1;
     goperl_marks_publish(f);
-    f->psp = f->stbase;
+    f->psp = f->stbase + lo;
     goperl_stack_extend(f, f->psp, count);
     for (int32_t i = 0; i < count; i++)
         *++f->psp = (SV *)(uintptr_t)goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,
