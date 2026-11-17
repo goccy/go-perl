@@ -84,6 +84,25 @@ func TestNativeStructureBehindAnSV(t *testing.T) {
 	})
 }
 
+// The string of a scalar cannot be memory of native code's process: the
+// interpreter has no access to it. A module that makes it one (File::Map
+// makes the mapping of a file the string of a scalar) gets an error that
+// says so, whichever order it sets the buffer and the flags in, and the
+// scalar keeps what it had. Before, the scalar read as the interpreter's
+// own memory at an address no buffer has: blanks instead of the file's
+// bytes, and writes that never reached the file.
+func TestNativeStringInNativeMemory(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	const refused = `the string of a scalar cannot be in native memory on go-perl`
+	runEvalCases(t, p, []evalCase{
+		{"the buffer, then SvPOK_only_UTF8", `my $s; my $r = eval { PerlAPI::string_in_native_memory($s, 0) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . "," . (defined $s ? "defined" : "undef")`, "refused,undef"},
+		{"SvPV_set into a string", `my $s = "before"; my $r = eval { PerlAPI::string_in_native_memory($s, 1) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . ",$s"`, "refused,before"},
+		{"the buffer, then SvFLAGS", `my $s; my $r = eval { PerlAPI::string_in_native_memory($s, 2) }; ($r // (index($@, "` + refused + `") >= 0 ? "refused" : $@)) . "," . (defined $s ? "defined" : "undef")`, "refused,undef"},
+		{"a structure behind an SV is still no string", `my $kept = PerlAPI::keep_pair(5, 0); PerlAPI::kept_pair($kept)`, "5,10,no string,0"},
+	})
+}
+
 // A module keeps pointers to structures of its own in an array or a hash,
 // as if they were values (Object::Pad keeps its method descriptions so):
 // they are what it reads back through AvARRAY, av_fetch, hv_fetch,

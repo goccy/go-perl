@@ -843,6 +843,36 @@ XS(XS_PerlAPI_release_pair) {
     }
 }
 
+/* string_in_native_memory(sv, how): makes memory of this process the
+ * string of sv, as File::Map does with the mapping of a file: the buffer
+ * slot through SvPVX with no room and the length, then SvPOK_only_UTF8
+ * (how 0); SvPV_set into a scalar that is a string already (how 1); the
+ * slot, then the flags through SvFLAGS (how 2). A call that is not refused
+ * says so. */
+static char native_string_block[] = "the bytes of a native block";
+XS(XS_PerlAPI_string_in_native_memory) {
+    dXSARGS;
+    if (items != 2) croak_xs_usage(cv, "sv, how");
+    {
+        SV *const sv = ST(0);
+        const IV how = SvIV(ST(1));
+        SvUPGRADE(sv, SVt_PV);
+        if (how == 1) {
+            SvPV_set(sv, native_string_block);
+        } else {
+            SvPVX(sv) = native_string_block;
+            SvLEN(sv) = 0;
+            SvCUR(sv) = strlen(native_string_block);
+            if (how == 0)
+                SvPOK_only_UTF8(sv);
+            else
+                SvFLAGS(sv) |= SVf_POK | SVp_POK;
+        }
+        ST(0) = sv_2mortal(newSVpvs("not refused"));
+        XSRETURN(1);
+    }
+}
+
 /* waited(usec): what select(2) through PerlSock_select returned after
  * waiting that long with no descriptor, and whether the time passed. */
 XS(XS_PerlAPI_waited) {
@@ -7514,6 +7544,7 @@ XS_EXTERNAL(boot_PerlAPI) {
     newXS_deffile("PerlAPI::keep_pair", XS_PerlAPI_keep_pair);
     newXS_deffile("PerlAPI::kept_pair", XS_PerlAPI_kept_pair);
     newXS_deffile("PerlAPI::release_pair", XS_PerlAPI_release_pair);
+    newXS_deffile("PerlAPI::string_in_native_memory", XS_PerlAPI_string_in_native_memory);
     newXS_deffile("PerlAPI::waited", XS_PerlAPI_waited);
     newXS_deffile("PerlAPI::kept_array", XS_PerlAPI_kept_array);
     newXS_deffile("PerlAPI::kept_array_sums", XS_PerlAPI_kept_array_sums);
