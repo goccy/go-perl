@@ -5067,6 +5067,11 @@ static void goperl_pio_set_ptrcnt(goperl_frame_t *f, const void *h,
                   GOPERL_PIO_SET_PTRCNT | ((uint64_t)(uint32_t)(int32_t)cnt << 32), 0, 0);
 }
 #define USE_PERLIO
+/* PerlIO is perl's layered one, which perl says with PERLIO_LAYERS in the
+ * perlio.h that perl.h includes: a module that defines a layer (perliol.h)
+ * looks for it before it registers one (PerlIO::unicodeeol dies "PerlIO
+ * layers are not supported" in its BOOT without it) */
+#define PERLIO_LAYERS 1
 #define PerlIO_fast_gets(io) \
     ((int)goperl_pio(_gof, GOPERL_PIO_FAST_GETS, (io), 0, 0, 0))
 #define PerlIO_has_cntptr(io) \

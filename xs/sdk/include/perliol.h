@@ -438,6 +438,14 @@ static SSize_t PerlIOBase_unread(pTHX_ PerlIO *f, const void *vbuf,
     (void)f; (void)vbuf; (void)count;
     return -1;
 }
+/* :perlio's unread, which a buffered layer names for its Unread slot as
+ * well (PerlIO::unicodeeol): the guest's proxy layer is :perlio's, and
+ * either is its stock unread there */
+static SSize_t PerlIOBuf_unread(pTHX_ PerlIO *f, const void *vbuf,
+                                Size_t count) {
+    (void)f; (void)vbuf; (void)count;
+    return -1;
+}
 static SSize_t PerlIOBuf_write(pTHX_ PerlIO *f, const void *vbuf,
                                Size_t count) {
     (void)f; (void)vbuf; (void)count;
@@ -450,7 +458,49 @@ static IV PerlIOBuf_seek(pTHX_ PerlIO *f, Off_t offset, int whence) {
 static Off_t PerlIOBuf_tell(pTHX_ PerlIO *f) { (void)f; return 0; }
 static IV PerlIOBuf_close(pTHX_ PerlIO *f) { (void)f; return 0; }
 static IV PerlIOBuf_flush(pTHX_ PerlIO *f) { (void)f; return 0; }
-static IV PerlIOBuf_fill(pTHX_ PerlIO *f) { (void)f; return -1; }
+/* :perlio's fill (perlio.c), for a layer of native code whose own Fill
+ * calls it first and then works on what it read (PerlIO::unicodeeol): the
+ * buffer is the guest's window the hook was handed, the layer below is the
+ * guest's (the tail). As the stock Fill slot it is not called: the guest's
+ * proxy fills with its own. */
+static IV PerlIOBuf_fill(pTHX_ PerlIO *f) {
+    PerlIOBuf *const b = PerlIOSelf(f, PerlIOBuf);
+    PerlIO *const n = PerlIONext(f);
+    SSize_t avail;
+    b->ptr = b->end = b->buf;
+    if (!PerlIOValid(n)) {
+        PerlIOBase(f)->flags |= PERLIO_F_EOF;
+        return -1;
+    }
+    if (PerlIO_fast_gets(n)) {
+        /* the layer below is buffered: what it has, or one fill of it,
+         * not a read that waits for the whole buffer (a pipe) */
+        avail = PerlIO_get_cnt(n);
+        if (avail <= 0) {
+            avail = PerlIO_fill(n);
+            if (avail == 0)
+                avail = PerlIO_get_cnt(n);
+            else if (!PerlIO_error(n) && PerlIO_eof(n))
+                avail = 0;
+        }
+        if (avail > 0) {
+            STDCHAR *const ptr = PerlIO_get_ptr(n);
+            const SSize_t cnt = avail;
+            if (avail > (SSize_t)b->bufsiz) avail = (SSize_t)b->bufsiz;
+            Copy(ptr, b->buf, avail, STDCHAR);
+            PerlIO_set_ptrcnt(n, ptr + avail, cnt - avail);
+        }
+    } else {
+        avail = PerlIO_read(n, b->ptr, b->bufsiz);
+    }
+    if (avail <= 0) {
+        PerlIOBase(f)->flags |= avail == 0 ? PERLIO_F_EOF : PERLIO_F_ERROR;
+        return -1;
+    }
+    b->end = b->buf + avail;
+    PerlIOBase(f)->flags |= PERLIO_F_RDBUF;
+    return 0;
+}
 static IV PerlIOBase_eof(pTHX_ PerlIO *f) {
     return (PerlIOBase(f)->flags & PERLIO_F_EOF) != 0;
 }
@@ -502,7 +552,7 @@ static void PerlIO_define_layer(pTHX_ PerlIO_funcs *tab) {
     GOPERL_IOL_REQ(Fileno, PerlIOBase_fileno);
     GOPERL_IOL_REQ(Dup, PerlIOBuf_dup);
     GOPERL_IOL_REQ(Read, PerlIOBuf_read);
-    GOPERL_IOL_REQ(Unread, PerlIOBase_unread);
+    if (tab->Unread != PerlIOBuf_unread) GOPERL_IOL_REQ(Unread, PerlIOBase_unread);
     GOPERL_IOL_REQ(Write, PerlIOBuf_write);
     GOPERL_IOL_REQ(Seek, PerlIOBuf_seek);
     GOPERL_IOL_REQ(Tell, PerlIOBuf_tell);
@@ -552,6 +602,14 @@ static goperl_iol_shadow_t *goperl_iol_shadow(PerlIO_funcs *tab, uint64_t ltok,
     return sh;
 }
 
+/* The tail takes the flags of the guest layer below the proxy, which a
+ * hook reads through PerlIONext(f) (Pushed of PerlIO::unicodeeol takes
+ * PERLIO_F_UTF8 from it). */
+static void goperl_iol_tail_flags(goperl_frame_t *f, goperl_iol_shadow_t *sh) {
+    sh->tail.base.flags =
+        (U32)goperl_do_op(f, GOPERL_OP_PERLIO_STATE, sh->ff, 3, 0, 0);
+}
+
 GOPERL_C __attribute__((weak, visibility("default"), used)) int32_t
 __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
                        const unsigned char *req, uint32_t reqlen,
@@ -593,6 +651,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
             mode = (const char *)req + 40;
         }
         PerlIO *hf = &sh->fslot;
+        goperl_iol_tail_flags(f, sh);
         U32 before = PerlIOBase(hf)->flags;
         IV code = tab->Pushed(hf, mode, (SV *)(uintptr_t)argtok, tab);
         U32 after = PerlIOBase(hf)->flags;
@@ -622,6 +681,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v,
         /* mirror the guest's sticky flags, minus buffer state */
         PerlIOBase(hf)->flags =
             (gflags & ~(U32)(PERLIO_F_RDBUF | PERLIO_F_WRBUF));
+        goperl_iol_tail_flags(f, sh);
         IV code = tab->Fill(hf);
         const goperl_gword_t status = code == 0 ? 0 : 1;
         const goperl_gword_t ptrOff = (goperl_gword_t)(b->ptr - b->buf);
