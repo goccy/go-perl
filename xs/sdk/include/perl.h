@@ -4523,6 +4523,23 @@ static void goperl_marks_publish(goperl_frame_t *f) {
     goperl_markstack_owner_v = f;
     goperl_markstack_ptr_v = goperl_marks(f) + f->markidx;
 }
+/* Where the part of the frame's stack the interpreter is handed to run
+ * ops on starts: the values above that slot, and the marks, as offsets
+ * from it. For an XSUB that has not looked below its arguments, the slot
+ * below them, when no mark the frame holds is lower and the stack pointer
+ * is not: what lies below was never read in, and an XSUB called deep in
+ * the interpreter's stack (in a map over a long list) is not to hand all
+ * of it over for each run. Otherwise the stack from the bottom, with what
+ * lies below an XSUB's arguments read in. */
+static int32_t goperl_stack_lo(goperl_frame_t *f) {
+    if (f->below <= 0) return 0;
+    const int32_t lo = f->below - 1;
+    int32_t i = 0;
+    while (i <= f->markidx && goperl_marks(f)[i] >= lo) i++;
+    if (i > f->markidx && f->psp - f->stbase >= lo) return lo;
+    goperl_stack_below(f);
+    return 0;
+}
 /* Makes a frame the current one. The mark pointer is the current frame's
  * from then on: what the frame that ran before left there is not this
  * frame's, and the owner's address does not tell the two apart, because
@@ -6366,8 +6383,8 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
      * function's stack from then on. */
     goperl_frame_t *const f = _gof;
     goperl_marks_adopt(f);
-    goperl_stack_below(f); /* the values below an XSUB's arguments too */
-    const I32 n = (I32)(f->psp - f->stbase); /* the values are st[1..n] */
+    const I32 lo = goperl_stack_lo(f);
+    const I32 n = (I32)(f->psp - f->stbase) - lo; /* the values are st[lo+1..lo+n] */
     const I32 nmarks = f->markidx + 1 > 0 ? f->markidx + 1 : 0;
     /* words: [marks][op_targ][an offset for each mark][the values] */
     const size_t bytes = sizeof(goperl_gword_t) * (size_t)(2 + nmarks + (n > 0 ? n : 0));
@@ -6375,8 +6392,9 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     if (!w) goperl_croakf(f, "Out of memory!");
     w[0] = (goperl_gword_t)nmarks;
     w[1] = cur ? (goperl_gword_t)cur->op_targ : 0;
-    for (I32 i = 0; i < nmarks; i++) w[2 + i] = (goperl_gword_t)(int64_t)goperl_marks(f)[i];
-    for (I32 i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[1 + i]);
+    for (I32 i = 0; i < nmarks; i++)
+        w[2 + i] = (goperl_gword_t)(int64_t)(goperl_marks(f)[i] - lo);
+    for (I32 i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[lo + 1 + i]);
     const uint64_t op = ((uint64_t)(cur ? cur->op_private : 0) << 40) |
                         ((uint64_t)(cur ? cur->op_flags : 0) << 32) |
                         (uint32_t)type;
@@ -6391,7 +6409,7 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     if (!failed_before && f->failed && f->jb) goperl_raise(f);
     const I32 count = (I32)(uint32_t)second;
     const I32 taken = (I32)(second >> 32);
-    f->psp = f->stbase;
+    f->psp = f->stbase + lo;
     goperl_stack_extend(f, f->psp, count);
     for (I32 i = 0; i < count; i++) {
         uint64_t tok = goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,

@@ -2436,7 +2436,12 @@ func (f *cFrame) initStack(items int) {
 	}
 	f.stCap = int64(items + stackHeadroom)
 	f.stBase = cMalloc(int(f.stCap) * 8)
-	pokeBytes(f.stBase, make([]byte, int(f.stCap)*8))
+	// Not cleared: the slots handed over are written, and what lies below
+	// an XSUB's arguments is read from the interpreter's stack when native
+	// code looks there (goperl_stack_below). An XSUB called inside a map
+	// over a long list has its arguments that far up; clearing the block
+	// would cost every such call in proportion to the depth.
+	pokeU64(f.stBase, 0)
 }
 
 // inlineStack reports whether the stack is still the frame's own array.
