@@ -3716,12 +3716,17 @@ static SV **goperl_hv_store(goperl_frame_t *f, HV *hv, const char *key,
        ((GV *)GOPERL_SV(goperl_ops(GOPERL_OP_GV_FETCH, (uint64_t)(int64_t)(flags), (uint64_t)(int64_t)(svt), (goperl_gv_fetchpv_name_), __builtin_strlen(goperl_gv_fetchpv_name_)))); })
 #define gv_fetchpvs(name, flags, svt) gv_fetchpv("" name "", (flags), (svt))
 
+/* sv_2cv with what perl's gives in its out-parameters: the glob and the
+ * stash (a glob of a sub that is not defined gives no cv and the glob,
+ * which Devel::NYTProf names the sub of a call that will die by). */
 static SV *goperl_sv_2cv(goperl_frame_t *f, SV *sv, HV **stash, GV **gvp,
                          I32 lref) {
-    if (stash) *stash = 0;
-    if (gvp) *gvp = 0;
-    return GOPERL_SV(goperl_do_op(f, GOPERL_OP_SV_2CV, GOPERL_TOK(sv),
-                                  (uint64_t)(int64_t)lref, 0, 0));
+    /* -> the address of [the cv][the glob][the stash] */
+    const goperl_gword_t *r = (const goperl_gword_t *)goperl_guest_mem(
+        f, goperl_do_op3(f, GOPERL_OP_SV_2CV, GOPERL_TOK(sv), (uint64_t)(int64_t)lref, 1, 0, 0));
+    if (stash) *stash = r ? (HV *)GOPERL_SV(r[2]) : 0;
+    if (gvp) *gvp = r ? (GV *)GOPERL_SV(r[1]) : 0;
+    return r ? GOPERL_SV(r[0]) : 0;
 }
 #define sv_2cv(sv, stash, gvp, lref) \
     ((CV *)goperl_sv_2cv(_gof, (SV *)(sv), (stash), (gvp), (lref)))
@@ -6702,7 +6707,16 @@ typedef char goperl_ssnew_fits
  * (Devel::NYTProf looks there whether the destructor it saved beside the
  * block has run). The block goes when its slot is taken again. A released
  * block's pointer has its low bit set (calloc's blocks are aligned): which
- * blocks were released cannot be told otherwise. */
+ * blocks were released cannot be told otherwise.
+ *
+ * A new block takes the slot above every block whose scope has not ended
+ * (goperl_ssnew_hint_v is that slot), as perl's savestack offset is above
+ * everything still saved: a block made inside the scope of another has the
+ * higher index, and the slots above the blocks still in scope are taken
+ * again as scopes end. Devel::NYTProf finds the entry of the sub being
+ * called above the entry of its caller, and gives up profiling when it is
+ * not ("stack is confused"), which the slots taken round the table made
+ * happen once 4096 blocks had been made. */
 #define GOPERL_SSNEW_RELEASED ((uintptr_t)1)
 static void *goperl_ssnew_block(void *mem) {
     return (void *)((uintptr_t)mem & ~GOPERL_SSNEW_RELEASED);
@@ -6713,24 +6727,23 @@ static void goperl_ssnew_free_cb(pTHX_ void *p) {
     if (ix >= 0 && ix < GOPERL_SSNEW_MAX && goperl_ssnew_v[ix].mem)
         goperl_ssnew_v[ix].mem =
             (void *)((uintptr_t)goperl_ssnew_v[ix].mem | GOPERL_SSNEW_RELEASED);
+    /* the slots at the top whose scopes have ended are free again */
+    while (goperl_ssnew_hint_v > 0) {
+        const void *mem = goperl_ssnew_v[goperl_ssnew_hint_v - 1].mem;
+        if (mem && !((uintptr_t)mem & GOPERL_SSNEW_RELEASED)) break;
+        goperl_ssnew_hint_v--;
+    }
 }
 
 static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
-    int32_t ix = -1;
-    for (int32_t k = 0; k < GOPERL_SSNEW_MAX; k++) {
-        int32_t i = (goperl_ssnew_hint_v + k) % GOPERL_SSNEW_MAX;
-        void *mem = goperl_ssnew_v[i].mem;
-        if (!mem || ((uintptr_t)mem & GOPERL_SSNEW_RELEASED)) {
-            free(goperl_ssnew_block(mem));
-            goperl_ssnew_v[i].mem = 0;
-            ix = i;
-            break;
-        }
-    }
-    if (ix < 0) goperl_croakf(f, "SSNEW: scratch table full");
-    goperl_ssnew_hint_v = ix + 1;
+    const int32_t ix = goperl_ssnew_hint_v;
+    if (ix < 0 || ix >= GOPERL_SSNEW_MAX)
+        goperl_croakf(f, "SSNEW: more than %d scratch blocks of native code at once",
+                      GOPERL_SSNEW_MAX);
+    free(goperl_ssnew_block(goperl_ssnew_v[ix].mem));
     goperl_ssnew_v[ix].mem = calloc(1, size);
     if (!goperl_ssnew_v[ix].mem) goperl_croakf(f, "SSNEW: out of memory");
+    goperl_ssnew_hint_v = ix + 1;
     goperl_save_destructor(f, goperl_ssnew_free_cb, (void *)(intptr_t)ix,
                            GOPERL_DTOR_CALL_OWN);
     return (SSize_t)ix;
