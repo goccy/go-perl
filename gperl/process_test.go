@@ -350,6 +350,15 @@ kill USR1 => $pid;
 close $out;
 report("USR1 from outside: ", status());
 
+# signals the Go runtime would end the program with a dump of its own for
+for my $sig (qw(QUIT ABRT)) {
+    $pid = open($out, '-|', $perl, '-e', '$| = 1; print "ready\n"; sleep 600') // die "spawn: $!";
+    $ready = <$out>;
+    kill $sig => $pid;
+    close $out;
+    report("$sig from outside: ", status());
+}
+
 # a handler in the child runs for a signal from outside
 $pid = open($out, '-|', $perl, '-e', '$| = 1; $SIG{USR1} = sub { print "caught\n"; exit 5 }; print "ready\n"; sleep 600') // die "spawn: $!";
 $ready = <$out>;
@@ -375,6 +384,8 @@ report("USR2 from the child: handler ran=$got ", status());
 		"killed itself with KILL: signal=9 exit=0",
 		"handled TERM: signal=0 exit=4",
 		"USR1 from outside: signal="+strconv.Itoa(int(syscall.SIGUSR1))+" exit=0",
+		"QUIT from outside: signal="+strconv.Itoa(int(syscall.SIGQUIT))+" exit=0",
+		"ABRT from outside: signal="+strconv.Itoa(int(syscall.SIGABRT))+" exit=0",
 		"USR1 handled in the child: said=caught signal=0 exit=5",
 		"USR2 from the child: handler ran=1 signal=0 exit=0",
 	)
