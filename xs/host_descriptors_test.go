@@ -53,7 +53,7 @@ our ($fh, $r, $w, $nr, $nw, $nrh, $sa, $sb, $sah);
 		{"a handle that is no descriptor of the process", `PerlAPI::fd_of(\*STDOUT)`, "-1"},
 
 		// from native code to the program
-		{"a handle on a descriptor native code made", `($nr, $nw) = PerlAPI::fd_pair("pipe"); open($nrh, "<&=", $nr) or die "fdopen: $!"; PerlAPI::fd_write($nw, "from native\n"); fileno($nrh) == $nr ? scalar(<$nrh>) : "another number"`, "from native\n"},
+		{"a handle on a descriptor native code made", `($nr, $nw) = PerlAPI::fd_pair("pipe"); open($nrh, "<&=", $nr) or die "fdopen: $! (native code finds " . PerlAPI::fd_state($nr) . ")"; PerlAPI::fd_write($nw, "from native\n"); fileno($nrh) == $nr ? scalar(<$nrh>) : "another number"`, "from native\n"},
 		{"IO::Handle->new_from_fd", `my $h = IO::Handle->new_from_fd($nw, "w") or die "new_from_fd: $!"; $h->autoflush(1); print {$h} "through a handle\n"; my $line = <$nrh>; $h->close; $line . PerlAPI::fd_state($nw)`, "through a handle\nclosed"},
 		{"select", `($nr, $nw) = PerlAPI::fd_pair("pipe"); my $rin = ""; vec($rin, $nr, 1) = 1; my $before = select(my $rout = $rin, undef, undef, 0); PerlAPI::fd_write($nw, "x"); my $after = select($rout = $rin, undef, undef, 5); "$before $after " . vec($rout, $nr, 1)`, "0 1 1"},
 		{"fcntl", `open(my $h, "<&=", $nr) or die "fdopen: $!"; my $flags = fcntl($h, F_GETFL, 0) // die "F_GETFL: $!"; fcntl($h, F_SETFL, $flags | O_NONBLOCK) or die "F_SETFL: $!"; my $state = PerlAPI::fd_state($nr); close($h); "$state; " . PerlAPI::fd_state($nr)`, "pipe nonblocking; closed"},
@@ -65,6 +65,52 @@ our ($fh, $r, $w, $nr, $nw, $nrh, $sa, $sb, $sah);
 		{"PerlIO_fdopen", `pipe(my $pr, my $pw) or die "pipe: $!"; syswrite($pw, "a line\nand more"); my $n = POSIX::dup(fileno($pr)); my $line = PerlAPI::fd_line($n); "$line; " . PerlAPI::fd_state($n)`, "a line; closed"},
 		{"PerlIO_importFILE", `my ($ir, $iw) = PerlAPI::fd_pair("pipe"); my $n = PerlAPI::fd_import_write($iw, "imported"); my $got = PerlAPI::fd_read($ir, 64); PerlAPI::fd_close($ir); "$n $got; " . PerlAPI::fd_state($iw)`, "8 imported; closed"},
 	})
+}
+
+// The descriptors the runtime makes for a command whose streams it copies
+// (an interpreter whose output is a buffer of the embedder's) are the
+// runtime's while the command runs, and nobody's once it has been waited
+// for: a descriptor native code makes afterwards under one of those numbers
+// is the program's to open a handle on. Before, the numbers stayed the
+// runtime's for good wherever the host gives a new pipe what fstat says of
+// the closed one (macOS does, nearly always): when native code's pipe got
+// one of them and what fstat said of the old one, the program got EBADF
+// (TestNativeCodeAndTheProgramShareDescriptors, after the fork tests'
+// commands, now and then).
+func TestNativeCodeMakesADescriptorUnderTheNumberOfAFinishedCommand(t *testing.T) {
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatalf("extract stdlib: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	p, err := perl.New(perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, HostProcess: true, Stdout: &out, Stderr: &errOut,
+		Exec: func(string, []string) bool { return true }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Close() })
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"pipes of native code after commands", `use POSIX (); my @failed;
+for my $i (1 .. 20) {
+    system("/bin/sh", "-c", "echo command $i; echo to stderr >&2") == 0 or die "system: $? $!";
+    my ($nr, $nw) = PerlAPI::fd_pair("pipe");
+    if (open(my $h, "<&=", $nr)) {
+        PerlAPI::fd_write($nw, "x\n");
+        my $line = <$h>;
+        push @failed, "$i: read " . ($line // "nothing") unless defined $line && $line eq "x\n";
+        close($h);
+    } else {
+        push @failed, "$i: $! (native code finds " . PerlAPI::fd_state($nr) . ")";
+        PerlAPI::fd_close($nr);
+    }
+    PerlAPI::fd_close($nw);
+}
+@failed ? join("; ", @failed) : "all opened"`, "all opened"},
+	})
+	if got := strings.Count(out.String(), "command "); got != 20 {
+		t.Errorf("the commands' output: %d lines in %q", got, out.String())
+	}
 }
 
 // A forked process starts with its parent's descriptors under the same
