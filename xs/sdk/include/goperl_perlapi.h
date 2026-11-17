@@ -362,6 +362,12 @@ static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
 static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
 
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
+    if (GOPERL_LV_IS_IOWORD(field)) { /* FIELD 24 */
+        const int w = field - GOPERL_LV_IOWORD;
+        const uint64_t v = goperl_do_op3(f, GOPERL_OP_FIELD, tok, (uint64_t)w, (uint64_t)(24), 0, 0);
+        if (GOPERL_IOWORD_IS_NAME(w)) return v ? (uint64_t)(uintptr_t)goperl_guest_mem(f, v) : 0;
+        return v;
+    }
     switch (field) {
     case GOPERL_LV_IV:
         return goperl_do_op3(f, GOPERL_OP_SV_SLOT_GET, tok, 0, (uint64_t)(2), 0, 0);
@@ -433,6 +439,21 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
 }
 static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
                                   uint64_t val) {
+    if (GOPERL_LV_IS_IOWORD(field)) { /* FIELD 25, which in the high half */
+        const int w = field - GOPERL_LV_IOWORD;
+        const uint64_t c = (uint64_t)(25) | ((uint64_t)(uint32_t)w << 32);
+        if (GOPERL_IOWORD_IS_NAME(w) && val) {
+            const char *name = (const char *)(uintptr_t)val;
+            const uint64_t g = goperl_guest_addr(f, name);
+            if (g) /* a name in the interpreter's memory already */
+                goperl_xs_opx(f, GOPERL_OP_FIELD, tok, g, c, 0, 0, 0);
+            else /* a copy of the text: the interpreter's from now on */
+                goperl_xs_opx(f, GOPERL_OP_FIELD, tok, 0, c, name, __builtin_strlen(name) + 1, 0);
+        } else {
+            goperl_xs_opx(f, GOPERL_OP_FIELD, tok, val, c, 0, 0, 0);
+        }
+        return;
+    }
     switch (field) {
     case GOPERL_LV_IV:
         goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, val, (uint64_t)(2), 0, 0, 0);
@@ -1445,7 +1466,20 @@ static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok) {
     (*(char *)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOTYPE, GOPERL_LV_AT))
 #define IoFLAGS(io) \
     (*(U8 *)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOFLAGS, GOPERL_LV_AT))
-#define IoLINES(io) ((IV)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_IO_LINES, io, 0))
+/* The other words of an IO's body, lvalues as on perl
+ * (`IoLINES(io) = 1`, `IoBOTTOM_NAME(io) = savepv(name)`). */
+#define GOPERL_IOWORD_LV(io, type, w) \
+    (*(type *)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IOWORD + (w), GOPERL_LV_AT))
+#define IoLINES(io) GOPERL_IOWORD_LV(io, IV, 0)
+#define IoPAGE(io) GOPERL_IOWORD_LV(io, IV, 1)
+#define IoPAGE_LEN(io) GOPERL_IOWORD_LV(io, IV, 2)
+#define IoLINES_LEFT(io) GOPERL_IOWORD_LV(io, IV, 3)
+#define IoTOP_GV(io) GOPERL_IOWORD_LV(io, GV *, 4)
+#define IoFMT_GV(io) GOPERL_IOWORD_LV(io, GV *, 5)
+#define IoBOTTOM_GV(io) GOPERL_IOWORD_LV(io, GV *, 6)
+#define IoTOP_NAME(io) GOPERL_IOWORD_LV(io, char *, 7)
+#define IoFMT_NAME(io) GOPERL_IOWORD_LV(io, char *, 8)
+#define IoBOTTOM_NAME(io) GOPERL_IOWORD_LV(io, char *, 9)
 
 /* ---- do_openn: the open behind perl's open function ----------------------- */
 
@@ -1835,6 +1869,57 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_localizing (*goperl_plint_ref(_gof, GOPERL_PL_LOCALIZING))
 #define GOPERL_PL_STATUSVALUE 62
 #define PL_statusvalue (*goperl_plint_ref(_gof, GOPERL_PL_STATUSVALUE))
+/* The position pos() reports for a scalar, in characters or with
+ * SV_POSBYTES in bytes: sv_regex_global_pos_get says whether it has one,
+ * _set gives it one, _clear takes it away (perl 5.42's API; Term-TermKey
+ * uses it, and walks the regex_global magic itself only without it).
+ * CALL 28, 29, 30. */
+#ifndef SV_POSBYTES
+#define SV_POSBYTES SV_CATBYTES
+#endif
+static bool goperl_regex_global_pos_get(goperl_frame_t *f, SV *sv, STRLEN *posp, U32 flags)
+    __attribute__((unused));
+static bool goperl_regex_global_pos_get(goperl_frame_t *f, SV *sv, STRLEN *posp, U32 flags) {
+    uint64_t pos = 0;
+    const uint64_t found = goperl_do_opx(f, GOPERL_OP_CALL, GOPERL_TOK(sv), 0,
+                                         (uint64_t)28 | ((uint64_t)flags << 32), 0, 0, &pos);
+    if (found && posp) *posp = (STRLEN)pos;
+    return found != 0;
+}
+#define sv_regex_global_pos_get(sv, posp, flags) \
+    goperl_regex_global_pos_get(_gof, (SV *)(sv), (posp), (U32)(flags))
+#define sv_regex_global_pos_set(sv, pos, flags)                                     \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_CALL, GOPERL_TOK((SV *)(sv)), (uint64_t)(pos), \
+                         (uint64_t)29 | ((uint64_t)(U32)(flags) << 32), 0, 0))
+#define sv_regex_global_pos_clear(sv) \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_CALL, GOPERL_TOK((SV *)(sv)), 0, (uint64_t)30, 0, 0))
+/* The seed of the interpreter's hash function, PERL_HASH_SEED_BYTES bytes
+ * (Data-HashMap seeds its own hash with it). It does not change while the
+ * program runs; the copy is this module's (CALL 31). */
+#define PERL_HASH_SEED_BYTES 32
+static const U8 *goperl_hash_seed(goperl_frame_t *f) __attribute__((unused));
+static const U8 *goperl_hash_seed(goperl_frame_t *f) {
+    static U8 seed[PERL_HASH_SEED_BYTES];
+    static int have;
+    if (!have) {
+        const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+            f, goperl_do_op3(f, GOPERL_OP_CALL, 0, 0, (uint64_t)31, 0, 0));
+        if (!w || w[0] != PERL_HASH_SEED_BYTES)
+            goperl_croakf(f, "PL_hash_seed: the interpreter's seed is not %d bytes",
+                          PERL_HASH_SEED_BYTES);
+        memcpy(seed, w + 1, sizeof seed);
+        have = 1;
+    }
+    return seed;
+}
+#define PL_hash_seed (goperl_hash_seed(_gof))
+/* is_lvalue_sub: how the sub being run was called, as an lvalue or not
+ * (the OPpLVAL_INTRO bits of perl's); LVRET: whether the XSUB's result is
+ * an lvalue's, as perl's pp.h defines it on the entersub that called it
+ * (CALL 32). */
+#define is_lvalue_sub() \
+    ((I32)(int64_t)goperl_do_op3(_gof, GOPERL_OP_CALL, 0, 0, (uint64_t)32, 0, 0))
+#define LVRET (goperl_do_op3(_gof, GOPERL_OP_CALL, 0, 1, (uint64_t)32, 0, 0) != 0)
 /* the status of the program as perl's perl.h gives it where it is not
  * VMS: $? itself */
 #define STATUS_UNIX PL_statusvalue

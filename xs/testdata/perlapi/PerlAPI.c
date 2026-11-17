@@ -6940,6 +6940,68 @@ XS(XS_PerlAPI_small_names) {
             } else {
                 sv_setpvs(out, "fail");
             }
+        } else if (strEQ(which, "openn")) {
+            /* a :scalar handle over a copy of the text, read back */
+            SV *rv = sv_2mortal(newRV_noinc(newSVsv(ST(1))));
+            PerlIO *fp = PerlIO_openn(aTHX_ ":scalar", "r", -1, 0, 0, NULL, 1, &rv);
+            char buf[64];
+            SSize_t n;
+            if (!fp) {
+                sv_setpvs(out, "no handle");
+            } else {
+                n = PerlIO_read(fp, buf, sizeof buf);
+                sv_setpvn(out, buf, n > 0 ? (STRLEN)n : 0);
+                PerlIO_close(fp);
+            }
+        } else if (strEQ(which, "isutf8")) {
+            IO *io = sv_2io(ST(1));
+            sv_setpv(out, PerlIO_isutf8(IoIFP(io)) ? "utf8" : "bytes");
+        } else if (strEQ(which, "iowords")) {
+            /* an IO as Filter::Util::Call keeps its state in one */
+            SV *sv = newSV(0);
+            sv_upgrade(sv, SVt_PVIO);
+            IoBOTTOM_NAME(sv) = savepv(SvPV_nolen(ST(1)));
+            IoTOP_GV(sv) = (GV *)newSVsv(ST(1));
+            IoLINES(sv) = 1;
+            IoPAGE_LEN(sv) = 5;
+            IoPAGE(sv) = 7;
+            IoPAGE_LEN(sv) += 2;
+            sv_setpvf(out, "%s,%s,%d,%d,%d", IoBOTTOM_NAME(sv), SvPV_nolen((SV *)IoTOP_GV(sv)),
+                      (int)IoLINES(sv), (int)IoPAGE_LEN(sv), (int)IoPAGE(sv));
+            SvREFCNT_dec((SV *)IoTOP_GV(sv));
+            IoTOP_GV(sv) = NULL;
+            SvREFCNT_dec(sv); /* the interpreter frees the name */
+        } else if (strEQ(which, "pos")) {
+            /* pos() of the scalar: whether it has one, set to 2, read, then
+             * cleared */
+            SV *sv = ST(1);
+            STRLEN pos = 99;
+            const bool before = sv_regex_global_pos_get(sv, &pos, 0);
+            sv_regex_global_pos_set(sv, 2, 0);
+            const bool after = sv_regex_global_pos_get(sv, &pos, 0);
+            sv_setpvf(out, "%d,%d,%d", (int)before, (int)after, (int)pos);
+            sv_regex_global_pos_clear(sv);
+            sv_catpvf(out, ",%d", (int)sv_regex_global_pos_get(sv, &pos, 0));
+        } else if (strEQ(which, "seed")) {
+            sv_setpvn(out, (const char *)PL_hash_seed, PERL_HASH_SEED_BYTES);
+        } else if (strEQ(which, "hvcommon")) {
+            HV *hv = newHV();
+            SV **svp;
+            Perl_hv_common(aTHX_ hv, NULL, "k", 1, 0, HV_FETCH_ISSTORE, newSVsv(ST(1)), 0);
+            svp = hv_fetchs(hv, "k", 0);
+            sv_setsv(out, svp ? *svp : &PL_sv_undef);
+            SvREFCNT_dec((SV *)hv);
+        } else if (strEQ(which, "lvret")) {
+            sv_setpvf(out, "%d,%d", (int)LVRET, (int)is_lvalue_sub());
+        } else if (strEQ(which, "ssptrt")) {
+            SSize_t ix;
+            int *p;
+            ENTER;
+            ix = SSNEWt(3, int);
+            p = SSPTRt(ix, int);
+            p[0] = 1; p[1] = 2; p[2] = (int)SvIV(ST(1));
+            sv_setiv(out, p[0] + p[1] + SSPTRt(ix, int)[2]);
+            LEAVE;
         } else if (strEQ(which, "cvname")) {
             CV *const code = (CV *)SvRV(ST(1));
             SV *const named = cv_name(code, NULL, 0);

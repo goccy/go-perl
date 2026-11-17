@@ -1869,6 +1869,14 @@ typedef struct goperl_shared {
 #define GOPERL_LV_IOTYPE 35
 #define GOPERL_LV_IOFLAGS 36
 #define GOPERL_LV_GVIO 37
+/* The other words of an IO's body, plain stores too (Filter::Util::Call
+ * keeps its state in them): the line counts, the format globs and the
+ * format names, in the order of the guest's GOPERL_IOWORD_ (FIELD 24/25).
+ * A name stored is copied into the interpreter, which frees it with the
+ * IO, as perl frees the savepv it is given. */
+#define GOPERL_LV_IOWORD 38 /* to 47 */
+#define GOPERL_LV_IS_IOWORD(field) ((field) >= GOPERL_LV_IOWORD && (field) < GOPERL_LV_IOWORD + 10)
+#define GOPERL_IOWORD_IS_NAME(w) ((w) >= 7)
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
 #define GOPERL_LV_IS_BODY(field) \
     ((field) == GOPERL_LV_CVBODY || (field) == GOPERL_LV_OBJFIELDS)
@@ -4689,6 +4697,42 @@ static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
     if (r != 0) goperl_errno_from_interp(_gof);
     return r;
 }
+/* PerlIO_openn: the open behind every open of the interpreter's, with the
+ * layers, the mode, a descriptor (-1 for none), the open(2) mode and
+ * permissions, the handle to reuse (or NULL) and the arguments (a path, a
+ * reference to a scalar for :scalar, ...). The handle is the
+ * interpreter's (Hyperman opens its request bodies with ":scalar"). */
+#define GOPERL_PIO_OPENN 36
+#define GOPERL_PIO_ISUTF8 37
+static PerlIO *PerlIO_openn(pTHX_ const char *layers, const char *mode, int fd,
+                            int imode, int perm, PerlIO *old, int narg, SV **args)
+    __attribute__((unused));
+static PerlIO *PerlIO_openn(pTHX_ const char *layers, const char *mode, int fd,
+                            int imode, int perm, PerlIO *old, int narg, SV **args) {
+    if (!mode) mode = "r";
+    if (!layers) layers = "";
+    if (narg < 0) narg = 0;
+    const size_t ll = __builtin_strlen(layers), ml = __builtin_strlen(mode);
+    const size_t len = 4 * 8 + (size_t)narg * 8 + ll + 1 + ml + 1;
+    char *req = (char *)malloc(len);
+    if (!req) goperl_croakf(_gof, "%s", "Out of memory!");
+    const goperl_gword_t head[4] = {(goperl_gword_t)(int64_t)fd, (goperl_gword_t)(int64_t)imode,
+                                    (goperl_gword_t)(int64_t)perm, (goperl_gword_t)narg};
+    memcpy(req, head, sizeof head);
+    for (int i = 0; i < narg; i++) {
+        const goperl_gword_t tok = GOPERL_TOK(args[i]);
+        memcpy(req + sizeof head + (size_t)i * 8, &tok, 8);
+    }
+    memcpy(req + sizeof head + (size_t)narg * 8, layers, ll + 1);
+    memcpy(req + sizeof head + (size_t)narg * 8 + ll + 1, mode, ml + 1);
+    PerlIO *const io =
+        (PerlIO *)(uintptr_t)goperl_pio(_gof, GOPERL_PIO_OPENN, old, (uint64_t)len, req, len);
+    free(req);
+    if (!io) goperl_errno_from_interp(_gof);
+    return io;
+}
+/* Whether the handle's top layer takes characters (:utf8). */
+#define PerlIO_isutf8(io) ((int)goperl_pio(_gof, GOPERL_PIO_ISUTF8, (io), 0, 0, 0))
 #define PerlIO_fileno(io) goperl_pio_fileno(_gof, (io))
 #define PerlIO_read(io, buf, n) \
     goperl_pio_read(_gof, (io), (buf), (size_t)(n))
@@ -6495,6 +6539,9 @@ static SSize_t goperl_ssnew(goperl_frame_t *f, size_t size) {
 #define SSNEW(size) goperl_ssnew(_gof, (size_t)(size))
 #define SSNEWa(size, align) goperl_ssnew(_gof, (size_t)(size))
 #define SSPTR(ix, type) ((type)goperl_ssnew_block(goperl_ssnew_v[(ix)].mem))
+#define SSNEWt(n, t) SSNEW((n) * sizeof(t))
+#define SSNEWat(n, t, align) SSNEWa((n) * sizeof(t), (align))
+#define SSPTRt(ix, t) SSPTR((ix), t *)
 #define MEM_ALIGNBYTES 8
 
 /* ---- context stack shadows -----------------------------------------------
@@ -7517,6 +7564,10 @@ static void *goperl_hv_common(goperl_frame_t *f, HV *hv, SV *keysv,
     goperl_hv_common(_gof, (HV *)(hv), (SV *)(keysv), (key),              \
                      (STRLEN)(klen), (int)(kflags), (int)(action),        \
                      (SV *)(val), (U32)(hash))
+/* the long names code calls them by (JavaBin: Perl_hv_common(aTHX_ ...));
+ * aTHX_ is nothing here */
+#define Perl_hv_common(...) hv_common(__VA_ARGS__)
+#define Perl_hv_common_key_len(...) hv_common_key_len(__VA_ARGS__)
 
 /* xsubpp emits this for ATTRS: sections. It is `use attributes PACKAGE,
  * \\&code, ATTRS` (op.c): attributes->import(PACKAGE, \\&code, ATTRS). */
