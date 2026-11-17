@@ -99,7 +99,7 @@ my ($report, $perl, @args) = @ARGV;
 open(STDOUT, '>', $report) or die "redirect: $!";
 exit(system($perl, @args) >> 8);
 `)
-	if status, err := gperl.Run(script, append([]string{out, shim}, args...)); err != nil || status != 0 {
+	if status, err := runInThisProcess(t, script, append([]string{out, shim}, args...)); err != nil || status != 0 {
 		t.Fatalf("perl %q = (%d, %v)", args, status, err)
 	}
 	raw, err := os.ReadFile(out)

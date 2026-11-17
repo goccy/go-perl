@@ -8,8 +8,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // A lock taken with flock is the operating system's, so it holds against
@@ -56,7 +54,7 @@ exit 0;
 		}
 		unlocked <- syscall.Flock(int(outside.Fd()), syscall.LOCK_UN)
 	}()
-	status, err := gperl.Run(script, []string{lockFile, report, released})
+	status, err := runInThisProcess(t, script, []string{lockFile, report, released})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

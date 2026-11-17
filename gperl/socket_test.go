@@ -5,8 +5,6 @@ package gperl_test
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // A TCP server and its client in one process: the listening socket reports
@@ -147,7 +145,7 @@ report("server read: $line");
 report("$said; exit=", $? >> 8);
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}

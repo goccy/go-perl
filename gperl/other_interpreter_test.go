@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // A program whose #! line names another interpreter is handed to that
@@ -19,7 +17,7 @@ func TestProgramForAnotherInterpreterIsHandedOver(t *testing.T) {
 	}
 	report := filepath.Join(t.TempDir(), "report.txt")
 	script := writeScript(t, "for-sh", "#!/bin/sh\necho \"run by sh as $0 with $# arguments: $1\" > \"$2\"\nexit 6\n")
-	status, err := gperl.Run(script, []string{"first", report})
+	status, err := runInThisProcess(t, script, []string{"first", report})
 	if err != nil || status != 6 {
 		t.Fatalf("Run = (%d, %v), want (6, nil)", status, err)
 	}
@@ -33,7 +31,7 @@ func TestProgramForAnotherInterpreterIsHandedOver(t *testing.T) {
 
 	// A #! line that names perl stays with perl, switches and all.
 	perlScript := writeScript(t, "for-perl", "#!/usr/bin/perl -l\nopen(my $fh, '>', $ARGV[0]) or die; print {$fh} 'run by perl'; close $fh;\n")
-	status, err = gperl.Run(perlScript, []string{report})
+	status, err = runInThisProcess(t, perlScript, []string{report})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
@@ -60,7 +58,7 @@ my ($perl, $program) = @ARGV;
 system($perl, "-w", "-I/some/dir", $program, "first", "second");
 exit($? >> 8);
 `)
-	status, err := gperl.Run(script, []string{shim, program})
+	status, err := runInThisProcess(t, script, []string{shim, program})
 	if err != nil || status != 7 {
 		t.Fatalf("Run = (%d, %v), want (7, nil)", status, err)
 	}

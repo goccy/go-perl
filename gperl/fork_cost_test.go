@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // forkLoop is a program that fills its heap with about the number of
@@ -104,7 +102,7 @@ sub report { open(my $fh, '>>', $REPORT) or die "report: $!"; syswrite($fh, join
 			if err := os.WriteFile(script, []byte(src), 0o644); err != nil {
 				b.Fatal(err)
 			}
-			status, err := gperl.Run(script, []string{report, strconv.Itoa(megabytes), strconv.Itoa(b.N)})
+			status, err := runInThisProcess(b, script, []string{report, strconv.Itoa(megabytes), strconv.Itoa(b.N)})
 			if err != nil || status != 0 {
 				b.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 			}

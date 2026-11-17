@@ -318,7 +318,7 @@ func TestProgramEndLeavesNoGoroutineBehind(t *testing.T) {
 	keepProcessState(t)
 	// A first program leaves behind the goroutines the process keeps once
 	// it has run one (the delivery of the host's signals).
-	if status, err := gperl.Run(writeScript(t, "first.pl", "exit 0;\n"), nil); err != nil || status != 0 {
+	if status, err := runInThisProcess(t, writeScript(t, "first.pl", "exit 0;\n"), nil); err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
 	before := runtime.NumGoroutine()
@@ -335,7 +335,7 @@ exit 4;
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
 	start := time.Now()
-	status, err := gperl.Run(script, []string{report})
+	status, err := runInThisProcess(t, script, []string{report})
 	if err != nil || status != 4 {
 		t.Fatalf("Run = (%d, %v), want (4, nil)", status, err)
 	}

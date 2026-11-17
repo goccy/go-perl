@@ -5,8 +5,6 @@ package gperl_test
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-perl/gperl"
 )
 
 // POSIX::abort ends the process by SIGABRT.
@@ -28,7 +26,7 @@ my $out = `+"`$perl -e 'use POSIX (); POSIX::abort()'; echo \"shell status \\$?\
 chomp $out;
 report($out);
 `)
-	status, err := gperl.Run(script, []string{report, shim})
+	status, err := runInThisProcess(t, script, []string{report, shim})
 	if err != nil || status != 0 {
 		t.Fatalf("Run = (%d, %v), want (0, nil)", status, err)
 	}
