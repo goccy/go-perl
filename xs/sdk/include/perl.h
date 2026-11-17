@@ -5638,10 +5638,11 @@ static void goperl_call_results_take(goperl_frame_t *f, uint64_t words, I32 coun
 }
 
 /* call_sv / call_method: arguments between the last PUSHMARK and the stack
- * top cross as a token list; results come back in a mortal AV and are
- * pushed where perl would leave them. G_EVAL is forced across the boundary
- * (an uncaught guest die cannot unwind host C frames); when the caller did
- * not ask for G_EVAL the error is re-raised here as a croak. */
+ * top cross as a token list; results come back as words and are pushed
+ * where perl would leave them. The flags go over as they are: without
+ * G_EVAL, a die in the callee unwinds the interpreter to its catch point
+ * beyond this native call, which the operation ends by a jump
+ * (GOPERL_FAILED_JUMP), as perl's call_sv does. */
 static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
                           I32 flags) {
     I32 markoff = goperl_popmark(f);
@@ -5666,18 +5667,15 @@ static I32 goperl_do_call(goperl_frame_t *f, SV *sv, const char *method,
     }
     /* the code called reads the ops as native code left them */
     goperl_optree_flush(f);
-    /* -> the address of the results, a word each; second: died<<63 |
-     * count */
+    /* -> the address of the results, a word each; second: the count */
     uint64_t second = 0;
     const uint64_t words =
         goperl_do_opx(f, method ? GOPERL_OP_CALL_METHOD : GOPERL_OP_CALL_SV,
                       method ? 0 : GOPERL_TOK(sv), o, (uint64_t)(uint32_t)flags, buf, o, &second);
     free(buf);
-    int died = (int)(second >> 63);
     I32 count = (I32)(second & 0x7FFFFFFF);
     f->psp = f->stbase + markoff; /* args consumed */
     goperl_call_results_take(f, words, count);
-    if (died && !(flags & G_EVAL)) goperl_croak_errsv(f);
     return count;
 }
 #define call_sv(sv, flags) goperl_do_call(_gof, (SV *)(sv), 0, (flags))
