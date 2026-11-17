@@ -38,6 +38,24 @@ print "prove: ", ($version =~ /\ATAP::Harness v[\d.]+ and Perl v5\.44\.0\n\z/ ? 
 	}
 }
 
+// perl's programs run on this perl also with another home directory, whose
+// cache has no link of its own yet: their #! line names the link that was
+// made under the home directory of the time (a test runs a program with
+// HOME set to a directory of its own).
+func TestPerlProgramsRunWithAnotherHome(t *testing.T) {
+	home := t.TempDir()
+	out, status := hostPerl(t, "-MConfig", "-e", `
+my $home = shift;
+delete $ENV{XDG_CACHE_HOME};
+local $ENV{HOME} = $home;
+my $version = qx("$Config{scriptdir}/prove" --version);
+print "prove: ", ($version =~ /\ATAP::Harness v[\d.]+ and Perl v5\.44\.0\n\z/ ? "runs on this perl" : $version), "\n";
+`, home)
+	if want := "prove: runs on this perl\n"; status != 0 || out != want {
+		t.Fatalf("status %d, output:\n%s\nwant:\n%s", status, out, want)
+	}
+}
+
 // A program that shows its whole manual (Pod::Usage at -verbose 2) has
 // perldoc print it, as on perl.
 func TestPodUsageShowsTheManualThroughPerldoc(t *testing.T) {
