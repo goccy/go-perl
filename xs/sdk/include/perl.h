@@ -6034,23 +6034,31 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
 #define GOPERL_XS_OPEN(frame, prev_cur) GOPERL_XS_OPEN_WITH(frame, prev_cur, GOPERL_XS_OPEN_RETURN)
 /* GOPERL_XS_OPEN with what a croak does in the function, once the
  * activation is closed */
+/* What opening an activation on the frame does before its catch point is
+ * set: one function for every XSUB and module function that opens one, so
+ * that each holds only the call and its setjmp (an XSUB the loader enters
+ * takes the entry's activation over and never runs it, yet carried all of
+ * it inline). jb is the catch point the activation's croaks reach. */
+static void goperl_xs_open_prepare(goperl_frame_t *f, goperl_frame_t *prev_cur, void *jb)
+    __attribute__((noinline, unused));
+static void goperl_xs_open_prepare(goperl_frame_t *f, goperl_frame_t *prev_cur, void *jb) {
+    const int32_t base = goperl_hostsave_n;
+    errno = goperl_errno_entry(f);
+    goperl_hostsave_i32(f, &f->hostsave_base);
+    goperl_hostsave_ptr(f, (void **)&f->prev_frame);
+    goperl_hostsave_ptr(f, (void **)&f->jb);
+    for (int32_t i = base; i < goperl_hostsave_n; i++)
+        goperl_hostsave_v[i].scope = GOPERL_HOSTSAVE_ACTIVATION;
+    f->prev_frame = f == prev_cur ? (void *)f : (void *)prev_cur;
+    goperl_xs_depth_v++;
+    goperl_opreg_enter();
+    f->native_call = 1;
+    f->hostsave_base = base;
+    f->jb = jb;
+}
 #define GOPERL_XS_OPEN_WITH(frame, prev_cur, after_croak)  \
     {                                                      \
-        int32_t goperl_entry_base = goperl_hostsave_n;     \
-        errno = goperl_errno_entry(frame);                 \
-        goperl_hostsave_i32((frame), &(frame)->hostsave_base); \
-        goperl_hostsave_ptr((frame), (void **)&(frame)->prev_frame); \
-        goperl_hostsave_ptr((frame), (void **)&(frame)->jb); \
-        for (int32_t goperl_i = goperl_entry_base; goperl_i < goperl_hostsave_n; goperl_i++) \
-            goperl_hostsave_v[goperl_i].scope = GOPERL_HOSTSAVE_ACTIVATION; \
-        (frame)->prev_frame = ((frame) == (prev_cur))      \
-                                  ? (void *)(frame)        \
-                                  : (void *)(prev_cur);    \
-        goperl_xs_depth_v++;                               \
-        goperl_opreg_enter();                              \
-        (frame)->native_call = 1;                          \
-        (frame)->hostsave_base = goperl_entry_base;        \
-        (frame)->jb = (void *)&_gof_jb;                    \
+        goperl_xs_open_prepare((frame), (prev_cur), (void *)&_gof_jb); \
         if (GOPERL_SETJMP(_gof_jb)) {                      \
             /* xs_leave unwinds the host saves itself, after reading \
              * the frame to return to: that link is one of them */  \
