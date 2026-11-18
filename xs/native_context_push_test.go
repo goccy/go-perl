@@ -34,6 +34,7 @@ XS(XS_MyCx_eval_block) {
         PL_in_eval = EVAL_INEVAL|EVAL_KEEPERR;
         sv_catpvf(report, "pushed %d eval %d in_eval %d", (int)(cxstack_ix - was),
                   CxTYPE(CX_CUR()) == CXt_EVAL ? 1 : 0, (int)PL_in_eval);
+        PUSHMARK(SP);
         call_sv(code, G_VOID | G_DISCARD);
         sv_catpvs(report, " returned");
     } else {
