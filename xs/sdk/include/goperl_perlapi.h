@@ -2936,6 +2936,21 @@ static inline __attribute__((unused)) STRLEN *goperl_lv_body_word(goperl_frame_t
 }
 #define LvTARGOFF(sv) (*goperl_lv_body_word(_gof, (SV *)(sv), GOPERL_XPVLV_TARGOFF, "LvTARGOFF"))
 #define LvTARGLEN(sv) (*goperl_lv_body_word(_gof, (SV *)(sv), GOPERL_XPVLV_TARGLEN, "LvTARGLEN"))
+/* AvALLOC: where the allocation of an array's slots starts, in the
+ * interpreter's memory, as AvARRAY gives the slots in use (a shift moves
+ * AvARRAY on and leaves AvALLOC; Devel::Size reckons with the two). The
+ * body's xav_alloc, read where it is (perl 5.44's xpvav: the stash, the
+ * magic, the fill, the max, then xav_alloc); not an lvalue. */
+#define GOPERL_XPVAV_ALLOC 32
+static inline __attribute__((unused)) SV **goperl_av_alloc_view(goperl_frame_t *f, AV *av) {
+    const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(av));
+    if (!head || (svtype)((head[1] >> 32) & SVTYPEMASK) != SVt_PVAV)
+        goperl_croakf(f, "AvALLOC: the value is not an array");
+    if (!head[0]) return 0;
+    const uint64_t *const alloc = (const uint64_t *)goperl_guest_mem(f, head[0] + GOPERL_XPVAV_ALLOC);
+    return alloc && *alloc ? (SV **)goperl_guest_mem(f, *alloc) : (SV **)0;
+}
+#define AvALLOC(av) goperl_av_alloc_view(_gof, (AV *)(av))
 #define SvSHARED_HASH(sv) ((U32)GOPERL_FIELD(GOPERL_FIELD_SHARED_HASH, sv, 0))
 #define SvIS_FREED(sv) (GOPERL_FIELD(GOPERL_FIELD_IS_FREED, sv, 0) != 0)
 #define HvRITER_get(hv) ((I32)(int64_t)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER, hv, 0))
@@ -3221,8 +3236,18 @@ enum {
 
 /* A REGEXP is a value of the interpreter, as an SV is. Its body, which
  * perl's macros read through ReANY (and old code through SvANY), is a copy
- * here: what the interpreter held when the macro ran. */
-typedef struct goperl_sv REGEXP;
+ * here: what the interpreter held when the macro ran. As perl's struct p5rx
+ * it is a type of its own, laid out as the head of an SV (see struct
+ * goperl_sv), so that SvANY of one is its body as perl types it. */
+struct goperl_rx {
+    void *goperl_sv_any_;
+    uint32_t goperl_sv_refcnt_;
+    uint32_t sv_flags;
+    union {
+        void *goperl_sv_u_;
+    } sv_u;
+};
+typedef struct goperl_rx REGEXP;
 typedef struct regexp_engine {
     int goperl_opaque;
 } regexp_engine;
@@ -4798,6 +4823,13 @@ static void goperl_plroot_store(goperl_frame_t *f, int field, uint64_t val) {
  * fills them): hashes, read as they are (B::Generate). */
 #define GOPERL_PL_CUSTOM_OP_NAMES 404
 #define GOPERL_PL_CUSTOM_OP_DESCS 405
+/* The interpreter's two static pad names (pad.h's PL_padname_undef and
+ * PL_padname_const): the shadows of the names at their addresses, which is
+ * what the entries of a list of names are (Devel::Size skips them). */
+#define GOPERL_PL_PADNAME_UNDEF 406
+#define GOPERL_PL_PADNAME_CONST 407
+#define PL_padname_undef (*goperl_padname_shadow(_gof, GOPERL_PLVAR(GOPERL_PL_PADNAME_UNDEF)))
+#define PL_padname_const (*goperl_padname_shadow(_gof, GOPERL_PLVAR(GOPERL_PL_PADNAME_CONST)))
 #define PL_custom_op_names ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_CUSTOM_OP_NAMES)))
 #define PL_custom_op_descs ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_CUSTOM_OP_DESCS)))
 /* room for n entries above the top of the save stack (and the SS_MAXPUSH

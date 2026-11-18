@@ -837,7 +837,7 @@ struct op {
      * split's glob (op_pmtargetgv) and a match's stash, as perl without
      * threads has them, and the code blocks of the pattern */
     U32 op_pmflags;
-    struct goperl_sv *op_pmregexp;
+    struct goperl_rx *op_pmregexp; /* a REGEXP, as perl types it */
     union {
         OP *op_pmreplroot;
         UV op_pmtargetoff;
@@ -6341,7 +6341,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     const int cls = (int)((bits >> 8) & 0xFF);
     if (cls == GOPERL_OPCLASS_PMOP) {
         o->op_pmflags = (U32)w[GOPERL_OPREC_PMFLAGS];
-        o->op_pmregexp = GOPERL_SV(w[GOPERL_OPREC_PMREGEXP]);
+        o->op_pmregexp = (struct goperl_rx *)GOPERL_SV(w[GOPERL_OPREC_PMREGEXP]);
         /* the unions are ops of a substitution only: a split's glob and a
          * match's stash are values */
         if (o->op_type == OP_SUBST) {
@@ -11517,7 +11517,7 @@ struct goperl_op_base {
     U32 cop_features;
     /* a PMOP's and a PADOP's fields (stores of a class's own member) */
     U32 op_pmflags;
-    SV *op_pmregexp;
+    struct goperl_rx *op_pmregexp;
     uint64_t op_pmreplroot;
     uint64_t op_pmstashstart;
     OP *op_code_list;

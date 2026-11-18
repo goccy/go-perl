@@ -132,11 +132,11 @@ func TestSDKInternalsGoPerlDoesNotGive(t *testing.T) {
 static int uses(SV *sv, PerlIO *f) {
     I32 base = PL_savestack_ix;
     void *root = PL_sv_root;
-    SV **alloc = AvALLOC((AV *)sv);
+    pad_push(CvPADLIST((CV *)sv), 2);
     void *si = new_stackinfo(32, 4);
     PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1);
     save_alloc(8, 0);
-    (void)sv; (void)f; (void)alloc; (void)si; (void)root; (void)tab;
+    (void)sv; (void)f; (void)si; (void)root; (void)tab;
     return (int)base;
 }
 `)
@@ -144,7 +144,7 @@ static int uses(SV *sv, PerlIO *f) {
 		t.Fatal("a module using perl's internals built")
 	}
 	const phrase = "go-perl gives native code no access to this interpreter internal: "
-	for _, name := range []string{"PL_sv_root", "AvALLOC", "new_stackinfo", "PerlIO_find_layer", "save_alloc"} {
+	for _, name := range []string{"PL_sv_root", "pad_push", "new_stackinfo", "PerlIO_find_layer", "save_alloc"} {
 		if !strings.Contains(string(out), phrase+name) {
 			t.Errorf("no %q in what the compiler said:\n%s", phrase+name, out)
 		}
