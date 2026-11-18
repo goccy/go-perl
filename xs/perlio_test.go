@@ -12,10 +12,10 @@ import (
 
 // TestPerlIOUtf8Strict runs PerlIO::utf8_strict — a dist whose whole point
 // is a custom PerlIO layer — through the native SDK's layer bridge: the
-// guest pushes a PerlIOBuf-derived proxy under the dist's layer name and
-// only the slots the dist customized (Pushed and Fill here) round-trip to
-// the host, where they run against a shadow instance whose tail forwards
-// PerlIO_read/eof/get_ptr/... back to the guest layer below the proxy.
+// interpreter registers the dist's class, the slots that name perl's own
+// layer functions run there, and the dist's own (Pushed and Fill here) run
+// on the host on the layer's struct, with the layer below a view of the
+// interpreter's.
 //
 // It needs a prepared directory (opt-in via GOPERL_UTF8STRICT_DIR) holding:
 //

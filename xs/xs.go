@@ -56,7 +56,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 39
+const abiVersion = 40
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -1760,11 +1760,15 @@ func (s *state) magicLocalized(id uint32, nsv uint64) []byte {
 	return []byte{1}
 }
 
-// perlioHook services reserved method -6: run one host layer hook (the
-// SDK-side __goperl_perlio_invoke does the marshalling and croak guard).
-// The request starts [hook][funcs id][f][layer].
+// perlioHook services reserved method -6: run one slot of a PerlIO layer
+// of native code (the SDK-side __goperl_perlio_invoke does the marshalling
+// and the croak guard). The request starts [slot][funcs id][f][layer]
+// [errno]; the response is [1] and the slot's result, or, for a slot that
+// died as an XSUB dies, [0]+message or respThrow. The slot starts with the
+// interpreter's errno, and an errno it leaves that differs is what $! says
+// after it, as for an XSUB.
 func (s *state) perlioHook(req []byte) []byte {
-	if len(req) < 4*8 {
+	if len(req) < 5*8 {
 		return append([]byte{0}, "perlio hook: short request"...)
 	}
 	id := uint32(wordAt(req, 1))
@@ -1779,19 +1783,32 @@ func (s *state) perlioHook(req []byte) []byte {
 	pokeBytes(reqC, req)
 	respC := cMalloc(4096)
 	f, fp := s.bootFrame()
+	entryErrno := int32(1 + int64(wordAt(req, 4)))
+	f.xerrno = entryErrno
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
 	rlen := ccall.Invoke(inv, fp, funcs, reqC, uintptr(len(req)), respC, 4096)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	s.jumpCaught(f)
 	runtime.UnlockOSThread()
-	_ = f
 	unpinFrame(fp)
+	if f.xerrno != 0 && f.xerrno != entryErrno {
+		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), 0, ""); err != nil {
+			cFree(reqC)
+			cFree(respC)
+			return append([]byte{0}, ("perlio hook: " + err.Error())...)
+		}
+	}
 	n := int(int32(rlen))
 	var out []byte
-	if n <= 0 || n > 4096 {
+	switch {
+	case f.failed == failedThrown:
+		out = []byte{respThrow}
+	case f.failed != 0:
+		out = append([]byte{0}, f.errString()...)
+	case n <= 0 || n > 4096:
 		out = append([]byte{0}, "perlio hook: bad response"...)
-	} else {
+	default:
 		out = copyIn(respC, n)
 	}
 	cFree(reqC)

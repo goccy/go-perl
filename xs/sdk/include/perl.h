@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 39u
+#define GOPERL_XS_ABI 40u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -2266,6 +2266,8 @@ typedef struct goperl_shared {
     void *hv_arrays; /* goperl_hvarray_t: the arrays HvARRAY gave in this call
                       * of native code, by the address of the buckets, in
                       * the arena (goperl_compiler.h) */
+    void *pio_layers; /* goperl_pio_reg_t (perliol.h): the structs of layers
+                       * of native code's, behind goperl_pio_layers_head_t */
 } goperl_shared_t;
 #define goperl_hostsave_v \
     (GOPERL_SHARED->hostsave_more ? GOPERL_SHARED->hostsave_more : GOPERL_SHARED->hostsave)
@@ -2606,14 +2608,7 @@ enum {
     GOPERL_OP_IO_OFP = 161,
     GOPERL_OP_SV_CUR = 162,
     GOPERL_OP_SV_MAGIC_STD = 163,
-    GOPERL_OP_PERLIO_DEF_LAYER = 164,
-    GOPERL_OP_PERLIO_NEXT_READ = 165,
-    GOPERL_OP_PERLIO_NEXT_FASTGETS = 166,
-    GOPERL_OP_PERLIO_NEXT_GETCNT = 167,
-    GOPERL_OP_PERLIO_NEXT_GETPTR = 168,
-    GOPERL_OP_PERLIO_NEXT_SETPTRCNT = 169,
-    GOPERL_OP_PERLIO_NEXT_FILL = 170,
-    GOPERL_OP_PERLIO_STATE = 171,
+    /* 164-171 were the first layer proxy's: retired, not to be used again */
     GOPERL_OP_OPTREE_NEW = 172,
     GOPERL_OP_OPTREE_MISC = 173,
     GOPERL_OP_OP_SET = 174,
@@ -2645,7 +2640,11 @@ enum {
     GOPERL_OP_OP_DUMP = 201,
     GOPERL_OP_CALL = 202,
     GOPERL_OP_TREE = 203,
-    GOPERL_OP_INTERNAL = 204
+    GOPERL_OP_INTERNAL = 204,
+    /* PerlIO layers of native code (perliol.h): a class, a call of a layer
+     * function in the interpreter */
+    GOPERL_OP_PERLIO_DEFINE = 300,
+    GOPERL_OP_PERLIO_CALL = 301
 };
 
 /* PLVAR_GET/SET ids. */
@@ -5251,7 +5250,16 @@ enum {
     GOPERL_PIO_LAYERS = 32,
     GOPERL_PIO_FIND_FILE = 33,
     GOPERL_PIO_EXPORT_FILE = 34,
-    GOPERL_PIO_RELEASE_FILE = 35
+    GOPERL_PIO_RELEASE_FILE = 35,
+    /* the stack of layers and the tables of layers (perliol.h) */
+    GOPERL_PIO_PUSH = 300,
+    GOPERL_PIO_POP = 301,
+    GOPERL_PIO_FIND_LAYER = 302,
+    GOPERL_PIO_LAYER_FETCH = 303,
+    GOPERL_PIO_ARG_FETCH = 304,
+    GOPERL_PIO_STD_FUNCS = 305,
+    GOPERL_PIO_FUNCS_INFO = 306,
+    GOPERL_PIO_MODESTR = 307
 };
 #define GOPERL_PIO_READ_MAX 65536
 #define GOPERL_PL_ERRNO 60
@@ -5286,6 +5294,24 @@ static inline __attribute__((unused)) const goperl_pio_slot_t *goperl_pio_view_o
         if (m->slot == h) return m;
     return 0;
 }
+/* The structs of layers of native code's (perliol.h) that are here while
+ * native code runs: they go to the interpreter before each handle
+ * operation (out) and come back after it, so that the operation runs on
+ * the layers as native code left them, and native code sees what the
+ * operation did. rest hands them all back when the outermost native call
+ * returns. */
+typedef struct goperl_pio_layers_head {
+    int32_t active; /* the structs here now (activations) */
+    void (*sync)(goperl_frame_t *f, int out);
+    void (*rest)(goperl_frame_t *f);
+    void (*release)(void *head); /* the instance is gone */
+    void *(*clone)(const void *head); /* for a copy of the instance; NULL: no memory */
+} goperl_pio_layers_head_t;
+static inline __attribute__((unused)) void goperl_pio_sync(goperl_frame_t *f, int out) {
+    goperl_pio_layers_head_t *const h =
+        f->inst ? (goperl_pio_layers_head_t *)((goperl_shared_t *)f->inst)->pio_layers : 0;
+    if (h && h->active) h->sync(f, out);
+}
 static inline __attribute__((unused)) uint64_t goperl_pio_tok(goperl_frame_t *f,
                                                               const void *h) {
     (void)f;
@@ -5294,7 +5320,10 @@ static inline __attribute__((unused)) uint64_t goperl_pio_tok(goperl_frame_t *f,
 }
 static uint64_t goperl_pio(goperl_frame_t *f, int sel, const void *h,
                            uint64_t b, const char *s, uint64_t slen) {
-    return goperl_do_op3(f, GOPERL_OP_PERLIO, goperl_pio_tok(f, h), b, (uint64_t)(sel), s, slen);
+    goperl_pio_sync(f, 1);
+    const uint64_t r = goperl_do_op3(f, GOPERL_OP_PERLIO, goperl_pio_tok(f, h), b, (uint64_t)(sel), s, slen);
+    goperl_pio_sync(f, 0);
+    return r;
 }
 #define GOPERL_PIO_H(sel) \
     ((PerlIO *)(uintptr_t)goperl_pio(_gof, (sel), 0, 0, 0, 0))
@@ -5313,8 +5342,10 @@ static SSize_t goperl_pio_read(goperl_frame_t *f, const void *h, void *buf,
         size_t want = count - total;
         if (want > GOPERL_PIO_READ_MAX) want = GOPERL_PIO_READ_MAX;
         uint64_t got = 0;
+        goperl_pio_sync(f, 1);
         const uint64_t r = goperl_do_opx(f, GOPERL_OP_PERLIO, goperl_pio_tok(f, h), want,
                                          GOPERL_PIO_READ, 0, 0, &got);
+        goperl_pio_sync(f, 0);
         const int64_t n = (int64_t)got;
         if (n < 0) {
             if (total) return (SSize_t)total;
@@ -5333,9 +5364,11 @@ static SSize_t goperl_pio_write(goperl_frame_t *f, const void *h,
     __attribute__((unused));
 static SSize_t goperl_pio_write(goperl_frame_t *f, const void *h,
                                 const void *buf, size_t count) {
+    goperl_pio_sync(f, 1);
     const SSize_t n = (SSize_t)(int64_t)goperl_do_op(
-        f, GOPERL_OP_PERLIO_WRITE, (uint64_t)(uintptr_t)h,
+        f, GOPERL_OP_PERLIO_WRITE, goperl_pio_tok(f, h),
         (uint64_t)count, (const char *)buf, (uint64_t)count);
+    goperl_pio_sync(f, 0);
     if (n < 0) goperl_errno_from_interp(f);
     return n;
 }
@@ -5411,8 +5444,10 @@ static int64_t goperl_pio_status(goperl_frame_t *f, int sel, const void *h) {
 static int goperl_pio_flush(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static int goperl_pio_flush(goperl_frame_t *f, const void *h) {
+    goperl_pio_sync(f, 1);
     const int r = (int)(int64_t)goperl_do_op(
-        f, GOPERL_OP_PERLIO_FLUSH, (uint64_t)(uintptr_t)h, 0, 0, 0);
+        f, GOPERL_OP_PERLIO_FLUSH, goperl_pio_tok(f, h), 0, 0, 0);
+    goperl_pio_sync(f, 0);
     if (r != 0) goperl_errno_from_interp(f);
     return r;
 }
@@ -5442,8 +5477,10 @@ static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
     req[ml + 1 + nl] = '\0';
     goperl_flush(_gof);
     const int32_t failed_before = _gof->failed;
-    const int r = (int)(int64_t)goperl_xs_opx(_gof, GOPERL_OP_PERLIO, (uint64_t)(uintptr_t)h, 0,
+    goperl_pio_sync(_gof, 1);
+    const int r = (int)(int64_t)goperl_xs_opx(_gof, GOPERL_OP_PERLIO, goperl_pio_tok(_gof, h), 0,
                                               GOPERL_PIO_APPLY_LAYERS, req, ml + 1 + nl + 1, 0);
+    goperl_pio_sync(_gof, 0);
     goperl_gen_bump();
     goperl_pp_sync_in(_gof);
     free(req);
@@ -5546,8 +5583,10 @@ static void goperl_pio_set_ptrcnt(goperl_frame_t *f, const void *h,
     if (!g || (int64_t)g < 0) return;
     STDCHAR *cur = (STDCHAR *)goperl_guest_mem(f, g);
     uint64_t target = (uint64_t)((int64_t)g + (ptr - cur));
+    goperl_pio_sync(f, 1);
     goperl_do_op3(f, GOPERL_OP_PERLIO, goperl_pio_tok(f, h), target,
                   GOPERL_PIO_SET_PTRCNT | ((uint64_t)(uint32_t)(int32_t)cnt << 32), 0, 0);
+    goperl_pio_sync(f, 0);
 }
 #define USE_PERLIO
 /* PerlIO is perl's layered one, which perl says with PERLIO_LAYERS in the
@@ -7839,6 +7878,10 @@ static void goperl_arena_free_all(void) {
     }
     goperl_si_cache_v = 0;
     goperl_si_gen_v = 0;
+    /* the structs of layers of native code's go back to the interpreter
+     * (the views that showed them were in the arena) */
+    if (GOPERL_SHARED->pio_layers)
+        ((goperl_pio_layers_head_t *)GOPERL_SHARED->pio_layers)->rest(goperl_cur_frame_v);
     goperl_pio_views_v = 0; /* they were in the arena */
     GOPERL_SHARED->rx_bodies = 0; /* so were they */
     GOPERL_SHARED->mg_found = 0;  /* and the copies mg_find made */
@@ -9660,8 +9703,10 @@ static int goperl_pio_close(goperl_frame_t *f, const void *h)
     __attribute__((unused));
 static int goperl_pio_close(goperl_frame_t *f, const void *h) {
     goperl_pio_forget(f, h);
+    goperl_pio_sync(f, 1);
     const int r = (int)(int64_t)goperl_do_op(
-        f, GOPERL_OP_PERLIO_CLOSE, (uint64_t)(uintptr_t)h, 0, 0, 0);
+        f, GOPERL_OP_PERLIO_CLOSE, goperl_pio_tok(f, h), 0, 0, 0);
+    goperl_pio_sync(f, 0);
     if (r != 0) goperl_errno_from_interp(f);
     return r;
 }
@@ -14309,6 +14354,11 @@ __goperl_shared_clone(void *dst_raw, const void *src_raw) {
     dst->infix_head = src->infix_head;
     memcpy(dst->intern, src->intern, sizeof dst->intern);
     dst->na = src->na;
+    if (src->pio_layers) {
+        const goperl_pio_layers_head_t *const pl = (const goperl_pio_layers_head_t *)src->pio_layers;
+        dst->pio_layers = pl->clone(pl);
+        if (!dst->pio_layers) return -1;
+    }
 
     const goperl_dtor_t *const sd = (const goperl_dtor_t *)src->dtors;
     goperl_dtor_t *const dd = (goperl_dtor_t *)dst->dtors;
@@ -14425,6 +14475,11 @@ __goperl_shared_release(void *raw) {
     goperl_hooks_t *const h = (goperl_hooks_t *)((goperl_shared_t *)raw)->hooks;
     free(((goperl_shared_t *)raw)->hostsave_more);
     ((goperl_shared_t *)raw)->hostsave_more = 0;
+    if (((goperl_shared_t *)raw)->pio_layers) {
+        goperl_pio_layers_head_t *const pl = (goperl_pio_layers_head_t *)((goperl_shared_t *)raw)->pio_layers;
+        ((goperl_shared_t *)raw)->pio_layers = 0;
+        pl->release(pl);
+    }
     for (int32_t i = 0; h && i < h->atexit_n; i++) {
         goperl_atexit_t *const a = &h->atexit[i];
         if (!a->fn || !a->holders) continue;

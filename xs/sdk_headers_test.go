@@ -115,8 +115,8 @@ func TestSDKHeaderThatCannotBeGiven(t *testing.T) {
 }
 
 // A module that uses an internal of perl's that go-perl does not give
-// native code (the save stack, the bodies of SVs, the tmps stack, the
-// layers of a PerlIO handle) stops building with one fixed phrase and the
+// native code (the roots of op trees, the bodies of SVs, the catch flag,
+// the pads) stops building with one fixed phrase and the
 // name, for each use; #ifdef sees the name defined, and a module that does
 // not use one builds (TestSDKHeadersCompileWherePerlsDo). Before, such a
 // build failed with "implicit declaration" or "undeclared", which said
@@ -134,7 +134,7 @@ static int uses(SV *sv, PerlIO *f) {
     void *root = PL_sv_root;
     pad_push(CvPADLIST((CV *)sv), 2);
     void *si = new_stackinfo(32, 4);
-    PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1);
+    PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1); /* given (perliol.h) */
     (void)sv; (void)f; (void)si; (void)root; (void)tab;
     return (int)base;
 }
@@ -143,13 +143,15 @@ static int uses(SV *sv, PerlIO *f) {
 		t.Fatal("a module using perl's internals built")
 	}
 	const phrase = "go-perl gives native code no access to this interpreter internal: "
-	for _, name := range []string{"PL_sv_root", "pad_push", "new_stackinfo", "PerlIO_find_layer"} {
+	for _, name := range []string{"PL_sv_root", "pad_push", "new_stackinfo"} {
 		if !strings.Contains(string(out), phrase+name) {
 			t.Errorf("no %q in what the compiler said:\n%s", phrase+name, out)
 		}
 	}
-	if strings.Contains(string(out), phrase+"PL_savestack_ix") {
-		t.Errorf("PL_savestack_ix, which the SDK gives, was refused:\n%s", out)
+	for _, name := range []string{"PL_savestack_ix", "PerlIO_find_layer"} {
+		if strings.Contains(string(out), phrase+name) {
+			t.Errorf("%s, which the SDK gives, was refused:\n%s", name, out)
+		}
 	}
 	if strings.Contains(string(out), "is not defined") {
 		t.Errorf("#ifdef did not see the name defined:\n%s", out)
