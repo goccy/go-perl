@@ -1971,9 +1971,11 @@ static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
     const size_t count = (svp && num > 0) ? (size_t)num : 0;
     const size_t mode_len = len > 0 ? (size_t)len : 0;
     /* words: [as_raw][rawmode][rawperm][supplied handle][count], the
-     * arguments, then the mode text */
+     * arguments, then the mode text; rawmode (sysopen's flags, this
+     * system's) the interpreter's */
     const goperl_gword_t head[5] = {(goperl_gword_t)(int64_t)as_raw,
-                                    (goperl_gword_t)(int64_t)rawmode,
+                                    (goperl_gword_t)(int64_t)(as_raw ? goperl_oflags_to_guest(f, rawmode)
+                                                                     : rawmode),
                                     (goperl_gword_t)(int64_t)rawperm,
                                     goperl_pio_tok(f, supplied_fp), (goperl_gword_t)count};
     const size_t size = sizeof head + count * 8 + mode_len;
@@ -2092,6 +2094,18 @@ static void goperl_vwarn_args(goperl_frame_t *f, const char *pat, va_list *args)
     goperl_text_op(f, &t, GOPERL_OP_SV_STR, 0, GOPERL_TEXT_ARG(&t, 0), (uint64_t)(GOPERL_SVSTR_WARN));
 }
 #define vwarn(pat, args) goperl_vwarn_args(_gof, (pat), (args))
+/* vwarner: warner's warning of a category, with a va_list (PerlIO::Util's
+ * warnif) */
+static void goperl_vwarner_args(goperl_frame_t *f, U32 cat, const char *pat, va_list *args)
+    __attribute__((unused));
+static void goperl_vwarner_args(goperl_frame_t *f, U32 cat, const char *pat, va_list *args) {
+    goperl_text_t t;
+    goperl_text_init(&t);
+    goperl_vtext_p(f, &t, pat, args);
+    goperl_text_op(f, &t, GOPERL_OP_SV_STR, cat, GOPERL_TEXT_ARG(&t, 0), (uint64_t)(GOPERL_SVSTR_WARNER));
+}
+#define vwarner(cat, pat, args) goperl_vwarner_args(_gof, (cat), (pat), (args))
+#define Perl_vwarner(cat, pat, args) goperl_vwarner_args(_gof, (cat), (pat), (args))
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args)
     __attribute__((unused));
 static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {

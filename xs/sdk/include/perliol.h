@@ -13,18 +13,25 @@
  * module's, and the interpreter calls it here, with the slot's arguments.
  *
  * The layer's struct (funcs->size bytes) is the module's, on this side: its
- * PerlIOl part and, for a buffered layer (one whose table names functions
- * of perl's buffer layer, or says PERLIO_K_BUFFERED), its PerlIOBuf part
- * are kept in step with the interpreter's layer at every crossing: when a
- * slot of the module's is called, around each handle operation native code
- * makes while the struct is here, and when the outermost native call
- * returns. The buffer is in the interpreter's memory, where perl reads and
- * writes it; a buffer the layer allocated itself (Newx in its Get_base)
- * moves there at the next crossing, and the layer's struct points at the
- * moved one from then on. The interpreter owns it then, as perl's
- * PerlIOBuf_close, which frees it, expects. A layer popped while one of its
- * own functions runs (an "autopop" in Pushed) is freed when that function
- * returns.
+ * PerlIOl part and, for a layer whose struct is a PerlIOBuf (its table
+ * names functions of perl's buffer layer, or it gives its layer to one of
+ * them), its PerlIOBuf part are kept in step with the interpreter's layer
+ * at every crossing: when a slot of the module's is called, around each
+ * handle operation native code makes while the struct is here, and when
+ * the outermost native call returns. PERLIO_K_BUFFERED alone says nothing
+ * of the struct (PerlIO::Util's :dir keeps its buffer in its own struct).
+ * The buffer is in the interpreter's memory, where perl reads and writes
+ * it; a buffer the layer allocated itself (Newx in its Get_base) moves
+ * there at the next crossing, and the layer's struct points at the moved
+ * one from then on. The interpreter owns it then, as perl's
+ * PerlIOBuf_close, which frees it, expects. A buffer inside the layer's
+ * own struct is the interpreter's layer at the same place: a pointer into
+ * the struct that a slot answers (Get_ptr, Get_base) points into the
+ * interpreter's layer there, where the struct's bytes from there on go for
+ * perl to read, and a pointer perl gives back into it (Set_ptrcnt) points
+ * into the struct (perl writes no struct of a layer but through its PerlIOl
+ * and PerlIOBuf parts). A layer popped while one of its own functions runs
+ * (an "autopop" in Pushed) is freed when that function returns.
  *
  * Handles are views (goperl_pio_view): f and PerlIONext(f) stand for the
  * interpreter's handles, and a layer of a native code's class in a view is
@@ -64,8 +71,11 @@ typedef struct _PerlIO PerlIOl;
 typedef struct _PerlIO_funcs PerlIO_funcs;
 typedef PerlIOl *PerlIO;
 #define STDCHAR char
-/* a list of layers of the interpreter's (the layers an Open gets): the
- * address of the interpreter's, which only the functions below read */
+/* A list of layers of the interpreter's (the layers an Open gets,
+ * PL_known_layers, PL_def_layerlist), as perl's: its entries' tables (views
+ * of the interpreter's, or the module's own) and arguments, made for the
+ * native call from the interpreter's list as it is then (goperl_pio_list);
+ * the functions given one work on the interpreter's (gaddr). */
 typedef struct goperl_perlio_list PerlIO_list_t;
 
 struct _PerlIO {
@@ -108,6 +118,19 @@ struct _PerlIO_funcs {
     SSize_t (*Get_cnt)(pTHX_ PerlIO *f);
     void (*Set_ptrcnt)(pTHX_ PerlIO *f, STDCHAR *ptr, SSize_t cnt);
 };
+
+typedef struct {
+    PerlIO_funcs *funcs;
+    SV *arg;
+} PerlIO_pair_t;
+struct goperl_perlio_list {
+    IV refcnt;
+    IV cur;
+    IV len;
+    PerlIO_pair_t *array;
+    uint64_t gaddr; /* the interpreter's list */
+};
+#define GOPERL_PIO_LIST_ADDR(l) ((l) ? ((const PerlIO_list_t *)(l))->gaddr : 0)
 
 typedef struct {
     struct _PerlIO base;
@@ -288,6 +311,7 @@ typedef struct goperl_pio_class {
     int (*block_forget)(const void *p, size_t *size);
 } goperl_pio_class_t;
 
+struct goperl_pio_kept;
 typedef struct goperl_pio_reg {
     goperl_pio_layers_head_t head;
     goperl_pio_class_t *classes;
@@ -296,6 +320,12 @@ typedef struct goperl_pio_reg {
     goperl_iol_t **acts;
     int32_t nacts, capacts;
     goperl_pio_fview_t *fviews;
+    struct goperl_pio_kept *kept; /* the handles native code may keep */
+    /* the push native code makes of a class of native code's whose Pushed
+     * is native code's, while the interpreter makes it: the class, and the
+     * mode given, which that Pushed gets (goperl_pio_push) */
+    const PerlIO_funcs *push_tab;
+    const char *push_mode;
 } goperl_pio_reg_t;
 
 static goperl_pio_reg_t *goperl_pio_reg(goperl_frame_t *f);
@@ -369,6 +399,27 @@ static uint64_t goperl_iol_ptr_out(goperl_frame_t *f, goperl_iol_t *s, const STD
                       s->tab->name);
     return g;
 }
+/* A pointer into the layer's own struct past its PerlIOl part (a buffer
+ * PerlIO::Util's :dir keeps there, which its Get_ptr answers) is the
+ * interpreter's layer at the same place; the struct's bytes from there on
+ * go there for perl to read (0: p is not one). A layer whose struct is a
+ * PerlIOBuf keeps its buffer elsewhere (goperl_iol_place_buf). */
+static uint64_t goperl_iol_inner_out(goperl_frame_t *f, goperl_iol_t *s, const STDCHAR *p) {
+    const char *const st = (const char *)GOPERL_IOL_STRUCT(s);
+    const char *const q = (const char *)p;
+    if (s->buffered || q < st + sizeof(PerlIOl) || q > st + s->tab->size) return 0;
+    const size_t off = (size_t)(q - st);
+    memcpy((char *)goperl_guest_mem(f, s->ltok) + off, q, s->tab->size - off);
+    return s->ltok + off;
+}
+static STDCHAR *goperl_pio_ptr_in(goperl_frame_t *f, uint64_t g);
+/* a pointer perl gives a slot: into the interpreter's layer past its
+ * PerlIOl part (one goperl_iol_inner_out answered) is into the struct */
+static STDCHAR *goperl_iol_inner_in(goperl_frame_t *f, goperl_iol_t *s, uint64_t g) {
+    if (s && !s->buffered && g >= s->ltok + sizeof(PerlIOl) && g <= s->ltok + s->tab->size)
+        return (STDCHAR *)GOPERL_IOL_STRUCT(s) + (g - s->ltok);
+    return goperl_pio_ptr_in(f, g);
+}
 /* a field native code changed goes to the interpreter's layer */
 static void goperl_iol_put(goperl_iol_t *s, char *g, int field, size_t off, uint64_t v,
                            size_t size) {
@@ -422,10 +473,10 @@ static goperl_iol_t *goperl_iol_get(goperl_frame_t *f, uint64_t ltok, PerlIO_fun
     s->tab = tab;
     for (const goperl_pio_class_t *c = r->classes; c; c = c->next)
         if (c->tab == tab) s->block_forget = c->block_forget;
-    /* buffered: it says it is, or its table names a function of perl's
-     * that takes its struct for a PerlIOBuf */
+    /* buffered: its table names a function of perl's that takes its struct
+     * for a PerlIOBuf (or native code gives its layer to one, see
+     * goperl_pio_stock_buffered) */
     if (tab->size >= sizeof(PerlIOBuf)) {
-        s->buffered = (tab->kind & PERLIO_K_BUFFERED) != 0;
         for (int i = 0; i < GOPERL_PIO_SLOTS && !s->buffered; i++)
             s->buffered =
                 (goperl_pio_stock_id(GOPERL_PIO_SLOT_FN(tab, i)) & GOPERL_PIO_STOCK_BUFFER) != 0;
@@ -488,7 +539,15 @@ static void goperl_iol_kill(goperl_frame_t *f, uint64_t ltok) {
         return;
     }
 }
-static void goperl_iol_rest(goperl_frame_t *f) { goperl_iol_release_to(f, 0); }
+static void goperl_pio_keep(goperl_frame_t *f, goperl_pio_reg_t *r);
+static void goperl_iol_rest(goperl_frame_t *f) {
+    goperl_pio_reg_t *const r = goperl_pio_reg(f);
+    goperl_pio_keep(f, r);
+    goperl_iol_release_to(f, 0);
+    r->push_tab = 0; /* a push a death cut short */
+    r->push_mode = 0;
+}
+static void goperl_pio_kept_release(goperl_pio_reg_t *r);
 /* The instance is gone: its classes, structs and views go with it. */
 static void goperl_pio_reg_release(void *head) {
     goperl_pio_reg_t *const r = (goperl_pio_reg_t *)head;
@@ -510,6 +569,7 @@ static void goperl_pio_reg_release(void *head) {
         r->fviews = v->next;
         free(v);
     }
+    goperl_pio_kept_release(r);
     free(r);
 }
 static void *goperl_pio_reg_clone(const void *head);
@@ -524,7 +584,8 @@ static goperl_pio_reg_t *goperl_pio_reg_new(void) {
 }
 /* A copy of the instance (perl.Clone) has the classes; it has no structs
  * of layers: the layers it copied get theirs anew, zeroed, since a layer's
- * own state is memory of native code's, which the copies cannot share. */
+ * own state is memory of native code's, which the copies cannot share
+ * (nor has it the handles native code kept, which are in that memory). */
 static void *goperl_pio_reg_clone(const void *head) {
     const goperl_pio_reg_t *const src = (const goperl_pio_reg_t *)head;
     goperl_pio_reg_t *const r = goperl_pio_reg_new();
@@ -640,17 +701,151 @@ static PerlIO *goperl_pio_view(goperl_frame_t *f, uint64_t tok) {
     goperl_pio_register(&hv->reg, &hv->top, tok);
     return &hv->top;
 }
+/* ---- handles native code may keep -----------------------------------------
+ * A handle native code asks for (IoIFP, IoOFP, PerlIO_stdout, an open, a
+ * dup, PerlIO_allocate) it may keep after the native call returns, as a
+ * PerlIO * of perl's is the handle until it is closed: PerlIO::Util's :tee
+ * keeps the handle it writes to in its layer's struct, writes to it from
+ * its Write slot and walks its layers from an XSUB. Such a handle is the
+ * instance's, one for each handle of the interpreter's: the call makes its
+ * layers as for any view, and when the outermost native call returns, a
+ * copy of them (the views of the call are in the arena; a layer of a
+ * native code's class is copied as the module left its struct) is what it
+ * shows until it is made again. A handle function given it, or the next
+ * field of a layer of the copy, works on the interpreter's handle then
+ * too. */
+static goperl_pio_fview_t *goperl_pio_fview_of(goperl_frame_t *f, const PerlIO_funcs *tab);
+typedef struct goperl_pio_kept {
+    PerlIOl *top;
+    goperl_pio_slot_t reg; /* top stands for the interpreter's handle */
+    struct goperl_pio_kept *next;
+    char *copy;            /* the copy of its layers: n entries */
+    size_t ncopy;
+} goperl_pio_kept_t;
+/* an entry of a copy: the slot of the layer's next field, then the layer
+ * (size bytes, rounded up to 16) */
+typedef struct {
+    goperl_pio_slot_t reg;
+    size_t size;
+} goperl_pio_kept_layer_t;
+#define GOPERL_PIO_KEPT_ROUND(n) (((n) + 15) & ~(size_t)15)
+#define GOPERL_PIO_KEPT_STEP(e) (sizeof(goperl_pio_kept_layer_t) + GOPERL_PIO_KEPT_ROUND((e)->size))
+#define GOPERL_PIO_KEPT_LAYER(e) ((PerlIOl *)(void *)((goperl_pio_kept_layer_t *)(e) + 1))
+static PerlIO *goperl_pio_handle(goperl_frame_t *f, uint64_t tok) {
+    if (!tok) return 0;
+    goperl_pio_reg_t *const r = goperl_pio_reg(f);
+    goperl_pio_kept_t *k = r->kept;
+    while (k && k->reg.tok != tok) k = k->next;
+    if (!k) {
+        k = (goperl_pio_kept_t *)calloc(1, sizeof *k);
+        if (!k) goperl_croakf(f, "Out of memory!");
+        k->next = r->kept;
+        r->kept = k;
+        goperl_pio_register(&k->reg, &k->top, tok);
+    }
+    k->top = goperl_pio_chain(f, tok);
+    return &k->top;
+}
+/* Whether the layers a kept handle shows are its copy, as it was made. */
+static int goperl_pio_kept_whole(const goperl_pio_kept_t *k) {
+    const char *e = k->copy;
+    const PerlIOl *l = k->top;
+    for (size_t i = 0; i < k->ncopy; i++) {
+        if (l != GOPERL_PIO_KEPT_LAYER(e)) return 0;
+        l = l->next;
+        e += GOPERL_PIO_KEPT_STEP((const goperl_pio_kept_layer_t *)e);
+    }
+    return l == 0;
+}
+/* The size of a layer of a view: a layer of perl's is a view (PerlIOBuf),
+ * one of a native code's class that layer's struct. */
+static size_t goperl_pio_kept_size(goperl_frame_t *f, const PerlIOl *l) {
+    if (!l->tab || goperl_pio_fview_of(f, l->tab) || l->tab->size < sizeof(PerlIOl))
+        return sizeof(PerlIOBuf);
+    return (size_t)l->tab->size;
+}
+/* When the outermost native call returns (before the arena goes, and the
+ * structs of layers of native code's go back): each kept handle shows a
+ * copy of its layers, and the views registered are the kept handles and
+ * the next fields of their copies. */
+static void goperl_pio_keep(goperl_frame_t *f, goperl_pio_reg_t *r) {
+    /* the copies replaced go once no view registered is in them */
+    size_t nk = 0, nold = 0;
+    for (const goperl_pio_kept_t *k = r->kept; k; k = k->next) nk++;
+    char **old = 0;
+    for (goperl_pio_kept_t *k = r->kept; k; k = k->next) {
+        if (goperl_pio_kept_whole(k)) continue;
+        if (!old && !(old = (char **)malloc(nk * sizeof(char *)))) goperl_croakf(f, "Out of memory!");
+        size_t n = 0, bytes = 0;
+        for (const PerlIOl *l = k->top; l; l = l->next) {
+            n++;
+            bytes += sizeof(goperl_pio_kept_layer_t) + GOPERL_PIO_KEPT_ROUND(goperl_pio_kept_size(f, l));
+        }
+        char *const copy = n ? (char *)malloc(bytes) : 0;
+        if (n && !copy) goperl_croakf(f, "Out of memory!");
+        char *e = copy;
+        PerlIOl *prev = 0;
+        for (const PerlIOl *l = k->top; l; l = l->next) {
+            goperl_pio_kept_layer_t *const h = (goperl_pio_kept_layer_t *)e;
+            h->size = goperl_pio_kept_size(f, l);
+            const goperl_pio_slot_t *const m = goperl_pio_view_of(&l->next);
+            h->reg.slot = &GOPERL_PIO_KEPT_LAYER(h)->next;
+            h->reg.tok = m ? m->tok : 0;
+            memcpy(GOPERL_PIO_KEPT_LAYER(h), l, h->size);
+            if (prev) prev->next = GOPERL_PIO_KEPT_LAYER(h);
+            prev = GOPERL_PIO_KEPT_LAYER(h);
+            e += GOPERL_PIO_KEPT_STEP(h);
+        }
+        if (prev) prev->next = 0;
+        old[nold++] = k->copy;
+        k->copy = copy;
+        k->ncopy = n;
+        k->top = n ? GOPERL_PIO_KEPT_LAYER(copy) : 0;
+    }
+    goperl_pio_views_v = 0;
+    for (goperl_pio_kept_t *k = r->kept; k; k = k->next) {
+        goperl_pio_register(&k->reg, &k->top, k->reg.tok);
+        char *e = k->copy;
+        for (size_t i = 0; i < k->ncopy; i++) {
+            goperl_pio_kept_layer_t *const h = (goperl_pio_kept_layer_t *)e;
+            if (h->reg.tok) goperl_pio_register(&h->reg, h->reg.slot, h->reg.tok);
+            e += GOPERL_PIO_KEPT_STEP(h);
+        }
+    }
+    for (size_t i = 0; i < nold; i++) free(old[i]);
+    free(old);
+}
+static void goperl_pio_kept_release(goperl_pio_reg_t *r) {
+    while (r->kept) {
+        goperl_pio_kept_t *const k = r->kept;
+        r->kept = k->next;
+        free(k->copy);
+        free(k);
+    }
+}
+/* the handles perl.h's opens answer, as kept handles */
+#undef PerlIO_open
+#undef PerlIO_fdopen
+#undef PerlIO_importFILE
+#define PerlIO_open(path, mode) \
+    goperl_pio_handle(_gof, goperl_pio_tok(_gof, goperl_perlio_open(_gof, (path), (mode))))
+#define PerlIO_fdopen(fd, mode) \
+    goperl_pio_handle(_gof, goperl_pio_tok(_gof, goperl_pio_fdopen(_gof, (fd), (mode))))
+#define PerlIO_importFILE(fp, mode) \
+    goperl_pio_handle(_gof, goperl_pio_tok(_gof, goperl_pio_import(_gof, (fp), (mode))))
+#define PerlIO_openn(...) goperl_pio_handle(_gof, goperl_pio_tok(_gof, (PerlIO_openn)(__VA_ARGS__)))
+
 /* The layers under a handle of a view (a handle, or the next field of a
  * layer) changed (a push, a pop, layers applied): its slot shows them. */
 static void goperl_pio_view_again(goperl_frame_t *f, PerlIO *h) {
     if (!goperl_pio_view_of(h)) return;
     *h = goperl_pio_chain(f, goperl_pio_tok(f, h));
 }
-#define IoIFP(io) goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_IFP, (io), 0, 0, 0))
-#define IoOFP(io) goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_OFP, (io), 0, 0, 0))
-#define PerlIO_stdin() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDIN, 0, 0, 0, 0))
-#define PerlIO_stdout() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDOUT, 0, 0, 0, 0))
-#define PerlIO_stderr() goperl_pio_view(_gof, goperl_pio(_gof, GOPERL_PIO_STDERR, 0, 0, 0, 0))
+#define IoIFP(io) goperl_pio_handle(_gof, goperl_pio(_gof, GOPERL_PIO_IFP, (io), 0, 0, 0))
+#define IoOFP(io) goperl_pio_handle(_gof, goperl_pio(_gof, GOPERL_PIO_OFP, (io), 0, 0, 0))
+#define PerlIO_stdin() goperl_pio_handle(_gof, goperl_pio(_gof, GOPERL_PIO_STDIN, 0, 0, 0, 0))
+#define PerlIO_stdout() goperl_pio_handle(_gof, goperl_pio(_gof, GOPERL_PIO_STDOUT, 0, 0, 0, 0))
+#define PerlIO_stderr() goperl_pio_handle(_gof, goperl_pio(_gof, GOPERL_PIO_STDERR, 0, 0, 0, 0))
 
 /* utf8_strict walks PL_perlio to flush line-buffered TTY handles; there is
  * no host-visible handle table, and the walk exits immediately on NULL. */
@@ -696,9 +891,9 @@ static void goperl_pio_tab_arg(goperl_frame_t *f, const PerlIO_funcs *tab, goper
     w[0] = !tab ? 0 : v ? 1 : 2;
     w[1] = !tab ? 0 : v ? v->gtab : (goperl_gword_t)(uintptr_t)tab;
 }
-/* A handle the interpreter answers, as a view; a handle native code gives
- * it, as the interpreter's. */
-#define GOPERL_PIO_H_IN(f, tok) goperl_pio_view((f), (tok))
+/* A handle the interpreter answers, as a kept handle; a handle native
+ * code gives it, as the interpreter's. */
+#define GOPERL_PIO_H_IN(f, tok) goperl_pio_handle((f), (tok))
 #define GOPERL_PIO_H_OUT(f, h) ((goperl_gword_t)goperl_pio_tok((f), (h)))
 static STDCHAR *goperl_pio_ptr_in(goperl_frame_t *f, uint64_t g) {
     return g ? (STDCHAR *)goperl_guest_mem(f, g) : 0;
@@ -729,10 +924,10 @@ static PerlIO *goperl_pio_c_open(goperl_frame_t *gf, int which, uint64_t id, uin
     goperl_gword_t *const w = (goperl_gword_t *)malloc((12 + inl) * 8);
     if (!w) goperl_croakf(gf, "Out of memory!");
     goperl_pio_tab_arg(gf, tab, w);
-    w[2] = (goperl_gword_t)(uintptr_t)layers;
+    w[2] = GOPERL_PIO_LIST_ADDR(layers);
     w[3] = (goperl_gword_t)n;
     w[4] = (goperl_gword_t)(int64_t)fd;
-    w[5] = (goperl_gword_t)(int64_t)imode;
+    w[5] = (goperl_gword_t)(int64_t)goperl_oflags_to_guest(gf, imode);
     w[6] = (goperl_gword_t)(int64_t)perm;
     w[7] = old ? GOPERL_PIO_H_OUT(gf, old) : 0;
     w[8] = (goperl_gword_t)(int64_t)narg;
@@ -922,6 +1117,35 @@ static PerlIO_funcs *goperl_pio_tab_of(goperl_frame_t *f, uint64_t gtab) {
     return &v->tab;
 }
 
+/* The interpreter's list of layers at g as a view (NULL for none). */
+static PerlIO_list_t *goperl_pio_list(goperl_frame_t *f, uint64_t g) {
+    if (!g) return 0;
+    const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
+        f, goperl_do_op3(f, GOPERL_OP_PERLIO, g, 0, (uint64_t)GOPERL_PIO_LIST_INFO, 0, 0));
+    if (!w) return 0;
+    const IV cur = (IV)w[1];
+    /* a copy: the tables below make operations, which reuse the answer */
+    goperl_gword_t *const c = (goperl_gword_t *)goperl_arena_alloc((size_t)(3 + 2 * cur) * 8);
+    PerlIO_list_t *const l = (PerlIO_list_t *)goperl_arena_alloc(
+        sizeof(PerlIO_list_t) + (size_t)(cur > 0 ? cur : 1) * sizeof(PerlIO_pair_t));
+    if (!c || !l) goperl_croakf(f, "Out of memory!");
+    memcpy(c, w, (size_t)(3 + 2 * cur) * 8);
+    l->refcnt = (IV)c[0];
+    l->cur = cur;
+    l->len = (IV)c[2];
+    l->array = (PerlIO_pair_t *)(l + 1);
+    l->gaddr = g;
+    for (IV i = 0; i < cur; i++) {
+        l->array[i].funcs = goperl_pio_tab_of(f, c[3 + 2 * i]);
+        l->array[i].arg = GOPERL_SV(c[4 + 2 * i]);
+    }
+    return l;
+}
+#define PL_known_layers \
+    goperl_pio_list(_gof, goperl_do_op3(_gof, GOPERL_OP_PERLIO, 0, 0, (uint64_t)GOPERL_PIO_KNOWN_LAYERS, 0, 0))
+#define PL_def_layerlist \
+    goperl_pio_list(_gof, goperl_do_op3(_gof, GOPERL_OP_PERLIO, 0, 0, (uint64_t)GOPERL_PIO_DEF_LAYERLIST, 0, 0))
+
 /* ---- perl's own layer functions -------------------------------------------
  * Each runs perl's function of the name in the interpreter, on the
  * interpreter's layer (whose struct goes there and comes back, see
@@ -1102,8 +1326,28 @@ static int goperl_pio_binmode_view(goperl_frame_t *gf, PerlIO *h, int iotype, in
 #define PerlIO_binmode(...) goperl_pio_binmode_view(_gof, __VA_ARGS__)
 
 /* ---- the stack of layers ------------------------------------------------- */
-static PerlIO *goperl_pio_push(goperl_frame_t *gf, PerlIO *f, PerlIO_funcs *tab, const char *mode,
+/* Whether the table is a class native code defined (the classes are the
+ * instance's: those of every module). */
+static int goperl_pio_class_defined(goperl_frame_t *f, const PerlIO_funcs *tab) {
+    if (!((goperl_shared_t *)f->inst)->pio_layers) return 0;
+    for (const goperl_pio_class_t *c = goperl_pio_reg(f)->classes; c; c = c->next)
+        if (c->tab == tab) return 1;
+    return 0;
+}
+/* perl reads no mode of a push but to give it to the layer's Pushed (and
+ * PerlIO_debug): of a class native code defined whose Pushed is native
+ * code's, that Pushed gets the mode given here, as perl gives it the
+ * pointer it was given, which need not be a string (PerlIO::Util's :tee
+ * passes a struct of its own in its Dup), and the interpreter an empty
+ * one. */
+static PerlIO *goperl_pio_push(goperl_frame_t *gf, PerlIO *f, PerlIO_funcs *tab, const char *given,
                                SV *arg) {
+    const int own = given && tab && goperl_pio_class_defined(gf, tab) && tab->Pushed &&
+                    !goperl_pio_stock_id((void (*)(void))tab->Pushed);
+    const char *const mode = own ? "" : given;
+    goperl_pio_reg_t *const r = own ? goperl_pio_reg(gf) : 0;
+    const PerlIO_funcs *const outer_tab = r ? r->push_tab : 0;
+    const char *const outer_mode = r ? r->push_mode : 0;
     const size_t ml = mode ? __builtin_strlen(mode) + 1 : 0;
     char *const req = (char *)malloc(32 + ml + 1);
     if (!req) goperl_croakf(gf, "Out of memory!");
@@ -1114,14 +1358,22 @@ static PerlIO *goperl_pio_push(goperl_frame_t *gf, PerlIO *f, PerlIO_funcs *tab,
     memcpy(req, w, sizeof w);
     if (ml) memcpy(req + 32, mode, ml);
     const uint64_t tok = goperl_pio_tok(gf, f);
-    const uint64_t r = goperl_pio(gf, GOPERL_PIO_PUSH, f, 0, req, 32 + ml);
+    if (r) {
+        r->push_tab = tab;
+        r->push_mode = given;
+    }
+    const uint64_t h = goperl_pio(gf, GOPERL_PIO_PUSH, f, 0, req, 32 + ml);
+    if (r) {
+        r->push_tab = outer_tab;
+        r->push_mode = outer_mode;
+    }
     free(req);
     goperl_pio_view_again(gf, f);
-    if (!r) {
+    if (!h) {
         goperl_errno_from_interp(gf);
         return 0;
     }
-    return r == tok ? f : goperl_pio_view(gf, r);
+    return h == tok ? f : goperl_pio_handle(gf, h);
 }
 static PerlIO *PerlIO_push(pTHX_ PerlIO *f, PerlIO_funcs *tab, const char *mode, SV *arg) {
     return goperl_pio_push(goperl_cur_frame_v, f, tab, mode, arg);
@@ -1143,7 +1395,7 @@ static PerlIO_funcs *goperl_pio_layer_fetch(goperl_frame_t *gf, PerlIO_list_t *l
                                             PerlIO_funcs *def) {
     goperl_gword_t w[2];
     goperl_pio_tab_arg(gf, def, w);
-    return goperl_pio_tab_of(gf, goperl_do_op3(gf, GOPERL_OP_PERLIO, (uint64_t)(uintptr_t)list,
+    return goperl_pio_tab_of(gf, goperl_do_op3(gf, GOPERL_OP_PERLIO, GOPERL_PIO_LIST_ADDR(list),
                                                (uint64_t)n, (uint64_t)(GOPERL_PIO_LAYER_FETCH),
                                                (const char *)w, sizeof w));
 }
@@ -1151,8 +1403,56 @@ static PerlIO_funcs *PerlIO_layer_fetch(pTHX_ PerlIO_list_t *list, IV n, PerlIO_
     return goperl_pio_layer_fetch(goperl_cur_frame_v, list, n, def);
 }
 static SV *PerlIO_arg_fetch(PerlIO_list_t *list, IV n) {
-    return GOPERL_SV(goperl_do_op3(goperl_cur_frame_v, GOPERL_OP_PERLIO, (uint64_t)(uintptr_t)list,
+    return GOPERL_SV(goperl_do_op3(goperl_cur_frame_v, GOPERL_OP_PERLIO, GOPERL_PIO_LIST_ADDR(list),
                                    (uint64_t)n, (uint64_t)(GOPERL_PIO_ARG_FETCH), 0, 0));
+}
+/* PerlIO_sv_dup: the argument a Getarg slot answers, as perl's of an
+ * interpreter without threads makes it (no interpreter is cloned here) */
+static SV *PerlIO_sv_dup(pTHX_ SV *arg, CLONE_PARAMS *param) {
+    (void)param;
+    return arg ? newSVsv(arg) : 0;
+}
+/* PerlIO_allocate: a new handle of the interpreter's table */
+static PerlIO *PerlIO_allocate(pTHX) {
+    goperl_frame_t *const gf = goperl_cur_frame_v;
+    return goperl_pio_handle(gf, goperl_pio(gf, GOPERL_PIO_ALLOCATE, 0, 0, 0, 0));
+}
+/* PerlIO_apply_layera: the layers n to max of the list on the handle */
+static int PerlIO_apply_layera(pTHX_ PerlIO *f, const char *mode, PerlIO_list_t *layers, IV n,
+                               IV max) {
+    goperl_frame_t *const gf = goperl_cur_frame_v;
+    const size_t ml = mode ? __builtin_strlen(mode) + 1 : 0;
+    char *const req = (char *)malloc(32 + ml + 1);
+    if (!req) goperl_croakf(gf, "Out of memory!");
+    const goperl_gword_t w[4] = {GOPERL_PIO_LIST_ADDR(layers), (goperl_gword_t)n, (goperl_gword_t)max,
+                                 mode ? 1u : 0u};
+    memcpy(req, w, sizeof w);
+    if (ml) memcpy(req + 32, mode, ml);
+    const int r = (int)(int64_t)goperl_pio(gf, GOPERL_PIO_APPLY_LAYERA, f, 0, req, 32 + ml);
+    free(req);
+    goperl_pio_view_again(gf, f);
+    if (r) goperl_errno_from_interp(gf);
+    return r;
+}
+/* PerlIO_fdupopen: a handle on a duplicate of the handle's descriptor, with
+ * its layers (no interpreter is cloned here: param is not used) */
+static PerlIO *PerlIO_fdupopen(pTHX_ PerlIO *f, CLONE_PARAMS *param, int flags) {
+    goperl_frame_t *const gf = goperl_cur_frame_v;
+    (void)param;
+    const uint64_t r = goperl_pio(gf, GOPERL_PIO_FDUPOPEN, f, (uint64_t)(int64_t)flags, 0, 0);
+    if (!r) goperl_errno_from_interp(gf);
+    return goperl_pio_handle(gf, r);
+}
+/* PerlIOUnix_oflags: the open flags of a mode, as this system's */
+static int PerlIOUnix_oflags(const char *mode) {
+    goperl_frame_t *const gf = goperl_cur_frame_v;
+    const int64_t g = (int64_t)goperl_do_op3(gf, GOPERL_OP_PERLIO, 0, 0, (uint64_t)GOPERL_PIO_UNIX_OFLAGS,
+                                             mode ? mode : "", mode ? __builtin_strlen(mode) : 0);
+    if (g == -1) {
+        errno = EINVAL;
+        return -1;
+    }
+    return goperl_oflags_to_host(gf, g);
 }
 #define PerlIOArg PerlIO_arg_fetch(layers, n)
 /* the tables of perl's own layers, as views of the interpreter's */
@@ -1284,10 +1584,17 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v, const unsigned char *re
     PerlIO *const hf = ftok ? goperl_pio_view(f, ftok) : 0;
     goperl_gword_t ret = 0;
     switch (slot) {
-    case GOPERL_PIO_SLOT_PUSHED:
-        ret = (goperl_gword_t)(int64_t)tab->Pushed(aTHX_ hf, A(1) ? STR(2) : 0, GOPERL_SV(A(0)),
-                                                   tab);
+    case GOPERL_PIO_SLOT_PUSHED: {
+        /* the mode of a push native code makes (goperl_pio_push) */
+        goperl_pio_reg_t *const r = goperl_pio_reg(f);
+        const char *mode = A(1) ? STR(2) : 0;
+        if (mode && r->push_tab == tab) {
+            mode = r->push_mode;
+            r->push_tab = 0;
+        }
+        ret = (goperl_gword_t)(int64_t)tab->Pushed(aTHX_ hf, mode, GOPERL_SV(A(0)), tab);
         break;
+    }
     case GOPERL_PIO_SLOT_POPPED:
         ret = (goperl_gword_t)(int64_t)(tab->Popped ? tab->Popped(aTHX_ hf) : 0);
         goperl_iol_kill(f, ltok);
@@ -1295,9 +1602,9 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v, const unsigned char *re
     case GOPERL_PIO_HOOK_DROP: goperl_iol_kill(f, ltok); break;
     case GOPERL_PIO_SLOT_OPEN: {
         PerlIO *const old = A(5) ? goperl_pio_view(f, A(5)) : 0;
-        PerlIO *const h = tab->Open(aTHX_ tab, (PerlIO_list_t *)(uintptr_t)A(0), (IV)A(1),
-                                    A(8) ? STR(9) : 0,
-                                    (int)(int64_t)A(2), (int)(int64_t)A(3), (int)(int64_t)A(4), old,
+        PerlIO *const h = tab->Open(aTHX_ tab, goperl_pio_list(f, A(0)), (IV)A(1),
+                                    A(8) ? STR(9) : 0, (int)(int64_t)A(2),
+                                    goperl_oflags_to_host(f, (int64_t)A(3)), (int)(int64_t)A(4), old,
                                     (int)(int64_t)A(6),
                                     A(7) ? (SV **)goperl_guest_mem(f, A(7)) : 0);
         ret = h ? goperl_pio_tok(f, h) : 0;
@@ -1347,7 +1654,8 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v, const unsigned char *re
             goperl_iol_place_buf(f, s);
             ret = goperl_iol_ptr_out(f, s, p && from && b->buf != from && p >= from ? b->buf + (p - from) : p);
         } else {
-            ret = goperl_guest_addr(f, p);
+            ret = s && p ? goperl_iol_inner_out(f, s, p) : 0;
+            if (!ret) ret = goperl_guest_addr(f, p);
             if (p && !ret)
                 goperl_croakf(f, "PerlIO layer '%s' answered a buffer outside the interpreter's "
                                  "memory",
@@ -1358,7 +1666,7 @@ __goperl_perlio_invoke(goperl_frame_t *f, void *funcs_v, const unsigned char *re
     case GOPERL_PIO_SLOT_GET_BUFSIZ: ret = (goperl_gword_t)tab->Get_bufsiz(aTHX_ hf); break;
     case GOPERL_PIO_SLOT_GET_CNT: ret = (goperl_gword_t)(int64_t)tab->Get_cnt(aTHX_ hf); break;
     case GOPERL_PIO_SLOT_SET_PTRCNT:
-        tab->Set_ptrcnt(aTHX_ hf, goperl_pio_ptr_in(f, A(0)), (SSize_t)(int64_t)A(1));
+        tab->Set_ptrcnt(aTHX_ hf, goperl_iol_inner_in(f, s, A(0)), (SSize_t)(int64_t)A(1));
         break;
     default: goperl_croakf(f, "perlio hook: unknown slot %d", (int)slot);
     }
