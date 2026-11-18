@@ -4590,6 +4590,179 @@ static void goperl_mini_mktime(struct tm *ptm) {
 #define PL_defstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_DEFSTASH))
 #undef PL_tmps_floor
 #define PL_tmps_floor (*(SSize_t *)goperl_plint_ref(_gof, GOPERL_PL_TMPS_FLOOR))
+
+/* ---- the save stack and the temporaries stack, where they are ------------
+ * Their entries are the interpreter's words in its memory, read and written
+ * in place: an SV, an array, a pad there is its token, which is what an SV*
+ * is here; a function pointer of an entry is the interpreter's (a
+ * destructor, a save of native code's own, is the interpreter's trampoline
+ * with the native function's number), to be copied, not called; an op
+ * pointer is the interpreter's address of the op, not a shadow of it.
+ * Native code that takes entries off (PL_savestack_ix -= n) or puts them
+ * on (dSS_ADD ... SS_ADD_END) moves the index, which is an lvalue written
+ * back before the next operation. Room is the interpreter's to make (the
+ * stacks move when they grow): SSCHECK and EXTEND_MORTAL, and dSS_ADD for
+ * the SS_MAXPUSH entries perl keeps spare above the top. */
+#define GOPERL_PL_SAVESTACK_ADDR 119
+#define GOPERL_PL_TMPS_STACK_ADDR 120
+#define GOPERL_PL_SAVESTACK_MAX 121
+#define GOPERL_PL_TMPS_MAX 122
+#define GOPERL_PL_CATCH 123
+#define GOPERL_CALL_SS_ROOM 36
+#define GOPERL_CALL_TMPS_ROOM 37
+#undef PL_savestack_ix
+#define PL_savestack_ix (*(I32 *)goperl_plint_ref(_gof, GOPERL_PL_SAVESTACK_IX))
+#undef PL_tmps_ix
+#define PL_tmps_ix (*(SSize_t *)goperl_plint_ref(_gof, GOPERL_PL_TMPS_IX))
+#define PL_savestack ((ANY *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_SAVESTACK_ADDR)))
+#define PL_savestack_max ((I32)(int64_t)GOPERL_PLVAR(GOPERL_PL_SAVESTACK_MAX))
+#define PL_tmps_stack ((SV **)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_TMPS_STACK_ADDR)))
+#define PL_tmps_max ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_MAX))
+#define CATCH_GET (GOPERL_PLVAR(GOPERL_PL_CATCH) != 0)
+/* room for n entries above the top of the save stack (and the SS_MAXPUSH
+ * spare ones perl keeps above it) */
+static ANY *goperl_ss_room(goperl_frame_t *f, int n) {
+    return (ANY *)goperl_guest_mem(
+        f, goperl_do_op3(f, GOPERL_OP_CALL, 0, (uint64_t)(int64_t)n,
+                         (uint64_t)GOPERL_CALL_SS_ROOM, 0, 0));
+}
+#define SSCHECK(need) ((void)goperl_ss_room(_gof, (int)(need)))
+#define SSGROW(need) SSCHECK(need)
+#define EXTEND_MORTAL(n)                                                        \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_CALL, 0, (uint64_t)(int64_t)(n),         \
+                         (uint64_t)GOPERL_CALL_TMPS_ROOM, 0, 0))
+/* the save types of this perl (scope_types.h) */
+#define SAVE_TIGHT_SHIFT 6
+#define SAVE_MASK 0x3F
+#define SS_MAXPUSH 4
+#define SAVEt_ALLOC 0
+#define SAVEt_CLEARPADRANGE 1
+#define SAVEt_CLEARSV 2
+#define SAVEt_REGCONTEXT 3
+#define SAVEt_PADSV_NULL 4
+#define SAVEt_TMPSFLOOR 5
+#define SAVEt_BOOL 6
+#define SAVEt_COMPILE_WARNINGS 7
+#define SAVEt_CURCOP_WARNINGS 8
+#define SAVEt_COMPPAD 9
+#define SAVEt_FREECOPHH 10
+#define SAVEt_FREEOP 11
+#define SAVEt_FREEPV 12
+#define SAVEt_FREESV 13
+#define SAVEt_I16 14
+#define SAVEt_I32_SMALL 15
+#define SAVEt_I8 16
+#define SAVEt_INT_SMALL 17
+#define SAVEt_MORTALIZESV 18
+#define SAVEt_NSTAB 19
+#define SAVEt_OP 20
+#define SAVEt_PARSER 21
+#define SAVEt_STACK_POS 22
+#define SAVEt_READONLY_OFF 23
+#define SAVEt_FREEPADNAME 24
+#define SAVEt_STRLEN_SMALL 25
+#define SAVEt_FREERCPV 26
+#define SAVEt_FREE_REXC_STATE 27
+#define SAVEt_PADSV 28
+#define SAVEt_AV 29
+#define SAVEt_DESTRUCTOR 30
+#define SAVEt_DESTRUCTOR_X 31
+#define SAVEt_GENERIC_PVREF 32
+#define SAVEt_GENERIC_SVREF 33
+#define SAVEt_GP 34
+#define SAVEt_GVSV 35
+#define SAVEt_HINTS 36
+#define SAVEt_HPTR 37
+#define SAVEt_HV 38
+#define SAVEt_I32 39
+#define SAVEt_INT 40
+#define SAVEt_ITEM 41
+#define SAVEt_IV 42
+#define SAVEt_PPTR 43
+#define SAVEt_SAVESWITCHSTACK 44
+#define SAVEt_SHARED_PVREF 45
+#define SAVEt_SPTR 46
+#define SAVEt_STRLEN 47
+#define SAVEt_SV 48
+#define SAVEt_SVREF 49
+#define SAVEt_VPTR 50
+#define SAVEt_ADELETE 51
+#define SAVEt_APTR 52
+#define SAVEt_RCPV 53
+#define SAVEt_HELEM 54
+#define SAVEt_PADSV_AND_MORTALIZE 55
+#define SAVEt_SET_SVFLAGS 56
+#define SAVEt_GVSLOT 57
+#define SAVEt_AELEM 58
+#define SAVEt_DELETE 59
+#define SAVEt_HINTS_HH 60
+/* the raw pushes of scope.h: entries written in place above the top, the
+ * index moved at the end (room: SSCHECK first, or the spare entries) */
+#define dSS_ADD                                         \
+    I32 ix = PL_savestack_ix;                           \
+    ANY *ssp = goperl_ss_room(_gof, SS_MAXPUSH) + ix
+#define SS_ADD_INT(i) ((ssp++)->any_i32 = (I32)(i))
+#define SS_ADD_LONG(i) ((ssp++)->any_long = (long)(i))
+#define SS_ADD_BOOL(p) ((ssp++)->any_bool = (p))
+#define SS_ADD_IV(i) ((ssp++)->any_iv = (IV)(i))
+#define SS_ADD_UV(u) ((ssp++)->any_uv = (UV)(u))
+#define SS_ADD_PTR(p) ((ssp++)->any_ptr = (void *)(p))
+#define SS_ADD_DPTR(p) ((ssp++)->any_dptr = (p))
+#define SS_ADD_DXPTR(p) ((ssp++)->any_dxptr = (p))
+#define SS_ADD_END(need) (ix += (need), PL_savestack_ix = ix)
+#define SSPUSHINT(i) (PL_savestack[PL_savestack_ix++].any_i32 = (I32)(i))
+#define SSPUSHLONG(i) (PL_savestack[PL_savestack_ix++].any_long = (long)(i))
+#define SSPUSHBOOL(p) (PL_savestack[PL_savestack_ix++].any_bool = (p))
+#define SSPUSHIV(i) (PL_savestack[PL_savestack_ix++].any_iv = (IV)(i))
+#define SSPUSHUV(u) (PL_savestack[PL_savestack_ix++].any_uv = (UV)(u))
+#define SSPUSHPTR(p) (PL_savestack[PL_savestack_ix++].any_ptr = (void *)(p))
+#define SSPUSHDPTR(p) (PL_savestack[PL_savestack_ix++].any_dptr = (p))
+#define SSPUSHDXPTR(p) (PL_savestack[PL_savestack_ix++].any_dxptr = (p))
+#define SSPOPINT (PL_savestack[--PL_savestack_ix].any_i32)
+#define SSPOPLONG (PL_savestack[--PL_savestack_ix].any_long)
+#define SSPOPBOOL (PL_savestack[--PL_savestack_ix].any_bool)
+#define SSPOPIV (PL_savestack[--PL_savestack_ix].any_iv)
+#define SSPOPUV (PL_savestack[--PL_savestack_ix].any_uv)
+#define SSPOPPTR (PL_savestack[--PL_savestack_ix].any_ptr)
+#define SSPOPDPTR (PL_savestack[--PL_savestack_ix].any_dptr)
+#define SSPOPDXPTR (PL_savestack[--PL_savestack_ix].any_dxptr)
+/* the pushes of a pointer, two, and an integer with a pointer, with the
+ * save type on top (scope.c) */
+static void goperl_save_pushptr(goperl_frame_t *f, const void *ptr, int type) {
+    ANY *ss = goperl_ss_room(f, 2);
+    I32 *const ixp = (I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    ss[*ixp].any_ptr = (void *)ptr;
+    ss[*ixp + 1].any_uv = (UV)type;
+    *ixp += 2;
+}
+static void goperl_save_pushptrptr(goperl_frame_t *f, const void *p1, const void *p2, int type) {
+    ANY *ss = goperl_ss_room(f, 3);
+    I32 *const ixp = (I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    ss[*ixp].any_ptr = (void *)p1;
+    ss[*ixp + 1].any_ptr = (void *)p2;
+    ss[*ixp + 2].any_uv = (UV)type;
+    *ixp += 3;
+}
+static void goperl_save_pushi32ptr(goperl_frame_t *f, I32 i, const void *ptr, int type) {
+    ANY *ss = goperl_ss_room(f, 3);
+    I32 *const ixp = (I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    ss[*ixp].any_i32 = i;
+    ss[*ixp + 1].any_ptr = (void *)ptr;
+    ss[*ixp + 2].any_uv = (UV)type;
+    *ixp += 3;
+}
+#define save_pushptr(ptr, type) goperl_save_pushptr(_gof, (const void *)(ptr), (int)(type))
+#define Perl_save_pushptr(my_perl, ptr, type) save_pushptr(ptr, type)
+#define save_pushptrptr(p1, p2, type) \
+    goperl_save_pushptrptr(_gof, (const void *)(p1), (const void *)(p2), (int)(type))
+#define Perl_save_pushptrptr(my_perl, p1, p2, type) save_pushptrptr(p1, p2, type)
+#define save_pushi32ptr(i, ptr, type) \
+    goperl_save_pushi32ptr(_gof, (I32)(i), (const void *)(ptr), (int)(type))
+#define Perl_save_pushi32ptr(my_perl, i, ptr, type) save_pushi32ptr(i, ptr, type)
+#define savestack_grow() SSCHECK(128)
+#define Perl_savestack_grow(my_perl) savestack_grow()
+#define savestack_grow_cnt(n) SSCHECK(n)
+#define Perl_savestack_grow_cnt(my_perl, n) savestack_grow_cnt(n)
 /* The mask of the ops a compilation refuses (Safe's opmask), MAXO bytes in
  * the interpreter's memory, or NULL: in this process, a pointer into that
  * memory (where the buffer of a string is, SvPVX). */

@@ -126,18 +126,18 @@ func TestSDKInternalsGoPerlDoesNotGive(t *testing.T) {
 #include "perl.h"
 #include "XSUB.h"
 #include "perliol.h"
-#ifndef SAVEt_ALLOC
-#error "SAVEt_ALLOC is not defined"
+#ifndef PL_main_root
+#error "PL_main_root is not defined"
 #endif
 static int uses(SV *sv, PerlIO *f) {
     I32 base = PL_savestack_ix;
-    int t = SAVEt_ALLOC;
-    void *top = PL_savestack;
+    void *root = PL_main_root;
+    void *top = PL_eval_root;
     SSize_t n = sizeof(XPVMG);
-    SV **tmps = PL_tmps_stack;
+    int t = CATCH_SET(1);
     PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1);
     save_alloc(8, 0);
-    (void)sv; (void)f; (void)top; (void)n; (void)tmps; (void)tab;
+    (void)sv; (void)f; (void)top; (void)n; (void)root; (void)tab;
     return (int)base + t;
 }
 `)
@@ -145,7 +145,7 @@ static int uses(SV *sv, PerlIO *f) {
 		t.Fatal("a module using perl's internals built")
 	}
 	const phrase = "go-perl gives native code no access to this interpreter internal: "
-	for _, name := range []string{"SAVEt_ALLOC", "PL_savestack", "XPVMG", "PL_tmps_stack", "PerlIO_find_layer", "save_alloc"} {
+	for _, name := range []string{"PL_main_root", "PL_eval_root", "XPVMG", "CATCH_SET", "PerlIO_find_layer", "save_alloc"} {
 		if !strings.Contains(string(out), phrase+name) {
 			t.Errorf("no %q in what the compiler said:\n%s", phrase+name, out)
 		}

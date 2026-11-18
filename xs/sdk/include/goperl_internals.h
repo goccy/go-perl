@@ -23,172 +23,6 @@
 #define GOPERL_NO_INTERNAL_PRAGMA(x) _Pragma(#x)
 
 /* the save stack (scope.h) */
-#undef SAVEt_ADELETE
-#define SAVEt_ADELETE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_ADELETE") 0
-#undef SAVEt_AELEM
-#define SAVEt_AELEM GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_AELEM") 0
-#undef SAVEt_ALLOC
-#define SAVEt_ALLOC GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_ALLOC") 0
-#undef SAVEt_APTR
-#define SAVEt_APTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_APTR") 0
-#undef SAVEt_AV
-#define SAVEt_AV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_AV") 0
-#undef SAVEt_BOOL
-#define SAVEt_BOOL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_BOOL") 0
-#undef SAVEt_CLEARPADRANGE
-#define SAVEt_CLEARPADRANGE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_CLEARPADRANGE") 0
-#undef SAVEt_CLEARSV
-#define SAVEt_CLEARSV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_CLEARSV") 0
-#undef SAVEt_COMPILE_WARNINGS
-#define SAVEt_COMPILE_WARNINGS GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_COMPILE_WARNINGS") 0
-#undef SAVEt_COMPPAD
-#define SAVEt_COMPPAD GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_COMPPAD") 0
-#undef SAVEt_CURCOP_WARNINGS
-#define SAVEt_CURCOP_WARNINGS GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_CURCOP_WARNINGS") 0
-#undef SAVEt_DELETE
-#define SAVEt_DELETE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_DELETE") 0
-#undef SAVEt_DESTRUCTOR
-#define SAVEt_DESTRUCTOR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_DESTRUCTOR") 0
-#undef SAVEt_DESTRUCTOR_X
-#define SAVEt_DESTRUCTOR_X GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_DESTRUCTOR_X") 0
-#undef SAVEt_FREE_REXC_STATE
-#define SAVEt_FREE_REXC_STATE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREE_REXC_STATE") 0
-#undef SAVEt_FREECOPHH
-#define SAVEt_FREECOPHH GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREECOPHH") 0
-#undef SAVEt_FREEOP
-#define SAVEt_FREEOP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREEOP") 0
-#undef SAVEt_FREEPADNAME
-#define SAVEt_FREEPADNAME GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREEPADNAME") 0
-#undef SAVEt_FREEPV
-#define SAVEt_FREEPV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREEPV") 0
-#undef SAVEt_FREERCPV
-#define SAVEt_FREERCPV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREERCPV") 0
-#undef SAVEt_FREESV
-#define SAVEt_FREESV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_FREESV") 0
-#undef SAVEt_GENERIC_PVREF
-#define SAVEt_GENERIC_PVREF GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_GENERIC_PVREF") 0
-#undef SAVEt_GENERIC_SVREF
-#define SAVEt_GENERIC_SVREF GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_GENERIC_SVREF") 0
-#undef SAVEt_GP
-#define SAVEt_GP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_GP") 0
-#undef SAVEt_GVSLOT
-#define SAVEt_GVSLOT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_GVSLOT") 0
-#undef SAVEt_GVSV
-#define SAVEt_GVSV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_GVSV") 0
-#undef SAVEt_HELEM
-#define SAVEt_HELEM GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_HELEM") 0
-#undef SAVEt_HINTS
-#define SAVEt_HINTS GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_HINTS") 0
-#undef SAVEt_HINTS_HH
-#define SAVEt_HINTS_HH GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_HINTS_HH") 0
-#undef SAVEt_HPTR
-#define SAVEt_HPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_HPTR") 0
-#undef SAVEt_HV
-#define SAVEt_HV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_HV") 0
-#undef SAVEt_I16
-#define SAVEt_I16 GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_I16") 0
-#undef SAVEt_I32
-#define SAVEt_I32 GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_I32") 0
-#undef SAVEt_I32_SMALL
-#define SAVEt_I32_SMALL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_I32_SMALL") 0
-#undef SAVEt_I8
-#define SAVEt_I8 GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_I8") 0
-#undef SAVEt_INT
-#define SAVEt_INT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_INT") 0
-#undef SAVEt_INT_SMALL
-#define SAVEt_INT_SMALL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_INT_SMALL") 0
-#undef SAVEt_ITEM
-#define SAVEt_ITEM GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_ITEM") 0
-#undef SAVEt_IV
-#define SAVEt_IV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_IV") 0
-#undef SAVEt_MORTALIZESV
-#define SAVEt_MORTALIZESV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_MORTALIZESV") 0
-#undef SAVEt_NSTAB
-#define SAVEt_NSTAB GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_NSTAB") 0
-#undef SAVEt_OP
-#define SAVEt_OP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_OP") 0
-#undef SAVEt_PADSV
-#define SAVEt_PADSV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_PADSV") 0
-#undef SAVEt_PADSV_AND_MORTALIZE
-#define SAVEt_PADSV_AND_MORTALIZE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_PADSV_AND_MORTALIZE") 0
-#undef SAVEt_PADSV_NULL
-#define SAVEt_PADSV_NULL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_PADSV_NULL") 0
-#undef SAVEt_PARSER
-#define SAVEt_PARSER GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_PARSER") 0
-#undef SAVEt_PPTR
-#define SAVEt_PPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_PPTR") 0
-#undef SAVEt_RCPV
-#define SAVEt_RCPV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_RCPV") 0
-#undef SAVEt_READONLY_OFF
-#define SAVEt_READONLY_OFF GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_READONLY_OFF") 0
-#undef SAVEt_REGCONTEXT
-#define SAVEt_REGCONTEXT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_REGCONTEXT") 0
-#undef SAVEt_SAVESWITCHSTACK
-#define SAVEt_SAVESWITCHSTACK GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SAVESWITCHSTACK") 0
-#undef SAVEt_SET_SVFLAGS
-#define SAVEt_SET_SVFLAGS GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SET_SVFLAGS") 0
-#undef SAVEt_SHARED_PVREF
-#define SAVEt_SHARED_PVREF GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SHARED_PVREF") 0
-#undef SAVEt_SPTR
-#define SAVEt_SPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SPTR") 0
-#undef SAVEt_STACK_POS
-#define SAVEt_STACK_POS GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_STACK_POS") 0
-#undef SAVEt_STRLEN
-#define SAVEt_STRLEN GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_STRLEN") 0
-#undef SAVEt_STRLEN_SMALL
-#define SAVEt_STRLEN_SMALL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_STRLEN_SMALL") 0
-#undef SAVEt_SV
-#define SAVEt_SV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SV") 0
-#undef SAVEt_SVREF
-#define SAVEt_SVREF GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_SVREF") 0
-#undef SAVEt_TMPSFLOOR
-#define SAVEt_TMPSFLOOR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_TMPSFLOOR") 0
-#undef SAVEt_VPTR
-#define SAVEt_VPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVEt_VPTR") 0
-#undef SAVE_MASK
-#define SAVE_MASK GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVE_MASK") 0
-#undef SAVE_TIGHT_SHIFT
-#define SAVE_TIGHT_SHIFT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SAVE_TIGHT_SHIFT") 0
-#undef PL_savestack
-#define PL_savestack GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_savestack") 0
-#undef PL_savestack_max
-#define PL_savestack_max GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_savestack_max") 0
-#undef SSPUSHINT
-#define SSPUSHINT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHINT") 0
-#undef SSPUSHLONG
-#define SSPUSHLONG GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHLONG") 0
-#undef SSPUSHBOOL
-#define SSPUSHBOOL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHBOOL") 0
-#undef SSPUSHIV
-#define SSPUSHIV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHIV") 0
-#undef SSPUSHUV
-#define SSPUSHUV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHUV") 0
-#undef SSPUSHPTR
-#define SSPUSHPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHPTR") 0
-#undef SSPUSHDPTR
-#define SSPUSHDPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHDPTR") 0
-#undef SSPUSHDXPTR
-#define SSPUSHDXPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPUSHDXPTR") 0
-#undef SSPOPINT
-#define SSPOPINT GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPINT") 0
-#undef SSPOPLONG
-#define SSPOPLONG GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPLONG") 0
-#undef SSPOPBOOL
-#define SSPOPBOOL GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPBOOL") 0
-#undef SSPOPIV
-#define SSPOPIV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPIV") 0
-#undef SSPOPUV
-#define SSPOPUV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPUV") 0
-#undef SSPOPPTR
-#define SSPOPPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPPTR") 0
-#undef SSPOPDPTR
-#define SSPOPDPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPDPTR") 0
-#undef SSPOPDXPTR
-#define SSPOPDXPTR GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSPOPDXPTR") 0
-#undef SSCHECK
-#define SSCHECK GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSCHECK") 0
-#undef SSGROW
-#define SSGROW GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SSGROW") 0
 #undef save_alloc
 #define save_alloc GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: save_alloc") 0
 #undef Perl_save_alloc
@@ -197,26 +31,6 @@
 #define leave_scope GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: leave_scope") 0
 #undef Perl_leave_scope
 #define Perl_leave_scope GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_leave_scope") 0
-#undef save_pushptr
-#define save_pushptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: save_pushptr") 0
-#undef Perl_save_pushptr
-#define Perl_save_pushptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_save_pushptr") 0
-#undef save_pushptrptr
-#define save_pushptrptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: save_pushptrptr") 0
-#undef Perl_save_pushptrptr
-#define Perl_save_pushptrptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_save_pushptrptr") 0
-#undef save_pushi32ptr
-#define save_pushi32ptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: save_pushi32ptr") 0
-#undef Perl_save_pushi32ptr
-#define Perl_save_pushi32ptr GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_save_pushi32ptr") 0
-#undef savestack_grow
-#define savestack_grow GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: savestack_grow") 0
-#undef Perl_savestack_grow
-#define Perl_savestack_grow GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_savestack_grow") 0
-#undef savestack_grow_cnt
-#define savestack_grow_cnt GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: savestack_grow_cnt") 0
-#undef Perl_savestack_grow_cnt
-#define Perl_savestack_grow_cnt GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_savestack_grow_cnt") 0
 
 /* the pads and the context and stackinfo stacks */
 #undef pad_push
@@ -233,10 +47,6 @@
 #define Perl_new_stackinfo_flags GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_new_stackinfo_flags") 0
 #undef SWITCHSTACK
 #define SWITCHSTACK GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SWITCHSTACK") 0
-#undef PL_tmps_stack
-#define PL_tmps_stack GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_tmps_stack") 0
-#undef PL_tmps_max
-#define PL_tmps_max GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_tmps_max") 0
 
 /* the op tree and the match op's regexp */
 #undef cPMOPo
@@ -291,8 +101,6 @@
 #define PL_sv_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_sv_root") 0
 
 /* the catch flag of the jump environment */
-#undef CATCH_GET
-#define CATCH_GET GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: CATCH_GET") 0
 #undef CATCH_SET
 #define CATCH_SET GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: CATCH_SET") 0
 
