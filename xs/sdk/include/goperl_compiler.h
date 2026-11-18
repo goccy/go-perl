@@ -731,6 +731,16 @@ static __attribute__((unused)) void goperl_pads_rest(goperl_frame_t *f) {
 #define PadnameOUTER_on(pn) (PadnameFLAGS(pn) |= PADNAMEf_OUTER)
 #define PadnameOUTER_off(pn) (PadnameFLAGS(pn) &= ~PADNAMEf_OUTER)
 #define PadnameOURSTASH_set(pn, s) (PadnameOURSTASH(pn) = (s))
+/* pad.h: the names of the pad being compiled, by offset */
+#define PAD_COMPNAME(po) PAD_COMPNAME_SV(po)
+#define PAD_COMPNAME_SV(po) (PadnamelistARRAY(PL_comppad_name)[(po)])
+#define PAD_COMPNAME_FLAGS(po) PadnameFLAGS(PAD_COMPNAME(po))
+#define PAD_COMPNAME_FLAGS_isOUR(po) PadnameIsOUR(PAD_COMPNAME_SV(po))
+#define PAD_COMPNAME_PV(po) PadnamePV(PAD_COMPNAME(po))
+#define PAD_COMPNAME_TYPE(po) PadnameTYPE(PAD_COMPNAME(po))
+#define PAD_COMPNAME_OURSTASH(po) (PadnameOURSTASH(PAD_COMPNAME_SV(po)))
+#define PAD_COMPNAME_GEN(po) ((STRLEN)PAD_COMPNAME_SV(po)->xpadn_gen)
+#define PAD_COMPNAME_GEN_set(po, gen) (PAD_COMPNAME_SV(po)->xpadn_gen = (gen))
 #define PadnameTYPE_set(pn, s) (PadnameTYPE(pn) = (s))
 /* pad.h's names from before pad names were structures of their own (a
  * module that does not find PadnameIsOUR_on falls back to SvPAD_OUR_on,
