@@ -136,6 +136,11 @@ type Perl struct {
 	// belong to the goroutine that runs the interpreter.
 	callbackDepth int
 	jump          guestJump
+	// exit is the raw exit of the guest (wasi proc_exit: the end of an
+	// exec, POSIX::_exit) that an operation native code asked for ended
+	// in: see parkGuestExit. It cannot ride on the module as a jump does:
+	// the guest ran its exit to the end, and nothing of it may run again.
+	exit *base.WasiExitError
 	// xsOpCall is XSOpRun's call of the guest, made once (a closure made
 	// for every operation native code runs was allocated each time), and
 	// xsOpParked whether the operation it ran last parked a jump.
