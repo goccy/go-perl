@@ -426,6 +426,10 @@ struct goperl_gv {
 struct goperl_io {
     GOPERL_SV_HEAD
 };
+/* A pattern, perl's struct p5rx (REGEXP, goperl_perlapi.h). */
+struct goperl_rx {
+    GOPERL_SV_HEAD
+};
 /* The body of an IV as the interpreter lays it out (the head of a string's
  * body, 32 bytes, then the integer), for the offset of its integer
  * (STRUCT_OFFSET(XPVIV, xiv_iv)) in perl's bodyless IV; the members give
@@ -869,7 +873,7 @@ struct op {
      * split's glob (op_pmtargetgv) and a match's stash, as perl without
      * threads has them, and the code blocks of the pattern */
     U32 op_pmflags;
-    struct goperl_sv *op_pmregexp;
+    struct goperl_rx *op_pmregexp; /* a REGEXP, as perl types it */
     union {
         OP *op_pmreplroot;
         UV op_pmtargetoff;
@@ -3979,6 +3983,8 @@ static inline int goperl_is_value_ptr(struct goperl_gv *) { return 1; }
 static inline int goperl_is_value_ptr(const struct goperl_gv *) { return 1; }
 static inline int goperl_is_value_ptr(struct goperl_io *) { return 1; }
 static inline int goperl_is_value_ptr(const struct goperl_io *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_rx *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_rx *) { return 1; }
 static inline int goperl_is_value_ptr(void *) { return 1; }
 static inline int goperl_is_value_ptr(const void *) { return 1; }
 }
@@ -3989,7 +3995,8 @@ static inline int goperl_is_value_ptr(const void *) { return 1; }
              const struct goperl_cv *: 1, struct goperl_av *: 1, const struct goperl_av *: 1,   \
              struct goperl_hv *: 1, const struct goperl_hv *: 1, struct goperl_gv *: 1,         \
              const struct goperl_gv *: 1, struct goperl_io *: 1, const struct goperl_io *: 1,   \
-             void *: 1, const void *: 1, default: 0)
+             struct goperl_rx *: 1, const struct goperl_rx *: 1, void *: 1, const void *: 1,    \
+             default: 0)
 #endif
 #define SvREFCNT_inc(sv) \
     ({ GOPERL_ONCE(goperl_SvREFCNT_inc_sv_, sv); \
@@ -6634,7 +6641,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     const int cls = (int)((bits >> 8) & 0xFF);
     if (cls == GOPERL_OPCLASS_PMOP) {
         o->op_pmflags = (U32)w[GOPERL_OPREC_PMFLAGS];
-        o->op_pmregexp = GOPERL_SV(w[GOPERL_OPREC_PMREGEXP]);
+        o->op_pmregexp = (struct goperl_rx *)GOPERL_SV(w[GOPERL_OPREC_PMREGEXP]);
         /* the unions are ops of a substitution only: a split's glob and a
          * match's stash are values */
         if (o->op_type == OP_SUBST) {
@@ -12011,7 +12018,7 @@ struct goperl_op_base {
     U32 cop_features;
     /* a PMOP's and a PADOP's fields (stores of a class's own member) */
     U32 op_pmflags;
-    SV *op_pmregexp;
+    struct goperl_rx *op_pmregexp;
     uint64_t op_pmreplroot;
     uint64_t op_pmstashstart;
     OP *op_code_list;
