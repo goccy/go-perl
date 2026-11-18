@@ -56,10 +56,16 @@ var nativeInterruptReady = sync.OnceValue(func() bool {
 
 // nativeThreadSelf returns the thread the caller runs on (its OS thread
 // locked), for interruptNativeThread; ok is false where native code cannot
-// be interrupted.
-func nativeThreadSelf() (thread uint64, ok bool) {
+// be interrupted. A native call made in a callback of the guest runs on
+// the instance's thread, whose id the instance knows (the kernel's thread
+// id, as here): only a call made elsewhere asks the kernel, which every
+// native call did before, a system call each.
+func (s *state) nativeThreadSelf() (thread uint64, ok bool) {
 	if !nativeInterruptReady() {
 		return 0, false
+	}
+	if tid, ok := s.p.CallbackThreadID(); ok {
+		return tid, true
 	}
 	return uint64(syscall.Gettid()), true
 }

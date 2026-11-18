@@ -22,7 +22,7 @@ package xs
 // with what it returned once that code has returned. Calls nest (native
 // code can call back into the program, which can call native code again).
 func (s *state) enterNative() (prevThread uint64, prevInterrupt func(), entered bool) {
-	thread, ok := nativeThreadSelf()
+	thread, ok := s.nativeThreadSelf()
 	if !ok {
 		return 0, nil, false
 	}

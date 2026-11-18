@@ -252,14 +252,39 @@ type cFrame struct {
 	p *internal.Perl
 }
 
-// newFrame returns a frame of this instance with no stack yet.
+// framePool keeps the frames of native calls that have ended for the next
+// ones. A frame is 6 KB (its stack, marks and message buffer): allocated for
+// every call, frames made the collector run every few thousand calls, and
+// each collection stops the instance's thread while it runs guest code
+// (suspendG), which native-call-heavy programs spent more time in than in
+// the allocations themselves.
+var framePool = sync.Pool{New: func() any { return new(cFrame) }}
+
+// newFrame returns a frame of this instance with no stack yet: one that
+// ended (recycleFrame) and is cleared whole, or a new one.
 func (s *state) newFrame() *cFrame {
-	f := &cFrame{api: uintptr(unsafe.Pointer(vtable)), p: s.p, instShared: s.sharedRaw, opbox: s.opbox}
+	f := framePool.Get().(*cFrame)
+	*f = cFrame{}
+	f.api = uintptr(unsafe.Pointer(vtable))
+	f.p = s.p
+	f.instShared = s.sharedRaw
+	f.opbox = s.opbox
 	f.memSize = uintptr(unsafe.Pointer(s.p.MemorySizeWord()))
 	if mem := s.p.RawMemory(); cap(mem) > 0 {
 		f.memBase = uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
 	}
 	return f
+}
+
+// recycleFrame gives back the frame of a native call that has ended, for
+// newFrame to hand out again: it is no longer pinned, its stack is released,
+// and nothing reads it any more. Native code holds no pointer into it either:
+// the SDK puts the frame that was current before a call back when the call
+// leaves, and takes a frame that starts at the address of an ended one for
+// the new frame it is.
+func recycleFrame(f *cFrame) {
+	f.p = nil
+	framePool.Put(f)
 }
 
 // cAPI mirrors goperl_api_t (ABI).
@@ -370,6 +395,11 @@ type state struct {
 	// hands it to the runtime (enterNative), and a method value made there
 	// would be allocated each time.
 	interrupt func()
+	// resp holds the answer of the native call that returned last
+	// (dispatch): the guest's callback copies an answer into its own memory
+	// before anything else runs, so one buffer serves every call, where a
+	// new one was allocated for each.
+	resp []byte
 	// libs and syms are what DynaLoader's dl_load_file and dl_find_symbol
 	// handed to Perl code: the library handles and the addresses of the
 	// symbols themselves, as perl's dl_dlopen.xs hands them (SPVM passes
@@ -1108,7 +1138,10 @@ func (s *state) dispatch(req []byte) []byte {
 	f.gstack = wordAt(req, 4)
 	f.below = int32(ax)
 	fp := pinFrame(f)
-	defer unpinFrame(fp)
+	defer func() {
+		unpinFrame(fp)
+		recycleFrame(f)
+	}()
 	// The XSUB call and the epilogue that closes its activation must run
 	// on ONE OS thread: the SDK's current-frame state is per-thread, and
 	// the Go scheduler is otherwise free to migrate the goroutine between
@@ -1155,7 +1188,10 @@ func (s *state) dispatch(req []byte) []byte {
 	if n < 0 {
 		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d below ax %d)", top, ax))
 	}
-	resp := make([]byte, 1+8+8*n)
+	if need := 1 + 8 + 8*n; cap(s.resp) < need {
+		s.resp = make([]byte, need, max(need, 64))
+	}
+	resp := s.resp[:1+8+8*n]
 	resp[0] = 1
 	binary.LittleEndian.PutUint64(resp[1:], uint64(n))
 	for i := 0; i < n; i++ {
@@ -1218,6 +1254,7 @@ func (s *state) ppHook(req []byte) []byte {
 	}
 
 	f := s.newFrame()
+	defer recycleFrame(f)
 	f.hookOpTok = opTok
 	f.items = int32(depth)
 	f.ppFrame = 1

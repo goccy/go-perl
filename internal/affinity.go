@@ -73,6 +73,23 @@ const (
 // (see serve). With one processor for Go code neither side spins.
 const handOffSpin = 50 * time.Microsecond
 
+// CallbackThreadID returns the id (threadID) of the thread the guest's
+// callbacks run on while one runs: the instance's thread, where every entry
+// into the guest of an instance that has one runs, and so every callback.
+// ok is false outside a callback, and for an instance without a thread. It
+// spares a caller that needs the id in a callback the system call that
+// would find it out.
+func (p *Perl) CallbackThreadID() (uint64, bool) {
+	if p.callbackDepth == 0 {
+		return 0, false
+	}
+	t := p.thread.Load()
+	if t == nil {
+		return 0, false
+	}
+	return t.tid, true
+}
+
 // spinning reports whether the two sides of a hand-off spin (handOffSpin).
 func spinning() bool { return runtime.GOMAXPROCS(0) > 1 }
 

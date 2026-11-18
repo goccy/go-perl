@@ -6,6 +6,6 @@ package xs
 // which this package does not describe: native code is not interrupted by
 // the program's signals.
 
-func nativeThreadSelf() (thread uint64, ok bool) { return 0, false }
+func (s *state) nativeThreadSelf() (thread uint64, ok bool) { return 0, false }
 
 func interruptNativeThread(thread uint64) {}

@@ -72,7 +72,7 @@ var nativeInterruptReady = sync.OnceValue(func() bool {
 // nativeThreadSelf returns the thread the caller runs on (its OS thread
 // locked), for interruptNativeThread; ok is false where native code cannot
 // be interrupted.
-func nativeThreadSelf() (thread uint64, ok bool) {
+func (s *state) nativeThreadSelf() (thread uint64, ok bool) {
 	if !nativeInterruptReady() {
 		return 0, false
 	}
