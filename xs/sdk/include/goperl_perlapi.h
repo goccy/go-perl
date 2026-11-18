@@ -2178,6 +2178,55 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
        (void)GOPERL_SVSTR(GOPERL_SVSTR_HV_NAME_SET, hv,                     \
                           (U32)(flags) | (goperl_hv_name_set_name_ ? 0u : 0x80000000u), \
                           goperl_hv_name_set_name_, goperl_hv_name_set_name_ ? (len) : 0); })
+/* the target offset and length of an lvalue scalar, fields of its body */
+#define LvTARGOFF(sv) \
+    (*(STRLEN *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTARGOFF, GOPERL_LV_AT))
+#define LvSTARGOFF(sv) \
+    (*(SSize_t *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTARGOFF, GOPERL_LV_AT))
+#define LvTARGLEN(sv) \
+    (*(STRLEN *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTARGLEN, GOPERL_LV_AT))
+/* pp.h: a pp function dies and returns no op (the die does not return) */
+#define DIE(...) return (Perl_die(__VA_ARGS__), (OP *)0)
+/* scope.h: the value of a pad entry is cleared at the scope's end */
+#define SAVECLEARSV(sv) save_clearsv((SV **)&(sv))
+/* the scopes a context opened are left, as cx_popblock's caller does first */
+#define CX_LEAVE_SCOPE(cx) LEAVE_SCOPE((cx)->blk_oldsaveix)
+/* the mark stack has room for another mark: what PL_markstack_ptr was moved
+ * to (its end, which is why) is where it is in the grown stack */
+static I32 *goperl_markstack_grow(goperl_frame_t *f) {
+    goperl_marks_adopt(f);
+    goperl_marks_grow(f);
+    goperl_marks_publish(f);
+    return goperl_markstack_ptr_v;
+}
+#define markstack_grow() goperl_markstack_grow(_gof)
+#define Perl_markstack_grow(...) goperl_markstack_grow(_gof)
+/* av_reify (a sub's @_ made real), vivify_defelem (the element an lvalue
+ * scalar of a missing hash or array element stands for, made), and
+ * save_delete, SAVEDELETE (the key, savepvn's, is the call's) */
+#define GOPERL_INT_AV_REIFY 52
+#define GOPERL_INT_VIVIFY_DEFELEM 53
+#define av_reify(av) \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_INTERNAL, GOPERL_TOK(av), 0, GOPERL_INT_AV_REIFY, 0, 0))
+#define Perl_av_reify(...) av_reify(GOPERL_THX_DROP(__VA_ARGS__))
+#define vivify_defelem(sv) \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_INTERNAL, GOPERL_TOK(sv), 0, GOPERL_INT_VIVIFY_DEFELEM, 0, 0))
+#define Perl_vivify_defelem(...) vivify_defelem(GOPERL_THX_DROP(__VA_ARGS__))
+#define save_delete(hv, key, klen) SAVEDELETE((HV *)(hv), (char *)(key), (I32)(klen))
+#define Perl_save_delete(...) save_delete(GOPERL_THX_DROP(__VA_ARGS__))
+/* op_clear and FreeOp of an op the interpreter has (Data::Alias retypes the
+ * entersub its check function is given into a bigger op it copies the old
+ * one into): the op model has no such replacement yet, so the call dies
+ * with a message instead of going on with an op the interpreter does not
+ * know */
+static void goperl_op_replace_unsupported(goperl_frame_t *f, const char *what) __attribute__((noreturn, unused));
+static void goperl_op_replace_unsupported(goperl_frame_t *f, const char *what) {
+    goperl_croakf(f, "go-perl gives native code no %s of an op yet (an interpreter's op replaced "
+                     "by a copy of it in an op of another class)", what);
+}
+#define op_clear(o) ((void)(o), goperl_op_replace_unsupported(_gof, "op_clear"))
+#define Perl_op_clear(...) goperl_op_replace_unsupported(_gof, "op_clear")
+#define FreeOp(o) ((void)(o), goperl_op_replace_unsupported(_gof, "FreeOp"))
 /* perl.h's message for local through a reference */
 #define PL_no_localize_ref "Can't localize through a reference"
 /* the end of the mark stack, where markstack_grow is due */
@@ -3459,6 +3508,9 @@ static void goperl_cx_pushtry(goperl_frame_t *f, PERL_CONTEXT *cx, OP *retop) {
 #define cx_popblock(cx) \
     goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPBLOCK, "cx_popblock")
 #define CX_POP(cx) goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POP, "CX_POP")
+#define cx_popsub(cx) goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPSUB, "cx_popsub")
+#define cx_popformat(cx) \
+    goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPFORMAT, "cx_popformat")
 
 /* ---- the regular expression API ------------------------------------------- */
 

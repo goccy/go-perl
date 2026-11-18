@@ -2436,6 +2436,9 @@ static void goperl_calltab_add(void **tabp, goperl_calltab_ent_t **chain,
 #define GOPERL_LV_GVEGV 50
 /* A hash's placeholder count (INTERNAL HV_PLACEHOLDERS). */
 #define GOPERL_LV_HVPLACEHOLDERS 51
+/* An lvalue scalar's target offset and length, fields of its body. */
+#define GOPERL_LV_LVTARGOFF 52
+#define GOPERL_LV_LVTARGLEN 53
 #define GOPERL_LV_IS_IOWORD(field) ((field) >= GOPERL_LV_IOWORD && (field) < GOPERL_LV_IOWORD + 10)
 #define GOPERL_IOWORD_IS_NAME(w) ((w) >= 7)
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
@@ -5014,6 +5017,15 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
         if (field == GOPERL_LV_GVFORM || field == GOPERL_LV_GVEGV)
             goperl_croakf(f, "%s of something that is no glob with a GP",
                           field == GOPERL_LV_GVFORM ? "GvFORM" : "GvEGV");
+    }
+    if (field == GOPERL_LV_LVTARGOFF || field == GOPERL_LV_LVTARGLEN) {
+        /* struct xpvlv: the head of a string's body (32 bytes), the IV and
+         * the NV, then xlv_targoff and xlv_targlen */
+        const uint64_t *const head = tok ? (const uint64_t *)goperl_guest_mem(f, tok) : 0;
+        if (!head || ((uint32_t)(head[1] >> 32) & 0xff) != SVt_PVLV || !head[0])
+            goperl_croakf(f, "%s of something that is no lvalue scalar",
+                          field == GOPERL_LV_LVTARGOFF ? "LvTARGOFF" : "LvTARGLEN");
+        return (uint64_t *)goperl_guest_mem(f, head[0] + (field == GOPERL_LV_LVTARGOFF ? 48 : 56));
     }
     goperl_lvstate_t *st = goperl_lvstate_v;
     if (!st) {
@@ -8402,7 +8414,9 @@ enum {
     GOPERL_CX_POPEVAL = 6,
     GOPERL_CX_POPBLOCK = 7,
     GOPERL_CX_POP = 8,
-    GOPERL_CX_PUSHTRY = 9 /* s = [index][retop] */
+    GOPERL_CX_PUSHTRY = 9, /* s = [index][retop] */
+    GOPERL_CX_POPSUB = 10,   /* b = index of the top context: cx_popsub */
+    GOPERL_CX_POPFORMAT = 11 /* b = index of the top context: cx_popformat */
 };
 
 /* What native code stored into the contexts it was shown goes to the
