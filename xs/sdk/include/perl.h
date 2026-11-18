@@ -7068,12 +7068,29 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     return goperl_op_shadow_as(f, next, fields);
 }
 
+/* Op types whose function is the same in the interpreter's table have the
+ * same slot in the proxy table (a slot stands for the function of the type
+ * it was made for): perl's PL_ppaddr has pp_null for OP_SCALAR and its
+ * PL_check ck_null for OP_STUB, and native code that compares entries
+ * (Opcodes: check(0) eq check(1)) finds that here too. which: 0 PL_ppaddr,
+ * 1 PL_check. */
+#define GOPERL_CALL_FN_CLASSES 200
+static void goperl_slots_share(goperl_frame_t *f, void (**tbl)(void), int which) {
+    const uint16_t *const c = (const uint16_t *)goperl_guest_mem(
+        f, goperl_xs_opx(f, GOPERL_OP_CALL, 0, 0, GOPERL_CALL_FN_CLASSES, 0, 0, 0));
+    if (!c) return;
+    for (int t = 0; t < OP_max; t++)
+        if (c[which * OP_max + t] < t) tbl[t] = tbl[c[which * OP_max + t]];
+}
+
 /* The table, made when it is first looked at (by the SDK itself too, which
  * does not store into it: that is not the module evaluating PL_ppaddr). */
 static Perl_ppaddr_t *goperl_ppaddr_table(void) {
     if (!goperl_ppaddr_inited_v) {
         goperl_ppaddr_inited_v = 1;
         GOPERL_PP_SLOT_INIT(goperl_ppaddr_v);
+        goperl_frame_t *const f = goperl_cur_frame_v;
+        if (f) goperl_slots_share(f, (void (**)(void))goperl_ppaddr_v, 0);
         memcpy(goperl_ppaddr_base_v, goperl_ppaddr_v,
                sizeof(goperl_ppaddr_base_v));
         memcpy(goperl_ppaddr_told_v, goperl_ppaddr_v,
@@ -12872,6 +12889,7 @@ static goperl_hooks_t *goperl_hooks_get(goperl_frame_t *f) {
         h = (goperl_hooks_t *)calloc(1, sizeof(goperl_hooks_t));
         if (!h) goperl_croakf(f, "Out of memory!");
         GOPERL_NEWOP_SLOT_INIT(h->newop);
+        goperl_slots_share(f, (void (**)(void))h->newop, 1);
         memcpy(h->newop_stub, h->newop, sizeof(h->newop));
         memcpy(h->newop_told, h->newop, sizeof(h->newop));
         h->peep[0] = h->peep_stub[0] = h->peep_told[0] = goperl_peep_stub0;
