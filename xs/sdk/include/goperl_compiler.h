@@ -131,31 +131,10 @@ static __attribute__((unused)) goperl_compiler_state_t *goperl_compiler(goperl_f
  * plugin saves PL_compcv and points it at a sub of its own, which the
  * interpreter compiles into until the block ends). Such a location is the
  * slot of an interpreter variable here (SAVESPTR(PL_comppad)), PL_curcop,
- * PL_op, a location in the interpreter's memory (SAVEI8 on a byte of the
- * name of a pad entry), or a slot of the body of an array as AvARRAY or
+ * PL_op, or a location in the interpreter's memory: a byte of the name of a
+ * pad entry (SAVEI8), or a slot of the body of an array as AvARRAY or
  * PL_curpad designates it (SAVESPTR(PAD_SVl(ix))). Every other location is
  * native code's own, saved here. */
-static __attribute__((unused)) int goperl_avbody_locate(goperl_frame_t *f, const void *loc, uint64_t *avtok,
-                                int32_t *ix) {
-    (void)f;
-    goperl_lvstate_t *st = goperl_lvstate_v;
-    if (!st) return 0;
-    for (int32_t pass = 0; pass < 2; pass++) {
-        const int32_t n = pass == 0 ? st->nuses : st->nrecent;
-        for (int32_t i = 0; i < n; i++) {
-            goperl_lvslot_t *m = pass == 0 ? st->uses[i].slot : st->recent[i];
-            if (m->field != GOPERL_LV_AVBODY || !m->val) continue;
-            goperl_avbody_t *b = GOPERL_AVBODY_OF(m);
-            const uint64_t *p = (const uint64_t *)loc;
-            if (p >= b->slots && p < b->slots + b->len) {
-                *avtok = m->svtok;
-                *ix = (int32_t)(p - b->slots);
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
 
 /* A save of PL_curpad saves values of native code's own that stand in for
  * the interpreter's as well: the interpreter puts back its own, and these
@@ -204,18 +183,12 @@ static __attribute__((unused)) int goperl_save_routed(goperl_frame_t *f, void *l
     }
     const uint64_t g = goperl_guest_addr(f, loc);
     if (g) {
-        if (kind != GOPERL_SAVEK_INT || (width != 1 && width != 2 && width != 4))
-            goperl_croakf(f, "a save of a location in the interpreter's memory "
-                             "that holds no bytes of its own (%d bytes)", width);
+        /* bytes, or a pointer (a slot of an array's body) */
+        if (kind == GOPERL_SAVEK_INT ? (width != 1 && width != 2 && width != 4)
+                                     : width != (int)sizeof(void *))
+            goperl_croakf(f, "a save of %d bytes of the interpreter's memory as %s", width,
+                          kind == GOPERL_SAVEK_INT ? "an integer" : "a pointer");
         GOPERL_INTERNAL(f, GOPERL_INT_SAVE_MEM, g, ((uint64_t)width << 8) | (uint64_t)kind);
-        return 1;
-    }
-    uint64_t av = 0;
-    int32_t ix = 0;
-    if (goperl_avbody_locate(f, loc, &av, &ix)) {
-        if (kind == GOPERL_SAVEK_INT)
-            goperl_croakf(f, "an integer save of a slot of an array");
-        GOPERL_INTERNAL(f, GOPERL_INT_SAVE_AVELEM, av, ((uint64_t)(uint32_t)ix << 8) | (uint64_t)kind);
         return 1;
     }
     /* the slot of a field an accessor designates (GvSV(gv), SvIVX(sv)):
@@ -853,13 +826,13 @@ static __attribute__((unused)) SV ***goperl_curpad_ref(goperl_frame_t *f, const 
 #define PadMAX(pad) AvFILLp(pad)
 /* What a stored value of PL_comppad_name or PL_curpad is to the
  * interpreter (see goperl_plshadow_flush): the list a shadow stands for,
- * the array whose values a body is. Values of PL_curpad in native code's
- * own memory are not the interpreter's: they are kept here, for the pad in
- * use (goperl_curpad_ref), and nothing is written back (0). */
-static __attribute__((unused)) int goperl_curpad_av(goperl_frame_t *f, uint64_t val, uint64_t *out) {
-    int32_t ix = 0;
-    *out = 0;
-    return !val || (goperl_avbody_locate(f, (const void *)(uintptr_t)val, out, &ix) && ix == 0);
+ * the address of values in its memory (a pad's body, as AvARRAY gives it).
+ * Values of PL_curpad in native code's own memory are not the
+ * interpreter's: they are kept here, for the pad in use
+ * (goperl_curpad_ref), and nothing is written back (0). */
+static __attribute__((unused)) int goperl_curpad_guest(goperl_frame_t *f, uint64_t val, uint64_t *out) {
+    *out = goperl_guest_addr(f, (const void *)(uintptr_t)val);
+    return !val || *out;
 }
 static uint64_t goperl_runops_out(goperl_frame_t *f, uint64_t val);
 static uint64_t goperl_sighandlerp_out(goperl_frame_t *f, uint64_t val);
@@ -899,7 +872,7 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
     }
     if (id == GOPERL_PL_CURPAD) {
         goperl_compiler_state_t *const c = goperl_compiler(f);
-        if (goperl_curpad_av(f, s->val, out)) {
+        if (goperl_curpad_guest(f, s->val, out)) {
             c->curpad_own = 0;
             return 1;
         }
@@ -916,10 +889,10 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
  * interpreter's again. */
 static __attribute__((unused)) void goperl_curpad_own_flush(goperl_frame_t *f) {
     goperl_compiler_state_t *const c = (goperl_compiler_state_t *)((goperl_shared_t *)f->inst)->compiler;
-    uint64_t av = 0;
-    if (!c || !c->curpad_own || !goperl_curpad_av(f, (uint64_t)(uintptr_t)c->curpad_own, &av)) return;
+    uint64_t g = 0;
+    if (!c || !c->curpad_own || !goperl_curpad_guest(f, (uint64_t)(uintptr_t)c->curpad_own, &g)) return;
     c->curpad_own = 0;
-    goperl_xs_op(f, GOPERL_OP_PLVAR_SET, GOPERL_PL_CURPAD, av, 0, 0);
+    goperl_xs_op(f, GOPERL_OP_PLVAR_SET, GOPERL_PL_CURPAD, g, 0, 0);
     goperl_plshadow_v[GOPERL_PL_CURPAD].live = 0;
 }
 /* The pad of a padlist at a depth becomes the one in use, saved for the
@@ -943,11 +916,10 @@ static __attribute__((unused)) void goperl_curpad_own_flush(goperl_frame_t *f) {
 /* save_clearsv is given the address of a value of the pad in use. */
 static __attribute__((unused)) void goperl_save_clearsv(goperl_frame_t *f, SV **svp) __attribute__((unused));
 static __attribute__((unused)) void goperl_save_clearsv(goperl_frame_t *f, SV **svp) {
-    uint64_t av = 0;
-    int32_t ix = 0;
-    if (!goperl_avbody_locate(f, svp, &av, &ix) || av != GOPERL_TOK(PL_comppad))
+    SV **const base = AvARRAY(PL_comppad);
+    if (!base || svp < base || svp > base + AvFILLp(PL_comppad))
         goperl_croakf(f, "save_clearsv of a value that is not of the pad in use");
-    goperl_do_op(f, GOPERL_OP_PAD, 10 /* GOPERL_PAD_SAVE_CLEARSV */, (uint64_t)ix, 0, 0);
+    goperl_do_op(f, GOPERL_OP_PAD, 10 /* GOPERL_PAD_SAVE_CLEARSV */, (uint64_t)(svp - base), 0, 0);
 }
 #undef save_clearsv
 #define save_clearsv(svp) goperl_save_clearsv(_gof, (SV **)(svp))

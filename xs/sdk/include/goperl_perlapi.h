@@ -1728,11 +1728,6 @@ static SV *goperl_newSVrv(goperl_frame_t *f, SV *rv, const char *classname) {
                             (uint64_t)(int64_t)(SSize_t)(key),             \
                             GOPERL_SVCALL_AV_DELETE | ((uint64_t)(U32)(flags) << 32), 0, 0))
 #define AvMAX(av) ((SSize_t)(int64_t)GOPERL_SVCALL(GOPERL_SVCALL_AV_MAX, av, 0))
-/* the caller has flushed */
-static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok) {
-    return (int32_t)(int64_t)goperl_xs_opx(f, GOPERL_OP_SV_CALL, avtok, 0, (uint64_t)(GOPERL_SVCALL_AV_MAX), 0, 0, 0) +
-           1;
-}
 #define HvUSEDKEYS(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_USEDKEYS, hv, 0))
 #define HvTOTALKEYS(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_TOTALKEYS, hv, 0))
 #define HvFILL(hv) ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_HV_FILL, hv, 0))
@@ -2385,8 +2380,14 @@ typedef char goperl_iv_is_pointer_width
 #define Perl_save_strlen(p) save_strlen(p)
 /* $@ made the empty string, as perl's CLEAR_ERRSV leaves it */
 #define CLEAR_ERRSV() STMT_START { sv_setpvs(ERRSV, ""); SvPOK_only(ERRSV); } STMT_END
-/* a loop whose iteration variable is a lexical (its pad slot) */
+#define CvSIGNATURE(cv) (CvFLAGS(cv) & CVf_SIGNATURE)
+/* the iteration variable of a loop context: the address of its pad slot
+ * (the interpreter's memory), of its glob's scalar, or of the reference */
 #define CxPADLOOP(c) ((c)->cx_type & CXp_FOR_PAD)
+#define CxITERVAR(c)                                                         \
+    (CxPADLOOP(c) ? (c)->blk_loop.itervar_u.svp                              \
+                  : ((c)->cx_type & CXp_FOR_GV) ? &GvSV((c)->blk_loop.itervar_u.gv) \
+                                                : (SV **)&(c)->blk_loop.itervar_u.gv)
 
 /* ---- number scanning (numeric.c) ------------------------------------------ */
 

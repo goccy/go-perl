@@ -56,7 +56,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 36
+const abiVersion = 37
 
 // nativeHdrWords is the number of header words of a native-XSUB request
 // (GOPERL_NATIVE_HDR_WORDS in perl-wasm): the function id, the CV, the

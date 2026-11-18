@@ -182,7 +182,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 36u
+#define GOPERL_XS_ABI 37u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -1782,15 +1782,6 @@ typedef struct goperl_hostsave {
  * (DBI + HTTP::Parser::XS), each had its own current-frame/save-stack and
  * a hook running in one module dereferenced another's stale frame. The
  * loader owns ONE block (api->shared) that every module aliases. */
-/* The body of an array as AvARRAY designates it: the tokens of its slots,
- * and what the interpreter held when they were loaded. The slot of the
- * field (GOPERL_LV_AVBODY) holds the address of slots. */
-typedef struct goperl_avbody {
-    int32_t len; /* the slots the array had room for when it was loaded */
-    int32_t cap;
-    uint64_t *shadow;
-    uint64_t slots[];
-} goperl_avbody_t;
 /* One field an accessor macro designated as an lvalue (SvIVX, SvRV, GvSV,
  * ...): val is the storage, shadow what the interpreter held when it was
  * loaded, users the evaluations of a macro that designate it and are not
@@ -1958,8 +1949,8 @@ typedef struct goperl_shared {
 #define GOPERL_LV_GVHV 9
 #define GOPERL_LV_REFCNT 10
 #define GOPERL_LV_CVOUTSIDE 11
-/* AvARRAY: the slot holds the address of the array's body in this process
- * (a goperl_avbody_t's slots), whose elements are what is written back. */
+/* AvARRAY: the slot holds the address of the array's body, which is in
+ * the interpreter's memory, where native code reads and writes its slots. */
 #define GOPERL_LV_AVBODY 12
 /* SvPVX and SvLEN: the buffer of a string (its address in this process)
  * and the room it has. */
@@ -4084,21 +4075,6 @@ static HV **goperl_modglobal_ref(goperl_frame_t *f) {
 
 /* ---- the flush: pending host state -> guest, before any guest op -------- */
 
-#define GOPERL_AVBODY_OF(m) \
-    ((goperl_avbody_t *)((char *)(uintptr_t)(m)->val - \
-                         offsetof(goperl_avbody_t, slots)))
-
-/* The elements of an array's body that were stored into go to the
- * interpreter (as they are: the store does not count a reference). */
-static void goperl_avbody_store(goperl_frame_t *f, goperl_lvslot_t *m) {
-    goperl_avbody_t *b = GOPERL_AVBODY_OF(m);
-    for (int32_t i = 0; i < b->len; i++) {
-        if (b->slots[i] == b->shadow[i]) continue;
-        b->shadow[i] = b->slots[i];
-        goperl_xs_opx(f, GOPERL_OP_AV_STORE_RAW, m->svtok, b->slots[i], (uint64_t)i, 0, 0, 0);
-    }
-}
-
 /* A slot is given up: the body it holds, if it is an array's or a sub's. */
 static void goperl_lvbody_release(goperl_lvslot_t *m);
 static void goperl_lvslot_release(goperl_lvslot_t *m) {
@@ -4106,18 +4082,19 @@ static void goperl_lvslot_release(goperl_lvslot_t *m) {
         goperl_lvbody_release(m);
         return;
     }
-    if (m->field != GOPERL_LV_AVBODY || !m->val) return;
-    goperl_avbody_t *b = GOPERL_AVBODY_OF(m);
-    free(b->shadow);
-    free(b);
-    m->val = m->shadow = 0;
+    if (m->field == GOPERL_LV_AVBODY) m->val = m->shadow = 0;
 }
 
 static void goperl_lvbody_store(goperl_frame_t *f, goperl_lvslot_t *m);
 static void goperl_lvbody_load(goperl_frame_t *f, goperl_lvslot_t *m);
 static void goperl_lvslot_store(goperl_frame_t *f, goperl_lvslot_t *m) {
+    /* the slots of an array's body are the interpreter's memory, where
+     * native code stored into them; the body itself is the interpreter's
+     * to place */
     if (m->field == GOPERL_LV_AVBODY) {
-        if (m->val) goperl_avbody_store(f, m);
+        if (m->val != m->shadow)
+            goperl_croakf(f, "AvARRAY was stored into: gperl cannot give an array a body "
+                             "of native code's");
         return;
     }
     if (GOPERL_LV_IS_BODY(m->field)) {
@@ -4429,68 +4406,22 @@ static void goperl_lvuse_end(goperl_frame_t *f, goperl_lvstate_t *st,
     st->recent[st->nrecent++] = m;
 }
 
-/* The number of slots the array has room for (AvMAX + 1); defined with the
- * calls it is made of. */
-static int32_t goperl_av_slots(goperl_frame_t *f, uint64_t avtok)
-    __attribute__((unused));
-
-/* AvARRAY is the array's body: every slot the array has room for, the ones
- * beyond its last element NULL. Code that extends an array and then looks
- * which slots are filled (AvARRAY(av)[i] ? ... : ...) reads them. The body
- * is loaded from the interpreter at every evaluation (what was stored into
- * it has been written back by then): the interpreter says where the body
- * is in its memory (SV_CALL 59, AV_BODY), and the slots are read there —
- * as they are, without the magic of a tied array, which is what AvARRAY
- * is. */
+/* AvARRAY is the array's body where it is in the interpreter's memory:
+ * every slot the array has room for, the ones beyond its last element as
+ * they are (code that takes elements out by lowering AvFILLp reads the slot
+ * it has just left behind, `AvARRAY(av)[AvFILLp(av)--]`, Future::XS), and
+ * what native code stores into a slot is the array's at once, as on perl
+ * (the store does not count a reference). The interpreter says where the
+ * body is at every evaluation (SV_CALL 59, AV_BODY), since an operation may
+ * have moved it, as on perl, where code takes AvARRAY again after
+ * av_extend; the slots are read as they are, without the magic of a tied
+ * array, which is what AvARRAY is. A tied array has no body: AvARRAY is
+ * NULL, which is how code tells it to fetch the elements instead
+ * (Tree::RB::XS). */
 static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
-    uint64_t n = 0;
-    const uint64_t where = goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, &n);
-    if (!where) {
-        /* an array with no body, as a tied array has: AvARRAY is NULL,
-         * which is how code tells it to fetch the elements instead
-         * (Tree::RB::XS) */
-        if (m->val) {
-            goperl_avbody_t *const old = GOPERL_AVBODY_OF(m);
-            free(old->shadow);
-            free(old);
-        }
-        m->val = m->shadow = 0;
-        return;
-    }
-    int32_t len = (int32_t)n;
-    int32_t slots = goperl_av_slots(f, m->svtok);
-    if (slots < len) slots = len;
-    /* the slots are SV pointers of the interpreter's: words of its width.
-     * Every slot the array has room for is read as it is in memory, past
-     * its last element too: code that takes elements out by lowering
-     * AvFILLp reads the slot it has just left behind
-     * (`AvARRAY(av)[AvFILLp(av)--]`, Future::XS), and perl leaves what
-     * was there in place. */
-    const uint64_t *const guest =
-        slots > 0 ? (const uint64_t *)goperl_guest_mem(f, where) : 0;
-    len = guest ? slots : 0;
-    goperl_avbody_t *b = m->val ? GOPERL_AVBODY_OF(m) : 0;
-    if (!b || slots > b->cap) {
-        int32_t ncap = b ? b->cap : 16;
-        while (ncap < slots) ncap *= 2;
-        uint64_t *oshadow = b ? b->shadow : 0;
-        goperl_avbody_t *nb = (goperl_avbody_t *)realloc(
-            b, sizeof(goperl_avbody_t) + (size_t)ncap * 8);
-        if (!nb) goperl_croakf(f, "out of memory for the body of an array");
-        b = nb;
-        m->val = m->shadow = (uint64_t)(uintptr_t)b->slots;
-        b->len = 0;
-        b->shadow = oshadow;
-        uint64_t *nshadow = (uint64_t *)realloc(oshadow, (size_t)ncap * 8);
-        if (!nshadow) goperl_croakf(f, "out of memory for the body of an array");
-        b->shadow = nshadow;
-        b->cap = ncap;
-    }
-    for (int32_t i = 0; i < len; i++) b->slots[i] = b->shadow[i] = guest[i];
-    for (int32_t i = len; i < slots; i++) b->slots[i] = b->shadow[i] = 0;
-    /* every slot is written back when it was stored into, the ones beyond
-     * the last element too */
-    b->len = slots;
+    const uint64_t where =
+        goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, 0);
+    m->val = m->shadow = where ? (uint64_t)(uintptr_t)goperl_guest_mem(f, where) : 0;
 }
 
 /* The lvalue of a field (see GOPERL_LV_IV): pending stores are written
@@ -4585,9 +4516,9 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
     ((SV **)(uintptr_t)*goperl_lv_ref(_gof, (SV *)(av), GOPERL_LV_AVBODY, \
                                       GOPERL_LV_AT))
 
-/* sortsv and sortsv_flags over a mirror (or any host SV* array): a
- * stable merge sort, as perl's (pp_sort.c), descending for SORTf_DESC;
- * the mirror flush propagates the permutation. */
+/* sortsv and sortsv_flags over an array's body (AvARRAY, the interpreter's
+ * memory) or an SV* array of native code's: a stable merge sort in place, as
+ * perl's (pp_sort.c), descending for SORTf_DESC. */
 typedef I32 (*SVCOMPARE_t)(pTHX_ SV *a, SV *b);
 #ifndef SORTf_DESC
 #define SORTf_DESC 1
