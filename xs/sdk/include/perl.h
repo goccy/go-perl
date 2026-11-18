@@ -1903,6 +1903,12 @@ typedef struct goperl_shared {
      * all from then on; 0 before. Freed with the instance. */
     goperl_hostsave_t *hostsave_more;
     int32_t hostsave_cap;
+    void *mg_found; /* goperl_mgfound_t: the copies of the interpreter's own
+                     * magic mg_find made in this call of native code, by
+                     * the MAGIC's address, in the arena */
+    void *hv_arrays; /* goperl_hvarray_t: the arrays HvARRAY gave in this call
+                      * of native code, by the address of the buckets, in
+                      * the arena (goperl_compiler.h) */
 } goperl_shared_t;
 #define goperl_hostsave_v \
     (GOPERL_SHARED->hostsave_more ? GOPERL_SHARED->hostsave_more : GOPERL_SHARED->hostsave)
@@ -7109,6 +7115,8 @@ static void goperl_arena_free_all(void) {
     goperl_si_gen_v = 0;
     goperl_pio_views_v = 0; /* they were in the arena */
     GOPERL_SHARED->rx_bodies = 0; /* so were they */
+    GOPERL_SHARED->mg_found = 0;  /* and the copies mg_find made */
+    GOPERL_SHARED->hv_arrays = 0; /* and the arrays HvARRAY gave */
     /* and so may the chain SvMAGIC showed be (its copies of the
      * interpreter's magic): the slot was written back before */
     GOPERL_SHARED->svmagic_sv = 0;
@@ -7702,9 +7710,16 @@ static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
 /* The magic of a type on an SV: what native code attached, or else what
  * the interpreter itself keeps there (the back references of a weakened
  * referent, the overload table of a stash, the taint of a value, ...). The
- * latter is a copy, good until the outermost native call returns; its
- * mg_ptr is the interpreter's memory, except for the overload table, which
- * is given as the AMT it is (see goperl_amt). */
+ * latter is a copy, good until the outermost native call returns, and the
+ * same copy for the same MAGIC until then, as perl's pointer is the same
+ * (Sereal::Encoder tells a tied container was retied by comparing them);
+ * its mg_ptr is the interpreter's memory, except for the overload table,
+ * which is given as the AMT it is (see goperl_amt). */
+typedef struct goperl_mgfound {
+    struct goperl_mgfound *next;
+    uint64_t g; /* the MAGIC's address in the interpreter */
+    MAGIC mg;
+} goperl_mgfound_t;
 static void *goperl_arena_alloc(size_t n);
 static void *goperl_amt(goperl_frame_t *f, SV *stash);
 static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
@@ -7717,10 +7732,18 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
         f, goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), (uint64_t)(unsigned char)type, (uint64_t)(8), 0, 0));
     if (!w) return 0;
-    goperl_gword_t c[6];
+    goperl_gword_t c[7];
     memcpy(c, w, sizeof c);
-    MAGIC *mg = (MAGIC *)goperl_arena_alloc(sizeof(MAGIC));
-    if (!mg) goperl_croakf(f, "Out of memory!");
+    goperl_mgfound_t *e = (goperl_mgfound_t *)((goperl_shared_t *)f->inst)->mg_found;
+    while (e && e->g != c[6]) e = e->next;
+    if (!e) {
+        e = (goperl_mgfound_t *)goperl_arena_alloc(sizeof(goperl_mgfound_t));
+        if (!e) goperl_croakf(f, "Out of memory!");
+        e->g = c[6];
+        e->next = (goperl_mgfound_t *)((goperl_shared_t *)f->inst)->mg_found;
+        ((goperl_shared_t *)f->inst)->mg_found = e;
+    }
+    MAGIC *const mg = &e->mg;
     mg->mg_type = (char)c[0];
     mg->mg_flags = (U8)c[1];
     mg->mg_len = (I32)c[2];
@@ -8070,10 +8093,16 @@ struct mro_meta {
     U32 pkg_gen;
     U32 cache_gen;
 };
+/* the interpreter randomizes the order of a hash's keys (hv.h) */
+#define PERL_HASH_RANDOMIZE_KEYS 1
+#define PERL_HASH_ITER_BUCKET(iter) (((iter)->xhv_riter) ^ ((iter)->xhv_rand))
 struct xpvhv_aux {
     struct mro_meta *xhv_mro_meta;
     AV *xhv_backreferences;
     I32 xhv_riter;
+    U32 xhv_rand;      /* the hash's random value: an iterator position's
+                        * bucket is (riter ^ xhv_rand) & HvMAX */
+    U32 xhv_last_rand; /* the value before the last split */
 };
 static struct {
     struct mro_meta meta;
@@ -8092,6 +8121,9 @@ static struct xpvhv_aux *goperl_hvaux(goperl_frame_t *f, HV *hv) {
     /* FIELD 1 and 2: the back references and the iterator position */
     goperl_hvaux_v.aux.xhv_backreferences = (AV *)GOPERL_SV(goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(1), 0, 0));
     goperl_hvaux_v.aux.xhv_riter = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(2), 0, 0);
+    /* FIELD 26 and 27: the random values */
+    goperl_hvaux_v.aux.xhv_rand = (U32)goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(26), 0, 0);
+    goperl_hvaux_v.aux.xhv_last_rand = (U32)goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(27), 0, 0);
     return &goperl_hvaux_v.aux;
 }
 #define HvAUX(hv) goperl_hvaux(_gof, (HV *)(hv))

@@ -1492,9 +1492,17 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
  * rest of the chain); NULL when the hash has no buckets yet (pp_defined's
  * test of a hash). The bucket array of the interpreter holds addresses of
  * its memory, so this is an array of this process's pointers to the same
- * entries, made at each evaluation and kept until the outermost native call
- * returns; it is not an lvalue (a store into it would not reach the
+ * entries, filled at each evaluation and kept until the outermost native
+ * call returns: the same array for the same buckets, as perl's pointer is
+ * the same until the hash is split (Sereal::Encoder tells a split during a
+ * callback so). It is not an lvalue (a store into it would not reach the
  * hash). */
+typedef struct goperl_hvarray {
+    struct goperl_hvarray *next;
+    uint64_t arr; /* the address of the buckets in the interpreter */
+    uint64_t n;   /* their number */
+    HE *ents[];
+} goperl_hvarray_t;
 static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
     /* -> the buckets, or 0; second: their number */
     uint64_t nbuckets = 0;
@@ -1502,11 +1510,21 @@ static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
                                        0, 0, &nbuckets);
     if (!arr) return (HE **)0;
     const uint64_t n = nbuckets;
-    HE **out = (HE **)goperl_arena_alloc(sizeof(HE *) * (size_t)(n ? n : 1));
-    if (!out) goperl_croakf(f, "Out of memory!");
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    goperl_hvarray_t *a = (goperl_hvarray_t *)sh->hv_arrays;
+    while (a && (a->arr != arr || a->n != n)) a = a->next;
+    if (!a) {
+        a = (goperl_hvarray_t *)goperl_arena_alloc(sizeof(goperl_hvarray_t) +
+                                                   sizeof(HE *) * (size_t)(n ? n : 1));
+        if (!a) goperl_croakf(f, "Out of memory!");
+        a->arr = arr;
+        a->n = n;
+        a->next = (goperl_hvarray_t *)sh->hv_arrays;
+        sh->hv_arrays = a;
+    }
     for (uint64_t i = 0; i < n; i++)
-        out[i] = goperl_he_at(f, goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i));
-    return out;
+        a->ents[i] = goperl_he_at(f, goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i));
+    return a->ents;
 }
 #define HvARRAY(hv) goperl_hv_array(_gof, (HV *)(hv))
 

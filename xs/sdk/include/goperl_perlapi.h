@@ -1339,6 +1339,12 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
     ({ GOPERL_ONCE(goperl_SvIsCOW_shared_hash_sv_, sv); \
        (SvFLAGS(goperl_SvIsCOW_shared_hash_sv_) & (SVf_POK | SVf_IsCOW)) == (SVf_POK | SVf_IsCOW) && SvLEN(goperl_SvIsCOW_shared_hash_sv_) == 0; })
 #define SvPROTECT(sv) (SvFLAGS(sv) & SVf_PROTECT)
+/* The shared key a shared-hash scalar's string is (hv.h): the string is the
+ * key of the HEK in the interpreter's memory, where its length, hash and
+ * flags are read (Sereal::Encoder dedupes keys by it). */
+#define SvSHARED_HEK_FROM_PV(pvx) ((HEK *)((const char *)(pvx) - STRUCT_OFFSET(HEK, hek_key)))
+/* The magic of a v-string (sv.h): its spelling in mg_ptr and mg_len. */
+#define SvVSTRING_mg(sv) (SvMAGICAL(sv) ? mg_find((SV *)(sv), PERL_MAGIC_vstring) : (MAGIC *)NULL)
 #define SvIMMORTAL(sv) \
     ({ GOPERL_ONCE(goperl_SvIMMORTAL_sv_, sv); \
        SvREADONLY(goperl_SvIMMORTAL_sv_) && ((SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_undef || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_yes || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_no || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_zero || (SV *)goperl_SvIMMORTAL_sv_ == &PL_sv_placeholder); })
@@ -2251,8 +2257,13 @@ static const char *const goperl_phase_names_v[] __attribute__((unused)) = {
 #define PL_no_helem_sv \
     "Modification of non-creatable hash value attempted, subscript \"%" SVf "\""
 #define PL_no_security "Insecure dependency in %s%s"
-#define PL_Yes "1"
-#define PL_No ""
+/* the interpreter's strings of true and false, which are the buffers of
+ * its booleans (code tells core false by SvPVX(sv) == PL_No, as
+ * Sereal::Encoder does) */
+#define GOPERL_PL_YES 128
+#define GOPERL_PL_NO 129
+#define PL_Yes ((const char *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_YES)))
+#define PL_No ((const char *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_NO)))
 
 /* ---- calls ----------------------------------------------------------------- */
 
@@ -3334,6 +3345,32 @@ typedef enum {
 } regex_charset;
 #define set_regex_charset(flagsp, cs) \
     (*(flagsp) = (*(flagsp) & ~RXf_PMf_CHARSET) | ((U32)(cs) << RXf_PMf_CHARSET_SHIFT_))
+/* The modifiers of a pattern as regexp.h spells them, and the flags a
+ * pattern is compiled with (op_reg_common.h): a pattern's modifiers are
+ * rebuilt from its flags in the order of INT_PAT_MODS (Sereal::Encoder). */
+#define ONCE_PAT_MODS "o"
+#define KEEPCOPY_PAT_MODS "p"
+#define NOCAPTURE_PAT_MODS "n"
+#define EXEC_PAT_MODS "e"
+#define LOOP_PAT_MODS "gc"
+#define NONDESTRUCT_PAT_MODS "r"
+#define LOCALE_PAT_MODS "l"
+#define UNICODE_PAT_MODS "u"
+#define DEPENDS_PAT_MODS "d"
+#define ASCII_RESTRICT_PAT_MODS "a"
+#define ASCII_MORE_RESTRICT_PAT_MODS "aa"
+#define STD_PAT_MODS "msixxn"
+#define CHARSET_PAT_MODS ASCII_RESTRICT_PAT_MODS DEPENDS_PAT_MODS LOCALE_PAT_MODS UNICODE_PAT_MODS
+#define INT_PAT_MODS STD_PAT_MODS KEEPCOPY_PAT_MODS
+#define EXT_PAT_MODS ONCE_PAT_MODS KEEPCOPY_PAT_MODS NOCAPTURE_PAT_MODS
+#define QR_PAT_MODS STD_PAT_MODS EXT_PAT_MODS CHARSET_PAT_MODS
+#define M_PAT_MODS QR_PAT_MODS LOOP_PAT_MODS
+#define S_PAT_MODS M_PAT_MODS EXEC_PAT_MODS NONDESTRUCT_PAT_MODS
+#define RXf_PMf_COMPILETIME                                                            \
+    (RXf_PMf_MULTILINE | RXf_PMf_SINGLELINE | RXf_PMf_FOLD | RXf_PMf_EXTENDED |          \
+     RXf_PMf_EXTENDED_MORE | RXf_PMf_KEEPCOPY | RXf_PMf_NOCAPTURE | RXf_PMf_CHARSET |    \
+     RXf_PMf_STRICT)
+#define RXf_PMf_FLAGCOPYMASK (RXf_PMf_COMPILETIME | RXf_PMf_SPLIT)
 
 /* pregexec matches in a string of the interpreter's memory (the buffer of
  * the SV it is given, as a rule). A string that lies elsewhere is matched
