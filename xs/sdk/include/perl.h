@@ -5476,6 +5476,7 @@ static void goperl_jmpenv_jump(goperl_frame_t *f, int v, int32_t failed) {
 static void goperl_arena_free_all(void);
 static void goperl_blocks_handed_free(void);
 static void goperl_opreg_clear(void);
+static void goperl_opreg_retire(int32_t depth);
 static void goperl_opreg_enter(void);
 static void goperl_pads_rest(goperl_frame_t *f);
 static void goperl_optree_flush(goperl_frame_t *f);
@@ -5508,6 +5509,9 @@ static void goperl_xs_leave(goperl_frame_t *f) {
      * even when native code called it (Devel::Declare's handler reads the
      * line of PL_compiling its toke_skipspace moved on) */
     goperl_optree_flush(f);
+    /* the shadows this call gave a baseline are written back: a call
+     * deeper than the outermost lets them go */
+    if (goperl_xs_depth_v > 1) goperl_opreg_retire(goperl_xs_depth_v);
     if (--goperl_xs_depth_v <= 0) {
         goperl_xs_depth_v = 0;
         goperl_lvslot_flush(f);
@@ -6111,7 +6115,8 @@ typedef struct goperl_opreg_ent {
     struct goperl_opreg_ent *next;        /* in its bucket, or among the spare */
     struct goperl_opreg_ent *active_next; /* among the ones with a baseline */
     U8 persist; /* its size is a module's (NewOpSz): the memory is not reused */
-    U8 active;
+    U8 active;  /* 0, or the depth of the native call that gave it a baseline
+                 * (capped at 255): see goperl_opreg_retire */
     U16 ext; /* a persistent one: the bytes of the module's struct past OP */
     uint32_t gen; /* the generation its links were described in */
     struct goperl_op_base *base; /* what was written back last (a write-back
@@ -6274,12 +6279,40 @@ static void goperl_opreg_clear(void) {
 }
 
 /* The shadow has a baseline from here on: what a module writes into it is
- * seen against it and written back. */
+ * seen against it and written back, until the native call that gave it the
+ * baseline returns (active is that call's depth; the shadows of deeper calls
+ * are in front of the list). */
 static void goperl_op_activate(goperl_opreg_t *r, goperl_opreg_ent_t *e) {
     goperl_op_base_capture(&e->op);
     if (e->active) return;
-    e->active = 1;
+    const int32_t d = goperl_xs_depth_v;
+    e->active = (U8)(d < 1 ? 1 : d > 255 ? 255 : d);
     e->active_next = r->active;
+    r->active = e;
+}
+/* A native call deeper than the outermost returns, the shadows written back
+ * (goperl_xs_leave): the ones it gave a baseline have none any more, so that
+ * the flushes of the calls around it do not walk them (a shadow native code
+ * looks up again takes a baseline again). The outermost call's are given
+ * up when it returns (goperl_opreg_clear). */
+static void goperl_opreg_retire(int32_t depth) {
+    goperl_opreg_t *r = goperl_opreg_v;
+    if (!r || depth <= 1 || depth > 255) return;
+    goperl_opreg_ent_t *e = r->active;
+    while (e && e->active >= depth) {
+        goperl_opreg_ent_t *next = e->active_next;
+        free(e->base);
+        e->base = 0;
+        e->active = 0;
+        e->active_next = 0;
+        if (!e->op.gop && !e->persist) { /* its op was freed meanwhile */
+            free(e->aux_own);
+            e->aux_own = 0;
+            e->next = r->spare;
+            r->spare = e;
+        }
+        e = next;
+    }
     r->active = e;
 }
 
@@ -6429,13 +6462,17 @@ static OP *goperl_op_describe(goperl_frame_t *f, uint64_t tok, int mode) {
     return e ? &e->op : 0;
 }
 
-/* The shadow of an op, whatever is known of it. */
+/* The shadow of an op, whatever is known of it (with a baseline: native code
+ * may store into what it is handed). */
 static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
     if (!tok) return 0;
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e) return &e->op;
+    if (e) {
+        if (!e->active) goperl_op_activate(r, e);
+        return &e->op;
+    }
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
 }
 
@@ -6465,7 +6502,10 @@ static OP *goperl_op_shadow_as(goperl_frame_t *f, uint64_t tok, uint64_t fields)
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
     const int native_pp = e && e->op.op_type < OP_max &&
                           e->op.op_ppaddr != goperl_ppaddr_base(f, e->op.op_type);
-    if (e && !native_pp && goperl_op_fields_word(&e->op) == fields) return &e->op;
+    if (e && !native_pp && goperl_op_fields_word(&e->op) == fields) {
+        if (!e->active) goperl_op_activate(r, e);
+        return &e->op;
+    }
     return goperl_op_describe(f, tok, native_pp ? GOPERL_OPDUMP_SUBTREE : GOPERL_OPDUMP_ONE);
 }
 
@@ -6492,7 +6532,10 @@ static OP *goperl_op_shadow_full(goperl_frame_t *f, uint64_t tok) {
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e && e->op.gop_full && e->gen == r->gen) return &e->op;
+    if (e && e->op.gop_full && e->gen == r->gen) {
+        if (!e->active) goperl_op_activate(r, e);
+        return &e->op;
+    }
     return goperl_op_describe(f, tok, GOPERL_OPDUMP_SUBTREE);
 }
 
