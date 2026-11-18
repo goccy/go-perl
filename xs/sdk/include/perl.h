@@ -2725,7 +2725,16 @@ static void goperl_raise(goperl_frame_t *f) {
 
 /* The loader's direct accessors. They follow the contract of goperl_do_op
  * (minus the flush, which their callers do): when the interpreter dies
- * inside one, the call does not return. */
+ * inside one, the call does not return. The interpreter is given the
+ * frame's stack and top mark first, as for every operation, since they are
+ * taken back after it (Perl code of magic or overloading may run on the
+ * stack, and grow or move it): taken back without that, they are the ones
+ * before the frame's last moves (the mark dXSARGS popped comes back, and
+ * the XSUB's caller pops the wrong mark: values before the call are lost,
+ * after gv_stashsv's read of the name). */
+static inline __attribute__((unused)) void goperl_direct_begin(goperl_frame_t *f) {
+    goperl_pp_sync_out(f);
+}
 static inline __attribute__((unused)) void goperl_direct_end(
     goperl_frame_t *f, int32_t failed_before) {
     goperl_gen_bump();
@@ -2738,6 +2747,7 @@ static int64_t goperl_direct_sv_iv(goperl_frame_t *f, uint64_t sv)
 static int64_t goperl_direct_sv_iv(goperl_frame_t *f, uint64_t sv) {
     const int32_t failed_before = f->failed;
     const int goperl_e = errno;
+    goperl_direct_begin(f);
     int64_t r = goperl_api_v->sv_iv(f, sv);
     errno = goperl_e;
     GOPERL_DIRECT_END(f, failed_before);
@@ -2749,6 +2759,7 @@ static const char *goperl_direct_sv_pv(goperl_frame_t *f, uint64_t sv,
                                        uint64_t *lenp) {
     const int32_t failed_before = f->failed;
     const int goperl_e = errno;
+    goperl_direct_begin(f);
     const char *r = goperl_api_v->sv_pv(f, sv, lenp);
     errno = goperl_e;
     GOPERL_DIRECT_END(f, failed_before);
@@ -2759,6 +2770,7 @@ static uint64_t goperl_direct_new_iv(goperl_frame_t *f, int64_t v)
 static uint64_t goperl_direct_new_iv(goperl_frame_t *f, int64_t v) {
     const int32_t failed_before = f->failed;
     const int goperl_e = errno;
+    goperl_direct_begin(f);
     uint64_t r = goperl_api_v->new_iv(f, v);
     errno = goperl_e;
     GOPERL_DIRECT_END(f, failed_before);
@@ -2770,6 +2782,7 @@ static uint64_t goperl_direct_new_pvn(goperl_frame_t *f, const char *p,
                                       uint64_t len) {
     const int32_t failed_before = f->failed;
     const int goperl_e = errno;
+    goperl_direct_begin(f);
     uint64_t r = goperl_api_v->new_pvn(f, p, len);
     errno = goperl_e;
     GOPERL_DIRECT_END(f, failed_before);
@@ -2780,6 +2793,7 @@ static uint64_t goperl_direct_sv_mortal(goperl_frame_t *f, uint64_t sv)
 static uint64_t goperl_direct_sv_mortal(goperl_frame_t *f, uint64_t sv) {
     const int32_t failed_before = f->failed;
     const int goperl_e = errno;
+    goperl_direct_begin(f);
     uint64_t r = goperl_api_v->sv_mortal(f, sv);
     errno = goperl_e;
     GOPERL_DIRECT_END(f, failed_before);
