@@ -47,6 +47,7 @@ import (
 
 	"github.com/ebitengine/purego"
 	"github.com/goccy/go-perl/internal"
+	"github.com/goccy/go-perl/internal/ccall"
 )
 
 // xsTrace logs every guest micro-op to stderr (GOPERL_XS_TRACE=1); the
@@ -250,6 +251,10 @@ type cFrame struct {
 
 	// Go-only:
 	p *internal.Perl
+	// call is the frame's call of native code (the XSUB, its epilogue, a
+	// pp function): a Call that lives as long as the frame, so that the
+	// call allocates nothing.
+	call ccall.Call
 }
 
 // framePool keeps the frames of native calls that have ended for the next
@@ -539,7 +544,7 @@ func (s *state) adoptClone(clone *internal.Perl) error {
 	pokeBytes(cs.sharedRaw, make([]byte, sharedBlockSize))
 
 	if s.sharedClone != 0 {
-		if rc, _, _ := purego.SyscallN(s.sharedClone, cs.sharedRaw, s.sharedRaw); int32(rc) != 0 {
+		if rc := ccall.Invoke(s.sharedClone, cs.sharedRaw, s.sharedRaw); int32(rc) != 0 {
 			statesMu.Unlock()
 			s.mu.Unlock()
 			return errors.New("xs: out of memory copying the native modules' state")
@@ -791,7 +796,7 @@ func (s *state) layoutAgrees(lib uintptr, path string) error {
 	np := cMalloc(8)
 	defer cFree(np)
 	pokeU64(np, 0)
-	pairs, _, _ := purego.SyscallN(fn, np)
+	pairs := ccall.Invoke(fn, np)
 	n := int(binary.LittleEndian.Uint32(copyIn(np, 4)))
 	if pairs == 0 || n <= 0 || n > layoutWords {
 		return fmt.Errorf("%s: __goperl_xs_layout describes no layout", path)
@@ -871,7 +876,7 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	if err != nil {
 		return lib, &plainLibraryError{path: path, err: err}
 	}
-	got, _, _ := purego.SyscallN(initFn, uintptr(unsafe.Pointer(vtable)))
+	got := ccall.Invoke(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
 		return 0, fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
 	}
@@ -1145,7 +1150,7 @@ func (s *state) dispatch(req []byte) []byte {
 	// The XSUB call and the epilogue that closes its activation must run
 	// on ONE OS thread: the SDK's current-frame state is per-thread, and
 	// the Go scheduler is otherwise free to migrate the goroutine between
-	// the two purego calls.
+	// the two calls into native code.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	s.mu.Lock()
@@ -1158,11 +1163,11 @@ func (s *state) dispatch(req []byte) []byte {
 	// The SDK's entry makes the frame current before the XSUB's first
 	// statement: an XSUB takes no context argument, as in perl without
 	// MULTIPLICITY, and works on the current frame.
-	purego.SyscallN(inv, fp, fn, uintptr(cvTok))
+	f.call.Invoke(inv, fp, fn, uintptr(cvTok))
 	// Close any activation levels the XSUB left open (xsubpp PPCODE exits
 	// with a bare return, skipping XSRETURN's leave).
 	if epi != 0 {
-		purego.SyscallN(epi, fp)
+		f.call.Invoke(epi, fp)
 	}
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	if f.xerrno != 0 {
@@ -1272,7 +1277,7 @@ func (s *state) ppHook(req []byte) []byte {
 	fp := pinFrame(f)
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
-	next, _, _ := purego.SyscallN(invoke, fp, fn)
+	next := f.call.Invoke(invoke, fp, fn)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
@@ -1335,7 +1340,7 @@ func (s *state) hostCall(req []byte) []byte {
 	// thread.
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
-	n, _, _ := purego.SyscallN(inv, fp, reqC, uintptr(len(req)), respC, respCap)
+	n := ccall.Invoke(inv, fp, reqC, uintptr(len(req)), respC, respCap)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
@@ -1370,7 +1375,7 @@ func (s *state) dtorFired(id uint32) []byte {
 	f, fp := s.bootFrame()
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
-	purego.SyscallN(invoke, fp, uintptr(id))
+	ccall.Invoke(invoke, fp, uintptr(id))
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
@@ -1455,7 +1460,7 @@ func releaseState(p *internal.Perl) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sharedRelease != 0 {
-		purego.SyscallN(s.sharedRelease, s.sharedRaw)
+		ccall.Invoke(s.sharedRelease, s.sharedRaw)
 	}
 	for _, rec := range s.magicBySV {
 		for mg := rec.head; mg != 0; {
@@ -1476,7 +1481,7 @@ func flushNativeStdio() {
 		fflushFn, _ = purego.Dlsym(purego.RTLD_DEFAULT, "fflush")
 	})
 	if fflushFn != 0 {
-		purego.SyscallN(fflushFn, 0)
+		ccall.Invoke(fflushFn, 0)
 	}
 }
 
@@ -1712,7 +1717,7 @@ func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) (msg string, died bo
 	// The SDK-side entry installs the current frame and a croak guard
 	// before running the hook; interpreter macros inside it need both. It
 	// returns 0 when the hook died, with the message in the frame.
-	ran, _, _ := purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
+	ran := ccall.Invoke(invoke, fp, fn, uintptr(sv), mg)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	if uint32(ran) == 0 {
@@ -1793,7 +1798,7 @@ func (s *state) perlioHook(req []byte) []byte {
 	f, fp := s.bootFrame()
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
-	rlen, _, _ := purego.SyscallN(inv, fp, funcs, reqC, uintptr(len(req)), respC, 4096)
+	rlen := ccall.Invoke(inv, fp, funcs, reqC, uintptr(len(req)), respC, 4096)
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	runtime.UnlockOSThread()
 	_ = f
@@ -1835,7 +1840,7 @@ func (s *state) keywordHook(req []byte) []byte {
 	retC := cMalloc(4)
 	tokC := cMalloc(8)
 	f, fp := s.bootFrame()
-	rc, _, _ := purego.SyscallN(inv, fp, wordC, uintptr(len(word)),
+	rc := ccall.Invoke(inv, fp, wordC, uintptr(len(word)),
 		uintptr(kind), retC, tokC)
 	cFree(wordC)
 	words := func(w ...uint64) []byte {
@@ -2181,7 +2186,7 @@ func (s *state) cvAnySlot(cv uint64) uintptr {
 }
 
 // buildVtable creates the C-callable API table. Callbacks are process-global
-// (purego.NewCallback registrations are permanent); the frame carries the
+// (ccall.NewCallback registrations are permanent); the frame carries the
 // instance.
 func buildVtable() {
 	vtable = &cAPI{abi: abiVersion}
@@ -2190,7 +2195,9 @@ func buildVtable() {
 	// each state's own sharedRaw, stamped onto frames.
 	vtable.sharedRaw = cMalloc(sharedBlockSize)
 	pokeBytes(vtable.sharedRaw, make([]byte, sharedBlockSize))
-	vtable.svIV = purego.NewCallback(func(fr, sv uintptr) uintptr {
+	vtable.svIV = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2202,7 +2209,10 @@ func buildVtable() {
 		}
 		return uintptr(v)
 	})
-	vtable.svPV = purego.NewCallback(func(fr, sv, lenp uintptr) uintptr {
+	vtable.svPV = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
+		lenp := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2224,7 +2234,9 @@ func buildVtable() {
 		}
 		return uintptr(unsafe.Pointer(unsafe.SliceData(mem))) + uintptr(off)
 	})
-	vtable.newIV = purego.NewCallback(func(fr, v uintptr) uintptr {
+	vtable.newIV = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		v := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2236,7 +2248,10 @@ func buildVtable() {
 		}
 		return uintptr(sv)
 	})
-	vtable.newPVN = purego.NewCallback(func(fr, p, ln uintptr) uintptr {
+	vtable.newPVN = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		p := args[1]
+		ln := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2248,7 +2263,9 @@ func buildVtable() {
 		}
 		return uintptr(sv)
 	})
-	vtable.svMortal = purego.NewCallback(func(fr, sv uintptr) uintptr {
+	vtable.svMortal = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2260,7 +2277,14 @@ func buildVtable() {
 		}
 		return uintptr(out)
 	})
-	vtable.xsOp = purego.NewCallback(func(fr uintptr, op int32, a, b, c, sPtr, sLen uintptr) uintptr {
+	vtable.xsOp = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		op := int32(args[1])
+		a := args[2]
+		b := args[3]
+		c := args[4]
+		sPtr := args[5]
+		sLen := args[6]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2288,7 +2312,9 @@ func buildVtable() {
 		}
 		return uintptr(v)
 	})
-	vtable.hostFd = purego.NewCallback(func(fr, fd uintptr) uintptr {
+	vtable.hostFd = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		fd := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return ^uintptr(0)
@@ -2299,14 +2325,18 @@ func buildVtable() {
 		}
 		return host
 	})
-	vtable.pvHost = purego.NewCallback(func(fr, sv uintptr, create int32) uintptr {
+	vtable.pvHost = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
+		create := int32(args[2])
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
 		}
 		return stateFor(f.p).pvHostSlot(uint64(sv), create != 0)
 	})
-	vtable.xsOpBox = purego.NewCallback(func(fr uintptr) uintptr {
+	vtable.xsOpBox = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2329,7 +2359,10 @@ func buildVtable() {
 		}
 		return 1
 	})
-	vtable.cvSetXsub = purego.NewCallback(func(fr, cv, fn uintptr) uintptr {
+	vtable.cvSetXsub = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		cv := args[1]
+		fn := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2339,7 +2372,10 @@ func buildVtable() {
 		}
 		return 0
 	})
-	vtable.regXS = purego.NewCallback(func(fr, name, fn uintptr) uintptr {
+	vtable.regXS = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		name := args[1]
+		fn := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2350,7 +2386,9 @@ func buildVtable() {
 		}
 		return 0
 	})
-	vtable.guestMem = purego.NewCallback(func(fr, gptr uintptr) uintptr {
+	vtable.guestMem = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		gptr := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2362,7 +2400,10 @@ func buildVtable() {
 		}
 		return uintptr(unsafe.Pointer(&mem[gptr]))
 	})
-	vtable.newXS = purego.NewCallback(func(fr, name, fn uintptr) uintptr {
+	vtable.newXS = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		name := args[1]
+		fn := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2375,7 +2416,9 @@ func buildVtable() {
 		}
 		return uintptr(cvTok)
 	})
-	vtable.cvAny = purego.NewCallback(func(fr, cv uintptr) uintptr {
+	vtable.cvAny = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		cv := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			if xsTrace {
@@ -2385,7 +2428,9 @@ func buildVtable() {
 		}
 		return stateFor(f.p).cvAnySlot(uint64(cv))
 	})
-	vtable.cvXsub = purego.NewCallback(func(fr, cv uintptr) uintptr {
+	vtable.cvXsub = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		cv := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2395,21 +2440,34 @@ func buildVtable() {
 		defer s.mu.Unlock()
 		return s.cvFn[uint64(cv)]
 	})
-	vtable.magicExt = purego.NewCallback(func(fr, sv, obj uintptr, how int32, vtbl, name, namlen uintptr) uintptr {
+	vtable.magicExt = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
+		obj := args[2]
+		how := int32(args[3])
+		vtbl := args[4]
+		name := args[5]
+		namlen := args[6]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
 		}
 		return stateFor(f.p).magicExt(f, uint64(sv), uint64(obj), how, vtbl, name, int64(namlen))
 	})
-	vtable.magicChain = purego.NewCallback(func(fr, sv uintptr) uintptr {
+	vtable.magicChain = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
 		}
 		return stateFor(f.p).magicChainHead(uint64(sv))
 	})
-	vtable.magicDel = purego.NewCallback(func(fr, sv uintptr, how int32, vtbl uintptr) uintptr {
+	vtable.magicDel = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
+		how := int32(args[2])
+		vtbl := args[3]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2417,7 +2475,10 @@ func buildVtable() {
 		stateFor(f.p).magicDel(uint64(sv), how, vtbl)
 		return 0
 	})
-	vtable.perlioDef = purego.NewCallback(func(fr, name, funcs uintptr) uintptr {
+	vtable.perlioDef = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		name := args[1]
+		funcs := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2431,7 +2492,10 @@ func buildVtable() {
 		_ = name
 		return uintptr(id)
 	})
-	vtable.perOpSet = purego.NewCallback(func(fr uintptr, opTok uint64, fn uintptr) uintptr {
+	vtable.perOpSet = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		opTok := uint64(args[1])
+		fn := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2446,7 +2510,10 @@ func buildVtable() {
 		s.mu.Unlock()
 		return 0
 	})
-	vtable.magicSetHead = purego.NewCallback(func(fr, sv, mg uintptr) uintptr {
+	vtable.magicSetHead = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		sv := args[1]
+		mg := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2454,7 +2521,10 @@ func buildVtable() {
 		stateFor(f.p).magicSetHead(f, uint64(sv), mg)
 		return 0
 	})
-	vtable.ppHookSet = purego.NewCallback(func(fr uintptr, opType int32, fn uintptr) uintptr {
+	vtable.ppHookSet = ccall.NewCallback(func(args *ccall.Args) uintptr {
+		fr := args[0]
+		opType := int32(args[1])
+		fn := args[2]
 		f := lookupFrame(fr)
 		if f == nil {
 			return 0
@@ -2595,13 +2665,13 @@ func libcInit() {
 }
 
 func cMalloc(n int) uintptr {
-	p, _, _ := purego.SyscallN(mallocFn, uintptr(n))
+	p := ccall.Invoke(mallocFn, uintptr(n))
 	return p
 }
 
 func cFree(p uintptr) {
 	if p != 0 {
-		purego.SyscallN(freeFn, p)
+		ccall.Invoke(freeFn, p)
 	}
 }
 
