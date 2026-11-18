@@ -6080,6 +6080,7 @@ enum {
  * OPclass, goperl_perlapi.h) that have words of their own. */
 #define GOPERL_OPCLASS_PMOP 6
 #define GOPERL_OPCLASS_PADOP 8
+#define GOPERL_OPCLASS_SVOP 7
 #define GOPERL_OPBIT_MORESIB 1
 #define GOPERL_OPBIT_COP 2
 #define GOPERL_OPBIT_HOOKED 4
@@ -11521,6 +11522,7 @@ struct goperl_op_base {
     uint64_t op_pmstashstart;
     OP *op_code_list;
     UV op_padix;
+    SV *op_sv; /* an SVOP's */
 };
 
 /* guest field selectors for OP_SET */
@@ -11543,7 +11545,8 @@ enum {
     GOPERL_OPF_PMREPLROOT = 402,
     GOPERL_OPF_PMSTASHSTART = 403,
     GOPERL_OPF_PMCODELIST = 404,
-    GOPERL_OPF_PADIX = 405
+    GOPERL_OPF_PADIX = 405,
+    GOPERL_OPF_SV = 406 /* the SV of an SVOP */
 };
 
 /* The word one of a PMOP's unions holds as the interpreter keeps it (an
@@ -11585,6 +11588,7 @@ static void goperl_op_base_capture(OP *o) {
     b->op_pmstashstart = goperl_op_union_word(o, 1);
     b->op_code_list = o->op_code_list;
     b->op_padix = o->op_padix;
+    b->op_sv = o->op_sv;
 }
 
 static void goperl_perop_pp_register(goperl_frame_t *f, OP *o);
@@ -11620,6 +11624,7 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
         b->op_pmreplroot == goperl_op_union_word(o, 0) &&
         b->op_pmstashstart == goperl_op_union_word(o, 1) &&
         b->op_code_list == o->op_code_list && b->op_padix == o->op_padix &&
+        b->op_sv == o->op_sv &&
         (!o->gop_iscop ||
          (b->cop_line == o->cop_line && b->cop_warnings == o->cop_warnings &&
           b->cop_hints == o->cop_hints && b->cop_features == o->cop_features.bits[0])))
@@ -11661,6 +11666,9 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     if (b->op_code_list != o->op_code_list)
         goperl_op_setfield(f, o, GOPERL_OPF_PMCODELIST, goperl_op_link_tok(f, o->op_code_list));
     if (b->op_padix != o->op_padix) goperl_op_setfield(f, o, GOPERL_OPF_PADIX, o->op_padix);
+    /* the SV an SVOP holds (the class the interpreter gave the op, plus one) */
+    if (b->op_sv != o->op_sv && o->gop_class == GOPERL_OPCLASS_SVOP + 1)
+        goperl_op_setfield(f, o, GOPERL_OPF_SV, GOPERL_TOK(o->op_sv));
     if (o->gop_iscop) {
         /* COP_SET: 0 the line, 1 the warnings, 2 the hints */
         if (b->cop_line != o->cop_line)
