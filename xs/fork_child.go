@@ -181,7 +181,7 @@ func (s *state) childXSUB(req []byte) []byte {
 		return append([]byte{0}, "native XS dispatch: short payload"...)
 	}
 	if s.inDestructor() || s.tearingDown() {
-		return []byte{1, 0, 0, 0, 0, 0, 0, 0, 0} // [1][no values]
+		return s.returnsNothing(req)
 	}
 	id := int64(wordAt(req, 0))
 	what, fn := "a native sub", uintptr(0)
@@ -194,6 +194,25 @@ func (s *state) childXSUB(req []byte) []byte {
 	}
 	s.mu.Unlock()
 	return refuse(what, fn)
+}
+
+// returnsNothing is the answer of an XSUB that returns nothing: the stack
+// down to the mark pp_entersub pushed, which is taken ([1][depth][top]).
+func (s *state) returnsNothing(req []byte) []byte {
+	if len(req) < (3+stackWords)*8 {
+		return append([]byte{0}, "native XS dispatch: short payload"...)
+	}
+	marks, top := wordAt(req, 3+3), int64(wordAt(req, 3+4))
+	mem := s.p.RawMemory()
+	at := marks + 4*uint64(top)
+	if top < 0 || at+4 > uint64(len(mem)) {
+		return append([]byte{0}, "native XS dispatch: no mark for the call"...)
+	}
+	resp := make([]byte, 1+16)
+	resp[0] = 1
+	binary.LittleEndian.PutUint64(resp[1:], uint64(int64(int32(binary.LittleEndian.Uint32(mem[at:])))))
+	binary.LittleEndian.PutUint64(resp[1+8:], uint64(top-1))
+	return resp
 }
 
 // childMagicLocal answers `local` on a variable with magic of native code

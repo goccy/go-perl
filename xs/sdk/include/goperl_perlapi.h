@@ -710,7 +710,13 @@ static void goperl_sv_pvx_store(goperl_frame_t *f, uint64_t tok, const void *p) 
         g = GOPERL_PV_HOST;
         goperl_pv_views_g = 1;
     }
+    const int32_t failed_before = f->failed;
     goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, g, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
+    /* the interpreter refused the buffer (a string that perl could write
+     * through, of memory it cannot reach): the call ends there, as at any
+     * operation the interpreter dies in, before native code writes to the
+     * stacks the die has unwound */
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
 }
 /* SvLEN, read and stored: the interpreter's, except for an SV whose buffer
  * slot holds a pointer of this process's (see GOPERL_PV_HOST). Only an SV
@@ -1973,6 +1979,7 @@ static bool goperl_do_openn(goperl_frame_t *f, GV *gv, const char *oname,
     const uint64_t opened =
         goperl_xs_op(f, GOPERL_OP_DO_OPENN, GOPERL_TOK(gv), size, req, size);
     goperl_gen_bump();
+    goperl_pp_sync_in(f);
     free(req);
     if (!failed_before && f->failed && f->jb) goperl_raise(f);
     if (!opened) goperl_errno_from_interp(f);
@@ -2492,22 +2499,22 @@ static void goperl_require_pv(goperl_frame_t *f, const char *pv) {
 #define require_pv(pv) goperl_require_pv(_gof, (pv))
 
 /* A module that runs a callback on "a new stack" gets one in the
- * interpreter, of the type it names: the callback runs on it (a `last` or
- * a goto in it finds no context of the module's caller's to leave to, as
- * on perl). The module keeps working on the one host stack meanwhile: the
- * position to come back to is kept on the mark stack. */
+ * interpreter, of the type it names, as perl's PUSHSTACKi switches to one:
+ * native code's sp is on it from then on, and the callback runs on it (a
+ * `last` or a goto in it finds no context of the module's caller's to leave
+ * to). POPSTACK switches back to the stack below, where it was left, and
+ * native code takes sp again (SPAGAIN), as on perl. */
 #define PUSHSTACKi(type)                                                  \
     STMT_START {                                                          \
         PL_stack_sp = sp;                                                 \
-        goperl_pushmark(_gof, (I32)(sp - PL_stack_base));                 \
         (void)GOPERL_INTERNAL(_gof, GOPERL_INT_PUSHSTACK, 0, (I32)(type)); \
+        sp = PL_stack_sp;                                                 \
     }                                                                     \
     STMT_END
 #define PUSHSTACK PUSHSTACKi(PERLSI_UNKNOWN)
 #define POPSTACK                                                          \
     STMT_START {                                                          \
         (void)GOPERL_INTERNAL(_gof, GOPERL_INT_POPSTACK, 0, 0);            \
-        PL_stack_sp = PL_stack_base + goperl_popmark(_gof);               \
     }                                                                     \
     STMT_END
 
@@ -3657,12 +3664,11 @@ static CV *goperl_cv_clone_fn(pTHX_ CV *proto) { return cv_clone(proto); }
 
 #define PL_errors (*goperl_plsv_ref(_gof, GOPERL_PL_ERRORS))
 /* The interpreter's mark stack, where it is: what a context's
- * blk_oldmarksp indexes. (The marks of the running native function are its
- * own: PL_markstack_ptr, TOPMARK.) A mark there is an index of the
- * interpreter's stack, which PL_stack_base is by index (goperl_stack_below). */
+ * blk_oldmarksp indexes, and PL_markstack_ptr points into. */
 static inline __attribute__((unused)) I32 *goperl_markstack_guest(goperl_frame_t *f) {
-    goperl_stack_below(f);
-    return (I32 *)goperl_guest_mem(f, GOPERL_PLVAR(GOPERL_PL_MARKSTACK));
+    goperl_marks_adopt(f);
+    goperl_marks_publish(f);
+    return goperl_marks(f);
 }
 #define PL_markstack (goperl_markstack_guest(_gof))
 #define PL_savebegin (*(bool *)goperl_plint_ref(_gof, GOPERL_PL_SAVEBEGIN))
@@ -4057,28 +4063,27 @@ static GOPERL_OP_BUILDER OP *goperl_newunop_aux(goperl_frame_t *f, I32 type, I32
  * the next call. perl saves the cost of entering the sub each time; here
  * each MULTICALL is a call of the sub.
  *
- * As in perl, the calls run on a stack of their own, from PUSH_MULTICALL
- * to POP_MULTICALL: what a call returns is PL_stack_base[1] and up to
- * PL_stack_sp (a block in list context: List::MoreUtils' pairwise), and
- * the stack the caller had, with its arguments, is as it was afterwards
- * (a pointer to the arguments taken before PUSH_MULTICALL stays good: a
- * sort that calls the block rearranges them in place).
+ * As in perl, the calls run on a stack of the interpreter's of their own
+ * (PERLSI_MULTICALL), from PUSH_MULTICALL to POP_MULTICALL: what a call
+ * returns is PL_stack_base[1] and up to PL_stack_sp (a block in list
+ * context: List::MoreUtils' pairwise), and the stack the caller had, with
+ * its arguments, is as it was afterwards (a pointer to the arguments taken
+ * before PUSH_MULTICALL stays good: a sort that calls the block rearranges
+ * them in place).
  *
  * As in perl, MULTICALL needs nothing but multicall_cop: a module hands
  * that one variable to a function of its own and says MULTICALL there. So
- * what the call needs — the sub, the context the variable gimme had at
- * PUSH_MULTICALL, the caller's stack — is kept in a record that
- * multicall_cop points into.
+ * what the call needs — the sub and the context the variable gimme had at
+ * PUSH_MULTICALL — is kept in a record that multicall_cop points into.
  *
- * A function that leaves by croak between the two leaves the frame on the
- * stack of the calls, which is given up with the frame. */
+ * A function that leaves by croak between the two leaves the stack of the
+ * calls to the interpreter's unwinding of the die, which gives it up, as
+ * perl's does. */
 typedef struct {
     OP op; /* what multicall_cop points to */
     CV *cv;
     U8 gimme;
-    SV **outer_base; /* the caller's stack */
-    SV **outer_sp;
-    int64_t outer_cap;
+    U8 pushed; /* PUSH_MULTICALL ran and POP_MULTICALL not yet */
 } goperl_multicall_t;
 #define dMULTICALL                                                   \
     goperl_multicall_t goperl_multicall_v __attribute__((unused));   \
@@ -4089,25 +4094,14 @@ typedef struct {
 static void goperl_multicall_push(goperl_frame_t *f, goperl_multicall_t *m, CV *cv, U8 gimme)
     __attribute__((unused));
 static void goperl_multicall_push(goperl_frame_t *f, goperl_multicall_t *m, CV *cv, U8 gimme) {
-    enum { first_cap = 64 };
-    goperl_stk(f);
-    /* the stack of a pp function is the interpreter's own, kept in step
-     * with it: another one cannot stand in for it */
-    if (f->pp_frame)
-        goperl_croakf(f, "MULTICALL in a pp function is not supported by the go-perl XS SDK");
-    SV **calls = (SV **)malloc(first_cap * sizeof(SV *));
-    if (!calls) goperl_croakf(f, "Out of memory for the stack of a MULTICALL");
-    /* the entry below the first value is undef, as on every stack of
-     * perl's: *PL_stack_sp is undef after a call that returned nothing */
-    calls[0] = &PL_sv_undef;
+    /* the calls' stack: one of the interpreter's of the multicall type, as
+     * perl's (its entry below the first value is undef: *PL_stack_sp is
+     * undef after a call that returned nothing) */
+    (void)goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, (uint64_t)PERLSI_MULTICALL,
+                        33 /* GOPERL_INT_PUSHSTACK (goperl_compiler.h) */, 0, 0);
     m->cv = cv;
     m->gimme = gimme;
-    m->outer_base = f->stbase;
-    m->outer_sp = f->psp;
-    m->outer_cap = f->stcap;
-    f->stbase = calls;
-    f->stcap = first_cap;
-    f->psp = calls;
+    m->pushed = 1;
     /* the scope of the calls: what is saved until POP_MULTICALL is undone
      * there (perl's CX_LEAVE_SCOPE of the multicall's context) */
     ENTER;
@@ -4138,13 +4132,10 @@ static void goperl_multicall(goperl_frame_t *f, goperl_multicall_t *m) {
 static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m)
     __attribute__((unused));
 static void goperl_multicall_pop(goperl_frame_t *f, goperl_multicall_t *m) {
-    if (!m->outer_base) return;
+    if (!m->pushed) return;
     LEAVE;
-    free(f->stbase);
-    f->stbase = m->outer_base;
-    f->stcap = m->outer_cap;
-    f->psp = m->outer_sp;
-    m->outer_base = 0;
+    (void)goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, 0, 34 /* GOPERL_INT_POPSTACK */, 0, 0);
+    m->pushed = 0;
 }
 #define POP_MULTICALL goperl_multicall_pop(_gof, (goperl_multicall_t *)multicall_cop)
 #define CHANGE_MULTICALL_FLAGS(the_cv, flags) \

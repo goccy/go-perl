@@ -1372,52 +1372,19 @@ static __attribute__((unused)) const char *goperl_cop_label(goperl_frame_t *f, c
 #define CopLABEL_len(c, len) goperl_cop_label(_gof, (const COP *)(c), (len), (U32 *)0)
 #define CopLABEL(c) goperl_cop_label(_gof, (const COP *)(c), (STRLEN *)0, (U32 *)0)
 
-/* CALLRUNOPS runs the ops from PL_op on, as the run loop does, on the perl
- * stack native code has: what is on it (values and marks) is on the
- * interpreter's stack while they run, and what they leave there is native
- * code's stack afterwards. PL_op is what the run loop left in it, NULL. */
+/* CALLRUNOPS runs the ops from PL_op on, as the run loop does, on the
+ * interpreter's stacks as native code left them; what the ops leave there
+ * is native code's stack afterwards. PL_op may be an op of native code's
+ * own (an entersub op on the C stack, as perl's amagic_call runs an
+ * overloaded operator's sub): the interpreter runs its copy of it
+ * (goperl_op_for_interp). PL_op is what the run loop left in it, NULL. */
+static uint64_t goperl_op_for_interp(goperl_frame_t *f, const OP *o, int depth);
 static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     OP *const start = f->plop;
-    const uint64_t tok = goperl_op_field_tok(f, (uint64_t)(uintptr_t)start);
+    const uint64_t tok = goperl_op_for_interp(f, start, 0);
     goperl_optree_flush(f);
-    if (f->pp_frame) {
-        GOPERL_INTERNAL(f, GOPERL_INT_RUNOPS, tok, (uint64_t)1 << 63);
-        f->plop = 0;
-        return;
-    }
-    goperl_marks_adopt(f);
-    const int32_t lo = goperl_stack_lo(f);
-    const int32_t n = (int32_t)(f->psp - f->stbase) - lo; /* st[lo+1..lo+n] */
-    const int32_t nmarks = f->markidx + 1 > 0 ? f->markidx + 1 : 0;
-    /* words: [marks][values], the marks, the values; -> the address of the
-     * words [count][marks][the array of the values], the marks */
-    const size_t bytes = sizeof(goperl_gword_t) * (size_t)(2 + nmarks + (n > 0 ? n : 0));
-    goperl_gword_t *const w = (goperl_gword_t *)malloc(bytes);
-    if (!w) goperl_croakf(f, "Out of memory!");
-    w[0] = (goperl_gword_t)nmarks;
-    w[1] = (goperl_gword_t)(n > 0 ? n : 0);
-    for (int32_t i = 0; i < nmarks; i++)
-        w[2 + i] = (goperl_gword_t)(int64_t)(goperl_marks(f)[i] - lo);
-    for (int32_t i = 0; i < n; i++) w[2 + nmarks + i] = GOPERL_TOK(f->stbase[lo + 1 + i]);
-    const uint64_t r = goperl_do_op3(f, GOPERL_OP_INTERNAL, tok, bytes, (uint64_t)(GOPERL_INT_RUNOPS), (const char *)w, bytes);
-    free(w);
-    f->plop = 0;
-    const goperl_gword_t *a = (const goperl_gword_t *)goperl_guest_mem(f, r);
-    if (!a) goperl_croakf(f, "the interpreter did not hand back the stack of a run of ops");
-    const int32_t count = (int32_t)a[0];
-    const int32_t nm = (int32_t)a[1] > 0 ? (int32_t)a[1] : 0;
-    const uint64_t avtok = a[2];
-    /* the marks, before the fetches below run code that may move the
-     * interpreter's memory */
-    while (nm > goperl_marks_cap(f)) goperl_marks_grow(f);
-    for (int32_t i = 0; i < nm; i++) goperl_marks(f)[i] = lo + (int32_t)(int64_t)a[3 + i];
-    f->markidx = nm - 1;
-    goperl_marks_publish(f);
-    f->psp = f->stbase + lo;
-    goperl_stack_extend(f, f->psp, count);
-    for (int32_t i = 0; i < count; i++)
-        *++f->psp = (SV *)(uintptr_t)goperl_xs_op(f, GOPERL_OP_AV_FETCH, avtok,
-                                                  (uint64_t)(int64_t)i, 0, 0);
+    GOPERL_INTERNAL(f, GOPERL_INT_RUNOPS, tok, (uint64_t)1 << 63);
+    f->plop = f->plop_base = 0;
 }
 #define CALLRUNOPS(ctx) goperl_callrunops(_gof)
 #define PL_runops_std goperl_callrunops
@@ -1433,7 +1400,7 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
  * run the ops to their end. */
 static __attribute__((unused)) OP *goperl_docatch(goperl_frame_t *f, Perl_ppaddr_t firstpp) {
     OP *const o = PL_op;
-    if (!f->pp_frame)
+    if (!f->hook_op_tok)
         goperl_croakf(f, "docatch is called outside a pp function");
     if (!o || o->op_ppaddr != firstpp)
         goperl_croakf(f, "docatch is given a pp function that is not the running op's: gperl "
@@ -2056,13 +2023,10 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
         if (reqlen < 16) goperl_croakf(f, "host call: short run loop request");
         const runops_proc_t fn = (runops_proc_t)goperl_fn_of(f, (uint32_t)req[1]);
         goperl_flush(f);
-        /* The ops the loop runs work on the interpreter's stack, and the
-         * pp function of a custom op (LRU::Cache's) is the module's own,
-         * which the loop calls itself: the frame works on the interpreter's
-         * stack while the loop runs, as a pp function's does. */
-        goperl_pp_stack_take(f);
+        /* The ops the loop runs work on the interpreter's stack, which the
+         * frame has (the pp function of a custom op, LRU::Cache's, is the
+         * module's own, which the loop calls itself) */
         fn();
-        goperl_pp_stack_give_back(f);
         return 0;
     }
     case GOPERL_HOST_SIGHANDLER: { /* [id][signal of the interpreter's] */

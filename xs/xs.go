@@ -56,16 +56,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 37
-
-// nativeHdrWords is the number of header words of a native-XSUB request
-// (GOPERL_NATIVE_HDR_WORDS in perl-wasm): the function id, the CV, the
-// item count, the interpreter's stack index of the first item (ax), where
-// its stack is, and its errno; the items follow.
-const nativeHdrWords = 6
-
-// maxStackIndex bounds the stack index a request may name.
-const maxStackIndex = 1 << 28
+const abiVersion = 39
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -85,14 +76,8 @@ const (
 )
 
 const (
-	maxStack = 512 // GOPERL_XS_STACK: the slots a frame starts with
-	// stackHeadroom is the room above the arguments a frame is given when
-	// they do not fit the initial stack: return values an XSUB stores
-	// without extending the stack first.
-	stackHeadroom = 64
 	// sharedBlockSize matches GOPERL_SHARED_RESERVED in the SDK.
 	sharedBlockSize = 262144
-	maxMarks        = 64 // GOPERL_XS_MARKS
 	tmpSlots        = 16 // GOPERL_XS_TMPS
 )
 
@@ -167,13 +152,23 @@ func opboxResult2(mem []byte, opbox uint64) uint64 {
 
 // cFrame mirrors goperl_frame_t in sdk/include/perl.h (ABI). The trailing Go
 // fields are invisible to C, which only knows the leading portion.
+//
+// The perl stack of every native call is the interpreter's own: stBase,
+// psp and markv point into its stack and mark stack, in its memory. The
+// loader gives them to an XSUB and a pp function (stackFrom); a function it
+// runs on the side (a destructor, a magic hook) takes them at the SDK's
+// entry. ppVars is the address there of the guest's record of the addresses
+// of PL_stack_sp, PL_stack_base, PL_stack_max, PL_markstack_ptr,
+// PL_markstack and PL_markstack_max, through which the SDK puts sp and the
+// mark pointer into the interpreter before every guest operation and reads
+// the stacks back after it (an operation may move them).
 type cFrame struct {
 	api          uintptr
 	subname      uintptr
 	jb           uintptr
-	items        int32
+	_            int32
 	failed       int32
-	psp          uintptr // SV** into st, maintained by the SDK macros
+	psp          uintptr // PL_stack_sp, maintained by the SDK macros
 	markidx      int32
 	hostsaveBase int32
 	hookDirty    int32
@@ -184,16 +179,10 @@ type cFrame struct {
 	hookOpTok    uint64  // pp-hook frames: the guest op being executed
 	prevFrame    uintptr // frame nesting (SDK-maintained)
 	instShared   uintptr // this instance's shared-state block (goperl_shared_t)
-	// stBase and stCap describe the perl stack of the frame: st below to
-	// begin with, a C heap block when the call has more arguments than st
-	// holds or the SDK's EXTEND outgrew it. The block is freed when the
-	// frame ends (releaseStack).
-	stBase uintptr
-	stCap  int64
-	st     [maxStack]uint64
-	marks  [maxMarks]int32
-	tmp    [tmpSlots]uint64
-	err    [512]byte
+	stBase       uintptr // PL_stack_base
+	stCap        int64   // PL_stack_max - PL_stack_base + 1
+	tmp          [tmpSlots]uint64
+	err          [512]byte
 	// xerrno is 0, or 1 + the errno the XSUB left when it returned, in the
 	// interpreter's numbering: the SDK notes it, dispatch hands it over.
 	xerrno int32
@@ -207,15 +196,7 @@ type cFrame struct {
 	// readable.
 	memBase uintptr
 	memSize uintptr
-	// The perl stack of a pp function (ppFrame set) is the interpreter's
-	// own: stBase and markv point into its stack and mark stack, in its
-	// memory. ppVars is the address there of the guest's record of the
-	// addresses of PL_stack_sp, PL_stack_base, PL_stack_max,
-	// PL_markstack_ptr, PL_markstack and PL_markstack_max, through which
-	// the SDK puts sp and the mark pointer into the interpreter before
-	// every guest operation and reads the stacks back after it (an
-	// operation may move them).
-	ppFrame int32
+	ppFrame int32 // the frame has the interpreter's stacks
 	_       int32
 	ppVars  uint64
 	// nativeCall is set by the SDK in the frame of a native call the
@@ -234,16 +215,12 @@ type cFrame struct {
 	// (goperl_tmpblock_t: the block before it, then the slots), which the
 	// SDK mallocs and releaseStack frees with the frame.
 	tmpMore uintptr
-	// The stack of an XSUB is the interpreter's by index: gstack is where
-	// the interpreter's stack is in its memory, and below the number of
-	// its values under the arguments (ax), which the SDK reads into
-	// st[0..below-1] when native code may index them, setting below to 0.
-	gstack uint64
-	below  int32
-	// markv is the block the SDK moved the marks to once they outgrew
-	// marks (markcap of them), a C heap block releaseStack frees; 0 before.
-	markcap int32
-	markv   uintptr
+	markcap int32 // PL_markstack_max - PL_markstack
+	_       int32
+	markv   uintptr // PL_markstack
+	// plopBase is the SDK's: what plop was when it was last read from the
+	// interpreter or written back to it.
+	plopBase uintptr
 
 	// Go-only:
 	p *internal.Perl
@@ -1089,24 +1066,58 @@ func wordAt(req []byte, i int) uint64 {
 	return binary.LittleEndian.Uint64(req[8*i:])
 }
 
-// dispatch handles one native XSUB call: request [fn_id][cv][items]
-// [svs...]; response [1][nret][svs...] or [0]+message.
+// The words of a request that say where the interpreter's stacks are
+// (perl-wasm's goperl_pp_stack_words), and how many there are.
+const stackWords = 7
+
+// stackFrom gives the frame the interpreter's stacks as the request's words
+// from i on say they are: [PL_stack_base][depth = sp - base][room =
+// PL_stack_max - base][PL_markstack][top = PL_markstack_ptr - PL_markstack]
+// [mark room][the guest's record of the stack variables' addresses],
+// addresses in the interpreter's memory. -> "" or why they are not that.
+func (f *cFrame) stackFrom(req []byte, i int) string {
+	base, depth, room := wordAt(req, i), wordAt(req, i+1), wordAt(req, i+2)
+	marks, top, markRoom := wordAt(req, i+3), wordAt(req, i+4), wordAt(req, i+5)
+	if depth > room || top > markRoom || room > math.MaxInt32 || markRoom > math.MaxInt32 {
+		return "stack beyond its room"
+	}
+	f.ppFrame = 1
+	f.ppVars = wordAt(req, i+6)
+	f.stBase = f.memBase + uintptr(base)
+	f.stCap = int64(room)
+	f.psp = f.stBase + uintptr(depth)*8
+	f.markv = f.memBase + uintptr(marks)
+	f.markcap = int32(markRoom)
+	f.markidx = int32(top)
+	return ""
+}
+
+// stackLeft writes into out (16 bytes) the stacks as the native call left
+// them, the depth and the top mark, which the interpreter makes its sp and
+// mark pointer (the SDK keeps stBase and markv current when an operation
+// moves them); the frame has them no more: they are not the frame's to
+// free.
+func (f *cFrame) stackLeft(out []byte) {
+	binary.LittleEndian.PutUint64(out, uint64(int64(f.psp-f.stBase)/8))
+	binary.LittleEndian.PutUint64(out[8:], uint64(int64(f.markidx)))
+	f.ppFrame, f.ppVars = 0, 0
+	f.stBase, f.stCap, f.psp = 0, 0, 0
+	f.markv, f.markcap = 0, 0
+}
+
+// dispatch handles one native XSUB call: request [fn_id][cv][the
+// interpreter's errno] and where the interpreter's stacks are (stackFrom),
+// which the XSUB works on as a real
+// one does: its arguments are there, above the mark pp_entersub pushed,
+// which its dXSARGS takes. Response [1][depth][top mark] as it left them,
+// or [0]+message, or respThrow.
 func (s *state) dispatch(req []byte) []byte {
 	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
-	if len(req) < 3*8 {
+	if len(req) < (3+stackWords)*8 {
 		return fail("native XS dispatch: short payload")
 	}
 	id := int32(int64(wordAt(req, 0)))
 	cvTok := wordAt(req, 1)
-	nitems := wordAt(req, 2)
-	if len(req) < nativeHdrWords*8 || nitems > uint64(len(req)/8) || len(req) < 8*(nativeHdrWords+int(nitems)) {
-		return fail("native XS dispatch: truncated payload")
-	}
-	items := int(nitems)
-	ax := int(int64(wordAt(req, 3)))
-	if ax < 1 || ax > maxStackIndex {
-		return fail(fmt.Sprintf("native XS dispatch: no stack index %d", ax))
-	}
 	s.mu.Lock()
 	var fn, subname uintptr
 	if id >= 0 && int(id) < len(s.fns) {
@@ -1119,29 +1130,18 @@ func (s *state) dispatch(req []byte) []byte {
 	}
 
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[xsub] %s cv=%#x items=%d\n", cString(subname), cvTok, items)
+		fmt.Fprintf(os.Stderr, "[xsub] %s cv=%#x\n", cString(subname), cvTok)
 	}
 	f := s.newFrame()
 	f.subname = subname
-	f.items = int32(items)
-	// The stack is the interpreter's by index, as a real XS entry's is:
-	// the arguments at st[ax..ax+items-1], ax being the interpreter's
-	// index of the first, a mark at ax-1, sp at the last argument. The
-	// values below the arguments are the interpreter's, at gstack; the SDK
-	// reads them in when native code may look at them.
-	f.marks[0] = int32(ax - 1)
-	f.markidx = 0
-	f.initStack(ax - 1 + items)
-	for i := 0; i < items; i++ {
-		f.setStack(ax+i, wordAt(req, nativeHdrWords+i))
+	if msg := f.stackFrom(req, 3); msg != "" {
+		recycleFrame(f)
+		return fail("native XS dispatch: " + msg)
 	}
-	f.psp = f.stBase + uintptr(ax-1+items)*8
-	f.gstack = wordAt(req, 4)
-	f.below = int32(ax)
 	// The XSUB starts with the interpreter's errno in errno, as perl's
 	// XSUBs do, where $! and errno are one variable; an errno it leaves
 	// that differs from that is what $! says after it.
-	entryErrno := int32(1 + int64(wordAt(req, 5)))
+	entryErrno := int32(1 + int64(wordAt(req, 2)))
 	f.xerrno = entryErrno
 	fp := pinFrame(f)
 	defer func() {
@@ -1172,6 +1172,14 @@ func (s *state) dispatch(req []byte) []byte {
 	}
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	s.jumpCaught(f)
+	// the answer's buffer is the state's, which the interpreter reads
+	// before the next native call
+	if cap(s.resp) < 1+16 {
+		s.resp = make([]byte, 1+16, 64)
+	}
+	resp := s.resp[:1+16]
+	resp[0] = 1
+	f.stackLeft(resp[1:])
 	if f.xerrno != 0 && f.xerrno != entryErrno {
 		// What the C code left in errno is what $! says after the call.
 		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), 0, ""); err != nil {
@@ -1186,37 +1194,18 @@ func (s *state) dispatch(req []byte) []byte {
 	if f.failed != 0 {
 		return fail(f.errString())
 	}
-	top := int(int64(f.psp-f.stBase) / 8)
-	if top < 0 || int64(top) >= f.stCap {
-		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d)", top))
-	}
-	n := top - (ax - 1) // the return values are st[ax..top]
-	if n < 0 {
-		return fail(fmt.Sprintf("native XS dispatch: corrupt stack pointer (top %d below ax %d)", top, ax))
-	}
-	if need := 1 + 8 + 8*n; cap(s.resp) < need {
-		s.resp = make([]byte, need, max(need, 64))
-	}
-	resp := s.resp[:1+8+8*n]
-	resp[0] = 1
-	binary.LittleEndian.PutUint64(resp[1:], uint64(n))
-	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint64(resp[1+8+8*i:], f.stackAt(ax+i))
-	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[xsub] %s returns %d: % x\n", cString(subname), n, resp[1+8:])
+		fmt.Fprintf(os.Stderr, "[xsub] %s leaves % x\n", cString(subname), resp[1:])
 	}
 	return resp
 }
 
-// bootFrame builds a minimal frame for loader-driven native calls that
-// happen outside an XSUB dispatch (svt_free teardown).
+// bootFrame builds a frame for a function the loader runs on the side,
+// outside an XSUB dispatch (a destructor, a magic hook, a host call): it
+// has no stacks until the SDK's entry takes the interpreter's.
 func (s *state) bootFrame() (*cFrame, uintptr) {
 	f := s.newFrame()
-	f.marks[0] = 0
-	f.markidx = 0
-	f.initStack(0)
-	f.psp = f.stBase
+	f.markidx = -1
 	return f, pinFrame(f)
 }
 
@@ -1237,12 +1226,6 @@ func (s *state) ppHook(req []byte) []byte {
 	}
 	opTok := wordAt(req, 0)
 	opType := int32(int64(wordAt(req, 1)))
-	base, depth, room := wordAt(req, 2), wordAt(req, 3), wordAt(req, 4)
-	marks, top, markRoom := wordAt(req, 5), wordAt(req, 6), wordAt(req, 7)
-	vars := wordAt(req, 8)
-	if depth > room || top > markRoom || room > math.MaxInt32 || markRoom > math.MaxInt32 {
-		return fail("pp hook: stack beyond its room")
-	}
 	s.mu.Lock()
 	fn := s.perOpFns[opTok]
 	if fn == 0 {
@@ -1254,23 +1237,15 @@ func (s *state) ppHook(req []byte) []byte {
 		return fail(fmt.Sprintf("pp hook: no host function for op %d", opType))
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d depth=%d top=%d\n", opTok, opType, depth, top)
+		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d\n", opTok, opType)
 	}
 
 	f := s.newFrame()
 	defer recycleFrame(f)
 	f.hookOpTok = opTok
-	f.items = int32(depth)
-	f.ppFrame = 1
-	f.ppVars = vars
-	f.stBase = f.memBase + uintptr(base)
-	f.stCap = int64(room)
-	f.psp = f.stBase + uintptr(depth)*8
-	f.markv = f.memBase + uintptr(marks)
-	f.markcap = int32(markRoom)
-	f.markidx = int32(top)
-	f.gstack = base
-	f.below = 0
+	if msg := f.stackFrom(req, 2); msg != "" {
+		return fail("pp hook: " + msg)
+	}
 	fp := pinFrame(f)
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
@@ -1278,13 +1253,8 @@ func (s *state) ppHook(req []byte) []byte {
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	s.jumpCaught(f)
 	runtime.UnlockOSThread()
-	// The stacks as the function left them (the SDK keeps stBase and markv
-	// current when an operation moves them), and then the frame's own
-	// stack again: the interpreter's are not the frame's to free.
-	newDepth := uint64(int64(f.psp-f.stBase) / 8)
-	newTop := uint64(f.markidx)
-	f.stBase, f.stCap = uintptr(unsafe.Pointer(&f.st[0])), maxStack
-	f.markv, f.markcap = 0, 0
+	resp := make([]byte, 1+3*8)
+	f.stackLeft(resp[1+8:])
 	unpinFrame(fp)
 	if f.failed == failedThrown {
 		return []byte{respThrow}
@@ -1295,14 +1265,11 @@ func (s *state) ppHook(req []byte) []byte {
 		}
 		return fail(f.errString())
 	}
-	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x depth=%d top=%d\n", next, newDepth, newTop)
-	}
-	resp := make([]byte, 1+3*8)
 	resp[0] = 1
 	binary.LittleEndian.PutUint64(resp[1:], uint64(next))
-	binary.LittleEndian.PutUint64(resp[1+8:], newDepth)
-	binary.LittleEndian.PutUint64(resp[1+16:], newTop)
+	if xsTrace {
+		fmt.Fprintf(os.Stderr, "[pphook] -> % x\n", resp[1:])
+	}
 	return resp
 }
 
@@ -2577,58 +2544,9 @@ func buildVtable() {
 	})
 }
 
-// initStack gives the frame a stack with room for items arguments: its own
-// array, or a C heap block when they do not fit.
-func (f *cFrame) initStack(items int) {
-	if items+stackHeadroom <= maxStack {
-		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
-		f.stCap = maxStack
-		return
-	}
-	f.stCap = int64(items + stackHeadroom)
-	f.stBase = cMalloc(int(f.stCap) * 8)
-	// Not cleared: the slots handed over are written, and what lies below
-	// an XSUB's arguments is read from the interpreter's stack when native
-	// code looks there (goperl_stack_below). An XSUB called inside a map
-	// over a long list has its arguments that far up; clearing the block
-	// would cost every such call in proportion to the depth.
-	pokeU64(f.stBase, 0)
-}
-
-// inlineStack reports whether the stack is still the frame's own array.
-func (f *cFrame) inlineStack() bool {
-	return f.stBase == uintptr(unsafe.Pointer(&f.st[0]))
-}
-
-// setStack and stackAt write and read slot i of the stack, wherever it is.
-func (f *cFrame) setStack(i int, tok uint64) {
-	if f.inlineStack() {
-		f.st[i] = tok
-		return
-	}
-	pokeU64(f.stBase+uintptr(i)*8, tok)
-}
-
-func (f *cFrame) stackAt(i int) uint64 {
-	if f.inlineStack() {
-		return f.st[i]
-	}
-	return foreignLoadU64(f.stBase + uintptr(i)*8)
-}
-
 // releaseStack frees what the frame holds on the C heap when it ends: the
-// stack when it is a heap block (the loader's for a long argument list, or
-// the one the SDK moved it to), and the SDK's blocks of SV** result slots.
+// SDK's blocks of SV** result slots. (Its stacks are the interpreter's.)
 func (f *cFrame) releaseStack() {
-	if f.stBase != 0 && !f.inlineStack() {
-		cFree(f.stBase)
-		f.stBase = uintptr(unsafe.Pointer(&f.st[0]))
-		f.stCap = maxStack
-	}
-	if f.markv != 0 {
-		cFree(f.markv)
-		f.markv, f.markcap = 0, 0
-	}
 	for f.tmpMore != 0 {
 		b := f.tmpMore
 		f.tmpMore = uintptr(foreignLoadU64(b))
