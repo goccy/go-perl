@@ -9676,6 +9676,94 @@ static int goperl_wait_mask_end(goperl_frame_t *f, uint64_t old, int r) {
     }
     return r;
 }
+/* ---- the signal mask of native code ---------------------------------------
+ * The program's signal mask is the interpreter's (POSIX::sigprocmask
+ * changes it): native code that blocks or unblocks signals with
+ * sigprocmask or pthread_sigmask (Thread::SigMask) changes it as it changes
+ * the mask of the one thread a process of perl's has, and a signal it
+ * unblocks that came meanwhile is delivered before the call returns. The
+ * mask before is the program's. The host thread's own mask is set as
+ * well, for what native code waits on itself (sigwait). Where the
+ * interpreter cannot be asked (see goperl_wait_frame), the C library's
+ * call alone. Functions of the module itself (hidden), as sigaction is. */
+#define GOPERL_INT_SIGMASK 63 /* a: how (0 block, 1 unblock, 2 set, 3 ask), b: the
+                               * mask of the program's signals -> the mask before */
+static int goperl_sigmask_call(int how, const sigset_t *set, sigset_t *old,
+                               int (*libc)(int, const sigset_t *, sigset_t *)) {
+    goperl_frame_t *const f = goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
+                                  ? goperl_thread_frame()
+                                  : NULL;
+    if (!f) return libc(how, set, old);
+    uint64_t b = 0;
+    int kind = 3;
+    if (set) {
+        switch (how) {
+        case SIG_BLOCK: kind = 0; break;
+        case SIG_UNBLOCK: kind = 1; break;
+        case SIG_SETMASK: kind = 2; break;
+        default: return libc(how, set, old); /* EINVAL, as the C library says */
+        }
+        for (int g = 1; g <= 64; g++)
+            if (sigismember(set, goperl_signal_host(g)) == 1) b |= (uint64_t)1 << (g - 1);
+    }
+    sigset_t host_old;
+    const int r = libc(how, set, &host_old);
+    if (r != 0) return r;
+    const int e = errno;
+    const uint64_t was =
+        goperl_xs_opx(f, GOPERL_OP_INTERNAL, (uint64_t)kind, b, GOPERL_INT_SIGMASK, 0, 0, 0);
+    errno = e;
+    if (old) {
+        sigemptyset(old);
+        for (int g = 1; g <= 64; g++)
+            if (was & ((uint64_t)1 << (g - 1))) {
+                const int h = goperl_signal_host(g);
+                if (h > 0 && h < NSIG) sigaddset(old, h);
+            }
+    }
+    return 0;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigprocmask)(
+    int, const sigset_t *, sigset_t *) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) int sigprocmask(
+    int how, const sigset_t *set, sigset_t *old) GOPERL_LIBC_THROW {
+    if (!goperl_libc_sigprocmask) {
+        goperl_libc_sigprocmask =
+            (int (*)(int, const sigset_t *, sigset_t *))dlsym(RTLD_NEXT, "sigprocmask");
+        if (!goperl_libc_sigprocmask) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+    return goperl_sigmask_call(how, set, old, goperl_libc_sigprocmask);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_pthread_sigmask)(
+    int, const sigset_t *, sigset_t *) = 0;
+/* pthread_sigmask says what failed by its result, not by errno */
+static int goperl_libc_pthread_sigmask_errno(int how, const sigset_t *set, sigset_t *old) {
+    const int r = goperl_libc_pthread_sigmask(how, set, old);
+    if (r != 0) {
+        errno = r;
+        return -1;
+    }
+    return 0;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) int pthread_sigmask(
+    int how, const sigset_t *set, sigset_t *old) GOPERL_LIBC_THROW {
+    if (!goperl_libc_pthread_sigmask) {
+        goperl_libc_pthread_sigmask =
+            (int (*)(int, const sigset_t *, sigset_t *))dlsym(RTLD_NEXT, "pthread_sigmask");
+        if (!goperl_libc_pthread_sigmask) return ENOSYS;
+    }
+    const int saved = errno;
+    if (goperl_sigmask_call(how, set, old, goperl_libc_pthread_sigmask_errno) != 0) {
+        const int r = errno;
+        errno = saved;
+        return r;
+    }
+    errno = saved;
+    return 0;
+}
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_pselect)(
     int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) int pselect(
