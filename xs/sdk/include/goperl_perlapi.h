@@ -1335,6 +1335,8 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
 #define SvWEAKREF(sv) \
     ((SvFLAGS(sv) & (SVf_ROK | SVprv_WEAKREF)) == (SVf_ROK | SVprv_WEAKREF))
 #define SvIsCOW(sv) (SvFLAGS(sv) & SVf_IsCOW)
+#define SvIsCOW_on(sv) GOPERL_FLAGS_CHANGE(sv, SVf_IsCOW, 0)
+#define SvIsCOW_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVf_IsCOW)
 #define SvIsCOW_shared_hash(sv) \
     ({ GOPERL_ONCE(goperl_SvIsCOW_shared_hash_sv_, sv); \
        (SvFLAGS(goperl_SvIsCOW_shared_hash_sv_) & (SVf_POK | SVf_IsCOW)) == (SVf_POK | SVf_IsCOW) && SvLEN(goperl_SvIsCOW_shared_hash_sv_) == 0; })

@@ -1310,9 +1310,24 @@ static __attribute__((unused)) void **goperl_sv_any(goperl_frame_t *f, SV *sv, c
 }
 #undef SvANY
 #define SvANY(sv) (*goperl_sv_any(_gof, (SV *)(sv), GOPERL_LV_AT))
-/* A key shared by the interpreter, shared once more (the copy here is the
- * key; the interpreter shares it when it is given one). */
-#define share_hek_hek(hek) ((HEK *)(hek))
+/* A key shared by the interpreter, shared once more, as hv.h's: a key of
+ * the interpreter's memory (HeKEY_hek, SvSHARED_HEK_FROM_PV) counts one
+ * more holder in the shared_he it is the key of, which the interpreter
+ * takes back when it unshares the key (a scalar of LEN 0 that is IsCOW
+ * and has the key as its string, when it is freed). A key of native
+ * code's own (share_hek, CvNAME_HEK: a copy for the native call) is the
+ * key itself; the interpreter shares it when it is given one. */
+struct shared_he {
+    struct goperl_he shared_he_he;
+    struct hek shared_he_hek;
+};
+static inline __attribute__((unused)) HEK *goperl_share_hek_hek(goperl_frame_t *f, HEK *hek) {
+    if (hek && goperl_in_memory(f, hek))
+        ++((struct shared_he *)((char *)hek - STRUCT_OFFSET(struct shared_he, shared_he_hek)))
+              ->shared_he_he.he_valu.hent_refcount;
+    return hek;
+}
+#define share_hek_hek(hek) goperl_share_hek_hek(_gof, (HEK *)(hek))
 
 /* ---- ops ----------------------------------------------------------------------- */
 #define cPVOPo cPVOPx(o)
