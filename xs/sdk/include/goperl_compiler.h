@@ -2111,14 +2111,14 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
             break;
         case 1:
         case 2:
-            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
+            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_DESCRIBE) : (OP *)0;
             if (req[2] == 1 && BhkENTRY(hk, bhk_pre_end)) hk->bhk_pre_end(&o);
             if (req[2] == 2 && BhkENTRY(hk, bhk_post_end)) hk->bhk_post_end(&o);
             if (o && !o->gop)
                 goperl_croakf(f, "a block hook returned an op that is not the interpreter's");
             break;
         case 3:
-            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_SUBTREE) : (OP *)0;
+            o = req[3] ? goperl_op_describe(f, req[3], GOPERL_OPDUMP_DESCRIBE) : (OP *)0;
             if (BhkENTRY(hk, bhk_eval)) hk->bhk_eval(o);
             break;
         default:
