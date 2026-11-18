@@ -67,30 +67,6 @@
 #define PL_eval_start GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_eval_start") 0
 
 /* the bodies of SVs (sv.h, av.h) */
-#undef XPV
-#define XPV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPV") 0
-#undef XPVUV
-#define XPVUV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVUV") 0
-#undef XPVNV
-#define XPVNV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVNV") 0
-#undef XPVMG
-#define XPVMG GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVMG") 0
-#undef XPVGV
-#define XPVGV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVGV") 0
-#undef XPVLV
-#define XPVLV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVLV") 0
-#undef XPVAV
-#define XPVAV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVAV") 0
-#undef XPVHV
-#define XPVHV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVHV") 0
-#undef XPVIO
-#define XPVIO GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVIO") 0
-#undef XPVFM
-#define XPVFM GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVFM") 0
-#undef XPVINVLIST
-#define XPVINVLIST GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVINVLIST") 0
-#undef XPVOBJ
-#define XPVOBJ GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVOBJ") 0
 #undef AvALLOC
 #define AvALLOC GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: AvALLOC") 0
 
