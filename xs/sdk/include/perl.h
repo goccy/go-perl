@@ -2430,6 +2430,9 @@ static void goperl_calltab_add(void **tabp, goperl_calltab_ent_t **chain,
  * compiled (PL_main_root, PL_main_start, PL_eval_root, PL_eval_start): op
  * shadows, which a store gives the interpreter (see goperl_plroot_load). */
 #define GOPERL_LV_PLROOT 400 /* to 403 */
+/* IoDIRP: a view of the directory stream of a dirhandle, which a store
+ * gives the interpreter (see goperl_dirview_for, goperl_iodirp_store). */
+#define GOPERL_LV_IODIRP 404
 #define GOPERL_LV_IS_PLROOT(field) ((field) >= GOPERL_LV_PLROOT && (field) < GOPERL_LV_PLROOT + 4)
 /* A glob's format and effective glob, fields of its GP (goperl_gp_of). */
 #define GOPERL_LV_GVFORM 49
@@ -11906,6 +11909,187 @@ typedef struct stat Stat_t;
 #define PerlDir_rewind(dir) rewinddir((dir))
 #define PerlDir_seek(dir, loc) seekdir((dir), (loc))
 #define PerlDir_tell(dir) telldir((dir))
+
+/* ---- IoDIRP: the directory stream of a dirhandle --------------------------
+ * The DIR of a dirhandle is the interpreter's, in its memory, with its
+ * descriptor. IoDIRP gives native code a view of it: a DIR * of the SDK's
+ * (one for each IO), which readdir, telldir, seekdir, rewinddir, closedir
+ * and dirfd take as they take a DIR of the host's, and which they answer
+ * from the interpreter's DIR (dirfd with the host's descriptor of it, which
+ * the host's system calls take: File::StatX's statx(dirfd(IoDIRP(io)),
+ * ...)). A DIR of the host's goes to the C library as before. IoDIRP is an
+ * lvalue: a store of a DIR of the host's (POSIX::2008's fdopendir) gives
+ * the IO a DIR of the interpreter's on a duplicate of its descriptor (the
+ * module keeps its own, as it opened it), a store of NULL leaves the IO
+ * without one, and a store of another IO's view gives the IO that DIR. */
+#define GOPERL_INT_DIR 120
+enum {
+    GOPERL_DIR_HAS = 0,
+    GOPERL_DIR_READ = 1,
+    GOPERL_DIR_TELL = 2,
+    GOPERL_DIR_SEEK = 3,
+    GOPERL_DIR_REWIND = 4,
+    GOPERL_DIR_CLOSE = 5,
+    GOPERL_DIR_FD = 6,
+    GOPERL_DIR_ADOPT = 7,
+    GOPERL_DIR_UNSET = 8,
+    GOPERL_DIR_SHARE = 9
+};
+typedef struct goperl_dirview {
+    uint64_t io; /* the IO token */
+    void *inst;  /* the instance of the interpreter */
+    struct goperl_dirview *next;
+    struct dirent ent; /* what readdir answered last */
+} goperl_dirview_t;
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_dirview_t *goperl_dirviews_g = 0;
+static __attribute__((unused)) goperl_dirview_t *goperl_dirview_of(const void *d) {
+    for (goperl_dirview_t *v = goperl_dirviews_g; v; v = v->next)
+        if ((const void *)v == d) return v;
+    return 0;
+}
+static __attribute__((unused)) uint64_t goperl_dir_op(goperl_frame_t *f, uint64_t io, uint32_t what,
+                                                      uint64_t b, uint64_t *err) {
+    uint64_t second = 0;
+    const uint64_t r = goperl_do_opx(f, GOPERL_OP_INTERNAL, io, b,
+                                     (uint64_t)GOPERL_INT_DIR | ((uint64_t)what << 32), 0, 0, &second);
+    /* the interpreter's error number, as the host's */
+    if (err) *err = (uint64_t)goperl_errno_host((int)second);
+    return r;
+}
+/* The view of an IO's DIR, or NULL when it has none. */
+static __attribute__((unused)) DIR *goperl_dirview_for(goperl_frame_t *f, uint64_t io) {
+    if (!io || !goperl_dir_op(f, io, GOPERL_DIR_HAS, 0, 0)) return 0;
+    for (goperl_dirview_t *v = goperl_dirviews_g; v; v = v->next)
+        if (v->io == io && v->inst == f->inst) return (DIR *)(void *)v;
+    goperl_dirview_t *const v = (goperl_dirview_t *)calloc(1, sizeof(goperl_dirview_t));
+    if (!v) goperl_croakf(f, "Out of memory!");
+    v->io = io;
+    v->inst = f->inst;
+    v->next = goperl_dirviews_g;
+    goperl_dirviews_g = v;
+    return (DIR *)(void *)v;
+}
+/* A store into IoDIRP (an lvalue slot written back). */
+static __attribute__((unused)) void goperl_iodirp_store(goperl_frame_t *f, uint64_t io, uint64_t val) {
+    DIR *const d = (DIR *)(uintptr_t)val;
+    const goperl_dirview_t *const v = goperl_dirview_of(d);
+    uint64_t err = 0;
+    if (!d) {
+        goperl_dir_op(f, io, GOPERL_DIR_UNSET, 0, 0);
+        return;
+    }
+    if (v) {
+        if (v->io != io) goperl_dir_op(f, io, GOPERL_DIR_SHARE, v->io, 0);
+        return;
+    }
+    const int fd = (dirfd)(d);
+    const int dup_fd = fd < 0 ? -1 : dup(fd);
+    if (dup_fd < 0) goperl_croakf(f, "IoDIRP: the descriptor of the DIR stored: %s", strerror(errno));
+    /* a descriptor of the host process: the program's when it is the host
+     * process (Config.HostProcess, as gperl's is), as with any descriptor
+     * native code makes */
+    if (goperl_dir_op(f, io, GOPERL_DIR_ADOPT, (uint64_t)(int64_t)dup_fd, &err) != 0) {
+        close(dup_fd);
+        goperl_croakf(f, "IoDIRP: the interpreter could not take the DIR stored: %s", strerror((int)err));
+    }
+}
+/* WASI's file types, which the interpreter's d_type is, as the host's. */
+static __attribute__((unused)) unsigned char goperl_dir_type(uint64_t wasi_type) {
+    switch (wasi_type) {
+    case 1: return DT_BLK;
+    case 2: return DT_CHR;
+    case 3: return DT_DIR;
+    case 4: return DT_REG;
+    case 5:
+    case 6: return DT_SOCK;
+    case 7: return DT_LNK;
+    default: return DT_UNKNOWN;
+    }
+}
+/* The C library's directory functions, for a view too. */
+static __attribute__((unused)) struct dirent *goperl_readdir(DIR *d) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) return (readdir)(d);
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (!f) {
+        errno = EBADF;
+        return 0;
+    }
+    uint64_t err = 0;
+    const uint64_t at = goperl_dir_op(f, v->io, GOPERL_DIR_READ, 0, &err);
+    const goperl_gword_t *const w = at ? (const goperl_gword_t *)goperl_guest_mem(f, at) : 0;
+    if (!w) {
+        if (err) errno = (int)err;
+        return 0;
+    }
+    memset(&v->ent, 0, sizeof v->ent);
+    v->ent.d_ino = (ino_t)w[0];
+    v->ent.d_type = goperl_dir_type(w[1]);
+    const char *const name = (const char *)goperl_guest_mem(f, w[2]);
+    size_t n = (size_t)w[3];
+    if (n > sizeof v->ent.d_name - 1) n = sizeof v->ent.d_name - 1;
+    if (name) memcpy(v->ent.d_name, name, n);
+    v->ent.d_name[n] = 0;
+#ifdef __APPLE__
+    v->ent.d_namlen = (__uint16_t)n;
+#endif
+    return &v->ent;
+}
+static __attribute__((unused)) long goperl_telldir(DIR *d) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) return (telldir)(d);
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    uint64_t err = 0;
+    const long pos = f ? (long)(int64_t)goperl_dir_op(f, v->io, GOPERL_DIR_TELL, 0, &err) : -1;
+    if (pos < 0) errno = f ? (int)err : EBADF;
+    return pos;
+}
+static __attribute__((unused)) void goperl_seekdir(DIR *d, long pos) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) {
+        (seekdir)(d, pos);
+        return;
+    }
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (f) goperl_dir_op(f, v->io, GOPERL_DIR_SEEK, (uint64_t)(int64_t)pos, 0);
+}
+static __attribute__((unused)) void goperl_rewinddir(DIR *d) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) {
+        (rewinddir)(d);
+        return;
+    }
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (f) goperl_dir_op(f, v->io, GOPERL_DIR_REWIND, 0, 0);
+}
+static __attribute__((unused)) int goperl_closedir(DIR *d) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) return (closedir)(d);
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    uint64_t err = 0;
+    const int rc = f ? (int)(int64_t)goperl_dir_op(f, v->io, GOPERL_DIR_CLOSE, 0, &err) : -1;
+    if (rc) errno = f ? (int)err : EBADF;
+    return rc;
+}
+static __attribute__((unused)) int goperl_dirfd(DIR *d) {
+    goperl_dirview_t *const v = goperl_dirview_of(d);
+    if (!v) return (dirfd)(d);
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    uint64_t err = 0;
+    const int64_t fd = f ? (int64_t)goperl_dir_op(f, v->io, GOPERL_DIR_FD, 0, &err) : -1;
+    if (fd < 0) {
+        errno = f ? (int)err : EBADF;
+        return -1;
+    }
+    return (int)goperl_api_host_fd(f, fd);
+}
+#define readdir(d) goperl_readdir(d)
+#define telldir(d) goperl_telldir(d)
+#define seekdir(d, pos) goperl_seekdir((d), (pos))
+#define rewinddir(d) goperl_rewinddir(d)
+#define closedir(d) goperl_closedir(d)
+#define dirfd(d) goperl_dirfd(d)
+#define IoDIRP(io) (*(DIR **)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IODIRP, GOPERL_LV_AT))
 #define PerlEnv_putenv(str) putenv(str)
 #define PerlEnv_ENVgetenv(str) PerlEnv_getenv((str))
 #define PerlEnv_uname(name) uname((name))

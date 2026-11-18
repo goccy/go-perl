@@ -7,7 +7,7 @@
  * subs. What perl keeps for itself is not handed over: the save stack,
  * the stacks of contexts and of stack infos, the op tree's roots and the
  * regexp of a match op, the bodies of SVs, the SV arenas, the jump
- * environment, the directory stream of a dirhandle, the layers of PerlIO
+ * environment, the layers of PerlIO
  * handles. A module that uses one of these names stops building, with a
  * message that says which and why: one fixed phrase ("go-perl gives native code no access to this interpreter internal")
  * and the name. The use is what fails, not the header: #ifdef sees the
@@ -41,9 +41,5 @@
 /* the SV arenas: PL_sv_arenaroot is the interpreter's first arena (perl.h) */
 #undef PL_sv_root
 #define PL_sv_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_sv_root") 0
-
-/* the directory stream of a dirhandle */
-#undef IoDIRP
-#define IoDIRP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: IoDIRP") 0
 
 #endif /* GOPERL_XS_SDK_INTERNALS_H */

@@ -773,6 +773,7 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return v;
     }
     if (GOPERL_LV_IS_PLROOT(field)) return goperl_plroot_load(f, field);
+    if (field == GOPERL_LV_IODIRP) return (uint64_t)(uintptr_t)goperl_dirview_for(f, tok);
     switch (field) {
     case GOPERL_LV_IV:
         return goperl_do_op3(f, GOPERL_OP_SV_SLOT_GET, tok, 0, (uint64_t)(2), 0, 0);
@@ -868,6 +869,10 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     }
     if (GOPERL_LV_IS_PLROOT(field)) {
         goperl_plroot_store(f, field, val);
+        return;
+    }
+    if (field == GOPERL_LV_IODIRP) {
+        goperl_iodirp_store(f, tok, val);
         return;
     }
     switch (field) {
