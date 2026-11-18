@@ -10400,7 +10400,16 @@ static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
                          (fail_ok) ? 1 : 0, ((uint64_t)1 << 32) | (U32)(flags), 0, 0))
 #define sv_utf8_downgrade_nomg(sv, fail_ok) sv_utf8_downgrade_flags((sv), (fail_ok), 0)
 #define mg_set(sv) ((void)goperl_op0(GOPERL_OP_MG_SET, GOPERL_TOK(sv), 0), 0)
-#define SvSETMAGIC(sv) ((void)mg_set(sv))
+/* SvSETMAGIC: the set magic of a scalar that has some (sv.h), the flag
+ * read from the head once pending stores are written */
+static void goperl_sv_setmagic(goperl_frame_t *f, SV *sv) {
+    const uint64_t tok = GOPERL_TOK(sv);
+    if (!tok) return;
+    goperl_flush(f);
+    const uint32_t flags = (uint32_t)(((const uint64_t *)goperl_guest_mem(f, tok))[1] >> 32);
+    if (flags & SVs_SMG) (void)goperl_do_op(f, GOPERL_OP_MG_SET, tok, 0, 0, 0);
+}
+#define SvSETMAGIC(sv) goperl_sv_setmagic(_gof, (SV *)(sv))
 #define sv_setiv_mg(sv, i) \
     ({ GOPERL_ONCE(goperl_sv_setiv_mg_sv_, sv); \
        (sv_setiv((goperl_sv_setiv_mg_sv_), (i)), (void)mg_set(goperl_sv_setiv_mg_sv_)); })
