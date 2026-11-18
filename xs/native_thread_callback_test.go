@@ -81,11 +81,71 @@ XS(XS_ThreadCb_run_later) {
     pthread_detach(t);
     XSRETURN_EMPTY;
 }
+/* two_at_once(sv): two threads of the module's own use the interpreter,
+ * the second while the first still holds it (it has used it and waits for
+ * the second to be done), as an OpenMP loop's threads read Perl values */
+struct two {
+    SV *sv;
+    void *interp;
+    pthread_mutex_t mu;
+    pthread_cond_t cond;
+    int first_in, second_done;
+};
+static void *first_thread(void *arg) {
+    struct two *w = (struct two *)arg;
+#ifdef MULTIPLICITY
+    PERL_SET_CONTEXT((PerlInterpreter *)w->interp);
+#endif
+    dTHX;
+    (void)SvTRUE(w->sv);
+    pthread_mutex_lock(&w->mu);
+    w->first_in = 1;
+    pthread_cond_broadcast(&w->cond);
+    while (!w->second_done) pthread_cond_wait(&w->cond, &w->mu);
+    pthread_mutex_unlock(&w->mu);
+    return NULL;
+}
+static void *second_thread(void *arg) {
+    struct two *w = (struct two *)arg;
+    pthread_mutex_lock(&w->mu);
+    while (!w->first_in) pthread_cond_wait(&w->cond, &w->mu);
+    pthread_mutex_unlock(&w->mu);
+    {
+#ifdef MULTIPLICITY
+        PERL_SET_CONTEXT((PerlInterpreter *)w->interp);
+#endif
+        dTHX;
+        (void)SvTRUE(w->sv);
+    }
+    pthread_mutex_lock(&w->mu);
+    w->second_done = 1;
+    pthread_cond_broadcast(&w->cond);
+    pthread_mutex_unlock(&w->mu);
+    return NULL;
+}
+XS(XS_ThreadCb_two_at_once) {
+    dXSARGS;
+    static struct two w;
+    pthread_t a, b;
+    if (items != 1) croak_xs_usage(cv, "sv");
+    w.sv = ST(0);
+    w.interp = (void *)PERL_GET_CONTEXT;
+    pthread_mutex_init(&w.mu, NULL);
+    pthread_cond_init(&w.cond, NULL);
+    w.first_in = w.second_done = 0;
+    pthread_create(&a, NULL, first_thread, &w);
+    pthread_create(&b, NULL, second_thread, &w);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    ST(0) = sv_2mortal(newSVpvs("both"));
+    XSRETURN(1);
+}
 XS_EXTERNAL(boot_ThreadCb) {
     dXSBOOTARGSXSAPIVERCHK;
     PERL_UNUSED_VAR(items);
     newXS("ThreadCb::run_in_thread", XS_ThreadCb_run_in_thread, __FILE__);
     newXS("ThreadCb::run_later", XS_ThreadCb_run_later, __FILE__);
+    newXS("ThreadCb::two_at_once", XS_ThreadCb_two_at_once, __FILE__);
     Perl_xs_boot_epilog(aTHX_ ax);
 }
 `
@@ -122,6 +182,31 @@ func TestNativeThreadCallingPerlWithNoCallWaitingIsTold(t *testing.T) {
 	const want = "goperl native XS: the interpreter was used from a thread of native code while no native call of the interpreter's was waiting: such a thread can use it only while a native call of the interpreter waits for it\n"
 	if err == nil || strings.Contains(out.String(), "ran") || strings.Contains(out.String(), "result:") ||
 		!strings.Contains(errOut.String(), want) {
+		t.Fatalf("err=%v\nstdout %q\nstderr %q", err, out.String(), errOut.String())
+	}
+}
+
+// Two threads of native code's own that use the interpreter at once (the
+// second while the first holds the frame of the call that waits for them)
+// would share the frame's operation box, its result slots and the SDK's
+// caches, and get one another's answers (an OpenMP loop of av_fetch and
+// SvNV summed wrong). Perl survives concurrent reads because they write
+// nothing shared; here every use goes through that state, so the process
+// ends with a message instead of a wrong answer. It ends, so the case runs
+// in a process of its own.
+func TestNativeThreadsUsingTheInterpreterAtOnceAreTold(t *testing.T) {
+	if so := os.Getenv("GOPERL_THREADCB_CHILD"); so != "" {
+		threadCallbackChild(t, so, `ThreadCb::two_at_once(1)`)
+		return
+	}
+	so := buildModuleSource(t, "ThreadCb", threadCallbackModule)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNativeThreadsUsingTheInterpreterAtOnceAreTold$")
+	cmd.Env = append(os.Environ(), "GOPERL_THREADCB_CHILD="+so)
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	err := cmd.Run()
+	const want = "goperl native XS: two threads used the interpreter at once (threads of native code's own can use it one at a time, while a native call of the interpreter waits for them)\n"
+	if err == nil || strings.Contains(out.String(), "result:") || !strings.Contains(errOut.String(), want) {
 		t.Fatalf("err=%v\nstdout %q\nstderr %q", err, out.String(), errOut.String())
 	}
 }

@@ -993,8 +993,25 @@ typedef struct goperl_process {
     /* set in a child of fork(2) native code made (see fork below): the
      * block is the child's copy, so only the child sees it */
     int32_t forked;
+    /* operations of threads of native code's own that are running on a
+     * waiting call's frame right now (goperl_borrow_op) */
+    int32_t borrow_active;
+    /* the one thread of native code's own that uses a waiting call's
+     * frame, and that frame (goperl_borrow); 0 when none does */
+    void *borrower;
+    goperl_frame_t *borrowed;
+    /* the key under which a thread keeps the frame it uses
+     * (goperl_borrow_key_of): 0 not made, 1 being made, 2 made */
+    int32_t borrow_key_state;
+    uint64_t borrow_key;
 } goperl_process_t;
 #define GOPERL_PROCESS ((goperl_process_t *)goperl_api_v->shared_raw)
+/* The slot of this thread in the table, as this file of the module found
+ * it last on this thread: a thread keeps its slot for as long as it lives
+ * (a slot is claimed once, by its own thread, and never given up), so the
+ * lookup runs once per thread and file. Every SDK macro reaches the current
+ * frame through here (goperl_curframe_slot). */
+static __thread goperl_frame_t **goperl_curframe_cache;
 
 /* ---- fork(2) in native code ----------------------------------------------
  * The interpreter runs inside a Go program, whose runtime keeps threads of
@@ -1114,6 +1131,25 @@ static inline goperl_frame_t *goperl_frame_of_op(goperl_frame_t *f) {
     if (__builtin_expect(!f, 0)) goperl_no_frame_die();
     return f;
 }
+/* An operation on f is about to run: one of a thread that uses a waiting
+ * call's frame (not its own: goperl_curframe_slot) is counted while it
+ * runs; one of the frame's own thread while such an operation runs is the
+ * two threads at once that would mix their answers. Returns whether the
+ * operation is a borrower's (the count is to be given back). */
+static void goperl_concurrent_die(void) __attribute__((noreturn, cold));
+static inline int goperl_borrow_op(goperl_frame_t *f) {
+    goperl_frame_t **const own = goperl_curframe_cache;
+    if (__builtin_expect(own && *own == f, 1)) {
+        if (__builtin_expect(__atomic_load_n(&GOPERL_PROCESS->borrow_active, __ATOMIC_RELAXED) != 0, 0))
+            goperl_concurrent_die();
+        return 0;
+    }
+    __atomic_add_fetch(&GOPERL_PROCESS->borrow_active, 1, __ATOMIC_ACQ_REL);
+    return 1;
+}
+static inline void goperl_borrow_op_end(int borrowed) {
+    if (borrowed) __atomic_sub_fetch(&GOPERL_PROCESS->borrow_active, 1, __ATOMIC_ACQ_REL);
+}
 static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint32_t slen) {
@@ -1144,6 +1180,7 @@ static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     if (goperl_pv_views_g) goperl_pv_view_hook(f, op, a, b);
     const int goperl_e_ = errno;
     const int32_t failed_before = f->failed;
+    const int borrowed = goperl_borrow_op(f);
     const uint64_t r = slen <= GOPERL_OPBOX_STR
                            ? goperl_xs_op_box(f, op, a, b, c, s, (uint32_t)slen)
                            : goperl_api_v->xs_op(f, op, a, b, c, s, slen);
@@ -1151,6 +1188,7 @@ static inline __attribute__((unused)) uint64_t goperl_xs_opx(
         *second = f->failed && !failed_before
                       ? 0
                       : ((const goperl_opbox_t *)(f->membase + f->opbox))->result2;
+    goperl_borrow_op_end(borrowed);
     errno = goperl_e_;
     return r;
 }
@@ -1755,12 +1793,6 @@ static void goperl_errno_leave(goperl_frame_t *f) {
     if (errno != goperl_errno_entry(f)) f->xerrno = 1 + goperl_errno_guest(errno);
 }
 
-/* The slot of this thread in the table, as this file of the module found
- * it last on this thread: a thread keeps its slot for as long as it lives
- * (a slot is claimed once, by its own thread, and never given up), so the
- * lookup runs once per thread and file. Every SDK macro reaches the current
- * frame through here. */
-static __thread goperl_frame_t **goperl_curframe_cache;
 /* The frame slot of the one thread that is inside a native call of the
  * interpreter's, other than self; NULL when no thread is, or more than one
  * (the native calls of two instances: which one a thread belongs to cannot
@@ -1776,6 +1808,78 @@ static goperl_frame_t **goperl_waiting_call(void *self) {
         }
     }
     return found;
+}
+/* Two threads that use the interpreter at once share the frame's
+ * operation box, its result slots and the SDK's caches, and get one
+ * another's answers. Perl's API is not thread-safe either; perl survives
+ * concurrent reads only because they write nothing shared, where here
+ * every use goes through that state. So it ends the process, with a
+ * message, as a croak with nothing to unwind to does. */
+static void goperl_concurrent_die(void) __attribute__((noreturn, cold));
+static void goperl_concurrent_die(void) {
+    static const char msg[] =
+        "goperl native XS: two threads used the interpreter at once (threads of native code's own "
+        "can use it one at a time, while a native call of the interpreter waits for them)\n";
+    (void)!write(2, msg, sizeof msg - 1);
+    abort();
+}
+/* The thread that used a waiting call's frame has ended (the destructor of
+ * the key goperl_borrow_key_of makes). */
+static void goperl_borrow_end(void *outer) {
+    (void)outer;
+    if (!goperl_api_v) return;
+    goperl_process_t *const p = GOPERL_PROCESS;
+    if (__sync_bool_compare_and_swap(&p->borrower, (void *)pthread_self(), (void *)0)) p->borrowed = 0;
+}
+/* The key, one for the process, under which a thread keeps the frame of the
+ * waiting call it uses. */
+static pthread_key_t goperl_borrow_key_of(goperl_process_t *p) {
+    if (__atomic_load_n(&p->borrow_key_state, __ATOMIC_ACQUIRE) != 2) {
+        if (__sync_bool_compare_and_swap(&p->borrow_key_state, 0, 1)) {
+            pthread_key_t k;
+            (void)pthread_key_create(&k, goperl_borrow_end);
+            p->borrow_key = (uint64_t)k;
+            __atomic_store_n(&p->borrow_key_state, 2, __ATOMIC_RELEASE);
+        } else {
+            while (__atomic_load_n(&p->borrow_key_state, __ATOMIC_ACQUIRE) != 2) sched_yield();
+        }
+    }
+    return (pthread_key_t)p->borrow_key;
+}
+/* Whether f is a native call made inside outer, on the frames' chain. */
+static int goperl_frame_within(const goperl_frame_t *f, const goperl_frame_t *outer) {
+    for (int i = 0; f && i < 64; i++) {
+        const goperl_frame_t *const prev = (const goperl_frame_t *)f->prev_frame;
+        if (prev == outer) return 1;
+        if (prev == f) return 0;
+        f = prev;
+    }
+    return 0;
+}
+/* The thread tid uses f, a waiting call's frame: one thread does at a
+ * time, from its first use until it ends (goperl_borrow_end) or the call
+ * returns (__goperl_xs_epilogue); another one ends the process. A native
+ * call the thread itself makes inside the call it uses is the thread's to
+ * run, and another thread may use that one while it waits. A holder of a
+ * frame that no longer waits (a call that returned without the epilogue)
+ * gives it up to the next. */
+static void goperl_borrow(void *tid, goperl_frame_t *f) {
+    goperl_process_t *const p = GOPERL_PROCESS;
+    const pthread_key_t key = goperl_borrow_key_of(p);
+    goperl_frame_t *const outer = (goperl_frame_t *)pthread_getspecific(key);
+    if (outer && outer != f && goperl_frame_within(f, outer)) return;
+    void *const holder = __atomic_load_n(&p->borrower, __ATOMIC_ACQUIRE);
+    if (holder == tid) {
+        /* the frame it holds stays held while the call it waits in has
+         * not returned: another frame now is one of its own calls, made
+         * before the frame's chain says so */
+        if (!p->borrowed) p->borrowed = f;
+    } else {
+        if (holder && p->borrowed == f) goperl_concurrent_die();
+        if (!__sync_bool_compare_and_swap(&p->borrower, holder, tid)) goperl_concurrent_die();
+        p->borrowed = f;
+    }
+    if (outer != f) (void)pthread_setspecific(key, f);
 }
 /* The frame slot of the thread. A thread of native code's own, which has
  * no frame (a C library's worker thread that calls back into Perl while
@@ -1819,7 +1923,9 @@ static goperl_frame_t **goperl_curframe_slot(void) {
         if (*own) return own;
     }
     goperl_frame_t **const waiting = goperl_waiting_call(tid);
-    return waiting ? waiting : own;
+    if (!waiting) return own;
+    goperl_borrow(tid, *waiting);
+    return waiting;
 }
 #define goperl_cur_frame_v (*goperl_curframe_slot())
 
@@ -6838,6 +6944,15 @@ __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
 GOPERL_C __attribute__((weak, visibility("default"), used)) uint32_t
 __goperl_xs_epilogue(goperl_frame_t *f) {
     uint32_t n = 0;
+    {
+        /* the call has returned: a thread that used its frame no longer
+         * does */
+        goperl_process_t *const p = GOPERL_PROCESS;
+        if (p->borrowed == f) {
+            p->borrowed = 0;
+            __atomic_store_n(&p->borrower, (void *)0, __ATOMIC_RELEASE);
+        }
+    }
     while (goperl_cur_frame_v == f && goperl_xs_depth_v > 0 && n < 64) {
         goperl_frame_t *prev = (goperl_frame_t *)f->prev_frame;
         goperl_xs_leave(f);
