@@ -6591,9 +6591,26 @@ typedef char goperl_dtor_fits
          ? 1
          : -1] __attribute__((unused));
 
+/* The function the interpreter's save stack names for a destructor of the
+ * host's (its id the argument): an entry native code took off the save stack
+ * and pushes again (Future::AsyncAwait suspends a sub with
+ * Syntax::Keyword::Try's finally block in scope, and resumes it) is the
+ * same entry, with the id still registered. The address is the same in
+ * every instance (the interpreter's function table is its binary's). */
+#define GOPERL_PL_DTOR_THUNK 130
+static uint64_t goperl_dtor_thunk_addr(goperl_frame_t *f) {
+    static uint64_t addr;
+    if (!addr) addr = goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_DTOR_THUNK, 0, 0, 0);
+    return addr;
+}
+static void goperl_save_pushptrptr(goperl_frame_t *f, const void *p1, const void *p2, int type);
 static void goperl_save_destructor(goperl_frame_t *f,
                                    void (*fn)(pTHX_ void *), void *arg,
                                    U8 kind) {
+    if (kind == GOPERL_DTOR_X && (uint64_t)(uintptr_t)fn == goperl_dtor_thunk_addr(f)) {
+        goperl_save_pushptrptr(f, (const void *)fn, arg, 31 /* SAVEt_DESTRUCTOR_X */);
+        return;
+    }
     int32_t id = -1;
     for (int32_t k = 0; k < GOPERL_DTOR_MAX; k++) {
         int32_t i = (goperl_dtor_hint_v + k) % GOPERL_DTOR_MAX;
@@ -7392,7 +7409,8 @@ enum {
     GOPERL_CX_PUSHEVAL = 5,
     GOPERL_CX_POPEVAL = 6,
     GOPERL_CX_POPBLOCK = 7,
-    GOPERL_CX_POP = 8
+    GOPERL_CX_POP = 8,
+    GOPERL_CX_PUSHTRY = 9 /* s = [index][retop] */
 };
 
 /* What native code stored into the contexts it was shown goes to the

@@ -3123,6 +3123,15 @@ static void goperl_cx_pop(goperl_frame_t *f, PERL_CONTEXT *cx, int sel, const ch
 }
 #define cx_pushblock(type, gimme, sp, saveix) \
     goperl_cx_pushblock(_gof, (U8)(type), (U8)(gimme), (SV **)(sp), (I32)(saveix))
+static void goperl_cx_pushtry(goperl_frame_t *f, PERL_CONTEXT *cx, OP *retop)
+    __attribute__((unused));
+static void goperl_cx_pushtry(goperl_frame_t *f, PERL_CONTEXT *cx, OP *retop) {
+    const goperl_gword_t w[2] = {(goperl_gword_t)goperl_cx_top_index(f, cx, "cx_pushtry"),
+                                 retop ? retop->gop : 0};
+    goperl_do_op3(f, GOPERL_OP_CX, 0, sizeof w, (uint64_t)(GOPERL_CX_PUSHTRY), (const char *)w,
+                  sizeof w);
+}
+#define cx_pushtry(cx, retop) goperl_cx_pushtry(_gof, (PERL_CONTEXT *)(cx), (OP *)(retop))
 #define cx_pusheval(cx, retop, namesv) \
     goperl_cx_pusheval(_gof, (PERL_CONTEXT *)(cx), (OP *)(retop), (SV *)(namesv))
 #define cx_popeval(cx) goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPEVAL, "cx_popeval")

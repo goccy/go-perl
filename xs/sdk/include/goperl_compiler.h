@@ -41,6 +41,7 @@ enum {
     GOPERL_INT_HASH = 32,       /* s+b: a key's bytes -> its hash (PERL_HASH) */
     GOPERL_INT_PUSHSTACK = 33,  /* b: the stackinfo type: PUSHSTACKi */
     GOPERL_INT_POPSTACK = 34,   /* POPSTACK */
+    GOPERL_INT_DOCATCH = 43,    /* a: the running op: docatch with its pp function first */
     GOPERL_INT_PADNAMELIST_NEW = 60, /* b: max -> newPADNAMELIST's list */
     GOPERL_INT_PADNAMELIST_FREE = 61, /* a: the list: PadnamelistREFCNT_dec */
     GOPERL_INT_PADNAME_OUTER = 62,  /* a: a pad name -> newPADNAMEouter's */
@@ -822,6 +823,20 @@ static __attribute__((unused)) SV ***goperl_curpad_ref(goperl_frame_t *f, const 
 #define PL_curpad (*goperl_curpad_ref(_gof, GOPERL_LV_AT))
 #undef PAD_SVl
 #define PAD_SVl(ix) (PL_curpad[ix])
+/* the entry perl's save_padsv_and_mortalize pushes: the value (a reference
+ * more), the pad, the index and the type */
+static __attribute__((unused)) void goperl_save_padsv_and_mortalize(PADOFFSET off) {
+    SV *const sv = PL_curpad[off];
+    PAD *const pad = PL_comppad;
+    SvREFCNT_inc_simple_void_NN(sv);
+    dSS_ADD;
+    SS_ADD_PTR(sv);
+    SS_ADD_PTR(pad);
+    SS_ADD_UV((UV)off);
+    SS_ADD_UV(SAVEt_PADSV_AND_MORTALIZE);
+    SS_ADD_END(4);
+}
+#define save_padsv_and_mortalize(off) goperl_save_padsv_and_mortalize((PADOFFSET)(off))
 #define PadARRAY(pad) AvARRAY(pad)
 #define PadMAX(pad) AvFILLp(pad)
 /* What a stored value of PL_comppad_name or PL_curpad is to the
@@ -943,8 +958,13 @@ static __attribute__((unused)) uint64_t goperl_cvfield_load(goperl_frame_t *f, u
     case GOPERL_LV_CVOUTSIDE_SEQ:
         return GOPERL_INTERNAL(f, GOPERL_INT_CV_GET, tok, GOPERL_CVF_OUTSIDE_SEQ);
     case GOPERL_LV_CVPADLIST:
-        return (uint64_t)(uintptr_t)goperl_padlist_shadow(
-            f, GOPERL_INTERNAL(f, GOPERL_INT_CV_GET, tok, GOPERL_CVF_PADLIST));
+        /* a shadow native code looks at, up to date and written back: the
+         * padlist's own fields are stored into through it
+         * (`CvPADLIST(cv)->xpadl_id = ...`, Future::AsyncAwait's copy of a
+         * suspended sub), with no accessor to tell the store */
+        return (uint64_t)(uintptr_t)goperl_padent_fresh(
+            f, goperl_padlist_shadow(f, GOPERL_INTERNAL(f, GOPERL_INT_CV_GET, tok,
+                                                        GOPERL_CVF_PADLIST)));
     case GOPERL_LV_CVDEPTH:
         return (uint64_t)(int64_t)(I32)GOPERL_INTERNAL(f, GOPERL_INT_CV_GET, tok, GOPERL_CVF_DEPTH);
     case GOPERL_LV_OBJMAXFIELD:
@@ -1029,8 +1049,10 @@ static __attribute__((unused)) void goperl_cvfield_store(goperl_frame_t *f, uint
 #define CvNAMED_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_NAMED)
 #define CvLEXICAL_on(cv) GOPERL_CVFLAGS_CHANGE(cv, CVf_LEXICAL, 0)
 #define CvLEXICAL_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_LEXICAL)
-#define CvEVAL(cv) (CvUNIQUE(cv) && SvFAKE(cv))
-#define CvEVAL_on(cv) (GOPERL_CVFLAGS_CHANGE(cv, CVf_UNIQUE, 0), SvFAKE_on(cv))
+/* the sub of a string eval is unique and not fake (cv.h); unique and fake
+ * is a special sub (CvSPECIAL: BEGIN, the main program's) */
+#define CvEVAL(cv) (CvUNIQUE(cv) && !SvFAKE(cv))
+#define CvEVAL_on(cv) (GOPERL_CVFLAGS_CHANGE(cv, CVf_UNIQUE, 0), SvFAKE_off(cv))
 #define CvEVAL_off(cv) GOPERL_CVFLAGS_CHANGE(cv, 0, CVf_UNIQUE)
 
 /* The body of a sub (SvANY of a CV), with perl's fields: loaded at every
@@ -1372,6 +1394,27 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
 }
 #define CALLRUNOPS(ctx) goperl_callrunops(_gof)
 #define PL_runops_std goperl_callrunops
+
+/* docatch (pp_ctl.c): a pp function, and the ops after it, in a run loop of
+ * their own under a JMPENV of their own, which a pp function asks for when
+ * CATCH_GET says the loop it runs in cannot go on after a die an eval
+ * catches (Future::AsyncAwait's pp_await, resuming a sub it suspended
+ * inside an eval): under the new JMPENV CATCH_GET is false, and an eval
+ * entered there that catches a die goes on from its op in that loop. The
+ * interpreter runs it, with the running op's pp function first, which the
+ * function native code gives must be. -> NULL, as docatch's: the loop has
+ * run the ops to their end. */
+static __attribute__((unused)) OP *goperl_docatch(goperl_frame_t *f, Perl_ppaddr_t firstpp) {
+    OP *const o = PL_op;
+    if (!f->pp_frame)
+        goperl_croakf(f, "docatch is called outside a pp function");
+    if (!o || o->op_ppaddr != firstpp)
+        goperl_croakf(f, "docatch is given a pp function that is not the running op's: gperl "
+                         "runs docatch from the op");
+    GOPERL_INTERNAL(f, GOPERL_INT_DOCATCH, goperl_op_field_tok(f, (uint64_t)(uintptr_t)o), 0);
+    return NULL;
+}
+#define docatch(firstpp) goperl_docatch(_gof, (Perl_ppaddr_t)(firstpp))
 
 /* ---- the hints of a COP -----------------------------------------------------------
  * The hints hash of a COP is the interpreter's chain of entries (a token
