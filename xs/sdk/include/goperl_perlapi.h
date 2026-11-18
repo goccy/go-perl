@@ -346,21 +346,27 @@ enum {
  * buffer slot of an SV stays the module's pointer there, as any pointer of
  * this process (a structure behind an SV), until the SV makes it its
  * string: a length (SvCUR_set, SvCUR) or the flag of a string (SvPOK_on,
- * SvPOK_only, SvFLAGS) given to it, or the size of its buffer (SvLEN_set,
- * SvLEN), whichever comes first, in whatever order the module gives them.
- * Then a block of the interpreter's with the same size and contents takes
- * its place, which the interpreter owns. The size of the buffer is perl's
- * sign that the block is the SV's from then on: the module's block is
- * freed when an outermost native call of this module's returns (so that a
- * write through the module's own pointer before then does not reach freed
- * memory). Without it the module's block stays the module's to free.
- * The pending ones are the SVs given such a block in this native call. */
+ * SvPOK_only, SvFLAGS) given to it, in whatever order the module gives
+ * them, or the size of its buffer (SvLEN_set, SvLEN) given to an SV that is
+ * a string. Then a block of the interpreter's with the same size and
+ * contents takes its place, which the interpreter owns. The size of the
+ * buffer is perl's sign that the block is the SV's from then on: the
+ * module's block is freed when an outermost native call of this module's
+ * returns (so that a write through the module's own pointer before then
+ * does not reach freed memory). Without it the module's block stays the
+ * module's to free. The size given to an SV that is no string waits for
+ * the SV to become one: a structure behind an SV with the size of its
+ * buffer (Hash::SharedMem's handle: SvPV_set, SvLEN_set, no flag of a
+ * string) stays the module's pointer, which the module goes on writing
+ * through and reads back with SvPVX. The pending ones are the SVs given
+ * such a block in this native call. */
 typedef struct goperl_pending_block {
     struct goperl_pending_block *next;
     uint64_t tok;
     void *p;
     size_t n;
     int copied;
+    int owned; /* the size of the buffer was given before the SV was a string */
 } goperl_pending_block_t;
 GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_pending_block_t *goperl_pending_blocks_v = 0;
 typedef struct goperl_handed {
@@ -466,7 +472,7 @@ static void goperl_pending_block_take(goperl_frame_t *f, uint64_t tok, int owned
             goperl_croakf(f, "Out of memory!");
         b->copied = 1;
     }
-    if (owned) {
+    if (owned || b->owned) {
         /* the copy is the SV's own buffer from now on, as the block was on
          * perl: no copy of native code's buffer any more */
         void **kept = f->api->pv_host(f, tok, 0);
@@ -718,8 +724,16 @@ static uint64_t goperl_sv_len_load(goperl_frame_t *f, uint64_t tok) {
 /* The size native code gives the buffer of an SV whose buffer is the copy
  * of one of native code's (goperl_pv_copy_in) is that buffer's: the copy's
  * own stays the SV's, which frees the copy with itself. */
+static uint64_t goperl_sv_is_string(goperl_frame_t *f, uint64_t tok);
 static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
-    if (goperl_pending_blocks_v && len) goperl_pending_block_take(f, tok, 1);
+    if (goperl_pending_blocks_v && len) {
+        if (goperl_sv_is_string(f, tok)) {
+            goperl_pending_block_take(f, tok, 1);
+        } else {
+            for (goperl_pending_block_t *b = goperl_pending_blocks_v; b; b = b->next)
+                if (b->tok == tok) b->owned = 1;
+        }
+    }
     void **kept = goperl_pv_host_of(f, tok);
     if (kept) {
         kept[1] = (void *)(uintptr_t)len;
