@@ -3164,6 +3164,22 @@ static inline __attribute__((unused)) SV **goperl_av_alloc_view(goperl_frame_t *
 #undef cPMOPx
 #define cPMOPx(o) ((PMOP *)(o))
 #define cMETHOPx_meth(o) (cMETHOPx(o)->op_u.op_meth_sv)
+/* the class of a method op (SUPER:: and next::method: the stash's name or
+ * glob); the interpreter has no threads, so it is the op's own SV */
+#define cMETHOPx_rclass(o) (cMETHOPx(o)->op_rclass_sv)
+#define cMETHOPo_rclass cMETHOPx_rclass(o)
+#define cMETHOP_rclass cMETHOPx_rclass(PL_op)
+/* op.h: an op of a type, or one that was of it before it was nulled */
+#define OP_TYPE_IS(o, type) ((o) && (o)->op_type == (type))
+#define OP_TYPE_IS_NN(o, type) ((o)->op_type == (type))
+#define OP_TYPE_ISNT(o, type) ((o) && (o)->op_type != (type))
+#define OP_TYPE_ISNT_NN(o, type) ((o)->op_type != (type))
+#define OP_TYPE_IS_OR_WAS_NN(o, type) \
+    (((o)->op_type == OP_NULL ? (o)->op_targ : (o)->op_type) == (type))
+#define OP_TYPE_IS_OR_WAS(o, type) ((o) && OP_TYPE_IS_OR_WAS_NN(o, type))
+#define OP_TYPE_ISNT_AND_WASNT_NN(o, type) \
+    (((o)->op_type == OP_NULL ? (o)->op_targ : (o)->op_type) != (type))
+#define OP_TYPE_ISNT_AND_WASNT(o, type) ((o) && OP_TYPE_ISNT_AND_WASNT_NN(o, type))
 #define cMETHOPo_meth cMETHOPx_meth(o)
 #define cMETHOP_meth cMETHOPx_meth(PL_op)
 typedef struct op PMOP;
