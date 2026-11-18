@@ -139,7 +139,21 @@ static NV goperl_drand01(goperl_frame_t *f) {
 /* How many SVs the interpreter has, and whether signals wait to be
  * delivered: read only. */
 #define PL_sv_count ((IV)GOPERL_PLVAR(GOPERL_PL_SV_COUNT))
-#define PL_sig_pending ((int)GOPERL_PLVAR(GOPERL_PL_SIG_PENDING))
+/* The interpreter's own variable, in its memory: native code reads it, and
+ * takes its address to watch it (Data::HashMap::Shared, Data::ReqRep::Shared
+ * compare it before and after a wait). */
+#define GOPERL_PL_SIG_PENDING_ADDR 117
+#define GOPERL_PL_PSIG_PEND_ADDR 118
+static volatile int *goperl_sig_pending_ref(goperl_frame_t *f) {
+    volatile int *p = (volatile int *)goperl_guest_mem(
+        f, goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SIG_PENDING_ADDR, 0, 0, 0));
+    if (!p) goperl_croakf(f, "PL_sig_pending: the interpreter did not give its address");
+    return p;
+}
+#define PL_sig_pending (*goperl_sig_pending_ref(_gof))
+/* the pending count of each signal, the interpreter's array */
+#define PL_psig_pend \
+    ((int *)goperl_guest_mem(_gof, goperl_xs_op(_gof, GOPERL_OP_PLVAR_GET, GOPERL_PL_PSIG_PEND_ADDR, 0, 0, 0)))
 
 /* The names and numbers of the signals, as perl's Configure finds them on
  * the system native code runs on (config.h's SIG_NAME, SIG_NUM and
@@ -571,6 +585,7 @@ static void goperl_interp_xsub(pTHX_ CV *cv) {
     (void)goperl_do_call(f, (SV *)cv, 0, GIMME_V == G_SCALAR ? G_SCALAR : G_LIST);
 }
 
+static void *goperl_sv_any_value(goperl_frame_t *f, SV *sv);
 static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field) {
     if (GOPERL_LV_IS_IOWORD(field)) { /* FIELD 24 */
         const int w = field - GOPERL_LV_IOWORD;
@@ -646,6 +661,8 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
     case GOPERL_LV_HVEITER: /* FIELD 4: the entry itself */
         return (uint64_t)(uintptr_t)goperl_he_at(
             f, goperl_do_op3(f, GOPERL_OP_FIELD, tok, 0, (uint64_t)(4), 0, 0));
+    case GOPERL_LV_SVANY:
+        return (uint64_t)(uintptr_t)goperl_sv_any_value(f, (SV *)(uintptr_t)tok);
     default:
         return goperl_do_op3(f, GOPERL_OP_GV_CALL, tok, 0, (uint64_t)(GOPERL_GVCALL_CVGEN), 0, 0);
     }
@@ -715,6 +732,18 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
     case GOPERL_LV_LVTARG: /* FIELD 19 */
         goperl_xs_opx(f, GOPERL_OP_FIELD, tok, val, (uint64_t)(19), 0, 0, 0);
         break;
+    case GOPERL_LV_SVANY: {
+        /* the body pointer is a pointer of the interpreter's: an address in
+         * its memory, as &sv->sv_u and the layouts give one; the head is
+         * the interpreter's memory too, and takes it as it is */
+        uint64_t *const head = (uint64_t *)goperl_guest_mem(f, tok);
+        if (!head || val >= (uint64_t)*f->memsize)
+            goperl_croakf(f, "SvANY: native code stored a body pointer that is not an address "
+                             "of the interpreter's memory; go-perl cannot give a value a body "
+                             "of native code's");
+        head[0] = val;
+        break;
+    }
     case GOPERL_LV_REFCNT: /* FIELD 0: the count itself, nothing is freed */
         goperl_xs_opx(f, GOPERL_OP_FIELD, tok, (uint32_t)val, 0 /* REFCNT_SET */, 0, 0, 0);
         break;
@@ -3188,21 +3217,6 @@ static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
     return r;
 }
 #define ReANY(rx) goperl_reany(_gof, (REGEXP *)(rx))
-static void *goperl_svany(goperl_frame_t *f, SV *sv) __attribute__((unused));
-static void *goperl_svany(goperl_frame_t *f, SV *sv) {
-    if (!sv) return 0;
-    const svtype t = (svtype)SvTYPE(sv);
-    if (t == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
-    if (t == SVt_NULL) {
-        /* the header of an SV arena: its any is the next arena (see
-         * goperl_sv_arenaroot) */
-        const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
-        return head ? (void *)(uintptr_t)head[0] : 0;
-    }
-    return 0;
-}
-#undef SvANY
-#define SvANY(sv) goperl_svany(_gof, (SV *)(sv))
 
 #define SvRX(sv) ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_OF_SV, sv, 0)))
 #define pregcomp(pattern, flags) \

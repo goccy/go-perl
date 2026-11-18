@@ -1221,11 +1221,10 @@ static __attribute__((unused)) void *goperl_no_body(void) {
     }
     return page;
 }
-static __attribute__((unused)) void *goperl_sv_any(goperl_frame_t *f, SV *sv, const void *site, uintptr_t frame) {
-    if (!sv) return 0;
+/* What SvANY reads of an SV that is not a sub (the slot GOPERL_LV_SVANY
+ * loads). */
+static void *goperl_sv_any_value(goperl_frame_t *f, SV *sv) {
     const svtype t = (svtype)SvTYPE(sv);
-    if (t == SVt_PVCV || t == SVt_PVFM)
-        return (void *)(uintptr_t)*goperl_lv_ref(f, sv, GOPERL_LV_CVBODY, site, frame);
     if (t == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
     if (t == SVt_NULL) {
         /* a head without a body has none (NULL), but for the header of an
@@ -1236,8 +1235,23 @@ static __attribute__((unused)) void *goperl_sv_any(goperl_frame_t *f, SV *sv, co
     }
     return goperl_no_body();
 }
+/* SvANY, an lvalue as perl's is: the body of a sub, and for any other SV
+ * the slot of what goperl_sv_any_value reads, whose store gives the SV a
+ * body of the interpreter's memory (see GOPERL_LV_SVANY). An SV that is
+ * NULL has a NULL body. */
+static __attribute__((unused)) void **goperl_sv_any(goperl_frame_t *f, SV *sv, const void *site, uintptr_t frame) {
+    static __thread void *none;
+    if (!sv) {
+        none = 0;
+        return &none;
+    }
+    const svtype t = (svtype)SvTYPE(sv);
+    if (t == SVt_PVCV || t == SVt_PVFM)
+        return (void **)goperl_lv_ref(f, sv, GOPERL_LV_CVBODY, site, frame);
+    return (void **)goperl_lv_ref(f, sv, GOPERL_LV_SVANY, site, frame);
+}
 #undef SvANY
-#define SvANY(sv) goperl_sv_any(_gof, (SV *)(sv), GOPERL_LV_AT)
+#define SvANY(sv) (*goperl_sv_any(_gof, (SV *)(sv), GOPERL_LV_AT))
 /* A key shared by the interpreter, shared once more (the copy here is the
  * key; the interpreter shares it when it is given one). */
 #define share_hek_hek(hek) ((HEK *)(hek))

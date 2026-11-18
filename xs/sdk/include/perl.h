@@ -361,14 +361,38 @@ typedef int64_t SSize_t;
  * arithmetic on SV pointers strides as on perl: a walk of the SV arenas
  * goes from slot to slot with sva + 1 and ends at &sva[SvREFCNT(sva)]
  * (Devel::Leak). No live path reads the fields; sv_flags is named so that
- * legacy code that names it still compiles. */
+ * legacy code that names it still compiles.
+ * The members of sv_u give their address, an address of the interpreter's
+ * memory, and no value: perl's bodyless IV is made from &sv->sv_u.svu_iv
+ * (Sereal::Decoder unrolls sv_setiv so), and a read or a store of the
+ * member's value, which is the interpreter's memory, does not compile. */
+struct goperl_no_value {
+    char goperl_no_value_[0];
+};
 struct goperl_sv {
     void *goperl_sv_any_;
     uint32_t goperl_sv_refcnt_;
     uint32_t sv_flags;
-    void *goperl_sv_u_;
+    union {
+        void *goperl_sv_u_;
+        struct goperl_no_value svu_iv, svu_uv, svu_nv, svu_pv, svu_rv, svu_array, svu_hash,
+            svu_gp, svu_fp, svu_rx;
+    } sv_u;
 };
 typedef struct goperl_sv SV;
+/* The body of an IV as the interpreter lays it out (the head of a string's
+ * body, 32 bytes, then the integer), for the offset of its integer
+ * (STRUCT_OFFSET(XPVIV, xiv_iv)) in perl's bodyless IV; the members give
+ * their offset and no value (see sv_u). */
+typedef struct xpviv {
+    char goperl_xpv_head_[32];
+    union {
+        IV goperl_xivu_;
+        struct goperl_no_value xivu_iv, xivu_uv, xivu_eval_seen;
+    } xiv_u;
+} XPVIV;
+#define xiv_iv xiv_u.xivu_iv
+#define xuv_uv xiv_u.xivu_uv
 typedef struct goperl_sv CV;
 typedef struct goperl_sv AV;
 typedef struct goperl_sv HV;
@@ -1926,6 +1950,10 @@ typedef struct goperl_shared {
  * A name stored is copied into the interpreter, which frees it with the
  * IO, as perl frees the savepv it is given. */
 #define GOPERL_LV_IOWORD 38 /* to 47 */
+/* SvANY as an lvalue: what it reads (see goperl_sv_any_value), and a store of an
+ * address of the interpreter's memory, which is the body pointer from then
+ * on (perl's bodyless IV, which Sereal::Decoder makes itself) */
+#define GOPERL_LV_SVANY 48
 #define GOPERL_LV_IS_IOWORD(field) ((field) >= GOPERL_LV_IOWORD && (field) < GOPERL_LV_IOWORD + 10)
 #define GOPERL_IOWORD_IS_NAME(w) ((w) >= 7)
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
@@ -9326,7 +9354,6 @@ static SV *goperl_sv_arenaroot(goperl_frame_t *f) {
     return GOPERL_SV(goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_SV_ARENAROOT, 0, 0, 0));
 }
 #define PL_sv_arenaroot (goperl_sv_arenaroot(_gof))
-#define SvANY(sv) ((void *)0)
 #define SVTYPEMASK 0xff
 
 /* ---- memory helpers ------------------------------------------------------ */

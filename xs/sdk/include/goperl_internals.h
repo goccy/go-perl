@@ -261,8 +261,6 @@
 /* the bodies of SVs (sv.h, av.h) */
 #undef XPV
 #define XPV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPV") 0
-#undef XPVIV
-#define XPVIV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVIV") 0
 #undef XPVUV
 #define XPVUV GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: XPVUV") 0
 #undef XPVNV
