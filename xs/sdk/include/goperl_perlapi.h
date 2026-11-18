@@ -4656,6 +4656,59 @@ static __attribute__((unused)) yy_parser *goperl_parser_present(goperl_frame_t *
 #ifndef PL_error_count
 #define PL_error_count GOPERL_PARSER_VAR(error_count)
 #endif
+/* the others the parser has, read through the copy (what a module writes
+ * into them does not go back) */
+#ifndef PL_oldbufptr
+#define PL_oldbufptr GOPERL_PARSER_VAR(oldbufptr)
+#endif
+#ifndef PL_oldoldbufptr
+#define PL_oldoldbufptr GOPERL_PARSER_VAR(oldoldbufptr)
+#endif
+#ifndef PL_linestart
+#define PL_linestart GOPERL_PARSER_VAR(linestart)
+#endif
+#ifndef PL_last_uni
+#define PL_last_uni GOPERL_PARSER_VAR(last_uni)
+#endif
+#ifndef PL_last_lop
+#define PL_last_lop GOPERL_PARSER_VAR(last_lop)
+#endif
+#ifndef PL_last_lop_op
+#define PL_last_lop_op GOPERL_PARSER_VAR(last_lop_op)
+#endif
+#ifndef PL_lex_inwhat
+#define PL_lex_inwhat GOPERL_PARSER_VAR(lex_inwhat)
+#endif
+#ifndef PL_lex_brackets
+#define PL_lex_brackets GOPERL_PARSER_VAR(lex_brackets)
+#endif
+#ifndef PL_lex_formbrack
+#define PL_lex_formbrack GOPERL_PARSER_VAR(lex_formbrack)
+#endif
+#ifndef PL_lex_repl
+#define PL_lex_repl GOPERL_PARSER_VAR(lex_repl)
+#endif
+#ifndef PL_multi_start
+#define PL_multi_start GOPERL_PARSER_VAR(multi_start)
+#endif
+#ifndef PL_multi_end
+#define PL_multi_end GOPERL_PARSER_VAR(multi_end)
+#endif
+#ifndef PL_multi_open
+#define PL_multi_open GOPERL_PARSER_VAR(multi_open)
+#endif
+#ifndef PL_multi_close
+#define PL_multi_close GOPERL_PARSER_VAR(multi_close)
+#endif
+#ifndef PL_preambling
+#define PL_preambling GOPERL_PARSER_VAR(preambling)
+#endif
+/* ppport.h's name for a variable of the parser, with its check that there
+ * is one, which a module that defines a PL_ name of its own uses
+ * (signatures: PL_oldbufptr) */
+#ifndef D_PPP_my_PL_parser_var
+#define D_PPP_my_PL_parser_var(var) GOPERL_PARSER_VAR(var)
+#endif
 
 /* What is pending is delivered (the handler of a signal), as between two
  * ops: despatch_signals, which PERL_ASYNC_CHECK runs. */
