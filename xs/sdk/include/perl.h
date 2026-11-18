@@ -2686,12 +2686,12 @@ static int goperl_text_infnan(goperl_text_t *t, const char *spec, double v)
     __attribute__((unused));
 static int goperl_text_infnan(goperl_text_t *t, const char *spec, double v) {
     if (!isinf(v) && !isnan(v)) return 0;
-    int left = 0, plus = 0, zero = 0;
+    int left = 0, plus = 0, zerofill = 0;
     const char *p = spec + 1;
     for (; *p && strchr("-+ #0", *p); p++) {
         if (*p == '-') left = 1;
         else if (*p == '+' || *p == ' ') plus = 1;
-        else if (*p == '0') zero = 1;
+        else if (*p == '0') zerofill = 1;
     }
     long width = 0;
     if (*p == '-') { /* a negative width from `*`: left-justified */
@@ -2711,7 +2711,7 @@ static int goperl_text_infnan(goperl_text_t *t, const char *spec, double v) {
         n += 3;
     }
     const size_t pad = width > (long)n ? (size_t)width - n : 0;
-    for (size_t i = 0; !left && i < pad; i++) goperl_text_put(t, zero ? "0" : " ", 1, 0);
+    for (size_t i = 0; !left && i < pad; i++) goperl_text_put(t, zerofill ? "0" : " ", 1, 0);
     goperl_text_put(t, text, n, 0);
     for (size_t i = 0; left && i < pad; i++) goperl_text_put(t, " ", 1, 0);
     return 1;
