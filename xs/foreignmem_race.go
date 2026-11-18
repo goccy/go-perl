@@ -7,19 +7,19 @@ import (
 	"runtime"
 	"unsafe"
 
-	"github.com/ebitengine/purego"
+	"github.com/goccy/go-perl/internal/ccall"
 )
 
 // Under -race, checkptr fatals on any Go dereference of memory it cannot
 // attribute to a Go allocation, which foreign memory is. So the C library
-// does the touching, driven through purego (memcpy to move bytes across,
+// does the touching, driven through ccall (memcpy to move bytes across,
 // strlen to size a C string), and Go only reads its own buffers.
 
 func foreignRead(dst []byte, src uintptr) {
 	if len(dst) == 0 {
 		return
 	}
-	purego.SyscallN(memcpyFn, uintptr(unsafe.Pointer(&dst[0])), src, uintptr(len(dst)))
+	ccall.Invoke(memcpyFn, uintptr(unsafe.Pointer(&dst[0])), src, uintptr(len(dst)))
 	runtime.KeepAlive(dst)
 }
 
@@ -27,13 +27,13 @@ func foreignWrite(dst uintptr, b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	purego.SyscallN(memcpyFn, dst, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+	ccall.Invoke(memcpyFn, dst, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 	runtime.KeepAlive(b)
 }
 
 func foreignMove(dst, src uintptr, n int) {
 	if n > 0 {
-		purego.SyscallN(memcpyFn, dst, src, uintptr(n))
+		ccall.Invoke(memcpyFn, dst, src, uintptr(n))
 	}
 }
 
@@ -50,7 +50,7 @@ func foreignStoreU64(dst uintptr, v uint64) {
 }
 
 func foreignStrlen(p uintptr) int {
-	n, _, _ := purego.SyscallN(strlenFn, p)
+	n := ccall.Invoke(strlenFn, p)
 	return int(n)
 }
 

@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	"github.com/goccy/go-perl/internal/ccall"
 
 	"github.com/goccy/go-perl/internal"
 )
@@ -35,8 +36,8 @@ type libcIDs struct{}
 // libcCall calls the C library function name, whose result is 0 or -1 with
 // errno. An id of -1 (leave alone) is the id type's all-ones value.
 //
-// errno is the calling thread's, and purego does not collect it on Linux
-// (it does on darwin): the call and the reading of errno, at the address
+// errno is the calling thread's, and a call into C does not collect it:
+// the call and the reading of errno, at the address
 // __errno_location gives, run on one locked OS thread, and the C library's
 // memcpy reads it (Go code does not dereference the C library's memory).
 func libcCall(name string, args ...uintptr) error {
@@ -54,13 +55,13 @@ func libcCall(name string, args ...uintptr) error {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	result, _, _ := purego.SyscallN(fn, args...)
+	result := ccall.Invoke(fn, args...)
 	if int32(result) == 0 {
 		return nil
 	}
-	at, _, _ := purego.SyscallN(errnoLocation)
+	at := ccall.Invoke(errnoLocation)
 	var errno int32
-	purego.SyscallN(memcpy, uintptr(unsafe.Pointer(&errno)), at, unsafe.Sizeof(errno))
+	ccall.Invoke(memcpy, uintptr(unsafe.Pointer(&errno)), at, unsafe.Sizeof(errno))
 	if errno == 0 {
 		return fmt.Errorf("%s failed without an errno", name)
 	}
