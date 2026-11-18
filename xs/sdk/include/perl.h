@@ -4168,6 +4168,33 @@ static int goperl_svmagic_detached(goperl_frame_t *f) {
 static void goperl_svmagic_head(goperl_frame_t *f, uint64_t sv, MAGIC *head) {
     if (goperl_api_magic_chain(f, sv) != head) goperl_api_magic_set_head(f, sv, head);
 }
+/* Where the view keeps the chain native code has on the value as the view
+ * last knew it (when it was taken, written back, or changed by the SDK):
+ * the chain shown when it shows none of the interpreter's magic, else the
+ * link of the zeroed MAGIC after the copies. */
+static MAGIC **goperl_svmagic_known(goperl_frame_t *f) {
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    MAGIC *end = sh->svmagic_orig;
+    if (!goperl_magic_is_interp_copy(f, end)) return &sh->svmagic_orig;
+    while (goperl_magic_is_interp_copy(f, end)) end++;
+    return &end->mg_moremagic;
+}
+/* Whether the chain native code has on the value is no longer the one the
+ * view knew: the value or its magic went while the view was kept (the
+ * interpreter freed it, and native code's MAGICs on it with it). The view
+ * is done with then, unwalked: what it shows of native code's chain was
+ * freed. A view is kept from one operation to the next (a module that holds
+ * &SvMAGIC(sv) stores the chain through it after an operation, as Event
+ * attaches its watchers) until the outermost native call returns; a native
+ * call that ran on meanwhile (Object::Pad parsing a class whose
+ * namespace::autoclean cleaned packages) wrote such a view back at its next
+ * operation: SIGSEGV in a keyword hook (Sub-HandlesVia t/50objectpad.t). */
+static int goperl_svmagic_gone(goperl_frame_t *f) {
+    goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
+    if (goperl_api_magic_chain(f, sh->svmagic_sv) == *goperl_svmagic_known(f)) return 0;
+    sh->svmagic_sv = 0;
+    return 1;
+}
 /* settle: the outermost native call ends, and a chain native code took off
  * whole is not put back any more */
 static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
@@ -4177,6 +4204,7 @@ static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
     MAGIC *const val = sh->svmagic_val;
     if (!goperl_magic_is_interp_copy(f, shown)) {
         if (val == shown) return;
+        if (goperl_svmagic_gone(f)) return;
         MAGIC *const head = goperl_magic_chain_of_native(f, val);
         goperl_svmagic_head(f, sh->svmagic_sv, head);
         sh->svmagic_orig = head;
@@ -4187,9 +4215,12 @@ static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
         /* the native part of the chain is what native code made it; the
          * interpreter's magic stays where it is until the chain is put
          * back or the call ends */
-        goperl_svmagic_head(f, sh->svmagic_sv, goperl_magic_chain_of_native(f, val));
+        MAGIC *const head = goperl_magic_chain_of_native(f, val);
+        goperl_svmagic_head(f, sh->svmagic_sv, head);
+        *goperl_svmagic_known(f) = head;
         return;
     }
+    if (goperl_svmagic_gone(f)) return;
     /* every type of the interpreter's magic shown is still on the chain (a
      * copy of it: the one shown, or one an earlier SvMAGIC of the value
      * showed, which a MAGIC native code put before the head links to) */
@@ -7502,7 +7533,7 @@ static MAGIC *goperl_sv_magicext(goperl_frame_t *f, SV *sv, SV *obj, int how,
 static void goperl_svmagic_changed(goperl_frame_t *f, uint64_t sv) {
     if (goperl_svmagic_sv_v != sv) return;
     if (goperl_svmagic_detached(f))
-        goperl_svmagic_val_v = goperl_api_magic_chain(f, sv);
+        goperl_svmagic_val_v = *goperl_svmagic_known(f) = goperl_api_magic_chain(f, sv);
     else
         goperl_svmagic_sv_v = 0;
 }
