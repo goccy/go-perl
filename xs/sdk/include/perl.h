@@ -5717,7 +5717,15 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
     dAXMARK;                                               \
     dITEMS
 
-#define dXSTARG SV *targ __attribute__((unused)) = sv_2mortal(newSV(0))
+/* TARG of an XSUB: the pad target of the entersub that calls it, as perl
+ * gives it (a call from native code, whose op has none, gets a new mortal):
+ * no SV is made for the value a call returns, and the head of one freed
+ * just before goes to the next SV the XSUB makes, as on perl (a module
+ * that keeps the address of an SV as an id finds it there again). */
+#define dXSTARG                                                             \
+    SV *const targ __attribute__((unused)) =                                \
+        ((PL_op->op_private & OPpENTERSUB_HASTARG) ? PAD_SV(PL_op->op_targ) \
+                                                    : sv_newmortal())
 #define TARG targ
 #define PUSHTARG PUSHs(TARG)
 #define XSprePUSH (sp = PL_stack_base + ax - 1)
