@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -42,12 +43,16 @@ type perlRunOpts struct {
 
 // startupGlue prepares the interpreter for a run the way the process
 // around a perl command would have: its working directory, the path it
-// knows itself by ($^X), and the build pipeline's %Config overlay.
+// knows itself by ($^X), the host's C toolchain in %Config (runToolchain)
+// and the build pipeline's %Config overlay.
 const startupGlue = `sub {
-    my ($dir, $exe, $preload) = @_;
+    my ($dir, $exe, $preload, %toolchain) = @_;
     # the directory the process was started in, which it may not search
     Internals::start_directory($dir) or die "chdir $dir: $!\n";
     $^X = $exe if defined $exe;
+    # Config.pm reports %Config::Override in place of its own values once it
+    # is loaded; nothing is loaded here
+    @Config::Override{keys %toolchain} = values %toolchain;
     if (defined $preload) {
         # do FILE returns undef for an unreadable file and for a file whose
         # last statement is undef alike; establish readability first.
@@ -255,7 +260,17 @@ func startInterpreter(ctx context.Context, p *perl.Perl, dir, exe, preload strin
 		}
 		return perl.ValueOf(s)
 	}
-	_, err = start.CallScalar(ctx, perl.ValueOf(dir), optional(exe), optional(preload))
+	args := []perl.Value{perl.ValueOf(dir), optional(exe), optional(preload)}
+	tc := runToolchain()
+	keys := make([]string, 0, len(tc))
+	for k := range tc {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, perl.ValueOf(k), perl.ValueOf(tc[k]))
+	}
+	_, err = start.CallScalar(ctx, args...)
 	return err
 }
 

@@ -314,8 +314,25 @@ func xsInstallBuildDeps(srcDir, lib string) error {
 // hostToolchain is the %Config overlay describing the HOST C toolchain:
 // the embedded interpreter's own %Config is guest-true (wasm64), and the
 // build must emit host-native compile/link rules. These are the platform
-// conventions a native perl build would have configured.
+// conventions a native perl build would have configured, and what the host
+// compiler says of itself.
 func hostToolchain() map[string]string {
+	common := hostToolchainStatic()
+	// Everything else that identifies the C toolchain is the host
+	// compiler's too: build scripts choose flags by the compiler's name and
+	// version (gcc or clang), run its preprocessor, and look for libraries
+	// where it looks. The interpreter's own values describe the compiler
+	// the interpreter was built with, on the machine it was built on.
+	for key, value := range hostCompiler(common["cc"]) {
+		common[key] = value
+	}
+	return common
+}
+
+// hostToolchainStatic is the part of hostToolchain that needs no asking of
+// the compiler: the programs of the toolchain, their flags and the names of
+// what they make, by the platform's conventions.
+func hostToolchainStatic() map[string]string {
 	common := map[string]string{
 		"cc": "cc", "ld": "cc", "ar": "ar", "full_ar": "ar",
 		"ranlib": "ranlib", "make": "make",
@@ -342,15 +359,27 @@ func hostToolchain() map[string]string {
 		common["dlext"] = "so"
 		common["lddlflags"] = "-shared"
 	}
-	// Everything else that identifies the C toolchain is the host
-	// compiler's too: build scripts choose flags by the compiler's name and
-	// version (gcc or clang), run its preprocessor, and look for libraries
-	// where it looks. The interpreter's own values describe the compiler
-	// the interpreter was built with, on the machine it was built on.
-	for key, value := range hostCompiler(common["cc"], common["ccflags"]) {
-		common[key] = value
-	}
+	// the compiler's preprocessor, and the libraries a program is linked
+	// with
+	cc := common["cc"]
+	common["cpp"], common["cpprun"], common["cppstdin"] = cc+" -E", cc+" -E", cc+" -E"
+	common["cppminus"], common["cpplast"], common["cppflags"] = "-", "-", common["ccflags"]
+	common["libs"], common["perllibs"] = "-lm", "-lm"
 	return common
+}
+
+// runToolchain is the part of %Config every program gperl runs is given in
+// place of the interpreter's: the host's C toolchain, which code that runs
+// it at run time (Filter::cpp's preprocessor, Inline::C, Affix::Build)
+// needs, where the interpreter's values name the compiler it was built
+// with on the machine it was built on. The keys that need the compiler
+// asked (hostCompiler) are left out, as asking costs processes at every
+// start; so is osname, which names the system the interpreter was built
+// for.
+func runToolchain() map[string]string {
+	tc := hostToolchainStatic()
+	delete(tc, "osname")
+	return tc
 }
 
 // hostCompiler returns the %Config keys that describe the C compiler cc of
@@ -359,14 +388,11 @@ func hostToolchain() map[string]string {
 // searches for libraries and the C library it links (-print-search-dirs,
 // -print-file-name). What it does not say stays empty rather than
 // describing another compiler.
-func hostCompiler(cc, ccflags string) map[string]string {
+func hostCompiler(cc string) map[string]string {
 	keys := map[string]string{
 		"ccname": filepath.Base(cc), "gccversion": "", "ccversion": "", "gccosandvers": "",
-		"cpp": cc + " -E", "cpprun": cc + " -E", "cppstdin": cc + " -E",
-		"cppminus": "-", "cpplast": "-", "cppflags": ccflags,
 		"ccsymbols": "", "cppsymbols": "", "cppccsymbols": "",
 		"libc": "", "gnulibc_version": "",
-		"libs": "-lm", "perllibs": "-lm",
 	}
 	macros := compilerMacros(cc)
 	if _, gnu := macros["__GNUC__"]; gnu {
