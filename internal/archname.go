@@ -68,6 +68,12 @@ func archProcessor(goos, goarch string) string {
 	return goarch
 }
 
+// OSName is the name of the system the interpreter reports ($^O and
+// $Config{osname}): the host's, spelled as perl's Configure spells it on
+// that host, as perl there reports it. One interpreter runs on every host;
+// it is told the name when it starts (perl_new).
+func OSName() string { return archSystem(runtime.GOOS) }
+
 // archSystem is the system as Configure names it ($^O).
 func archSystem(goos string) string {
 	if goos == "illumos" {

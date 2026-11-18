@@ -1188,6 +1188,9 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // with a directory (PERL5LIB, -I) and of
 // the site's architecture directory, and what `perl -v` says perl was
 // built for; empty stands for the name the build was configured with.
+// `osname` is the name of the system the interpreter runs on, as perl's
+// Configure names it there: $^O and $Config{osname}; empty stands for the
+// name the build was configured with (wasi).
 // %Config reports the directories
 // under every key that names one of them, and sitearch and sitelib are in
 //
@@ -1196,11 +1199,12 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // keeps the values of the build's configuration and
 // has no site
 // directory.
-func PerlNew(libDir string, siteDir string, archname string) (uint64, error) {
+func PerlNew(libDir string, siteDir string, archname string, osname string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
 	buf = pbAppendString(buf, 2, siteDir)
 	buf = pbAppendString(buf, 3, archname)
+	buf = pbAppendString(buf, 4, osname)
 	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err

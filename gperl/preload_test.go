@@ -172,10 +172,10 @@ print "preprocessed=", (qx(echo __VERSION__ | $Config::Config{cpprun} -) =~ /"\Q
 }
 
 // perl -V prints the summary of the configuration and what the binary was
-// built with, under the overlay as without it: the overlay gives $^O and
-// %Config's osname the host's name, and perl -V says the library was built
-// for the system %Config names, as it does on perl (Config::Perl::V reads
-// it). The summary shows %Config as the overlay leaves it.
+// built with, under the overlay as without it: $^O and %Config's osname are
+// the host's name, and perl -V says the library was built for the system
+// %Config names, as it does on perl (Config::Perl::V reads it). The summary
+// shows %Config as the overlay leaves it.
 func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
 	got := overlayRun(t, "-V")
 	for _, want := range []string{
@@ -191,7 +191,7 @@ func TestConfigOverlayLeavesPerlDashVWorking(t *testing.T) {
 		}
 	}
 	status, plain, stderr := runCLI(t, t.TempDir(), "", "-V")
-	if status != 0 || !strings.Contains(plain, "Summary of my perl5") || !strings.Contains(plain, "  Built under wasi\n") || !strings.Contains(plain, "  @INC:\n") {
+	if status != 0 || !strings.Contains(plain, "Summary of my perl5") || !strings.Contains(plain, "  Built under "+runtime.GOOS+"\n") || !strings.Contains(plain, "  @INC:\n") {
 		t.Errorf("perl -V without the overlay: status=%d stderr=%q stdout:\n%s", status, stderr, plain)
 	}
 	// $^O stays the host's for the rest of the program.

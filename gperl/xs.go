@@ -374,8 +374,8 @@ func hostToolchainStatic() map[string]string {
 // needs, where the interpreter's values name the compiler it was built
 // with on the machine it was built on. The keys that need the compiler
 // asked (hostCompiler) are left out, as asking costs processes at every
-// start; so is osname, which names the system the interpreter was built
-// for.
+// start; so is osname, which is the host's already ($^O, which the
+// interpreter is told when it starts).
 func runToolchain() map[string]string {
 	tc := hostToolchainStatic()
 	delete(tc, "osname")

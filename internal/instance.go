@@ -973,12 +973,14 @@ func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
 // perlNew starts the interpreter with its library in stdlibDir and, when
 // siteDir is not empty, its site directories under siteDir, telling it the
 // name of the architecture (ArchName): the host's, for which the native
-// modules a program loads into this process are built.
+// modules a program loads into this process are built; and the name of the
+// system (OSName), the host's too.
 func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
 	buf = pbAppendString(buf, 2, siteDir)
 	buf = pbAppendString(buf, 3, ArchName())
+	buf = pbAppendString(buf, 4, OSName())
 	resp, err := p.invoke(0, midNew, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return 0, err
