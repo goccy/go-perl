@@ -38,7 +38,7 @@ XS(XS_MySs_entries) {
               p == (void *)sv ? "same" : "other", (int)(SvREFCNT(sv) - before));
     PL_savestack_ix -= 2;
     sv_catpvf(out, " off %d", (int)(PL_savestack_ix == ix - 2));
-    save_pushptr(p, SAVEt_FREESV);
+    Perl_save_pushptr(aTHX_ p, SAVEt_FREESV);
     sv_catpvf(out, " back %d", (int)(PL_savestack_ix == ix));
     LEAVE;
     sv_catpvf(out, " after %d", (int)(SvREFCNT(sv) - before));

@@ -53,8 +53,6 @@
 #define cPMOPo GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: cPMOPo") 0
 #undef cPMOP
 #define cPMOP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: cPMOP") 0
-#undef PL_curpm
-#define PL_curpm GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_curpm") 0
 #undef PM_GETRE
 #define PM_GETRE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PM_GETRE") 0
 #undef PM_SETRE

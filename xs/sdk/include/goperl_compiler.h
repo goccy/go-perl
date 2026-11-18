@@ -845,6 +845,12 @@ static __attribute__((unused)) int goperl_plshadow_out(goperl_frame_t *f, int id
         *out = goperl_padstruct_tok((const void *)(uintptr_t)s->val);
         return 1;
     }
+    if (id == 74 /* GOPERL_PL_RESTARTOP: a shadow, its op */) {
+        const OP *const o = (const OP *)(uintptr_t)s->val;
+        if (o && !o->gop) goperl_croakf(f, "PL_restartop was given an op that is not the interpreter's");
+        *out = o ? o->gop : 0;
+        return 1;
+    }
     if (id == 99 /* GOPERL_PL_RUNOPS */) {
         *out = goperl_runops_out(f, s->val);
         return 1;

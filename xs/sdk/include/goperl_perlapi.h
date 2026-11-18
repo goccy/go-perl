@@ -2381,6 +2381,12 @@ typedef char goperl_iv_is_pointer_width
 #define save_I32(p) goperl_save_i32(_gof, (int32_t *)(p))
 #define save_long(p) goperl_save_int8(_gof, (void *)(p))
 #define save_iv(p) goperl_save_int8(_gof, (void *)(p))
+#define save_strlen(p) goperl_save_int8(_gof, (void *)(p))
+#define Perl_save_strlen(p) save_strlen(p)
+/* $@ made the empty string, as perl's CLEAR_ERRSV leaves it */
+#define CLEAR_ERRSV() STMT_START { sv_setpvs(ERRSV, ""); SvPOK_only(ERRSV); } STMT_END
+/* a loop whose iteration variable is a lexical (its pad slot) */
+#define CxPADLOOP(c) ((c)->cx_type & CXp_FOR_PAD)
 
 /* ---- number scanning (numeric.c) ------------------------------------------ */
 
@@ -4604,6 +4610,33 @@ static void goperl_mini_mktime(struct tm *ptm) {
 #define GOPERL_PL_TMPS_MAX 122
 #define GOPERL_PL_CATCH 123
 #define GOPERL_CALL_SS_ROOM 36
+/* The interpreter's JMPENV that is the top of its chain, as an address of
+ * its memory: native code compares it with an eval context's (whose
+ * cur_top_env it is when the eval was entered under it). */
+#define GOPERL_PL_TOP_ENV 125
+#define PL_top_env ((JMPENV *)(uintptr_t)GOPERL_PLVAR(GOPERL_PL_TOP_ENV))
+/* Where the interpreter goes on after a die an eval caught (die_unwind sets
+ * them; a docatch of native code clears them and runs from the op): the op
+ * as a shadow, and the JMPENV as the interpreter's address. Lvalues. */
+#define GOPERL_PL_RESTARTOP 74
+#define GOPERL_PL_RESTARTJMPENV 127
+static OP **goperl_restartop_ref(goperl_frame_t *f) __attribute__((unused));
+static OP **goperl_restartop_ref(goperl_frame_t *f) {
+    goperl_plshadow_t *s = &goperl_plshadow_v[GOPERL_PL_RESTARTOP];
+    if (!s->live || s->val == s->shadow) {
+        const uint64_t tok =
+            goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_RESTARTOP, 0, 0, 0);
+        s->val = s->shadow = (uint64_t)(uintptr_t)(tok ? goperl_op_shadow(f, tok) : 0);
+        goperl_plshadow_set_live(s);
+    }
+    return (OP **)&s->val;
+}
+#define PL_restartop (*goperl_restartop_ref(_gof))
+#define PL_restartjmpenv (*(JMPENV **)goperl_plsv_ref(_gof, GOPERL_PL_RESTARTJMPENV))
+/* The PMOP of the last match, as the interpreter's address of it (native
+ * code keeps it and puts it back, as Future::AsyncAwait does across an
+ * await; it is no op shadow to look into). */
+#define PL_curpm (*(PMOP **)goperl_plsv_ref(_gof, GOPERL_PL_CURPM))
 #define GOPERL_CALL_TMPS_ROOM 37
 #undef PL_savestack_ix
 #define PL_savestack_ix (*(I32 *)goperl_plint_ref(_gof, GOPERL_PL_SAVESTACK_IX))
@@ -4747,17 +4780,38 @@ static void goperl_save_pushi32ptr(goperl_frame_t *f, I32 i, const void *ptr, in
     *ixp += 3;
 }
 #define save_pushptr(ptr, type) goperl_save_pushptr(_gof, (const void *)(ptr), (int)(type))
-#define Perl_save_pushptr(my_perl, ptr, type) save_pushptr(ptr, type)
+#define Perl_save_pushptr(ptr, type) save_pushptr(ptr, type)
 #define save_pushptrptr(p1, p2, type) \
     goperl_save_pushptrptr(_gof, (const void *)(p1), (const void *)(p2), (int)(type))
-#define Perl_save_pushptrptr(my_perl, p1, p2, type) save_pushptrptr(p1, p2, type)
+#define Perl_save_pushptrptr(p1, p2, type) save_pushptrptr(p1, p2, type)
 #define save_pushi32ptr(i, ptr, type) \
     goperl_save_pushi32ptr(_gof, (I32)(i), (const void *)(ptr), (int)(type))
-#define Perl_save_pushi32ptr(my_perl, i, ptr, type) save_pushi32ptr(i, ptr, type)
+#define Perl_save_pushi32ptr(i, ptr, type) save_pushi32ptr(i, ptr, type)
 #define savestack_grow() SSCHECK(128)
-#define Perl_savestack_grow(my_perl) savestack_grow()
+#define Perl_savestack_grow() savestack_grow()
 #define savestack_grow_cnt(n) SSCHECK(n)
-#define Perl_savestack_grow_cnt(my_perl, n) savestack_grow_cnt(n)
+#define Perl_savestack_grow_cnt(n) savestack_grow_cnt(n)
+/* A string freed when the scope ends. A string of the interpreter's memory
+ * goes on the save stack as perl's save_freepv pushes it: its address as
+ * the interpreter has it, which is what an entry of the save stack holds,
+ * so that an entry taken off is pushed again as it was (Future::AsyncAwait
+ * suspends and resumes a sub's saves so). A block of the module's
+ * allocators, or of the C library, which the interpreter cannot reach, is
+ * freed by the module when the scope ends. */
+static void goperl_savefreepv_cb(pTHX_ void *p);
+static int goperl_block_size(const void *p, size_t *size);
+static void goperl_save_freepv(goperl_frame_t *f, char *pv) __attribute__((unused));
+static void goperl_save_freepv(goperl_frame_t *f, char *pv) {
+    size_t n;
+    const uint64_t g = goperl_guest_addr(f, pv);
+    if (g || !pv)
+        goperl_save_pushptr(f, (const void *)(uintptr_t)g, SAVEt_FREEPV);
+    else if (!goperl_block_size(pv, &n) && (uintptr_t)pv < *f->memsize)
+        goperl_save_pushptr(f, pv, SAVEt_FREEPV);
+    else
+        goperl_save_destructor(f, goperl_savefreepv_cb, (void *)pv, GOPERL_DTOR_CALL_OWN);
+}
+#define save_freepv(pv) goperl_save_freepv(_gof, (char *)(pv))
 /* The mask of the ops a compilation refuses (Safe's opmask), MAXO bytes in
  * the interpreter's memory, or NULL: in this process, a pointer into that
  * memory (where the buffer of a string is, SvPVX). */

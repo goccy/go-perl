@@ -2342,6 +2342,7 @@ typedef uint64_t goperl_gword_t;
 /* ---- the guest-op funnel: every operation flushes host state first ------ */
 
 static void goperl_flush(goperl_frame_t *f);
+static inline uint64_t goperl_guest_addr(const goperl_frame_t *f, const void *p);
 static void goperl_pp_sync_out(goperl_frame_t *f);
 static void goperl_pp_sync_in(goperl_frame_t *f);
 static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
@@ -4029,7 +4030,7 @@ static OP **goperl_plop_ref(goperl_frame_t *f) {
 #define PL_main_cv (*(CV **)goperl_plsv_ref(_gof, GOPERL_PL_MAIN_CV))
 #define PL_debstash (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_DEBSTASH))
 #define PL_sawampersand ((U8) * goperl_plint_ref(_gof, GOPERL_PL_SAWAMPERSAND))
-#define PL_scopestack_ix ((I32) * goperl_plint_ref(_gof, GOPERL_PL_SCOPESTACK_IX))
+#define PL_scopestack_ix (*(I32 *)goperl_plint_ref(_gof, GOPERL_PL_SCOPESTACK_IX))
 #define PL_exit_flags (*goperl_plint_ref(_gof, GOPERL_PL_EXIT_FLAGS))
 #define PL_basetime ((Time_t) * goperl_plint_ref(_gof, GOPERL_PL_BASETIME))
 /* PL_modglobal carries Time::HiRes's exported C hooks (Time::NVtime /
@@ -7044,9 +7045,39 @@ typedef struct goperl_context {
         SV *cur_text;
         CV *cv;
         OP *old_eval_root;
+        JMPENV *cur_top_env; /* the interpreter's address of the JMPENV the
+                              * eval was entered under (see PL_top_env) */
     } blk_eval;
-    struct {
+    /* perl's: the loop op, the iteration variable (for a lexical one the
+     * address of its pad slot, in the interpreter's memory), the value it
+     * had before, and where the iteration is */
+    struct block_loop {
         OP *my_op;
+        union {
+            SV **svp;
+            GV *gv;
+            SV *sv;
+            SV **gvp;
+        } itervar_u;
+        SV *itersave;
+        union {
+            struct {
+                AV *ary;
+                IV ix;
+            } ary;
+            struct {
+                SSize_t basesp;
+                IV ix;
+            } stack;
+            struct {
+                IV cur;
+                IV end;
+            } lazyiv;
+            struct {
+                SV *cur;
+                SV *end;
+            } lazysv;
+        } state_u;
     } blk_loop;
 } PERL_CONTEXT;
 struct goperl_si {
@@ -7320,7 +7351,7 @@ static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, i
         const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
             f, goperl_do_op3(f, GOPERL_OP_CX, tok, (uint64_t)(int64_t)i, 0 /* GOPERL_CX_DUMP */,
                              0, 0));
-        goperl_gword_t c[16];
+        goperl_gword_t c[20];
         if (!w) goperl_croakf(f, "context shadow: no such context");
         memcpy(c, w, sizeof c); /* the next operation reuses the words */
         memset(cx, 0, sizeof(*cx));
@@ -7354,9 +7385,18 @@ static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, i
             cx->blk_eval.cur_text = GOPERL_SV(c[12]);
             cx->blk_eval.cv = (CV *)GOPERL_SV(c[13]);
             cx->blk_eval.old_eval_root = goperl_op_shadow(f, c[14]);
+            cx->blk_eval.cur_top_env = (JMPENV *)(uintptr_t)c[15];
             break;
         default:
             cx->blk_loop.my_op = goperl_op_shadow_full(f, c[10]);
+            /* a pad slot is the interpreter's memory, where native code
+             * reads and writes it; a glob or scalar is its token */
+            cx->blk_loop.itervar_u.svp =
+                (cx->cx_type & CXp_FOR_PAD) && c[15] ? (SV **)(f->membase + c[15])
+                                                     : (SV **)(uintptr_t)c[15];
+            cx->blk_loop.itersave = GOPERL_SV(c[16]);
+            /* the two words of state_u: SV tokens or integers, as they are */
+            memcpy(&cx->blk_loop.state_u, &c[17], sizeof cx->blk_loop.state_u);
             break;
         }
         si->si_cxstack[n + 1 + i] = *cx;
@@ -7529,10 +7569,19 @@ static void goperl_cx_writeback(goperl_frame_t *f) {
                 GOPERL_CX_FIELD(12, blk_eval.cur_text, GOPERL_TOK(cx->blk_eval.cur_text))
                 GOPERL_CX_FIELD(13, blk_eval.cv, GOPERL_TOK(cx->blk_eval.cv))
                 GOPERL_CX_FIELD(14, blk_eval.old_eval_root, goperl_cx_op_tok(f, cx->blk_eval.old_eval_root))
+                GOPERL_CX_FIELD(15, blk_eval.cur_top_env, (uintptr_t)cx->blk_eval.cur_top_env)
                 break;
             default:
-                if (CxTYPE_is_LOOP(was))
+                if (CxTYPE_is_LOOP(was)) {
                     GOPERL_CX_FIELD(10, blk_loop.my_op, goperl_cx_op_tok(f, cx->blk_loop.my_op))
+                    GOPERL_CX_FIELD(15, blk_loop.itervar_u.svp,
+                                    (cx->cx_type & CXp_FOR_PAD) && cx->blk_loop.itervar_u.svp
+                                        ? goperl_guest_addr(f, cx->blk_loop.itervar_u.svp)
+                                        : (uint64_t)(uintptr_t)cx->blk_loop.itervar_u.svp)
+                    GOPERL_CX_FIELD(16, blk_loop.itersave, GOPERL_TOK(cx->blk_loop.itersave))
+                    GOPERL_CX_FIELD(17, blk_loop.state_u.lazyiv.cur, (uint64_t)cx->blk_loop.state_u.lazyiv.cur)
+                    GOPERL_CX_FIELD(18, blk_loop.state_u.lazyiv.end, (uint64_t)cx->blk_loop.state_u.lazyiv.end)
+                }
                 break;
             }
 #undef GOPERL_CX_FIELD
@@ -7759,7 +7808,6 @@ typedef struct {
 GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_mg_taken_t
     goperl_mg_taken_v[GOPERL_MG_TAKEN_MAX] = {{0, 0, 0, 0}};
 static uint64_t goperl_uvar_data_guest(const char *data);
-static inline uint64_t goperl_guest_addr(const goperl_frame_t *f, const void *p);
 static void goperl_magic_take_off(goperl_frame_t *f, uint64_t sv, const MAGIC *c) {
     uint64_t gdata = 0, key = 0;
     if (c->mg_len == HEf_SVKEY)
@@ -13055,6 +13103,7 @@ static SV *goperl_pad_sv_fetch(goperl_frame_t *f, PADOFFSET ix) {
  * through the SDK's host-destructor bridge) */
 static void goperl_savefreepv_cb(pTHX_ void *p) {
     (void)_gof;
+    goperl_block_forget(p, 0);
     free(p);
 }
 #define SAVEFREEPV(p) \
