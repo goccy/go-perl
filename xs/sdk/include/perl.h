@@ -1725,8 +1725,16 @@ static void goperl_errno_leave(goperl_frame_t *f) {
     if (errno != GOPERL_ERRNO_UNSET) f->xerrno = 1 + goperl_errno_guest(errno);
 }
 
+/* The slot of this thread in the table, as this file of the module found
+ * it last on this thread: a thread keeps its slot for as long as it lives
+ * (a slot is claimed once, by its own thread, and never given up), so the
+ * lookup runs once per thread and file. Every SDK macro reaches the current
+ * frame through here. */
+static __thread goperl_frame_t **goperl_curframe_cache;
 static goperl_frame_t **goperl_curframe_slot(void) {
     goperl_forked_check();
+    goperl_frame_t **const cached = goperl_curframe_cache;
+    if (__builtin_expect(cached != 0, 1)) return cached;
     if (!goperl_api_v) {
         /* the module is not booted yet: code that runs while it is being
          * loaded (a C++ static initializer) has no frame */
@@ -1739,13 +1747,13 @@ static goperl_frame_t **goperl_curframe_slot(void) {
     uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
     for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS; i++) {
         goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
-        if (e->tid == tid) return &e->f;
+        if (e->tid == tid) return goperl_curframe_cache = &e->f;
         if (e->tid == 0) {
             /* claim: threads only ever insert their OWN slot, so a lost
              * race means someone else claimed a different tid here */
             if (__sync_bool_compare_and_swap(&e->tid, (void *)0, tid))
-                return &e->f;
-            if (e->tid == tid) return &e->f;
+                return goperl_curframe_cache = &e->f;
+            if (e->tid == tid) return goperl_curframe_cache = &e->f;
         }
     }
     /* table full: unrecoverable configuration error */
@@ -6443,14 +6451,17 @@ static OP *goperl_newop_dispatch(pTHX_ int type, OP *o);
 GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
-/* What the table held when it was last synced (goperl_ppaddr_sync): the
- * sync before every operation compares it with the table in one memcmp,
- * and walks the slots only when one changed. */
+/* What the table held when it was last synced (goperl_ppaddr_sync): a sync
+ * compares it with the table in one memcmp, and walks the slots only when
+ * one changed. */
 GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_told_v[OP_max] = {0};
-/* The module looked at PL_ppaddr in this native call: an entry may be
- * assigned any time until the outermost native call returns (as PL_check's,
- * goperl_hooks_t.touched), and the table is synced before every operation
- * until then. */
+/* The module evaluated PL_ppaddr since the table was last synced: the
+ * operation after the evaluation syncs it (a slot is stored right after the
+ * table is evaluated, `PL_ppaddr[OP_X] = fn`), and so does the end of the
+ * outermost native call, for a slot stored later through the address the
+ * evaluation gave. A module that only calls slots (the original pp
+ * function of a type) costs one comparison per evaluation, not one per
+ * operation. */
 GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_touched_v = 0;
 
 /* An op is a shadow of the interpreter's when the registry has it under its
@@ -6550,9 +6561,9 @@ static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type) {
  * pp hooks. Called from the funnel flush. Uses the raw vtable (never the
  * funnel) to avoid recursion. */
 static void goperl_ppaddr_sync(goperl_frame_t *f) {
-    if (!goperl_ppaddr_touched_v ||
-        !memcmp(goperl_ppaddr_v, goperl_ppaddr_told_v, sizeof(goperl_ppaddr_told_v)))
-        return;
+    if (!goperl_ppaddr_touched_v) return;
+    goperl_ppaddr_touched_v = 0;
+    if (!memcmp(goperl_ppaddr_v, goperl_ppaddr_told_v, sizeof(goperl_ppaddr_told_v))) return;
     for (int i = 0; i < OP_max; i++) {
         int hooked = goperl_ppaddr_v[i] != goperl_ppaddr_base_v[i];
         if (hooked && !goperl_pp_installed_v[i]) {
@@ -6565,11 +6576,12 @@ static void goperl_ppaddr_sync(goperl_frame_t *f) {
     }
     memcpy(goperl_ppaddr_told_v, goperl_ppaddr_v, sizeof(goperl_ppaddr_told_v));
 }
-/* The outermost native call has returned: no expression is left that could
- * still assign an entry. */
+/* The outermost native call has returned: a slot stored through an address
+ * an evaluation gave, after the sync that followed it, is synced now (the
+ * table is compared whenever this module ever handed it out). */
 static void goperl_ppaddr_rest(goperl_frame_t *f) {
+    goperl_ppaddr_touched_v = goperl_ppaddr_inited_v;
     goperl_ppaddr_sync(f);
-    goperl_ppaddr_touched_v = 0;
 }
 
 /* ---- save-stack destructors ----------------------------------------------
