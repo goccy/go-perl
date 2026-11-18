@@ -227,6 +227,9 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 // The operation may end in a non-local exit of the interpreter instead of a
 // result (ErrGuestJump): see guestJump.
 func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
+	if p.exit != nil {
+		return 0, ErrGuestJump
+	}
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, op)
@@ -245,7 +248,7 @@ func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 		parked = p.parkGuestJump()
 		return r, err
 	})
-	if parked {
+	if parked || p.parkGuestExit(err) {
 		return 0, ErrGuestJump
 	}
 	if err != nil {
@@ -283,13 +286,34 @@ func (p *Perl) XSOpRun() error {
 			return r, err
 		}
 	}
+	if p.exit != nil {
+		return ErrGuestJump
+	}
 	p.xsOpParked = false
 	_, err := p.opInvoke(midXSOp, nil, p.xsOpCall)
-	if p.xsOpParked {
+	if p.xsOpParked || p.parkGuestExit(err) {
 		p.xsOpParked = false
 		return ErrGuestJump
 	}
 	return err
+}
+
+// parkGuestExit keeps a raw exit of the guest that an operation native
+// code asked for ended in (err), and reports whether it did. On perl the
+// exit ends the process from inside the operation, past every C frame of
+// the native code; here the native code is left as for a jump of the
+// interpreter (ErrGuestJump: the SDK unwinds it to its entry, saying
+// nothing), every operation it still asks for on the way is refused, and
+// the callback that ran it ends the program when it returns (see
+// dispatcher.HandleCallback). Outside of a callback there is no native
+// code to leave, and the exit is the caller's as it is.
+func (p *Perl) parkGuestExit(err error) bool {
+	var we *base.WasiExitError
+	if p.callbackDepth == 0 || !errors.As(err, &we) {
+		return false
+	}
+	p.exit = we
+	return true
 }
 
 // opInvoke runs an operation of native code (XSHelperOp, XSOpRun). Native
@@ -499,6 +523,16 @@ func (d dispatcher) HandleCallback(methodID int32, req []byte) (resp []byte, err
 			resp, err = nil, errCallbackJumped
 		}
 		d.p.callbackDepth--
+		if e := d.p.exit; e != nil {
+			// The native code the callback ran has been left after a
+			// raw exit inside one of its operations (parkGuestExit): the
+			// exit goes on from here, through the guest that called the
+			// callback, as the guest's own proc_exit goes, to the entry
+			// that called the guest (which ends the program, or keeps it
+			// for the next callback out).
+			d.p.exit = nil
+			panic(e)
+		}
 	}()
 	return d.handle(methodID, req)
 }
