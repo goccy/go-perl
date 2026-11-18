@@ -75,3 +75,35 @@ func archSystem(goos string) string {
 	}
 	return goos
 }
+
+// HostABI is the word of facts of the host's C ABI that native code has and
+// the interpreter, built for wasm, does not (perl-wasm's g_hostwords and
+// GOPERL_HOSTABI_*): the interpreter is told them before any code runs.
+func HostABI() uint32 { return hostABI(runtime.GOOS, runtime.GOARCH) }
+
+// hostABICharUnsigned is the bit of HostABI saying that char is unsigned.
+const hostABICharUnsigned = 1
+
+func hostABI(goos, goarch string) uint32 {
+	var w uint32
+	if charUnsigned(goos, goarch) {
+		w |= hostABICharUnsigned
+	}
+	return w
+}
+
+// charUnsigned says whether plain char is unsigned in the C ABI of the
+// platform: so the psABIs of arm, arm64, ppc64, s390x and riscv64 have it,
+// except where the system chose otherwise (Apple's and Microsoft's arm64,
+// OpenBSD's); char is signed on x86 and the other processors.
+func charUnsigned(goos, goarch string) bool {
+	switch goarch {
+	case "arm", "arm64", "ppc64", "ppc64le", "s390x", "riscv64":
+		switch goos {
+		case "darwin", "ios", "windows", "openbsd":
+			return false
+		}
+		return true
+	}
+	return false
+}

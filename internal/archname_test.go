@@ -24,3 +24,29 @@ func TestArchNameSpellsTheHostAsPerlDoes(t *testing.T) {
 		}
 	}
 }
+
+// char is unsigned in the C ABI of arm64, ppc64, s390x and riscv64 Linux,
+// and signed on x86 and on Apple's and Microsoft's arm64.
+func TestHostABISaysWhereCharIsUnsigned(t *testing.T) {
+	for _, c := range []struct {
+		goos, goarch string
+		want         uint32
+	}{
+		{"linux", "arm64", hostABICharUnsigned},
+		{"linux", "ppc64le", hostABICharUnsigned},
+		{"linux", "s390x", hostABICharUnsigned},
+		{"linux", "riscv64", hostABICharUnsigned},
+		{"linux", "arm", hostABICharUnsigned},
+		{"freebsd", "arm64", hostABICharUnsigned},
+		{"linux", "amd64", 0},
+		{"linux", "386", 0},
+		{"darwin", "arm64", 0},
+		{"darwin", "amd64", 0},
+		{"windows", "arm64", 0},
+		{"openbsd", "arm64", 0},
+	} {
+		if got := hostABI(c.goos, c.goarch); got != c.want {
+			t.Errorf("hostABI(%s, %s) = %d, want %d", c.goos, c.goarch, got, c.want)
+		}
+	}
+}

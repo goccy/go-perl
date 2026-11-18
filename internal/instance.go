@@ -366,6 +366,7 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 		return nil, addrErr
 	}
 	p.intrAddr = addr
+	p.writeHostABI()
 	return p, nil
 }
 
@@ -376,6 +377,23 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 // native code, which reads the process's memory). 0 means no base: the
 // addresses are the memory's own.
 const hostWordsBaseOffset = 8
+
+// hostWordsABIOffset is where, after the interpreter's interrupt flag
+// (perl-wasm's g_hostwords), the word lies of the facts of the host's C ABI
+// (HostABI), which the interpreter is told before any code runs in it: a
+// copy of an instance (a Clone, a fork child) has the word with the memory.
+const hostWordsABIOffset = 4
+
+// writeHostABI writes the facts of the host's C ABI into the word.
+func (p *Perl) writeHostABI() {
+	base.AccessMemory(p.m.g, func(mem []byte) {
+		at := p.intrAddr
+		if at+hostWordsABIOffset+4 > uint64(len(mem)) {
+			return
+		}
+		binary.LittleEndian.PutUint32(mem[at+hostWordsABIOffset:], HostABI())
+	})
+}
 
 // MarkMemoryBase gives an instance that runs native code its base, before
 // any code runs in it: the configuration decides it once, for the life of
