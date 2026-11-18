@@ -117,6 +117,20 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/file.h>
+/* what perl.h includes besides, on Linux (I_PWD, I_GRP, I_UTIME, I_CRYPT,
+ * I_SYS_UTSNAME, the System V IPC of HAS_SEM) */
+#include <pwd.h>
+#include <grp.h>
+#include <utime.h>
+#include <sys/utsname.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <wchar.h>
+#if defined(__has_include)
+#if __has_include(<crypt.h>)
+#include <crypt.h>
+#endif
+#endif
 
 /* The catch points of native code (an XSUB's entry, XCPT, JMPENV, the
  * loader's other entries) and the jump to them. On macOS they are _setjmp
@@ -10380,6 +10394,129 @@ typedef struct stat Stat_t;
 /* select(2) of this process, as the other system calls here are (a module
  * that waits a while: Devel::NYTProf's ticks_for_usleep). */
 #define PerlSock_select(n, r, w, e, t) select((n), (r), (w), (e), (t))
+/* The rest of iperlsys.h, as perl has it without PERL_IMPLICIT_SYS: each
+ * is the C library's call (waitpid, wait, fork and signal are the module's
+ * own, which the program's children and signals go to, as above). */
+#define Mkdir(path, mode) mkdir((path), (mode))
+#define Pause pause
+#define Sigjmp_buf sigjmp_buf
+#define Sigsetjmp(buf, save_mask) sigsetjmp((buf), (save_mask))
+#define Siglongjmp(buf, retval) siglongjmp((buf), (retval))
+#define my_fork() fork()
+#define PerlDir_mkdir(name, mode) Mkdir((name), (mode))
+#define PerlDir_chdir(name) chdir((name))
+#define PerlDir_rmdir(name) rmdir((name))
+#define PerlDir_close(dir) closedir((dir))
+#define PerlDir_open(name) opendir((name))
+#define PerlDir_read(dir) readdir((dir))
+#define PerlDir_rewind(dir) rewinddir((dir))
+#define PerlDir_seek(dir, loc) seekdir((dir), (loc))
+#define PerlDir_tell(dir) telldir((dir))
+#define PerlEnv_putenv(str) putenv(str)
+#define PerlEnv_ENVgetenv(str) PerlEnv_getenv((str))
+#define PerlEnv_uname(name) uname((name))
+#define PerlLIO_chown(file, owner, grp) chown((file), (owner), (grp))
+#define PerlLIO_chsize(fd, size) ftruncate((fd), (size))
+#define PerlLIO_flock(fd, op) flock((fd), (op))
+#define PerlLIO_ioctl(fd, u, buf) ioctl((fd), (u), (buf))
+#define PerlLIO_link(oldname, newname) link((oldname), (newname))
+#define PerlLIO_mktemp(file) mktemp((file))
+#define PerlLIO_readlink(path, buf, bufsiz) readlink((path), (buf), (bufsiz))
+#define PerlLIO_symlink(oldname, newname) symlink((oldname), (newname))
+#define PerlLIO_tmpnam(str) tmpnam((str))
+#define PerlLIO_umask(mode) umask((mode))
+#define PerlLIO_utime(file, time) utime((file), (time))
+#define PerlMem_get_lock()
+#define PerlMem_free_lock()
+#define PerlMem_is_locked() 0
+#define PerlMemShared_get_lock()
+#define PerlMemShared_free_lock()
+#define PerlMemShared_is_locked() 0
+#define PerlMemParse_malloc(size) malloc((size))
+#define PerlMemParse_realloc(buf, size) realloc((buf), (size))
+#define PerlMemParse_calloc(num, size) calloc((num), (size))
+#define PerlMemParse_free(buf) free((buf))
+#define PerlMemParse_get_lock()
+#define PerlMemParse_free_lock()
+#define PerlMemParse_is_locked() 0
+#define PerlProc_abort() abort()
+#define PerlProc_crypt(c, s) crypt((c), (s))
+#define PerlProc_exit(s) exit((s))
+#define PerlProc__exit(s) _exit((s))
+#define PerlProc_execl(c, w, x, y, z) execl((c), (w), (x), (y), (z))
+#define PerlProc_execv(c, a) execv((c), (a))
+#define PerlProc_execvp(c, a) execvp((c), (a))
+#define PerlProc_geteuid() geteuid()
+#define PerlProc_getgid() getgid()
+#define PerlProc_getegid() getegid()
+#define PerlProc_getlogin() getlogin()
+#define PerlProc_kill(i, a) kill((i), (a))
+#define PerlProc_killpg(i, a) killpg((i), (a))
+#define PerlProc_pause() Pause()
+#define PerlProc_pipe(fd) pipe((fd))
+#define PerlProc_setuid(u) setuid((u))
+#define PerlProc_setgid(g) setgid((g))
+#define PerlProc_sleep(t) sleep((t))
+#define PerlProc_times(t) times((t))
+#define PerlProc_wait(t) wait((t))
+#define PerlProc_waitpid(p, s, f) waitpid((p), (s), (f))
+#define PerlProc_setjmp(b, n) Sigsetjmp((b), (n))
+#define PerlProc_longjmp(b, n) Siglongjmp((b), (n))
+#define PerlProc_signal(n, h) signal((n), (h))
+#define PerlProc_fork() my_fork()
+#define PerlProc_gettimeofday(t, z) gettimeofday((t), (z))
+#define PerlSock_htonl(x) htonl(x)
+#define PerlSock_htons(x) htons(x)
+#define PerlSock_ntohl(x) ntohl(x)
+#define PerlSock_ntohs(x) ntohs(x)
+#define PerlSock_accept(s, a, l) accept(s, a, l)
+#define PerlSock_bind(s, n, l) bind(s, n, l)
+#define PerlSock_connect(s, n, l) connect(s, n, l)
+#define PerlSock_endhostent endhostent
+#define PerlSock_endnetent endnetent
+#define PerlSock_endprotoent endprotoent
+#define PerlSock_endservent endservent
+#define PerlSock_gethostbyaddr(a, l, t) gethostbyaddr(a, l, t)
+#define PerlSock_gethostbyname(n) gethostbyname(n)
+#define PerlSock_gethostent gethostent
+#define PerlSock_gethostname(n, l) gethostname(n, l)
+#define PerlSock_getnetbyaddr(n, t) getnetbyaddr(n, t)
+#define PerlSock_getnetbyname(n) getnetbyname(n)
+#define PerlSock_getnetent getnetent
+#define PerlSock_getpeername(s, n, l) getpeername(s, n, l)
+#define PerlSock_getprotobyname(n) getprotobyname(n)
+#define PerlSock_getprotobynumber(n) getprotobynumber(n)
+#define PerlSock_getprotoent getprotoent
+#define PerlSock_getservbyname(n, p) getservbyname(n, p)
+#define PerlSock_getservbyport(port, p) getservbyport(port, p)
+#define PerlSock_getservent getservent
+#define PerlSock_getsockname(s, n, l) getsockname(s, n, l)
+#define PerlSock_getsockopt(s, l, n, v, i) getsockopt(s, l, n, v, i)
+#define PerlSock_inet_addr(c) inet_addr(c)
+#define PerlSock_inet_ntoa(i) inet_ntoa(i)
+#define PerlSock_listen(s, b) listen(s, b)
+#define PerlSock_recv(s, b, l, f) recv(s, b, l, f)
+#define PerlSock_recvfrom(s, b, l, f, from, fromlen) recvfrom(s, b, l, f, from, fromlen)
+#define PerlSock_send(s, b, l, f) send(s, b, l, f)
+#define PerlSock_sendto(s, b, l, f, t, tlen) sendto(s, b, l, f, t, tlen)
+#define PerlSock_sethostent(f) sethostent(f)
+#define PerlSock_setnetent(f) setnetent(f)
+#define PerlSock_setprotoent(f) setprotoent(f)
+#define PerlSock_setservent(f) setservent(f)
+#define PerlSock_setsockopt(s, l, n, v, len) setsockopt(s, l, n, v, len)
+#define PerlSock_shutdown(s, h) shutdown(s, h)
+#define PerlSock_socket(a, t, p) socket(a, t, p)
+#define PerlSock_socketpair(a, t, p, f) socketpair(a, t, p, f)
+/* The types config.h names, as perl's Configure finds them on Linux. */
+#define Fpos_t fpos_t
+#define Groups_t gid_t
+#define Mmap_t void *
+#define Shmat_t void *
+#define Sock_size_t socklen_t
+#define Netdb_hlen_t size_t
+#define Netdb_host_t const void *
+#define Netdb_name_t const char *
+#define Netdb_net_t in_addr_t
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
