@@ -7544,6 +7544,8 @@ typedef struct {
               * buffer of SAVEFREEPV or SSNEW, a deferred save): the copies
               * of an instance share that memory, so a copy leaves its
               * release to the original (see __goperl_shared_clone) */
+    int32_t raw; /* the raw words below the destructor's group: its data,
+                  * which it pops itself (SSPUSH* right before it) */
 } goperl_dtor_t;
 #define GOPERL_DTOR_X 1
 #define GOPERL_DTOR_PLAIN 2
@@ -7556,6 +7558,9 @@ typedef char goperl_dtor_fits
          ? 1
          : -1] __attribute__((unused));
 
+static int32_t goperl_ss_raw_on_top(goperl_frame_t *f);
+static void goperl_ss_raw_end(void);
+static void goperl_ss_raw_begin(goperl_frame_t *f, int32_t n);
 static void goperl_save_destructor(goperl_frame_t *f,
                                    void (*fn)(pTHX_ void *), void *arg,
                                    U8 kind) {
@@ -7572,8 +7577,12 @@ static void goperl_save_destructor(goperl_frame_t *f,
     goperl_dtor_v[id].fn = fn;
     goperl_dtor_v[id].arg = arg;
     goperl_dtor_v[id].used = kind;
+    /* the raw words native code pushed right before are this destructor's
+     * data; the operation's flush still passes them as they are */
+    goperl_dtor_v[id].raw = goperl_ss_raw_on_top(f);
     goperl_do_op(f, GOPERL_OP_SAVE_DESTRUCTOR, (uint64_t)(uint32_t)(id + 1),
                  0, 0, 0);
+    goperl_ss_raw_end();
 }
 #define save_destructor_x(fn, p) \
     goperl_save_destructor(_gof, (fn), (p), GOPERL_DTOR_X)
@@ -7667,10 +7676,12 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
         return;
     }
     goperl_pp_stack_take(f);
+    goperl_ss_raw_begin(f, d.raw);
     if (d.used == GOPERL_DTOR_PLAIN)
         ((void (*)(void *))(void (*)(void))d.fn)(d.arg);
     else
         d.fn(d.arg);
+    goperl_ss_raw_end();
     /* what the destructor stored (PAD_SVl(ix) = NULL) is the interpreter's
      * before it goes on with the scope */
     goperl_flush(f);
