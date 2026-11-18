@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -367,8 +368,11 @@ func childWatchProgram(report string) []string {
 // reaps with waitpid(-1, WNOHANG) when SIGCHLD comes, finds the program's
 // fork children, which run inside the process, and the commands it started,
 // with their status words in the host's numbers, and then ECHILD. The end
-// of a fork child reaches a handler of SIGCHLD in native code once, as a
-// real SIGCHLD, and the program's own handler once. A child the module
+// of a fork child reaches the program's own handler of SIGCHLD once; the
+// module's handler, which the program's replaced (set after it), not at all
+// on Linux, as in perl, where the last sigaction wins. Elsewhere the runtime
+// does not know the native handler and leaves it the process's action, and
+// the end reaches it once, as a real SIGCHLD. A child the module
 // started itself is still its own to wait for. Before, waitpid was the C
 // library's: it knew no fork child (ECHILD at once) and took the commands
 // from under the runtime, and no SIGCHLD came for a fork child.
@@ -400,8 +404,12 @@ func TestNativeWaitpidIsTheProgramsOwn(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	got, _ := os.ReadFile(report)
+	nativeHandler := "1"
+	if runtime.GOOS == "linux" {
+		nativeHandler = "0"
+	}
 	want := strings.Join([]string{
-		"fork child: 768 then ECHILD, handled 1, native handler 1",
+		"fork child: 768 then ECHILD, handled 1, native handler " + nativeHandler,
 		"fork child that execs: " + strconv.Itoa(int(syscall.SIGUSR1)),
 		"command: 1280",
 		"module's own child: found 1024 -",
