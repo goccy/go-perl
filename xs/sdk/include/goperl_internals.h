@@ -96,44 +96,4 @@
 #undef IoDIRP
 #define IoDIRP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: IoDIRP") 0
 
-/* the layers of PerlIO handles: the tables of the interpreter's layers and the stack of a handle (a layer of native code may customize Pushed and Fill of a buffered layer, see perliol.h) */
-#undef PerlIO_push
-#define PerlIO_push GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_push") 0
-#undef PerlIO_pop
-#define PerlIO_pop GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_pop") 0
-#undef PerlIO_find_layer
-#define PerlIO_find_layer GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_find_layer") 0
-#undef PerlIO_layer_fetch
-#define PerlIO_layer_fetch GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_layer_fetch") 0
-#undef PerlIOBase_open
-#define PerlIOBase_open GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_open") 0
-#undef PerlIOBase_read
-#define PerlIOBase_read GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_read") 0
-#undef PerlIOBase_pushed
-#define PerlIOBase_pushed GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_pushed") 0
-#undef PerlIOBase_popped
-#define PerlIOBase_popped GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_popped") 0
-#undef PerlIOBase_close
-#define PerlIOBase_close GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_close") 0
-#undef PerlIOBase_dup
-#define PerlIOBase_dup GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIOBase_dup") 0
-#undef PerlIO_perlio
-#define PerlIO_perlio GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_perlio") 0
-#undef PerlIO_crlf
-#define PerlIO_crlf GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_crlf") 0
-#undef PerlIO_unix
-#define PerlIO_unix GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_unix") 0
-#undef PerlIO_stdio
-#define PerlIO_stdio GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_stdio") 0
-#undef PerlIO_utf8
-#define PerlIO_utf8 GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_utf8") 0
-#undef PerlIO_byte
-#define PerlIO_byte GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_byte") 0
-#undef PerlIO_raw
-#define PerlIO_raw GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_raw") 0
-#undef PerlIO_pending
-#define PerlIO_pending GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_pending") 0
-#undef PerlIO_remove
-#define PerlIO_remove GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PerlIO_remove") 0
-
 #endif /* GOPERL_XS_SDK_INTERNALS_H */
