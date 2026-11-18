@@ -2203,6 +2203,12 @@ func (s *state) cvAnySlot(cv uint64) uintptr {
 	return slot
 }
 
+// processServingInInitOffset is where the SDK's process block
+// (goperl_process_t, the vtable's shared_raw) has serving_in_init: after
+// the table of the threads' frames (512 slots of 16 bytes) and forked,
+// borrow_active, borrower, borrowed, borrow_key_state and borrow_key.
+const processServingInInitOffset = 8232
+
 // buildVtable creates the C-callable API table. Callbacks are process-global
 // (ccall.NewCallback registrations are permanent); the frame carries the
 // instance.
@@ -2213,6 +2219,11 @@ func buildVtable() {
 	// each state's own sharedRaw, stamped onto frames.
 	vtable.sharedRaw = cMalloc(sharedBlockSize)
 	pokeBytes(vtable.sharedRaw, make([]byte, sharedBlockSize))
+	if internal.ServingInInit() {
+		// the SDK tells a module's own thread that calls Perl that it
+		// cannot be served (goperl_init_serving_die)
+		pokeBytes(vtable.sharedRaw+processServingInInitOffset, []byte{1, 0, 0, 0})
+	}
 	vtable.svIV = ccall.NewCallback(func(args *ccall.Args) uintptr {
 		fr := args[0]
 		sv := args[1]

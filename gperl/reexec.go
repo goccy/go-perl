@@ -26,6 +26,8 @@ package gperl
 
 import (
 	"os"
+
+	"github.com/goccy/go-perl/internal"
 )
 
 // perlCLIEnv marks a process as a shim re-entry. Exported nowhere; the
@@ -45,6 +47,11 @@ func init() {
 	default:
 		return
 	}
+	// The program runs inside the Go program's package initialization,
+	// which ends with the program: a native module's own thread that calls
+	// Perl is told it cannot be served there (Go holds its call until the
+	// initialization ends) rather than waiting for ever.
+	internal.SetServingInInit()
 	status, err := runCommandLine(argv, false)
 	if err != nil {
 		PrintRunError(err)

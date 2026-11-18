@@ -1025,6 +1025,13 @@ typedef struct goperl_process {
      * (goperl_borrow_key_of): 0 not made, 1 being made, 2 made */
     int32_t borrow_key_state;
     uint64_t borrow_key;
+    /* set by the loader when the program runs inside the Go program's
+     * package initialization (gperl serves a perl command line there: a
+     * program started by its perl link, or as a child of a build or test
+     * harness), where Go holds a call into Go from a thread it did not
+     * start until the initialization ends, which is the end of the program
+     * (goperl_init_serving_die) */
+    int32_t serving_in_init;
 } goperl_process_t;
 #define GOPERL_PROCESS ((goperl_process_t *)goperl_api_v->shared_raw)
 /* The slot of this thread in the table, as this file of the module found
@@ -1144,6 +1151,23 @@ static void goperl_no_frame_die(void) {
         "goperl native XS: the interpreter was used from a thread of native code while no native "
         "call of the interpreter's was waiting: such a thread can use it only while a native call "
         "of the interpreter waits for it\n";
+    (void)!write(2, msg, sizeof msg - 1);
+    abort();
+}
+/* A thread of native code's own is about to use the interpreter through
+ * the frame of the native call that waits for it, while the program runs
+ * inside the Go program's package initialization (serving_in_init): the
+ * operation would be a call into Go from a thread Go did not start, which
+ * Go holds until the initialization ends, and the native call that waits
+ * for the thread never returns. It says so and ends the process, as the
+ * other uses that cannot be served do. */
+static void goperl_init_serving_die(void) __attribute__((noreturn, cold));
+static void goperl_init_serving_die(void) {
+    static const char msg[] =
+        "goperl native XS: a thread of native code's own called into Perl while gperl runs the "
+        "program inside the Go program's initialization (a program started as the perl command: "
+        "by gperl's perl link, or as a child of a build or test harness), where Go holds such a "
+        "call until the program ends; run the program with `gperl run`\n";
     (void)!write(2, msg, sizeof msg - 1);
     abort();
 }
@@ -1964,6 +1988,7 @@ static goperl_frame_t **goperl_curframe_find(void) {
     }
     goperl_frame_t **const waiting = goperl_waiting_call(tid);
     if (!waiting) return own;
+    if (GOPERL_PROCESS->serving_in_init) goperl_init_serving_die();
     goperl_borrow(tid, *waiting);
     return waiting;
 }
