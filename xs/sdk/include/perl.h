@@ -11834,7 +11834,8 @@ enum {
     GOPERL_HOST_CALLCK = 3,
     GOPERL_HOST_MAGIC = 4,
     GOPERL_HOST_UVAR = 5,
-    GOPERL_HOST_INFIX = 9
+    GOPERL_HOST_INFIX = 9,
+    GOPERL_HOST_NATIVE_OP = 100
 };
 /* The hooks of GOPERL_HOST_MAGIC (free and local come another way). */
 enum {
@@ -12019,6 +12020,14 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
 
 static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *req,
                                      uint32_t reqlen, goperl_gword_t *resp);
+/* An op an op of native code points at, for B (GOPERL_HOST_NATIVE_OP): the
+ * interpreter's number of the op a shadow stands for, or the address of an
+ * op of the module's own. */
+static goperl_gword_t goperl_native_op_word(goperl_frame_t *f, const OP *o) {
+    if (!o) return 0;
+    return goperl_op_is_shadow(f, o) ? (goperl_gword_t)(o->gop | GOPERL_OP_NUMBER_TAG)
+                                     : (goperl_gword_t)(uintptr_t)o;
+}
 /* Loader entry: one call of native code through the host-call channel.
  * req is [kind] and the kind's words; the answer goes to resp, in words,
  * and its length in bytes is returned (reqlen and respcap are in bytes
@@ -12081,6 +12090,33 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
             free(a.holders);
         }
         if (a.fn) a.fn(a.arg);
+        break;
+    }
+    case GOPERL_HOST_NATIVE_OP: {
+        /* [address] -> what the op there is, for a B::OP object the module
+         * made of it: [1][the interpreter's op] for a shadow, or for an op
+         * of the module's own (a struct on its C stack, a static one) [2]
+         * [type | flags << 16 | private << 24 | moresib << 32][targ][next]
+         * [sibparent][first][last], each op the interpreter's (its number,
+         * as PTR2IV makes it) or another of the module's (its address) */
+        if (reqlen < 16 || respcap < 56 || !req[1])
+            goperl_croakf(f, "host call: no op for the request");
+        const OP *const o = (const OP *)(uintptr_t)req[1];
+        if (goperl_op_is_shadow(f, o)) {
+            resp[0] = 1;
+            resp[1] = o->gop;
+            rlen = 16;
+            break;
+        }
+        resp[0] = 2;
+        resp[1] = (goperl_gword_t)o->op_type | (goperl_gword_t)o->op_flags << 16 |
+                  (goperl_gword_t)o->op_private << 24 | (goperl_gword_t)(o->op_moresib & 1) << 32;
+        resp[2] = (goperl_gword_t)o->op_targ;
+        resp[3] = goperl_native_op_word(f, o->op_next);
+        resp[4] = goperl_native_op_word(f, o->op_sibparent);
+        resp[5] = goperl_native_op_word(f, o->op_first);
+        resp[6] = goperl_native_op_word(f, o->op_last);
+        rlen = 56;
         break;
     }
     case GOPERL_HOST_CALLCK: {
