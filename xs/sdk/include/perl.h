@@ -9482,6 +9482,31 @@ static pid_t goperl_getpid(void) {
 #else
 #define GOPERL_LIBC_THROWNL
 #endif
+
+/* ---- libraries native code loads ---------------------------------------------
+ * A library a module loads itself, compiled against this SDK (Affix compiles
+ * C that takes SVs, loads it and calls it from Perl), runs code of the SDK
+ * too, which reaches the interpreter through the vtable the loader gives a
+ * module it loads (__goperl_xs_init). On perl such a library calls the
+ * perl API of the process it is loaded into; here dlopen gives it the
+ * vtable of the module that loads it. A library compiled for another ABI,
+ * or not against perl.h, is loaded as it is. */
+GOPERL_C __attribute__((weak, visibility("hidden"))) void *(*goperl_libc_dlopen)(const char *,
+                                                                                 int) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) void *dlopen(const char *file,
+                                                                   int mode) GOPERL_LIBC_THROWNL {
+    if (!goperl_libc_dlopen) {
+        goperl_libc_dlopen = (void *(*)(const char *, int))dlsym(RTLD_NEXT, "dlopen");
+        if (!goperl_libc_dlopen) return NULL;
+    }
+    void *const h = goperl_libc_dlopen(file, mode);
+    if (h && file && goperl_api_v) {
+        uint32_t (*const init)(const goperl_api_t *) =
+            (uint32_t (*)(const goperl_api_t *))dlsym(h, "__goperl_xs_init");
+        if (init) (void)init(goperl_api_v);
+    }
+    return h;
+}
 GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t (*goperl_libc_wait4)(
     pid_t, int *, int, struct rusage *) = 0;
 /* The host's number for a signal of the interpreter's (Linux's numbers, on
