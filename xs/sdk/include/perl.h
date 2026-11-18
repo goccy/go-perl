@@ -7341,12 +7341,6 @@ static PERL_SI *goperl_si_reusable(PERL_SI *old, uint64_t tok, I32 n) {
     return 0;
 }
 static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, int depth,
-                                           PERL_SI *old);
-static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
-                                      int depth) {
-    return goperl_si_materialize_from(f, si_tok, depth, goperl_si_cache_v);
-}
-static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, int depth,
                                            PERL_SI *old) {
     if (depth > 16) return 0;
     uint64_t tok = si_tok
@@ -7457,7 +7451,18 @@ static PERL_SI *goperl_si_cur(goperl_frame_t *f) {
     goperl_stack_below(f);
     if (goperl_si_cache_v && goperl_si_gen_v == goperl_gen_v)
         return goperl_si_cache_v;
-    goperl_si_cache_v = goperl_si_materialize(f, 0, 0);
+    /* What native code stored into the shadows goes to the interpreter
+     * first. They are then made again (in place, where they fit) out of
+     * the cache: every operation the making asks for writes back what the
+     * cache holds, and would take a context half made again for one native
+     * code changed, and overwrite it with what it was (a sub's context,
+     * read as the loop the context there was before, had its sub described
+     * as an op: DBI's caller lookup under trace) or tell the interpreter
+     * of it. */
+    goperl_cx_writeback(f);
+    PERL_SI *const old = goperl_si_cache_v;
+    goperl_si_cache_v = 0;
+    goperl_si_cache_v = goperl_si_materialize_from(f, 0, 0, old);
     goperl_si_gen_v = goperl_gen_v;
     if (!goperl_si_cache_v)
         goperl_croakf(f, "cannot materialize the context stack");
