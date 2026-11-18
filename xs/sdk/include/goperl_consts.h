@@ -1715,15 +1715,19 @@
 #ifndef OPpMULTICONCAT_STRINGIFY
 #define OPpMULTICONCAT_STRINGIFY 8
 #endif
-/* the fields of the header of a multiconcat op's aux array (op.h) */
+/* the fields of the header of a multiconcat op's aux array (perl.h of
+ * perl 5.44: three pad indexes of PADTMPs come before the lengths) */
 #ifndef PERL_MULTICONCAT_IX_NARGS
 #define PERL_MULTICONCAT_IX_NARGS 0
 #define PERL_MULTICONCAT_IX_PLAIN_PV 1
 #define PERL_MULTICONCAT_IX_PLAIN_LEN 2
 #define PERL_MULTICONCAT_IX_UTF8_PV 3
 #define PERL_MULTICONCAT_IX_UTF8_LEN 4
-#define PERL_MULTICONCAT_IX_LENGTHS 5
-#define PERL_MULTICONCAT_HEADER_SIZE 5
+#define PERL_MULTICONCAT_IX_PADTMP0 5
+#define PERL_MULTICONCAT_IX_PADTMP1 6
+#define PERL_MULTICONCAT_IX_PADTMP2 7
+#define PERL_MULTICONCAT_IX_LENGTHS 8
+#define PERL_MULTICONCAT_HEADER_SIZE 8
 #endif
 #ifndef OPpMULTIDEREF_DELETE
 #define OPpMULTIDEREF_DELETE 0x20
