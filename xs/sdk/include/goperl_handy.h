@@ -705,6 +705,75 @@ static const unsigned char goperl_mod_latin1_uc_v[256] __attribute__((unused)) =
 #ifndef isXDIGIT
 #define isXDIGIT(c) isXDIGIT_A(c)
 #endif
+
+/* More of handy.h's names, as perl defines them without DEBUGGING (where
+ * perl asserts on an argument, the assertion is left out, as there). */
+#ifndef XDIGIT_VALUE
+/* the value of a character known to be a hexadecimal digit */
+#define XDIGIT_VALUE(c) \
+    ((((NATIVE_TO_LATIN1(c) & 0x40) >> 3) | (NATIVE_TO_LATIN1(c) & 0x40) >> 6) + ((c) & 0xF))
+/* the value of the hexadecimal digit s points at; s is advanced */
+#define READ_XDIGIT(s) ((s)++, XDIGIT_VALUE(*((s) - 1)))
+/* the value of a character known to be an octal digit */
+#define OCTAL_VALUE(c) (7 & (c))
+#endif
+#ifndef isALPHA_FOLD_EQ
+/* whether two characters, one of them an ASCII letter, are the same letter
+ * in either case */
+#define isALPHA_FOLD_EQ(c1, c2) (((c1) & ~('A' ^ 'a')) == ((c2) & ~('A' ^ 'a')))
+#define isALPHA_FOLD_NE(c1, c2) (!isALPHA_FOLD_EQ((c1), (c2)))
+#endif
+#ifndef WIDEST_UTYPE
+#define WIDEST_UTYPE UV
+#endif
+#ifndef withinCOUNT
+/* whether l <= c <= l + n, l and n not negative */
+#define withinCOUNT(c, l, n) ((((WIDEST_UTYPE)(c)) - (l)) <= ((WIDEST_UTYPE)(n)))
+/* whether c is in l..u, l not negative */
+#define goperl_inRANGE_helper(cast, c, l, u) withinCOUNT(((cast)(c)), (l), ((u) - (l)))
+#define inRANGE(c, l, u)                                                         \
+    ((sizeof(c) == sizeof(U8))    ? goperl_inRANGE_helper(U8, (c), (l), (u))     \
+     : (sizeof(c) == sizeof(U16)) ? goperl_inRANGE_helper(U16, (c), (l), (u))    \
+     : (sizeof(c) == sizeof(U32)) ? goperl_inRANGE_helper(U32, (c), (l), (u))    \
+                                  : goperl_inRANGE_helper(WIDEST_UTYPE, (c), (l), (u)))
+#endif
+#ifndef toTITLE
+#define toTITLE(c) toUPPER(c)
+#endif
+#ifndef MUTABLE_IO
+#define MUTABLE_IO(p) ((IO *)MUTABLE_PTR(p))
+#endif
+#ifndef xV_FROM_REF
+/* the thing a reference refers to, of the kind XV */
+#define xV_FROM_REF(XV, ref) ((XV *)(SvRV(ref)))
+#define AV_FROM_REF(ref) xV_FROM_REF(AV, ref)
+#define CV_FROM_REF(ref) xV_FROM_REF(CV, ref)
+#define GV_FROM_REF(ref) xV_FROM_REF(GV, ref)
+#define HV_FROM_REF(ref) xV_FROM_REF(HV, ref)
+#endif
+#ifndef memLT
+#define memLT(s1, s2, l) (memcmp(s1, s2, l) < 0)
+#define memLE(s1, s2, l) (memcmp(s1, s2, l) <= 0)
+#define memGT(s1, s2, l) (memcmp(s1, s2, l) > 0)
+#define memGE(s1, s2, l) (memcmp(s1, s2, l) >= 0)
+#endif
+#ifndef NewCopy
+#define NewCopy(s, d, n, t)     STMT_START {                    Newx(d, n, t);              Copy(s, d, n, t);       }                           STMT_END
+#endif
+#ifndef U8_MAX
+#define U8_MAX UINT8_MAX
+#define U8_MIN 0
+#endif
+#ifndef U16_MAX
+#define U16_MAX UINT16_MAX
+#define U16_MIN 0
+#endif
+#ifndef I16_MIN
+#define I16_MIN INT16_MIN
+#endif
+#ifndef U32_MIN
+#define U32_MIN 0
+#endif
 #ifndef isPSXSPC
 #define isPSXSPC(c) isSPACE_A(c)
 #endif
