@@ -12219,28 +12219,6 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
 
 static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *req,
                                      uint32_t reqlen, goperl_gword_t *resp);
-/* Whether n bytes from p are mapped memory of the process: msync fails
- * (ENOMEM) for a range with a page that is not mapped, on Linux and on
- * darwin (whose mincore does not fail for one). A page mapped without
- * read permission (a guard page) counts as there. */
-static int goperl_memory_there(const void *p, size_t n) {
-    const uintptr_t page = (uintptr_t)getpagesize();
-    const uintptr_t start = (uintptr_t)p & ~(page - 1);
-    if ((uintptr_t)p + n < (uintptr_t)p) return 0;
-    return msync((void *)start, (size_t)((uintptr_t)p + n - start), MS_ASYNC) == 0;
-}
-/* An op an op of native code points at, for B (GOPERL_HOST_NATIVE_OP): the
- * interpreter's number of the op a shadow stands for, or the address of an
- * op of the module's own. */
-static goperl_gword_t goperl_native_op_word(goperl_frame_t *f, const OP *o) {
-    /* a link of a module's own op may hold whatever its memory held (an
-     * op on the C stack whose op_next alone was set): one that is no
-     * pointer to memory there is no op */
-    if (!o || ((uintptr_t)o & (sizeof(void *) - 1)) || !goperl_memory_there(o, sizeof(OP)))
-        return 0;
-    return goperl_op_is_shadow(f, o) ? (goperl_gword_t)(o->gop | GOPERL_OP_NUMBER_TAG)
-                                     : (goperl_gword_t)(uintptr_t)o;
-}
 /* Loader entry: one call of native code through the host-call channel.
  * req is [kind] and the kind's words; the answer goes to resp, in words,
  * and its length in bytes is returned (reqlen and respcap are in bytes
@@ -12308,9 +12286,10 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
         /* [address] -> what the op there is, for a B::OP object the module
          * made of it: [1][the interpreter's op] for a shadow, or for an op
          * of the module's own (a struct on its C stack, a static one) [2]
-         * [type | flags << 16 | private << 24 | moresib << 32][targ][next]
-         * [sibparent][first][last], each op the interpreter's (its number,
-         * as PTR2IV makes it) or another of the module's (its address) */
+         * [type | flags << 16 | private << 24 | moresib << 32 | opt << 33 |
+         * slabbed << 34 | savefree << 35 | static << 36 | folded << 37][targ]
+         * [next][sibparent][first][last], the links the addresses the op
+         * holds */
         if (reqlen < 16 || respcap < 56 || !req[1])
             goperl_croakf(f, "host call: no op for the request");
         const OP *const o = (const OP *)(uintptr_t)req[1];
@@ -12322,12 +12301,17 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
         }
         resp[0] = 2;
         resp[1] = (goperl_gword_t)o->op_type | (goperl_gword_t)o->op_flags << 16 |
-                  (goperl_gword_t)o->op_private << 24 | (goperl_gword_t)(o->op_moresib & 1) << 32;
+                  (goperl_gword_t)o->op_private << 24 | (goperl_gword_t)(o->op_moresib & 1) << 32 |
+                  (goperl_gword_t)(o->op_opt & 1) << 33 | (goperl_gword_t)(o->op_slabbed & 1) << 34 |
+                  (goperl_gword_t)(o->op_savefree & 1) << 35 |
+                  (goperl_gword_t)(o->op_static & 1) << 36 | (goperl_gword_t)(o->op_folded & 1) << 37;
         resp[2] = (goperl_gword_t)o->op_targ;
-        resp[3] = goperl_native_op_word(f, o->op_next);
-        resp[4] = goperl_native_op_word(f, o->op_sibparent);
-        resp[5] = goperl_native_op_word(f, o->op_first);
-        resp[6] = goperl_native_op_word(f, o->op_last);
+        /* the links as the op holds them: the interpreter follows one
+         * when B is asked for it, as perl does, with a request of its own */
+        resp[3] = (goperl_gword_t)(uintptr_t)o->op_next;
+        resp[4] = (goperl_gword_t)(uintptr_t)o->op_sibparent;
+        resp[5] = (goperl_gword_t)(uintptr_t)o->op_first;
+        resp[6] = (goperl_gword_t)(uintptr_t)o->op_last;
         rlen = 56;
         break;
     }
