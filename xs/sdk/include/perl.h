@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 37u
+#define GOPERL_XS_ABI 38u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -853,6 +853,30 @@ struct op {
     struct cop_feature_t {
         U32 bits[1]; /* COP_FEATURE_SIZE of feature.h */
     } cop_features;
+    /* PMOP view: the flags, the regexp (PM_GETRE), and the unions of a
+     * substitution's replacement (op_pmreplroot, op_pmreplstart), a
+     * split's glob (op_pmtargetgv) and a match's stash, as perl without
+     * threads has them, and the code blocks of the pattern */
+    U32 op_pmflags;
+    struct goperl_sv *op_pmregexp;
+    union {
+        OP *op_pmreplroot;
+        UV op_pmtargetoff;
+        GV *op_pmtargetgv;
+    } op_pmreplrootu;
+    union {
+        OP *op_pmreplstart;
+        HV *op_pmstash;
+    } op_pmstashstartu;
+    OP *op_code_list;
+    /* PADOP view */
+    UV op_padix;
+    /* COP view: the hints hash (COPHH, a token of the interpreter's
+     * chain), the glob of the file and the stash, as perl without threads
+     * has them */
+    struct refcounted_he *cop_hints_hash;
+    GV *cop_filegv;
+    HV *cop_stash;
 };
 #define cUNOPx(o) ((UNOP *)(o))
 #define cUNOPo cUNOPx(o)
@@ -2281,6 +2305,11 @@ typedef struct goperl_shared {
  * address of the interpreter's memory, which is the body pointer from then
  * on (perl's bodyless IV, which Sereal::Decoder makes itself) */
 #define GOPERL_LV_SVANY 48
+/* The roots and the starts of the main program and of the eval being
+ * compiled (PL_main_root, PL_main_start, PL_eval_root, PL_eval_start): op
+ * shadows, which a store gives the interpreter (see goperl_plroot_load). */
+#define GOPERL_LV_PLROOT 400 /* to 403 */
+#define GOPERL_LV_IS_PLROOT(field) ((field) >= GOPERL_LV_PLROOT && (field) < GOPERL_LV_PLROOT + 4)
 #define GOPERL_LV_IS_IOWORD(field) ((field) >= GOPERL_LV_IOWORD && (field) < GOPERL_LV_IOWORD + 10)
 #define GOPERL_IOWORD_IS_NAME(w) ((w) >= 7)
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
@@ -6244,8 +6273,25 @@ enum {
     GOPERL_OPREC_AUX = 22,
     GOPERL_OPREC_AUX_N = 23,
     GOPERL_OPREC_FEATURES = 24,
-    GOPERL_OPREC_WORDS = 25
+    GOPERL_OPREC_WORDS = 25,
+    /* the fields of a class of its own, in words the class has no other
+     * use for: a PMOP's regexp, flags, the raw words of its two unions and
+     * its code list; a PADOP's pad index; a COP's hints hash, the glob of
+     * its file and its stash */
+    GOPERL_OPREC_PMREGEXP = GOPERL_OPREC_SV,
+    GOPERL_OPREC_PMFLAGS = GOPERL_OPREC_HINTS,
+    GOPERL_OPREC_PMREPLROOT = GOPERL_OPREC_REDOOP,
+    GOPERL_OPREC_PMSTASHSTART = GOPERL_OPREC_NEXTOP,
+    GOPERL_OPREC_PMCODELIST = GOPERL_OPREC_LASTOP,
+    GOPERL_OPREC_PADIX = GOPERL_OPREC_AUX_N,
+    GOPERL_OPREC_HINTSHASH = GOPERL_OPREC_SV,
+    GOPERL_OPREC_FILEGV = GOPERL_OPREC_PV,
+    GOPERL_OPREC_COPSTASH = GOPERL_OPREC_AUX
 };
+/* The classes of ops as the record's bits name them (the interpreter's
+ * OPclass, goperl_perlapi.h) that have words of their own. */
+#define GOPERL_OPCLASS_PMOP 6
+#define GOPERL_OPCLASS_PADOP 8
 #define GOPERL_OPBIT_MORESIB 1
 #define GOPERL_OPBIT_COP 2
 #define GOPERL_OPBIT_HOOKED 4
@@ -6533,6 +6579,26 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     /* op_last and op_other share storage: an op has one of them */
     o->op_last = goperl_op_link(f, r, w[GOPERL_OPREC_LAST] ? w[GOPERL_OPREC_LAST]
                                                            : w[GOPERL_OPREC_OTHER]);
+    const int cls = (int)((bits >> 8) & 0xFF);
+    if (cls == GOPERL_OPCLASS_PMOP) {
+        o->op_pmflags = (U32)w[GOPERL_OPREC_PMFLAGS];
+        o->op_pmregexp = GOPERL_SV(w[GOPERL_OPREC_PMREGEXP]);
+        /* the unions are ops of a substitution only: a split's glob and a
+         * match's stash are values */
+        if (o->op_type == OP_SUBST) {
+            o->op_pmreplrootu.op_pmreplroot = goperl_op_link(f, r, w[GOPERL_OPREC_PMREPLROOT]);
+            o->op_pmstashstartu.op_pmreplstart =
+                goperl_op_link(f, r, w[GOPERL_OPREC_PMSTASHSTART]);
+        } else {
+            o->op_pmreplrootu.op_pmtargetgv = (GV *)GOPERL_SV(w[GOPERL_OPREC_PMREPLROOT]);
+            o->op_pmstashstartu.op_pmstash = (HV *)GOPERL_SV(w[GOPERL_OPREC_PMSTASHSTART]);
+        }
+        o->op_code_list = goperl_op_link(f, r, w[GOPERL_OPREC_PMCODELIST]);
+        o->gop_full = 1;
+        e->gen = r->gen;
+        goperl_op_activate(r, e);
+        return;
+    }
     o->op_redoop = goperl_op_link(f, r, w[GOPERL_OPREC_REDOOP]);
     o->op_nextop = goperl_op_link(f, r, w[GOPERL_OPREC_NEXTOP]);
     o->op_lastop = goperl_op_link(f, r, w[GOPERL_OPREC_LASTOP]);
@@ -6543,12 +6609,41 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         goperl_op_activate(r, e);
         return;
     }
-    o->op_sv = GOPERL_SV(w[GOPERL_OPREC_SV]);
-    o->op_u.op_meth_sv = o->op_sv;
-    o->op_pv = w[GOPERL_OPREC_PV]
-                   ? (char *)goperl_guest_mem(f, w[GOPERL_OPREC_PV])
-                   : 0;
-    if (w[GOPERL_OPREC_AUX] && o->op_type == OP_MULTIPARAM) {
+    if (bits & GOPERL_OPBIT_COP) {
+        o->cop_hints_hash = (struct refcounted_he *)GOPERL_SV(w[GOPERL_OPREC_HINTSHASH]);
+        o->cop_filegv = (GV *)GOPERL_SV(w[GOPERL_OPREC_FILEGV]);
+        o->cop_stash = (HV *)GOPERL_SV(w[GOPERL_OPREC_COPSTASH]);
+    } else {
+        o->op_sv = GOPERL_SV(w[GOPERL_OPREC_SV]);
+        o->op_u.op_meth_sv = o->op_sv;
+        o->op_pv = w[GOPERL_OPREC_PV]
+                       ? (char *)goperl_guest_mem(f, w[GOPERL_OPREC_PV])
+                       : 0;
+    }
+    if (cls == GOPERL_OPCLASS_PADOP) {
+        o->op_padix = (UV)w[GOPERL_OPREC_PADIX];
+    } else if (bits & GOPERL_OPBIT_COP) {
+        /* the words of a COP's own fields, above */
+    } else if (w[GOPERL_OPREC_AUX] && o->op_type == OP_MULTICONCAT) {
+        /* the items of a multiconcat, copied: its constant strings, which
+         * the op owns, are where they are in the interpreter's memory, and
+         * the copy points at them there */
+        const size_t n = (size_t)(U32)w[GOPERL_OPREC_AUX_N];
+        const UNOP_AUX_item *const g = (const UNOP_AUX_item *)goperl_guest_mem(f, w[GOPERL_OPREC_AUX]);
+        UNOP_AUX_item *const items = (UNOP_AUX_item *)malloc((n ? n : 1) * sizeof(UNOP_AUX_item));
+        if (!items || !g) goperl_croakf(f, "op shadow: the items of a multiconcat");
+        memcpy(items, g, n * sizeof(UNOP_AUX_item));
+        if (n > PERL_MULTICONCAT_IX_UTF8_PV) {
+            items[PERL_MULTICONCAT_IX_PLAIN_PV].pv =
+                (char *)goperl_guest_mem(f, (uint64_t)(uintptr_t)g[PERL_MULTICONCAT_IX_PLAIN_PV].pv);
+            items[PERL_MULTICONCAT_IX_UTF8_PV].pv =
+                (char *)goperl_guest_mem(f, (uint64_t)(uintptr_t)g[PERL_MULTICONCAT_IX_UTF8_PV].pv);
+        }
+        free(e->aux_own);
+        e->aux_own = items;
+        o->op_aux = items;
+        o->op_aux_n = (U32)n;
+    } else if (w[GOPERL_OPREC_AUX] && o->op_type == OP_MULTIPARAM) {
         free(e->aux_own);
         e->aux_own = goperl_multiparam_aux(f, w[GOPERL_OPREC_AUX]);
         o->op_aux = (UNOP_AUX_item *)e->aux_own;
@@ -6670,7 +6765,12 @@ static OP *goperl_op_of_number(IV iv) {
     goperl_frame_t *const f = goperl_cur_frame_v;
     if (!iv) return 0;
     if (!((UV)iv & GOPERL_OP_NUMBER_TAG)) return (OP *)(intptr_t)iv;
-    return f ? goperl_op_shadow(f, (uint64_t)((UV)iv & ~GOPERL_OP_NUMBER_TAG)) : 0;
+    /* an op a number names is read as it is now: B::Generate follows a
+     * B::OP object's next, which an op at the edge of what was described,
+     * or one kept from an earlier call, does not have yet */
+    return f ? (OP *)goperl_cop_fields(
+                   (COP *)goperl_op_shadow(f, (uint64_t)((UV)iv & ~GOPERL_OP_NUMBER_TAG)))
+             : 0;
 }
 
 /* The shadow of an op with what is below it, as the interpreter has it
@@ -11815,6 +11915,13 @@ struct goperl_op_base {
     U32 cop_hints;
     char *cop_warnings;
     U32 cop_features;
+    /* a PMOP's and a PADOP's fields (stores of a class's own member) */
+    U32 op_pmflags;
+    SV *op_pmregexp;
+    uint64_t op_pmreplroot;
+    uint64_t op_pmstashstart;
+    OP *op_code_list;
+    UV op_padix;
 };
 
 /* guest field selectors for OP_SET */
@@ -11831,8 +11938,27 @@ enum {
     GOPERL_OPF_PPADDR_HOOK = 9, /* patch this op's ppaddr to the pp-hook
                                    trampoline (per-op host dispatch) */
     GOPERL_OPF_MORESIB = 10,
-    GOPERL_OPF_PPADDR_OWN = 11 /* the pp function of the op's type again */
+    GOPERL_OPF_PPADDR_OWN = 11, /* the pp function of the op's type again */
+    GOPERL_OPF_PMFLAGS = 400,
+    GOPERL_OPF_PMREGEXP = 401,
+    GOPERL_OPF_PMREPLROOT = 402,
+    GOPERL_OPF_PMSTASHSTART = 403,
+    GOPERL_OPF_PMCODELIST = 404,
+    GOPERL_OPF_PADIX = 405
 };
+
+/* The word one of a PMOP's unions holds as the interpreter keeps it (an
+ * op's token for an op of a substitution, else the value's token), which:
+ * 0 op_pmreplrootu, 1 op_pmstashstartu. */
+static uint64_t goperl_op_union_word(const OP *o, int which) {
+    if (o->op_type == OP_SUBST) {
+        const OP *const k =
+            which ? o->op_pmstashstartu.op_pmreplstart : o->op_pmreplrootu.op_pmreplroot;
+        return k ? k->gop : 0;
+    }
+    return which ? GOPERL_TOK(o->op_pmstashstartu.op_pmstash)
+                 : GOPERL_TOK(o->op_pmreplrootu.op_pmtargetgv);
+}
 
 static void goperl_op_base_capture(OP *o) {
     goperl_opreg_ent_t *const e = GOPERL_OPENT(o);
@@ -11854,6 +11980,12 @@ static void goperl_op_base_capture(OP *o) {
     b->cop_hints = o->cop_hints;
     b->cop_warnings = o->cop_warnings;
     b->cop_features = o->cop_features.bits[0];
+    b->op_pmflags = o->op_pmflags;
+    b->op_pmregexp = o->op_pmregexp;
+    b->op_pmreplroot = goperl_op_union_word(o, 0);
+    b->op_pmstashstart = goperl_op_union_word(o, 1);
+    b->op_code_list = o->op_code_list;
+    b->op_padix = o->op_padix;
 }
 
 static void goperl_perop_pp_register(goperl_frame_t *f, OP *o);
@@ -11885,6 +12017,10 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
         (links < 2 || (b->op_last == o->op_last && b->op_other == o->op_other)) &&
         b->op_targ == o->op_targ && b->op_type == o->op_type && b->op_flags == o->op_flags &&
         b->op_private == o->op_private && b->op_ppaddr == o->op_ppaddr &&
+        b->op_pmflags == o->op_pmflags && b->op_pmregexp == o->op_pmregexp &&
+        b->op_pmreplroot == goperl_op_union_word(o, 0) &&
+        b->op_pmstashstart == goperl_op_union_word(o, 1) &&
+        b->op_code_list == o->op_code_list && b->op_padix == o->op_padix &&
         (!o->gop_iscop ||
          (b->cop_line == o->cop_line && b->cop_warnings == o->cop_warnings &&
           b->cop_hints == o->cop_hints && b->cop_features == o->cop_features.bits[0])))
@@ -11915,6 +12051,17 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     if (b->op_private != o->op_private)
         goperl_op_setfield(f, o, GOPERL_OPF_PRIVATE, o->op_private);
     if (b->op_ppaddr != o->op_ppaddr) goperl_perop_pp_register(f, o);
+    if (b->op_pmflags != o->op_pmflags)
+        goperl_op_setfield(f, o, GOPERL_OPF_PMFLAGS, o->op_pmflags);
+    if (b->op_pmregexp != o->op_pmregexp)
+        goperl_op_setfield(f, o, GOPERL_OPF_PMREGEXP, GOPERL_TOK(o->op_pmregexp));
+    if (b->op_pmreplroot != goperl_op_union_word(o, 0))
+        goperl_op_setfield(f, o, GOPERL_OPF_PMREPLROOT, goperl_op_union_word(o, 0));
+    if (b->op_pmstashstart != goperl_op_union_word(o, 1))
+        goperl_op_setfield(f, o, GOPERL_OPF_PMSTASHSTART, goperl_op_union_word(o, 1));
+    if (b->op_code_list != o->op_code_list)
+        goperl_op_setfield(f, o, GOPERL_OPF_PMCODELIST, goperl_op_link_tok(f, o->op_code_list));
+    if (b->op_padix != o->op_padix) goperl_op_setfield(f, o, GOPERL_OPF_PADIX, o->op_padix);
     if (o->gop_iscop) {
         /* COP_SET: 0 the line, 1 the warnings, 2 the hints */
         if (b->cop_line != o->cop_line)
@@ -11983,7 +12130,9 @@ enum {
     GOPERL_OPC_CONDOP = 10,
     GOPERL_OPC_SLICEOP = 11,
     /* 12 is GOPERL_OPC_RAW, below */
-    GOPERL_OPC_ASSIGNOP = 13
+    GOPERL_OPC_ASSIGNOP = 13,
+    GOPERL_OPC_PMOP = 400,
+    GOPERL_OPC_METHOP = 401 /* a method named by the op below it */
 };
 
 /* The functions native code builds ops with are calls of their own, as
@@ -12049,6 +12198,12 @@ static inline __attribute__((unused)) OP *goperl_newop(
     goperl_newop_of(_gof, GOPERL_OPC_SVOP, (type), (flags), GOPERL_TOK(sv), 0, 0)
 #define newGVOP(type, flags, gv) \
     goperl_newop_of(_gof, GOPERL_OPC_GVOP, (type), (flags), GOPERL_TOK(gv), 0, 0)
+#define newPMOP(type, flags) goperl_newop_of(_gof, GOPERL_OPC_PMOP, (type), (flags), 0, 0, 0)
+#define newMETHOP(type, flags, dynamic_meth) \
+    ({ GOPERL_ONCE(goperl_newMETHOP_meth_, dynamic_meth); \
+       goperl_newop_of(_gof, GOPERL_OPC_METHOP, (type), (flags), \
+                       (goperl_newMETHOP_meth_) ? ((OP *)(goperl_newMETHOP_meth_))->gop : 0, 0, \
+                       GOPERL_OPERAND_OP1); })
 #define newMETHOP_named(type, flags, name_sv) \
     goperl_newop_of(_gof, GOPERL_OPC_METHOP_NAMED, (type), (flags), \
                     GOPERL_TOK(name_sv), 0, 0)
@@ -12100,7 +12255,9 @@ enum {
     GOPERL_OPM_NULL = 8,
     GOPERL_OPM_FORCE_LIST = 9,
     GOPERL_OPM_SIBLING_SPLICE = 10,
-    GOPERL_OPM_OP_CLASS = 11
+    GOPERL_OPM_OP_CLASS = 11,
+    GOPERL_OPM_OPTIMIZE = 12,
+    GOPERL_OPM_FINALIZE = 13
 };
 
 static GOPERL_OP_BUILDER OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux, U32 aux2,
@@ -12117,10 +12274,12 @@ static GOPERL_OP_BUILDER OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux
                                     (uint32_t)aux,
                                 (uint64_t)aux2, toks, 16);
     if (sel == GOPERL_OPM_FREE) return 0;
-    if ((sel == GOPERL_OPM_LINKLIST || sel == GOPERL_OPM_CONTEXTUALIZE) && a) {
+    if ((sel == GOPERL_OPM_LINKLIST || sel == GOPERL_OPM_CONTEXTUALIZE ||
+         sel == GOPERL_OPM_OPTIMIZE || sel == GOPERL_OPM_FINALIZE) && a) {
         /* the interpreter set the links of execution (op_next) or the
          * context of every op below a, which code reads next: `start =
-         * LINKLIST(o); dup->op_next = kid->op_next` */
+         * LINKLIST(o); dup->op_next = kid->op_next`; the passes over a
+         * finished tree null ops and relink what runs */
         goperl_op_describe(f, a->gop, GOPERL_OPDUMP_SUBTREE);
     } else {
         goperl_op_refresh(f, a);
@@ -12184,6 +12343,11 @@ static GOPERL_OP_BUILDER OP *goperl_op_sibling_splice(goperl_frame_t *f, OP *par
 #define LINKLIST(o) op_linklist((OP *)(o))
 #define op_free(o) ((void)goperl_op_misc2(_gof, GOPERL_OPM_FREE, 0, (OP *)(o), 0))
 #define op_null(o) ((void)goperl_op_misc2(_gof, GOPERL_OPM_NULL, 0, (OP *)(o), 0))
+/* the passes perl runs on a finished optree: the peephole and the rest of
+ * optimize_optree, and finalize_optree's checks (List::Keywords runs them on
+ * a block it built) */
+#define optimize_optree(o) ((void)goperl_op_misc2(_gof, GOPERL_OPM_OPTIMIZE, 0, (OP *)(o), 0))
+#define finalize_optree(o) ((void)goperl_op_misc2(_gof, GOPERL_OPM_FINALIZE, 0, (OP *)(o), 0))
 #define op_sibling_splice(parent, start, del_count, insert) \
     goperl_op_sibling_splice(_gof, (OP *)(parent), (OP *)(start), \
                              (del_count), (OP *)(insert))

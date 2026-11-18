@@ -1487,6 +1487,27 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
        const char *const goperl_ces_p_ = SvPV(goperl_ces_k_, goperl_ces_l_); \
        cophh_exists_pvn((cophh), goperl_ces_p_, goperl_ces_l_, 0,          \
                         (flags) | (SvUTF8(goperl_ces_k_) ? COPHH_KEY_UTF8 : 0)); })
+/* refcounted_he_fetch_*: what the cophh_ names above are on perl, with
+ * the chain of a COP's hints hash (cop_hints_hash, CopHINTHASH_get);
+ * REFCOUNTED_HE_EXISTS asks whether the key is there (warnings::unused). */
+#ifndef REFCOUNTED_HE_KEY_UTF8
+#define REFCOUNTED_HE_KEY_UTF8 COPHH_KEY_UTF8
+#endif
+#define REFCOUNTED_HE_EXISTS COPHH_EXISTS
+#define refcounted_he_fetch_pvn(chain, key, keylen, hash, flags) \
+    goperl_cophh_fetch(_gof, (const COPHH *)(chain), (key), (STRLEN)(keylen), (U32)(flags))
+#define refcounted_he_fetch_pvs(chain, key, flags) \
+    refcounted_he_fetch_pvn((chain), "" key "", sizeof(key) - 1, 0, (flags))
+#define refcounted_he_fetch_pv(chain, key, hash, flags)                     \
+    ({ const char *const goperl_rhfp_k_ = (key);                            \
+       refcounted_he_fetch_pvn((chain), goperl_rhfp_k_, __builtin_strlen(goperl_rhfp_k_), 0, \
+                               (flags)); })
+#define refcounted_he_fetch_sv(chain, keysv, hash, flags)                   \
+    ({ STRLEN goperl_rhfs_l_;                                               \
+       SV *const goperl_rhfs_k_ = (keysv);                                  \
+       const char *const goperl_rhfs_p_ = SvPV(goperl_rhfs_k_, goperl_rhfs_l_); \
+       refcounted_he_fetch_pvn((chain), goperl_rhfs_p_, goperl_rhfs_l_, 0,  \
+                               (flags) | (SvUTF8(goperl_rhfs_k_) ? REFCOUNTED_HE_KEY_UTF8 : 0)); })
 #define cophh_2hv(cophh, flags)                                             \
     ((HV *)GOPERL_SV(GOPERL_INTERNAL(_gof, GOPERL_INT_HINTHASH_2HV,         \
                                      (uintptr_t)(cophh), (U32)(flags))))
