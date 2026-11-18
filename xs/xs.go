@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,7 +55,7 @@ import (
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
 // abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 35
+const abiVersion = 36
 
 // nativeHdrWords is the number of header words of a native-XSUB request
 // (GOPERL_NATIVE_HDR_WORDS in perl-wasm): the function id, the CV, the
@@ -205,22 +206,17 @@ type cFrame struct {
 	// readable.
 	memBase uintptr
 	memSize uintptr
-	// The perl stack of a pp function (ppFrame set): st is a copy of the
-	// interpreter's stack and marks of its mark stack, gmarkLo the
-	// interpreter's index of marks[0]. The SDK keeps what the copy was
-	// when the two were last in line (stSeen, which it allocates and
-	// frees) and whether the interpreter has moved on since (stStale); at
-	// the end of the function it leaves what the function made of the
-	// stack in ppState, a C heap block the loader frees.
-	ppFrame    int32
-	stStale    int32
-	gmarkLo    int32
-	markSeen   int32
-	stSeen     uintptr
-	stSeenN    int64
-	marksSeen  [maxMarks]int32
-	ppState    uintptr
-	ppStateLen int64
+	// The perl stack of a pp function (ppFrame set) is the interpreter's
+	// own: stBase and markv point into its stack and mark stack, in its
+	// memory. ppVars is the address there of the guest's record of the
+	// addresses of PL_stack_sp, PL_stack_base, PL_stack_max,
+	// PL_markstack_ptr, PL_markstack and PL_markstack_max, through which
+	// the SDK puts sp and the mark pointer into the interpreter before
+	// every guest operation and reads the stacks back after it (an
+	// operation may move them).
+	ppFrame int32
+	_       int32
+	ppVars  uint64
 	// nativeCall is set by the SDK in the frame of a native call the
 	// interpreter made, as opposed to a function the loader runs on the
 	// side (a destructor, a magic hook).
@@ -1214,31 +1210,29 @@ func (s *state) bootFrame() (*cFrame, uintptr) {
 	return f, pinFrame(f)
 }
 
-// ppMarksMax is the number of marks the guest hands over with the stack of
-// a pp function (GOPERL_PP_MARKS_MAX in perl-wasm): the top ones.
-const ppMarksMax = 32
-
 // ppHook runs a module's pp function for one guest op execution (reserved
-// callback method -3). Request: [op][op_type] and the perl stack as the
-// interpreter has it: [depth][top mark][n][n marks, the top ones from the
-// lowest][depth values from index 1]. Response: [1][next_op] and, when the
-// function changed its copy of the stack, what it became (the SDK builds
-// that part: see goperl_pp_state_build); or [0]+message.
+// callback method -3) on the interpreter's own stack and mark stack: the
+// request gives where they are, not what they hold, so that an op costs
+// the same however deep the stack is. Request: [op][op_type]
+// [PL_stack_base][depth = sp - base][room = PL_stack_max - base]
+// [PL_markstack][top = PL_markstack_ptr - PL_markstack][mark room]
+// [the guest's record of the stack variables' addresses], addresses in the
+// interpreter's memory. Response: [1][next_op][depth][top] as the function
+// left the stacks, which the interpreter makes its sp and mark pointer;
+// or [0]+message, or respThrow, after which it reads neither.
 func (s *state) ppHook(req []byte) []byte {
 	fail := func(msg string) []byte { return append([]byte{0}, msg...) }
-	if len(req) < 5*8 {
+	if len(req) < 9*8 {
 		return fail("pp hook: short payload")
 	}
 	opTok := wordAt(req, 0)
 	opType := int32(int64(wordAt(req, 1)))
-	udepth := wordAt(req, 2)
-	topMark := int32(int64(wordAt(req, 3)))
-	unmarks := wordAt(req, 4)
-	if unmarks > ppMarksMax || udepth > uint64(len(req)/8) ||
-		len(req) < 8*(5+int(unmarks)+int(udepth)) {
-		return fail("pp hook: truncated payload")
+	base, depth, room := wordAt(req, 2), wordAt(req, 3), wordAt(req, 4)
+	marks, top, markRoom := wordAt(req, 5), wordAt(req, 6), wordAt(req, 7)
+	vars := wordAt(req, 8)
+	if depth > room || top > markRoom || room > math.MaxInt32 || markRoom > math.MaxInt32 {
+		return fail("pp hook: stack beyond its room")
 	}
-	depth, nmarks := int(udepth), int(unmarks)
 	s.mu.Lock()
 	fn := s.perOpFns[opTok]
 	if fn == 0 {
@@ -1250,7 +1244,7 @@ func (s *state) ppHook(req []byte) []byte {
 		return fail(fmt.Sprintf("pp hook: no host function for op %d", opType))
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d depth=%d marks=%d\n", opTok, opType, depth, topMark)
+		fmt.Fprintf(os.Stderr, "[pphook] op=%#x type=%d depth=%d top=%d\n", opTok, opType, depth, top)
 	}
 
 	f := s.newFrame()
@@ -1258,18 +1252,15 @@ func (s *state) ppHook(req []byte) []byte {
 	f.hookOpTok = opTok
 	f.items = int32(depth)
 	f.ppFrame = 1
-	f.initStack(depth)
-	for i := 0; i < depth; i++ {
-		f.setStack(1+i, wordAt(req, 5+nmarks+i))
-	}
+	f.ppVars = vars
+	f.stBase = f.memBase + uintptr(base)
+	f.stCap = int64(room)
 	f.psp = f.stBase + uintptr(depth)*8
-	// marks[0] is the mark below the ones handed over (the interpreter's
-	// mark stack starts with an entry that is never a mark)
-	f.gmarkLo = topMark - int32(nmarks)
-	for i := 0; i < nmarks; i++ {
-		f.marks[1+i] = int32(int64(wordAt(req, 5+i)))
-	}
-	f.markidx = int32(nmarks)
+	f.markv = f.memBase + uintptr(marks)
+	f.markcap = int32(markRoom)
+	f.markidx = int32(top)
+	f.gstack = base
+	f.below = 0
 	fp := pinFrame(f)
 	runtime.LockOSThread()
 	prevThread, prevInterrupt, entered := s.enterNative()
@@ -1277,14 +1268,14 @@ func (s *state) ppHook(req []byte) []byte {
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	s.jumpCaught(f)
 	runtime.UnlockOSThread()
+	// The stacks as the function left them (the SDK keeps stBase and markv
+	// current when an operation moves them), and then the frame's own
+	// stack again: the interpreter's are not the frame's to free.
+	newDepth := uint64(int64(f.psp-f.stBase) / 8)
+	newTop := uint64(f.markidx)
+	f.stBase, f.stCap = uintptr(unsafe.Pointer(&f.st[0])), maxStack
+	f.markv, f.markcap = 0, 0
 	unpinFrame(fp)
-	var stackState []byte
-	if f.ppState != 0 {
-		stackState = copyIn(f.ppState, int(f.ppStateLen))
-		cFree(f.ppState)
-		f.ppState = 0
-	}
-	f.releaseStack()
 	if f.failed == failedThrown {
 		return []byte{respThrow}
 	}
@@ -1295,12 +1286,14 @@ func (s *state) ppHook(req []byte) []byte {
 		return fail(f.errString())
 	}
 	if xsTrace {
-		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x state=%d bytes\n", next, len(stackState))
+		fmt.Fprintf(os.Stderr, "[pphook] -> next=%#x depth=%d top=%d\n", next, newDepth, newTop)
 	}
-	resp := make([]byte, 1+8, 1+8+len(stackState))
+	resp := make([]byte, 1+3*8)
 	resp[0] = 1
 	binary.LittleEndian.PutUint64(resp[1:], uint64(next))
-	return append(resp, stackState...)
+	binary.LittleEndian.PutUint64(resp[1+8:], newDepth)
+	binary.LittleEndian.PutUint64(resp[1+16:], newTop)
+	return resp
 }
 
 // hostCall services reserved method -9: one call of native code through

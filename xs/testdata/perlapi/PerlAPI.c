@@ -2805,14 +2805,15 @@ XS(XS_PerlAPI_glob_slots) {
 static Perl_check_t PerlAPI_add_hook_before;
 static IV PerlAPI_adds_seen;
 /* How often the pp function below found the mark pointer of the SDK naming
- * the marks of another frame when it was entered. (This looks into the SDK:
+ * the marks of another frame when it was entered (a pp function's marks are
+ * the interpreter's mark stack, goperl_marks). (This looks into the SDK:
  * PL_markstack_ptr itself brings the pointer in line when it is read. A
  * pointer left by a frame that is gone is taken for this frame's when this
  * frame lies where that one was.) */
 static IV PerlAPI_adds_with_foreign_marks;
 static OP *PerlAPI_pp_add_more(pTHX) {
     if (goperl_markstack_owner_v != _gof ||
-        goperl_markstack_ptr_v != _gof->marks + _gof->markidx)
+        goperl_markstack_ptr_v != goperl_marks(_gof) + _gof->markidx)
         PerlAPI_adds_with_foreign_marks++;
     dSP;
     SV *right = POPs;

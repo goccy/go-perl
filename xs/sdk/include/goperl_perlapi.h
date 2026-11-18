@@ -3068,9 +3068,7 @@ static void goperl_cop_stash_set(goperl_frame_t *f, COP *c, HV *hv) {
  * pp function left them. */
 static void goperl_dounwind(goperl_frame_t *f, I32 cxix) __attribute__((unused));
 static void goperl_dounwind(goperl_frame_t *f, I32 cxix) {
-    goperl_pp_stack_push(f);
     goperl_do_op3(f, GOPERL_OP_CX, 0, (uint64_t)(int64_t)cxix, (uint64_t)(GOPERL_CX_DOUNWIND), 0, 0);
-    f->st_stale = f->pp_frame;
 }
 #define dounwind(cxix) goperl_dounwind(_gof, (cxix))
 #define Perl_dounwind(...) goperl_dounwind(_gof, __VA_ARGS__)
@@ -3096,7 +3094,6 @@ static PERL_CONTEXT *goperl_cx_pushblock(goperl_frame_t *f, U8 type, U8 gimme, S
 static PERL_CONTEXT *goperl_cx_pushblock(goperl_frame_t *f, U8 type, U8 gimme, SV **sp,
                                          I32 saveix) {
     (void)sp; /* the stack native code left, which the interpreter has now */
-    goperl_pp_stack_push(f);
     const goperl_gword_t w[3] = {type, gimme, (goperl_gword_t)(int64_t)saveix};
     const I32 ix = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_CX, 0, sizeof w,
                                                (uint64_t)(GOPERL_CX_PUSHBLOCK),
@@ -3115,9 +3112,7 @@ static void goperl_cx_pop(goperl_frame_t *f, PERL_CONTEXT *cx, int sel, const ch
     __attribute__((unused));
 static void goperl_cx_pop(goperl_frame_t *f, PERL_CONTEXT *cx, int sel, const char *what) {
     const I32 ix = goperl_cx_top_index(f, cx, what);
-    goperl_pp_stack_push(f);
     goperl_do_op3(f, GOPERL_OP_CX, 0, (uint64_t)(int64_t)ix, (uint64_t)sel, 0, 0);
-    f->st_stale = f->pp_frame;
 }
 #define cx_pushblock(type, gimme, sp, saveix) \
     goperl_cx_pushblock(_gof, (U8)(type), (U8)(gimme), (SV **)(sp), (I32)(saveix))

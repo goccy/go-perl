@@ -1330,9 +1330,7 @@ static __attribute__((unused)) void goperl_callrunops(goperl_frame_t *f) {
     const uint64_t tok = goperl_op_field_tok(f, (uint64_t)(uintptr_t)start);
     goperl_optree_flush(f);
     if (f->pp_frame) {
-        goperl_pp_stack_push(f);
         GOPERL_INTERNAL(f, GOPERL_INT_RUNOPS, tok, (uint64_t)1 << 63);
-        f->st_stale = 1;
         f->plop = 0;
         return;
     }
@@ -1970,16 +1968,11 @@ static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *re
         goperl_flush(f);
         /* The ops the loop runs work on the interpreter's stack, and the
          * pp function of a custom op (LRU::Cache's) is the module's own,
-         * which the loop calls itself: the frame keeps a copy of the stack
-         * as a pp function's does, fetched when it is first looked at,
-         * handed back before the interpreter runs an op
-         * (goperl_pp_dispatch) and when the loop returns. */
-        f->pp_frame = 1;
-        f->st_stale = 1;
+         * which the loop calls itself: the frame works on the interpreter's
+         * stack while the loop runs, as a pp function's does. */
+        goperl_pp_stack_take(f);
         fn();
-        goperl_pp_stack_push(f);
-        free(f->st_seen);
-        f->st_seen = 0;
+        goperl_pp_stack_give_back(f);
         return 0;
     }
     case GOPERL_HOST_SIGHANDLER: { /* [id][signal of the interpreter's] */

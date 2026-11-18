@@ -181,7 +181,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 35u
+#define GOPERL_XS_ABI 36u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -926,17 +926,15 @@ struct goperl_frame {
                               * The range reserved past the size holds
                               * nothing of this process's and is not
                               * readable. */
-    /* The perl stack of a pp function (see goperl_pp_stack_pull): st and
-     * marks are a copy of the interpreter's stack and mark stack. */
-    int32_t pp_frame;  /* the frame runs a pp function */
-    int32_t st_stale;  /* the interpreter's stack has moved on since the copy */
-    int32_t gmark_lo;  /* the interpreter's index of marks[0] */
-    int32_t mark_seen; /* markidx when the copy was last in line */
-    uint64_t *st_seen; /* the values then (index 0 unused) */
-    int64_t st_seen_n; /* and their number */
-    int32_t marks_seen[GOPERL_XS_MARKS];
-    char *pp_state;    /* what the function made of the stack, for the loader */
-    int64_t pp_state_len;
+    /* The perl stack of a pp function, or of a run loop of native code, is
+     * the interpreter's own (see goperl_pp_sync_in): stbase, psp and markv
+     * point into its stacks. */
+    int32_t pp_frame; /* the frame's stack is the interpreter's */
+    int32_t pad6;
+    uint64_t pp_vars; /* the address of the interpreter's record of where
+                       * PL_stack_sp, PL_stack_base, PL_stack_max,
+                       * PL_markstack_ptr, PL_markstack and PL_markstack_max
+                       * are (six words) */
     int32_t native_call; /* the frame of a native call the interpreter made
                           * (an XSUB, a pp function, a hook), not of a
                           * function the loader runs on the side */
@@ -2283,7 +2281,6 @@ enum {
     GOPERL_OP_FIELD = 196,
     GOPERL_OP_REGEXP = 197,
     GOPERL_OP_HOOK = 198,
-    GOPERL_OP_PP_STACK = 199,
     GOPERL_OP_CX = 200,
     GOPERL_OP_OP_DUMP = 201,
     GOPERL_OP_CALL = 202,
@@ -2345,6 +2342,8 @@ typedef uint64_t goperl_gword_t;
 /* ---- the guest-op funnel: every operation flushes host state first ------ */
 
 static void goperl_flush(goperl_frame_t *f);
+static void goperl_pp_sync_out(goperl_frame_t *f);
+static void goperl_pp_sync_in(goperl_frame_t *f);
 static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
                                const void *site, uintptr_t frame);
 static void goperl_hostsave_ptr(goperl_frame_t *f, void **loc);
@@ -2370,9 +2369,11 @@ static uint64_t goperl_do_opx(goperl_frame_t *f, int32_t op, uint64_t a,
     const int32_t failed_before = f->failed;
     uint64_t r = goperl_xs_opx(f, op, a, b, c, s, slen, second);
     /* any guest operation may have changed interpreter state the context
-     * mirrors reflect, and the pads native code holds shadows of */
+     * mirrors reflect, the pads native code holds shadows of, and where the
+     * interpreter's stacks are, which a pp function works on */
     goperl_gen_bump();
     goperl_pads_refresh(f);
+    goperl_pp_sync_in(f);
     /* The interpreter died inside the operation (the loader left the
      * message in the frame). A perl API function does not return to its
      * caller in that case: it unwinds to the nearest catch point, which
@@ -4337,6 +4338,7 @@ static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
 }
 static void goperl_svmagic_writeback(goperl_frame_t *f) { goperl_svmagic_writeback_at(f, 0); }
 static void goperl_flush(goperl_frame_t *f) {
+    goperl_pp_sync_out(f);
     goperl_svmagic_writeback(f);
     goperl_svcur_writeback(f);
     goperl_curcop_writeback(f);
@@ -4634,14 +4636,9 @@ static I32 goperl_sv_cmp_fn(pTHX_ SV *a, SV *b) {
 
 /* ---- the perl stack ------------------------------------------------------ */
 
-/* The frame with its stack in line with the interpreter's: the stack of a
- * pp function is a copy that falls behind when interpreter code runs on
- * the real one, and is fetched again when it is next looked at. */
-static void goperl_pp_stack_pull(goperl_frame_t *f);
-static inline goperl_frame_t *goperl_stk(goperl_frame_t *f) {
-    if (__builtin_expect(f->st_stale, 0)) goperl_pp_stack_pull(f);
-    return f;
-}
+/* The frame, its stack as native code sees it (a pp function's is the
+ * interpreter's own, re-read after every operation: goperl_pp_sync_in). */
+static inline goperl_frame_t *goperl_stk(goperl_frame_t *f) { return f; }
 #define PL_stack_base (goperl_stk(_gof)->stbase)
 #define PL_stack_sp (goperl_stk(_gof)->psp)
 
@@ -4696,8 +4693,7 @@ static int32_t goperl_stack_lo(goperl_frame_t *f) {
 static void goperl_frame_enter(goperl_frame_t *f) {
     goperl_frame_t *prev = goperl_cur_frame_v;
     if (prev == f) return;
-    if (prev && goperl_markstack_owner_v == prev && goperl_markstack_ptr_v &&
-        !prev->st_stale)
+    if (prev && goperl_markstack_owner_v == prev && goperl_markstack_ptr_v)
         prev->markidx = (int32_t)(goperl_markstack_ptr_v - goperl_marks(prev));
     goperl_cur_frame_v = f;
     goperl_marks_publish(f);
@@ -4716,23 +4712,22 @@ static void goperl_croakf(goperl_frame_t *f, const char *fmt, ...)
     __attribute__((noreturn, unused));
 static I32 goperl_popmark(goperl_frame_t *f) {
     goperl_marks_adopt(f);
-    /* marks[0] of a pp function's frame stands for a mark of the
-     * interpreter's that was not handed over */
-    if (f->pp_frame && f->markidx <= 0 && f->gmark_lo > 0)
-        goperl_croakf(f, "a pp function popped more marks than the go-perl "
-                         "XS SDK hands it (%d)", GOPERL_XS_MARKS / 2);
     I32 r = f->markidx >= 0 ? goperl_marks(f)[f->markidx--] : 0;
     goperl_marks_publish(f);
     return r;
 }
 /* Moves the marks to a block twice the size, as perl's markstack_grow
  * does: what a pointer into them was is where PL_markstack_ptr is now. A
- * pp function's are a copy of the interpreter's of a fixed size (the
- * loader compares the copy with what it was, mark by mark). */
+ * pp function's are the interpreter's mark stack, which the interpreter
+ * grows (CALL 39). */
+#define GOPERL_CALL_MARK_ROOM 39
+static uint64_t goperl_do_op3(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
+                              const char *s, uint64_t slen);
 static void goperl_marks_grow(goperl_frame_t *f) {
-    if (f->pp_frame)
-        goperl_croakf(f, "a pp function pushed more marks than the go-perl "
-                         "XS SDK holds for one (%d)", GOPERL_XS_MARKS);
+    if (f->pp_frame) {
+        goperl_do_op3(f, GOPERL_OP_CALL, 0, 0, (uint64_t)GOPERL_CALL_MARK_ROOM, 0, 0);
+        return;
+    }
     const int32_t cap = goperl_marks_cap(f);
     int32_t *const m = (int32_t *)malloc((size_t)cap * 2 * sizeof(int32_t));
     if (!m) goperl_croakf(f, "Out of memory during mark stack extend");
@@ -4753,10 +4748,18 @@ static void goperl_pushmark(goperl_frame_t *f, I32 off) {
  * frame's own stack pointer is moved along). As with perl's EXTEND, a
  * pointer into the stack taken before (MARK) is stale after it; ST(n) and
  * ORIGMARK are not, they go through the base. */
+#define GOPERL_CALL_STACK_ROOM 38
 static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
     int64_t used = (int64_t)(sp - f->stbase);
     if (n < 0) n = 0;
     if (used + n + 1 < f->stcap) return sp;
+    if (f->pp_frame) {
+        /* the interpreter's stack, which it grows as EXTEND does (CALL 38):
+         * where native code's sp is then */
+        const uint64_t g = goperl_do_op3(f, GOPERL_OP_CALL, (uint64_t)((char *)sp - f->membase),
+                                         (uint64_t)n, (uint64_t)GOPERL_CALL_STACK_ROOM, 0, 0);
+        return (SV **)(f->membase + g);
+    }
     int64_t ncap = f->stcap * 2;
     if (ncap < used + n + 64) ncap = used + n + 64;
     SV **nb = (SV **)malloc((size_t)ncap * sizeof(SV *));
@@ -6496,7 +6499,6 @@ static void goperl_do_op_dump(I32 level, void *fp, const OP *o) {
 
 static OP *goperl_pp_dispatch(pTHX_ int type);
 static OP *goperl_newop_dispatch(pTHX_ int type, OP *o);
-static void goperl_pp_stack_push(goperl_frame_t *f);
 #include "goperl_ppslots.h"
 
 GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max] = {0};
@@ -6527,14 +6529,12 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     if (goperl_op_is_shadow(_gof, cur)) {
         /* real guest op under execution: run the true pp for `type`, on
          * the stack as this function leaves it */
-        goperl_pp_stack_push(_gof);
         /* the op is PL_op while its pp runs (it is already, unless a run
          * loop of native code made it PL_op) */
         /* -> the next op; second: what it is now */
         uint64_t fields = 0;
         uint64_t next = goperl_do_opx(_gof, GOPERL_OP_RUN_ORIGINAL,
                                       (uint64_t)(uint32_t)type, cur->gop, 0, 0, 0, &fields);
-        _gof->st_stale = _gof->pp_frame;
         /* the op a run loop of native code runs next, as the interpreter
          * has it now: the loop calls the pp function of the shadow's type */
         return goperl_op_shadow_as(_gof, next, fields);
@@ -6848,114 +6848,59 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
  * the message is in f->err. */
 /* ---- the perl stack of a pp function --------------------------------------
  * A pp function reads and writes the argument stack and the mark stack. A
- * module's own runs here, on a copy of both that the loader made from the
- * interpreter's when it called the function: st[i] is the interpreter's
- * PL_stack_base[i], and marks[1..] are its top marks (marks[0] stands for
- * the mark below those, the interpreter's index gmark_lo). st_seen and
- * marks_seen are that copy as it was when the two were last in line.
- *
- * What the function made of its copy goes to the interpreter when the
- * function returns (pp_state, with the next op) and before every operation
- * that runs interpreter code on the stack (the pp function it stands in
- * for, dounwind); after such an operation the copy is behind (st_stale)
- * and is fetched again when the function next looks at it. */
-enum { GOPERL_PPSTACK_PULL = 0, GOPERL_PPSTACK_PUSH = 1 };
-
-static void goperl_pp_seen_capture(goperl_frame_t *f) {
-    const int64_t n = (int64_t)(f->psp - f->stbase);
-    uint64_t *seen = (uint64_t *)realloc(f->st_seen, (size_t)(n + 1) * 8);
-    if (!seen) goperl_croakf(f, "Out of memory for the stack of a pp function");
-    memcpy(seen, f->stbase, (size_t)(n + 1) * 8);
-    f->st_seen = seen;
-    f->st_seen_n = n;
-    f->mark_seen = f->markidx;
-    memcpy(f->marks_seen, f->marks, sizeof(f->marks_seen));
-}
-
-/* What the copy became since it was last in line, as the interpreter takes
- * it, in words: [depth][lo] and the values above lo, [top mark][mlo] and
- * the marks above mlo. NULL when nothing changed. The caller frees it. */
-static char *goperl_pp_state_build(goperl_frame_t *f, int64_t *lenp) {
+ * module's own runs here on the interpreter's: stbase, psp and the marks
+ * (markv) point into its stacks in its memory, and the slots are the
+ * interpreter's words, SV* tokens as an SV* is here. The interpreter's
+ * variables that say where the stacks are and how far they are used are
+ * written before every operation (the stack pointer and the top mark, as
+ * native code left them) and read after it (an operation may grow a stack,
+ * which then moves), through the record at pp_vars. A run loop of native
+ * code works on the interpreter's stack the same way. */
+#define GOPERL_PL_PP_VARS 124
+static void goperl_pp_sync_out(goperl_frame_t *f) {
+    if (!f->pp_frame || !f->pp_vars) return;
     goperl_marks_adopt(f);
-    const int64_t depth = (int64_t)(f->psp - f->stbase);
-    const int64_t common = depth < f->st_seen_n ? depth : f->st_seen_n;
-    int64_t lo = common;
-    for (int64_t i = 1; i <= common; i++)
-        if ((uint64_t)(uintptr_t)f->stbase[i] != f->st_seen[i]) {
-            lo = i - 1;
-            break;
-        }
-    const int32_t mcommon = f->markidx < f->mark_seen ? f->markidx : f->mark_seen;
-    int32_t mlo = mcommon < 0 ? 0 : mcommon;
-    for (int32_t j = 1; j <= mcommon; j++)
-        if (f->marks[j] != f->marks_seen[j]) {
-            mlo = j - 1;
-            break;
-        }
-    if (depth == f->st_seen_n && lo == depth && f->markidx == f->mark_seen &&
-        mlo == f->markidx)
-        return 0;
-    const int32_t midx = f->markidx < 0 ? 0 : f->markidx;
-    const size_t len = (size_t)(4 + (depth - lo) + (midx - mlo)) * sizeof(goperl_gword_t);
-    goperl_gword_t *w = (goperl_gword_t *)malloc(len);
-    if (!w) goperl_croakf(f, "Out of memory for the stack of a pp function");
-    size_t k = 0;
-    w[k++] = (goperl_gword_t)depth;
-    w[k++] = (goperl_gword_t)lo;
-    for (int64_t i = lo + 1; i <= depth; i++) w[k++] = GOPERL_TOK(f->stbase[i]);
-    w[k++] = (goperl_gword_t)(int64_t)(f->gmark_lo + midx);
-    w[k++] = (goperl_gword_t)(int64_t)(f->gmark_lo + mlo);
-    for (int32_t j = mlo + 1; j <= midx; j++) w[k++] = (goperl_gword_t)(int64_t)f->marks[j];
-    *lenp = (int64_t)len;
-    return (char *)w;
+    const goperl_gword_t *v = (const goperl_gword_t *)(f->membase + f->pp_vars);
+    *(uint64_t *)(f->membase + v[0]) = (uint64_t)((char *)f->psp - f->membase);
+    *(uint64_t *)(f->membase + v[3]) = (uint64_t)((char *)(f->markv + f->markidx) - f->membase);
 }
-
-/* Before interpreter code runs on the stack: it gets what the function
- * made of its copy. */
-static void goperl_pp_stack_push(goperl_frame_t *f) {
-    if (!f->pp_frame || f->st_stale) return;
-    int64_t len = 0;
-    char *state = goperl_pp_state_build(f, &len);
-    if (!state) return;
-    goperl_xs_op(f, GOPERL_OP_PP_STACK, GOPERL_PPSTACK_PUSH, (uint64_t)len,
-                 state, (uint64_t)len);
-    free(state);
-    goperl_pp_seen_capture(f);
+static void goperl_pp_sync_in(goperl_frame_t *f) {
+    if (!f->pp_frame || !f->pp_vars) return;
+    const goperl_gword_t *v = (const goperl_gword_t *)(f->membase + f->pp_vars);
+    const uint64_t sp = *(const uint64_t *)(f->membase + v[0]);
+    const uint64_t base = *(const uint64_t *)(f->membase + v[1]);
+    const uint64_t max = *(const uint64_t *)(f->membase + v[2]);
+    const uint64_t mptr = *(const uint64_t *)(f->membase + v[3]);
+    const uint64_t mbase = *(const uint64_t *)(f->membase + v[4]);
+    const uint64_t mmax = *(const uint64_t *)(f->membase + v[5]);
+    f->stbase = (SV **)(f->membase + base);
+    f->psp = (SV **)(f->membase + sp);
+    f->stcap = (int64_t)(max - base) / 8;
+    f->markv = (int32_t *)(f->membase + mbase);
+    f->markidx = (int32_t)((int64_t)(mptr - mbase) / 4);
+    f->markcap = (int32_t)((int64_t)(mmax - mbase) / 4);
+    if (goperl_markstack_owner_v == f) goperl_marks_publish(f);
 }
-
-/* The copy is fetched again, as words: [depth][top mark][n] the n top
- * marks, then the values. */
-static void goperl_pp_stack_pull(goperl_frame_t *f) {
-    f->st_stale = 0;
-    uint64_t nwords = 0;
-    const uint64_t where =
-        goperl_xs_opx(f, GOPERL_OP_PP_STACK, GOPERL_PPSTACK_PULL, 0, 0, 0, 0, &nwords);
-    const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(f, where);
-    if (!w || nwords < 3)
-        goperl_croakf(f, "the interpreter did not hand over its stack");
-    const int64_t depth = (int64_t)w[0];
-    const int32_t top = (int32_t)(int64_t)w[1];
-    int32_t n = (int32_t)w[2];
-    if (n > GOPERL_XS_MARKS - 1) n = GOPERL_XS_MARKS - 1;
-    if (depth + 64 >= f->stcap) {
-        const int64_t ncap = depth + 128;
-        SV **nb = (SV **)malloc((size_t)ncap * sizeof(SV *));
-        if (!nb) goperl_croakf(f, "Out of memory during stack extend");
-        if (f->stbase != (SV **)f->st) free(f->stbase);
-        f->stbase = nb;
-        f->stcap = ncap;
-    }
-    f->stbase[0] = 0;
-    for (int64_t i = 0; i < depth; i++)
-        f->stbase[1 + i] = GOPERL_SV(w[3 + (int32_t)w[2] + i]);
-    f->psp = f->stbase + depth;
-    f->gmark_lo = top - n;
-    f->marks[0] = 0;
-    for (int32_t j = 0; j < n; j++)
-        f->marks[1 + j] = (int32_t)(int64_t)w[3 + ((int32_t)w[2] - n) + j];
-    f->markidx = n;
-    goperl_marks_publish(f);
-    goperl_pp_seen_capture(f);
+/* A frame of the loader's own (a host call) works on the interpreter's
+ * stack from here on (a run loop of native code), and on its own again
+ * afterwards. */
+static void goperl_pp_stack_take(goperl_frame_t *f) {
+    f->pp_frame = 1;
+    f->pp_vars = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_PP_VARS, 0, 0, 0);
+    goperl_pp_sync_in(f);
+}
+static void goperl_pp_stack_give_back(goperl_frame_t *f) {
+    if (!f->pp_frame || !f->pp_vars) return;
+    goperl_pp_sync_out(f);
+    f->pp_frame = 0;
+    f->pp_vars = 0;
+    f->stbase = (SV **)f->st;
+    f->stcap = GOPERL_XS_STACK;
+    f->psp = f->stbase;
+    f->markv = 0;
+    f->markcap = 0;
+    f->markidx = 0;
+    if (goperl_markstack_owner_v == f) goperl_marks_publish(f);
 }
 
 /* Loader entry: run a module pp function for one guest op execution.
@@ -6975,19 +6920,15 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     f->hostsave_base = goperl_hostsave_n;
     if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
-        free(f->st_seen);
-        f->st_seen = 0;
         goperl_xs_leave(f);
         return 0;
     }
-    goperl_pp_seen_capture(f);
     f->plop = goperl_op_describe(f, f->hook_op_tok, GOPERL_OPDUMP_SUBTREE);
     OP *next = fn();
     uint64_t tok = next ? next->gop : 0;
     goperl_hostsave_settle(f, f->hostsave_base, __builtin_frame_address(0));
-    if (!f->st_stale) f->pp_state = goperl_pp_state_build(f, &f->pp_state_len);
-    free(f->st_seen);
-    f->st_seen = 0;
+    /* the loader answers the depth and the top mark the function left */
+    goperl_marks_adopt(f);
     goperl_xs_leave(f);
     return tok;
 }
@@ -12134,9 +12075,8 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     f->hostsave_base = goperl_hostsave_n;
     if (GOPERL_SETJMP(jb)) {
         goperl_hostsave_unwind_to(f, f->hostsave_base);
-        /* the copy of the stack a run loop's frame kept */
-        free(f->st_seen);
-        f->st_seen = 0;
+        /* the interpreter's stack a run loop's frame worked on */
+        goperl_pp_stack_give_back(f);
         goperl_xs_leave(f);
         return 0;
     }
