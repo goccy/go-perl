@@ -4565,9 +4565,17 @@ static void goperl_lvslot_store(goperl_frame_t *f, goperl_lvslot_t *m) {
      * native code stored into them; the body itself is the interpreter's
      * to place */
     if (m->field == GOPERL_LV_AVBODY) {
-        if (m->val != m->shadow)
-            goperl_croakf(f, "AvARRAY was stored into: gperl cannot give an array a body "
-                             "of native code's");
+        if (m->val == m->shadow) return;
+        /* a word that is no address of the interpreter's memory as this
+         * process has it is kept in the slot as it is (Math::Pari's chain of
+         * its objects there, which perl reads no element through); another
+         * place of the interpreter's memory would be a body of elements
+         * native code made, which perl would read and free */
+        if (m->val && goperl_guest_addr(f, (const void *)(uintptr_t)m->val))
+            goperl_croakf(f, "AvARRAY was given another place of the interpreter's memory: "
+                             "gperl cannot give an array a body of native code's making");
+        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, m->svtok, m->val, (uint64_t)(9 /* AV_ARRAY_WORD */), 0, 0, 0);
+        m->shadow = m->val;
         return;
     }
     if (GOPERL_LV_IS_BODY(m->field)) {
@@ -4905,8 +4913,16 @@ static void goperl_lvuse_end(goperl_frame_t *f, goperl_lvstate_t *st,
  * NULL, which is how code tells it to fetch the elements instead
  * (Tree::RB::XS). */
 static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
+    /* -> where the body is; second: bit 63 when the slot holds a word that
+     * is no body of the array's */
+    uint64_t second = 0;
     const uint64_t where =
-        goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, 0);
+        goperl_xs_opx(f, GOPERL_OP_SV_CALL, m->svtok, 0, (uint64_t)(59), 0, 0, &second);
+    if (second >> 63) {
+        /* a word native code keeps in the slot (Math::Pari): as it is */
+        m->val = m->shadow = where;
+        return;
+    }
     m->val = m->shadow = where ? (uint64_t)(uintptr_t)goperl_guest_mem(f, where) : 0;
 }
 
@@ -5026,9 +5042,8 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
 
 /* ---- AvARRAY ----------------------------------------------------------------- */
 
-#define AvARRAY(av)                                                       \
-    ((SV **)(uintptr_t)*goperl_lv_ref(_gof, (SV *)(av), GOPERL_LV_AVBODY, \
-                                      GOPERL_LV_AT))
+#define AvARRAY(av)                                                     \
+    (*(SV ***)goperl_lv_ref(_gof, (SV *)(av), GOPERL_LV_AVBODY, GOPERL_LV_AT))
 
 /* sortsv and sortsv_flags over an array's body (AvARRAY, the interpreter's
  * memory) or an SV* array of native code's: a stable merge sort in place, as
