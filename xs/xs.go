@@ -1089,6 +1089,7 @@ func (s *state) dispatch(req []byte) []byte {
 		purego.SyscallN(epi, fp)
 	}
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	if f.xerrno != 0 {
 		// What the C code left in errno is what $! says after the call.
 		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), 0, ""); err != nil {
@@ -1191,6 +1192,7 @@ func (s *state) ppHook(req []byte) []byte {
 	prevThread, prevInterrupt, entered := s.enterNative()
 	next, _, _ := purego.SyscallN(invoke, fp, fn)
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
 	var stackState []byte
@@ -1254,6 +1256,7 @@ func (s *state) hostCall(req []byte) []byte {
 	prevThread, prevInterrupt, entered := s.enterNative()
 	n, _, _ := purego.SyscallN(inv, fp, reqC, uintptr(len(req)), respC, respCap)
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
 	var out []byte
@@ -1273,6 +1276,19 @@ func (s *state) hostCall(req []byte) []byte {
 	return out
 }
 
+// jumpCaught is called when native code returns to the guest: a jump of
+// the interpreter that left one of its operations (a die that nothing inside
+// the operation caught) and that native code caught itself, in a JMPENV or
+// an XCPT_TRY, without passing it on, ends there, as on perl, where that
+// JMPENV was where the jump went (Syntax::Keyword::Defer catches a die of
+// its defer block in the eval context it pushed). The interpreter does not
+// go on with it when the native call returns.
+func (s *state) jumpCaught(f *cFrame) {
+	if f.failed == 0 {
+		s.p.GuestJumpCaught()
+	}
+}
+
 // dtorFired runs a save-stack destructor the guest scope pop released
 // (reserved callback method -4). A destructor that died answers as an XSUB
 // that died does: the interpreter dies with its message, or with the value
@@ -1289,6 +1305,7 @@ func (s *state) dtorFired(id uint32) []byte {
 	prevThread, prevInterrupt, entered := s.enterNative()
 	purego.SyscallN(invoke, fp, uintptr(id))
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	runtime.UnlockOSThread()
 	unpinFrame(fp)
 	defer f.releaseStack()
@@ -1631,6 +1648,7 @@ func (s *state) callSvtHook(sv uint64, mg, vtblOff uintptr) (msg string, died bo
 	// returns 0 when the hook died, with the message in the frame.
 	ran, _, _ := purego.SyscallN(invoke, fp, fn, uintptr(sv), mg)
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	runtime.UnlockOSThread()
 	if uint32(ran) == 0 {
 		return f.errString(), true
@@ -1712,6 +1730,7 @@ func (s *state) perlioHook(req []byte) []byte {
 	prevThread, prevInterrupt, entered := s.enterNative()
 	rlen, _, _ := purego.SyscallN(inv, fp, funcs, reqC, uintptr(len(req)), respC, 4096)
 	s.leaveNative(prevThread, prevInterrupt, entered)
+	s.jumpCaught(f)
 	runtime.UnlockOSThread()
 	_ = f
 	unpinFrame(fp)
@@ -1754,6 +1773,7 @@ func (s *state) keywordHook(req []byte) []byte {
 	f, fp := s.bootFrame()
 	rc, _, _ := purego.SyscallN(inv, fp, wordC, uintptr(len(word)),
 		uintptr(kind), retC, tokC)
+	s.jumpCaught(f)
 	cFree(wordC)
 	words := func(w ...uint64) []byte {
 		out := make([]byte, 1+8*len(w))

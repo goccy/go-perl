@@ -470,6 +470,16 @@ func (p *Perl) resumeGuestJump() bool {
 	return true
 }
 
+// GuestJumpCaught drops the jump parked in the callback activation that is
+// running: the native code it ran caught the jump itself and returned as
+// usual (see the xs package's jumpCaught), so the guest does not go on
+// unwinding when the callback returns.
+func (p *Perl) GuestJumpCaught() {
+	if p.jump.parked && p.jump.depth == p.callbackDepth {
+		p.jump = guestJump{}
+	}
+}
+
 // dispatcher is the per-instance CallbackHandler behind every guest->host
 // call. Reserved (negative) method ids route to the native-XS hook surface;
 // everything else is the Perl->Go function bridge, which the public package

@@ -6843,6 +6843,9 @@ struct goperl_si {
     I32 si_cxix;
     I32 si_type;
     PERL_SI *si_prev;
+    /* how many PERL_CONTEXTs si_cxstack has room for (0: none known) */
+    I32 goperl_cxcap;
+    I32 goperl_pad_;
 };
 #undef CxTYPE
 #define CXp_MULTICALL 0x10
@@ -7054,28 +7057,51 @@ static SV *goperl_hv_iterval(goperl_frame_t *f, HV *hv, const HE *he) {
 }
 #define hv_iterval(hv, he) goperl_hv_iterval(_gof, (HV *)(hv), (const HE *)(he))
 
+/* The shadow of the stackinfo tok made before (in the chain the cache had),
+ * when its context array has room for n contexts: made again in the same
+ * place, a PERL_CONTEXT pointer native code holds is still the same
+ * context, as in perl's cxstack (Syntax::Keyword::Defer pops the context
+ * it pushed, after operations in between). */
+static PERL_SI *goperl_si_reusable(PERL_SI *old, uint64_t tok, I32 n) {
+    for (int depth = 0; old && depth <= 16; old = old->si_prev, depth++)
+        if (old->tok == tok)
+            return old->goperl_cxcap >= 2 * n + 1 ? old : 0;
+    return 0;
+}
+static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, int depth,
+                                           PERL_SI *old);
 static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
                                       int depth) {
+    return goperl_si_materialize_from(f, si_tok, depth, goperl_si_cache_v);
+}
+static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, int depth,
+                                           PERL_SI *old) {
     if (depth > 16) return 0;
     uint64_t tok = si_tok
                        ? si_tok
                        : goperl_do_op(f, GOPERL_OP_SI_GET, 0, 0, 0, 0);
     if (!tok) return 0;
-    PERL_SI *si = (PERL_SI *)goperl_arena_alloc(sizeof(PERL_SI));
-    if (!si) goperl_croakf(f, "stackinfo shadow: out of memory");
+    const I32 cxix = (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 3, 0, 0);
+    I32 n = cxix + 1;
+    if (n < 0) n = 0;
+    PERL_SI *si = goperl_si_reusable(old, tok, n);
+    if (!si) {
+        si = (PERL_SI *)goperl_arena_alloc(sizeof(PERL_SI));
+        if (!si) goperl_croakf(f, "stackinfo shadow: out of memory");
+        /* the contexts, the one above them, then what each context was when
+         * it was read (what native code stores into one goes to the
+         * interpreter: goperl_cx_writeback); room for some more, so that a
+         * context pushed or popped leaves the others where they are */
+        const I32 room = n + 8;
+        si->si_cxstack = (PERL_CONTEXT *)goperl_arena_alloc(
+            sizeof(PERL_CONTEXT) * (2 * (size_t)room + 1));
+        if (!si->si_cxstack) goperl_croakf(f, "context shadow: out of memory");
+        si->goperl_cxcap = 2 * room + 1;
+    }
     si->tok = tok;
     si->si_type =
         (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 2, 0, 0);
-    si->si_cxix =
-        (I32)(int64_t)goperl_do_op(f, GOPERL_OP_SI_GET, tok, 3, 0, 0);
-    I32 n = si->si_cxix + 1;
-    if (n < 0) n = 0;
-    /* the contexts, the one above them, then what each context was when it
-     * was read (what native code stores into one goes to the interpreter:
-     * goperl_cx_writeback) */
-    si->si_cxstack = (PERL_CONTEXT *)goperl_arena_alloc(
-        sizeof(PERL_CONTEXT) * (2 * (size_t)n + 1));
-    if (!si->si_cxstack) goperl_croakf(f, "context shadow: out of memory");
+    si->si_cxix = cxix;
     for (I32 i = 0; i < n; i++) {
         PERL_CONTEXT *cx = &si->si_cxstack[i];
         /* CX_DUMP: the fields as words (see the interpreter side) */
@@ -7150,7 +7176,7 @@ static PERL_SI *goperl_si_materialize(goperl_frame_t *f, uint64_t si_tok,
     }
     uint64_t prev =
         goperl_do_op(f, GOPERL_OP_SI_GET, tok, 1, 0, 0);
-    si->si_prev = prev ? goperl_si_materialize(f, prev, depth + 1) : 0;
+    si->si_prev = prev ? goperl_si_materialize_from(f, prev, depth + 1, old) : 0;
     return si;
 }
 
@@ -7166,7 +7192,17 @@ static PERL_SI *goperl_si_cur(goperl_frame_t *f) {
 #define PL_curstackinfo (goperl_si_cur(_gof))
 
 /* CX selectors. */
-enum { GOPERL_CX_DUMP = 0, GOPERL_CX_DOUNWIND = 1, GOPERL_CX_MAX = 2, GOPERL_CX_SET = 3 };
+enum {
+    GOPERL_CX_DUMP = 0,
+    GOPERL_CX_DOUNWIND = 1,
+    GOPERL_CX_MAX = 2,
+    GOPERL_CX_SET = 3,
+    GOPERL_CX_PUSHBLOCK = 4,
+    GOPERL_CX_PUSHEVAL = 5,
+    GOPERL_CX_POPEVAL = 6,
+    GOPERL_CX_POPBLOCK = 7,
+    GOPERL_CX_POP = 8
+};
 
 /* What native code stored into the contexts it was shown goes to the
  * interpreter's contexts, field by field, before the next operation and

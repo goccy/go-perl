@@ -2096,7 +2096,9 @@ static CV *goperl_newXS_proto(goperl_frame_t *f, const char *name,
 #define PL_strtab (*(HV **)goperl_plsv_ref(_gof, GOPERL_PL_STRTAB))
 #define PL_sv_zero (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_ZERO)))
 #define PL_sv_placeholder (*GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_SV_PLACEHOLDER)))
-#define PL_in_eval ((U8)GOPERL_PLVAR(GOPERL_PL_IN_EVAL))
+/* an lvalue: Syntax::Keyword::Defer marks the eval it pushes (PL_in_eval =
+ * EVAL_INEVAL|EVAL_KEEPERR) */
+#define PL_in_eval (*goperl_plint_ref(_gof, GOPERL_PL_IN_EVAL))
 #define PL_dirty (GOPERL_PLVAR(GOPERL_PL_DIRTY) != 0)
 #define PL_savestack_ix ((I32)(int64_t)GOPERL_PLVAR(GOPERL_PL_SAVESTACK_IX))
 #define PL_tmps_ix ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_IX))
@@ -3010,6 +3012,56 @@ static void goperl_dounwind(goperl_frame_t *f, I32 cxix) {
 #define cxstack_max \
     ((I32)(int64_t)goperl_op3(GOPERL_OP_CX, 0, 0, GOPERL_CX_MAX))
 #define CX_CUR() (&cxstack[cxstack_ix])
+
+/* Contexts native code pushes and pops itself (Syntax::Keyword::Defer
+ * pretends an eval {} around a defer block): the interpreter's cx_pushblock
+ * and the others, on its current stackinfo, with the stack as native code
+ * left it. A context given back to one of them is one of those the SDK
+ * shows now (from cx_pushblock or cxstack), and the top one, as perl's
+ * functions require. */
+static I32 goperl_cx_top_index(goperl_frame_t *f, const PERL_CONTEXT *cx, const char *what) {
+    PERL_SI *const si = goperl_si_cur(f);
+    if (!cx || cx < si->si_cxstack || cx > si->si_cxstack + si->si_cxix)
+        goperl_croakf(f, "%s: native code gave a context that is not one of the "
+                         "interpreter's contexts as the SDK shows them now", what);
+    return (I32)(cx - si->si_cxstack);
+}
+static PERL_CONTEXT *goperl_cx_pushblock(goperl_frame_t *f, U8 type, U8 gimme, SV **sp,
+                                         I32 saveix) __attribute__((unused));
+static PERL_CONTEXT *goperl_cx_pushblock(goperl_frame_t *f, U8 type, U8 gimme, SV **sp,
+                                         I32 saveix) {
+    (void)sp; /* the stack native code left, which the interpreter has now */
+    goperl_pp_stack_push(f);
+    const goperl_gword_t w[3] = {type, gimme, (goperl_gword_t)(int64_t)saveix};
+    const I32 ix = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_CX, 0, sizeof w,
+                                               (uint64_t)(GOPERL_CX_PUSHBLOCK),
+                                               (const char *)w, sizeof w);
+    return &goperl_si_cur(f)->si_cxstack[ix];
+}
+static void goperl_cx_pusheval(goperl_frame_t *f, PERL_CONTEXT *cx, OP *retop, SV *namesv)
+    __attribute__((unused));
+static void goperl_cx_pusheval(goperl_frame_t *f, PERL_CONTEXT *cx, OP *retop, SV *namesv) {
+    const goperl_gword_t w[3] = {(goperl_gword_t)goperl_cx_top_index(f, cx, "cx_pusheval"),
+                                 retop ? retop->gop : 0, GOPERL_TOK(namesv)};
+    goperl_do_op3(f, GOPERL_OP_CX, 0, sizeof w, (uint64_t)(GOPERL_CX_PUSHEVAL),
+                  (const char *)w, sizeof w);
+}
+static void goperl_cx_pop(goperl_frame_t *f, PERL_CONTEXT *cx, int sel, const char *what)
+    __attribute__((unused));
+static void goperl_cx_pop(goperl_frame_t *f, PERL_CONTEXT *cx, int sel, const char *what) {
+    const I32 ix = goperl_cx_top_index(f, cx, what);
+    goperl_pp_stack_push(f);
+    goperl_do_op3(f, GOPERL_OP_CX, 0, (uint64_t)(int64_t)ix, (uint64_t)sel, 0, 0);
+    f->st_stale = f->pp_frame;
+}
+#define cx_pushblock(type, gimme, sp, saveix) \
+    goperl_cx_pushblock(_gof, (U8)(type), (U8)(gimme), (SV **)(sp), (I32)(saveix))
+#define cx_pusheval(cx, retop, namesv) \
+    goperl_cx_pusheval(_gof, (PERL_CONTEXT *)(cx), (OP *)(retop), (SV *)(namesv))
+#define cx_popeval(cx) goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPEVAL, "cx_popeval")
+#define cx_popblock(cx) \
+    goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POPBLOCK, "cx_popblock")
+#define CX_POP(cx) goperl_cx_pop(_gof, (PERL_CONTEXT *)(cx), GOPERL_CX_POP, "CX_POP")
 
 /* ---- the regular expression API ------------------------------------------- */
 
