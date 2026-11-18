@@ -2126,7 +2126,7 @@ typedef struct goperl_shared {
  * read-only scalar is not refused (a module that keeps a number of its own
  * in the slot of a scalar it has made read-only for the program goes on
  * updating it there). */
-#define GOPERL_LV_IV 0
+#define GOPERL_LV_IV 0 /* IV, UV and NV first: see goperl_sv_numslot */
 #define GOPERL_LV_UV 1
 #define GOPERL_LV_NV 2
 #define GOPERL_LV_CVXSUB 3
@@ -4621,14 +4621,42 @@ static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
     m->val = m->shadow = where ? (uint64_t)(uintptr_t)goperl_guest_mem(f, where) : 0;
 }
 
+/* The IV (or UV) or the NV slot of a scalar whose body has it, where it is
+ * in the interpreter's memory: SvANY and the slot's place in perl's XPVIV or
+ * XPVNV, as sv.h's SvIVX and SvNVX find it, a bodyless IV's or NV's SvANY
+ * pointing that much before the head's sv_u. -> 0 for a scalar that has no
+ * such slot, or holds a reference or a glob where it would be (the
+ * interpreter's view of those, see GOPERL_OP_SV_SLOT_GET, is the mirror's). */
+static uint64_t *goperl_sv_numslot(goperl_frame_t *f, uint64_t tok, int field) {
+    if (!tok) return 0;
+    const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, tok);
+    const uint64_t any = head[0];
+    const uint32_t flags = (uint32_t)(head[1] >> 32); /* after the U32 refcnt */
+    const unsigned t = flags & 0xff; /* SVTYPEMASK */
+    if (!any || (flags & SVf_ROK)) return 0;
+    if ((flags & (SVp_SCREAM | SVp_POK)) == SVp_SCREAM) return 0; /* isGV_with_GP */
+    const int scalar = t == SVt_PVNV || t == SVt_PVMG || t == SVt_PVLV;
+    if (field == GOPERL_LV_NV) {
+        if (!scalar && t != SVt_NV) return 0;
+        return (uint64_t *)goperl_guest_mem(f, any + 40); /* xnv_u */
+    }
+    if (!scalar && t != SVt_IV && t != SVt_PVIV) return 0;
+    return (uint64_t *)goperl_guest_mem(f, any + 32); /* xiv_u */
+}
+
 /* The lvalue of a field (see GOPERL_LV_IV): pending stores are written
  * back, the evaluations that are known to be over are ended, and the slot
- * of the field is found or made, and loaded from the interpreter. */
+ * of the field is found or made, and loaded from the interpreter. A number
+ * of a scalar whose body has its slot is that slot (goperl_sv_numslot). */
 static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
                                const void *site, uintptr_t frame) {
     uint64_t tok = GOPERL_TOK(sv);
     goperl_lvslot_t *m = 0;
     goperl_flush(f);
+    if (field <= GOPERL_LV_NV) {
+        uint64_t *const slot = goperl_sv_numslot(f, tok, field);
+        if (slot) return slot;
+    }
     goperl_lvstate_t *st = goperl_lvstate_v;
     if (!st) {
         st = (goperl_lvstate_t *)calloc(1, sizeof(goperl_lvstate_t));
