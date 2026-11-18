@@ -2492,9 +2492,11 @@ static void goperl_require_pv(goperl_frame_t *f, const char *pv) {
     uint64_t tok = goperl_do_op(f, GOPERL_OP_NEW_PVN, 0, o, code, o);
     free(code);
     SV *sv = GOPERL_SV(goperl_do_op(f, GOPERL_OP_SV_MORTAL, tok, 0, 0, 0));
-    SV **keep = f->psp;
+    /* on a stack of its own, as perl's require_pv: the caller's stack
+     * stays where it is */
+    goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, (uint64_t)PERLSI_REQUIRE, 33 /* PUSHSTACK */, 0, 0);
     goperl_eval_sv(f, sv, G_DISCARD);
-    f->psp = keep;
+    goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, 0, 34 /* POPSTACK */, 0, 0);
 }
 #define require_pv(pv) goperl_require_pv(_gof, (pv))
 

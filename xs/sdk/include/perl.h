@@ -10412,6 +10412,10 @@ static void goperl_load_module(goperl_frame_t *f, U32 flags, SV *name,
         goperl_croakf(f, "load_module: a module name of %llu bytes",
                       (unsigned long long)len);
     snprintf(buf, sizeof buf, "require %.*s", (int)len, p ? p : "");
+    /* on a stack of its own, as perl's BEGIN block of the use runs: the
+     * caller's stack stays where it is (Cpanel::JSON::XS pushes through
+     * the dSP it took before load_module); a die unwinds it */
+    goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, (uint64_t)PERLSI_REQUIRE, 33 /* PUSHSTACK */, 0, 0);
     goperl_do_op(f, GOPERL_OP_EVAL_PV, 1, 0, buf, __builtin_strlen(buf));
     if (ver) {
         dSP;
@@ -10440,6 +10444,7 @@ static void goperl_load_module(goperl_frame_t *f, U32 flags, SV *name,
         FREETMPS;
         LEAVE;
     }
+    goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, 0, 34 /* POPSTACK */, 0, 0);
     for (int i = 0; i < n; i++) SvREFCNT_dec(list[i]);
     if (ver) SvREFCNT_dec(ver);
     SvREFCNT_dec(name);
