@@ -407,8 +407,12 @@ exit 6;
 		t.Fatal("the built binary was still running 30s after it was started")
 	}
 	raw, _ := os.ReadFile(outFile.Name())
+	// the six processes it forked end with it, which it says
+	ending, said, _ := strings.Cut(string(raw), "\n")
+	pids := strings.Split(strings.TrimSuffix(strings.TrimPrefix(said,
+		"perl: the program exited while processes it forked were still running; they run inside its process and end with it: "), "\n"), ", ")
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 6 || string(raw) != "ending\n" {
-		t.Fatalf("the built binary ended with %v and output %q, want exit status 6 and %q", err, raw, "ending\n")
+	if !errors.As(err, &exit) || exit.ExitCode() != 6 || ending != "ending" || len(pids) != 6 || !strings.HasSuffix(said, "\n") {
+		t.Fatalf("the built binary ended with %v and output %q, want exit status 6, \"ending\" and the six forked processes it ends", err, raw)
 	}
 }

@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -220,10 +223,11 @@ type forkFamily struct {
 	origin *Perl
 
 	mu sync.Mutex
-	// running holds the fork children whose program has not ended. Which
-	// ones those are can be learnt nowhere else: the process table of the
-	// host state knows a child only once the fork that made it is over.
-	running map[*Perl]struct{}
+	// running holds the fork children whose program has not ended, with
+	// the pid each is known by. Which ones those are can be learnt nowhere
+	// else: the process table of the host state knows a child only once
+	// the fork that made it is over.
+	running map[*Perl]int32
 	// over records that the first process has ended: no pseudo-process is
 	// started from then on. A child that forks while the others are being
 	// ended would otherwise outlive them.
@@ -240,9 +244,9 @@ func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bo
 		return false
 	}
 	if f.running == nil {
-		f.running = map[*Perl]struct{}{}
+		f.running = map[*Perl]int32{}
 	}
-	f.running[child] = struct{}{}
+	f.running[child] = pid
 	go func() {
 		status := child.runForkChild(pid)
 		f.mu.Lock()
@@ -265,7 +269,11 @@ func (f *forkFamily) isOver() bool {
 // process group is: every one of them is killed as by SIGKILL — it runs no
 // Perl code from its next opcode on, no END block and no destructor — the
 // commands it started and has not waited for are killed and reaped, and its
-// descriptors are closed.
+// descriptors are closed. Unlike the end of a process group, it is said on
+// the first process's standard error, with the pids: a process that a
+// program forks and leaves running (a daemon, a child that writes after
+// its parent exited) outlives its parent elsewhere, and here it runs in
+// the program's own process, which cannot go on without the program.
 //
 // end does not wait for the goroutine of a pseudo-process to notice. One
 // that is in a call the host cannot interrupt (native code of an XS module,
@@ -278,10 +286,21 @@ func (f *forkFamily) end() {
 	f.mu.Lock()
 	f.over = true
 	children := make([]*Perl, 0, len(f.running))
-	for child := range f.running {
+	pids := make([]int32, 0, len(f.running))
+	for child, pid := range f.running {
 		children = append(children, child)
+		pids = append(pids, pid)
 	}
 	f.mu.Unlock()
+	if len(pids) > 0 {
+		slices.Sort(pids)
+		names := make([]string, len(pids))
+		for i, pid := range pids {
+			names[i] = strconv.Itoa(int(pid))
+		}
+		fmt.Fprintf(f.origin.stderr(), "perl: the program exited while processes it forked were still running;"+
+			" they run inside its process and end with it: %s\n", strings.Join(names, ", "))
+	}
 	// Every one is killed before anything of any of them is taken away: a
 	// child that sees a command die, or a descriptor close, must not get
 	// to act on it.
