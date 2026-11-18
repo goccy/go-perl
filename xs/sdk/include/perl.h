@@ -6273,10 +6273,11 @@ static uint64_t goperl_op_second(goperl_frame_t *f, int32_t op, uint64_t a, uint
  * a module writes into a shadow goes back to the interpreter before the
  * next operation on op trees, and when the native call ends. */
 
+/* OP_DUMP: the op and every op its links lead to (see goperl_op_describe),
+ * or the reports of the ops freed or written into (FREED); IS_COP: the op
+ * is a COP whatever its type says, as PL_compiling is. */
 enum {
-    GOPERL_OPDUMP_ONE = 0,
-    GOPERL_OPDUMP_SUBTREE = 1,
-    GOPERL_OPDUMP_REACH = 2,
+    GOPERL_OPDUMP_DESCRIBE = 0,
     GOPERL_OPDUMP_FREED = 3,
     GOPERL_OPDUMP_IS_COP = 0x80
 };
@@ -6329,7 +6330,6 @@ enum {
 #define GOPERL_OPBIT_MORESIB 1
 #define GOPERL_OPBIT_COP 2
 #define GOPERL_OPBIT_HOOKED 4
-#define GOPERL_OPBIT_EDGE 8
 #define GOPERL_OPBIT_RAW 16
 #define GOPERL_OPBIT_OPT 0x10000
 #define GOPERL_OPBIT_SLABBED 0x20000
@@ -6337,6 +6337,12 @@ enum {
 #define GOPERL_OPBIT_STATIC 0x80000
 #define GOPERL_OPBIT_FOLDED 0x100000
 #define GOPERL_OPBIT_TYPEHOOK 0x200000
+#define GOPERL_OPBIT_FINISHED 0x400000 /* of a finished op tree */
+/* A report of an op the interpreter wrote into (not one it freed). */
+#define GOPERL_OPREPORT_CHANGED 1
+/* The generation of a description of an op of a finished op tree: good in
+ * every one, until the interpreter reports the op freed or written into. */
+#define GOPERL_GEN_ALWAYS 0xFFFFFFFFu
 #define GOPERL_PL_OP_FREED 72
 
 typedef struct goperl_opreg_ent {
@@ -6346,7 +6352,8 @@ typedef struct goperl_opreg_ent {
     U8 active;  /* 0, or the depth of the native call that gave it a baseline
                  * (capped at 255): see goperl_opreg_retire */
     U16 ext; /* a persistent one: the bytes of the module's struct past OP */
-    uint32_t gen; /* the generation its links were described in */
+    uint32_t gen; /* the generation its links were described in, or
+                   * GOPERL_GEN_ALWAYS (a finished tree's op), or 0 */
     struct goperl_op_base *base; /* what was written back last (a write-back
                                   * baseline: see goperl_op_base_capture) */
     void *aux_own; /* the aux of the op in this process's layout (a signature's
@@ -6360,7 +6367,8 @@ typedef struct goperl_opreg {
     uint32_t count;
     goperl_opreg_ent_t *active; /* shadows with a baseline (see goperl_op_base) */
     goperl_opreg_ent_t *spare;  /* shadows of freed ops */
-    uint32_t gen;      /* moves on at every entry of native code */
+    uint32_t gen;      /* moves on at every entry of native code, never to 0
+                        * or GOPERL_GEN_ALWAYS (goperl_opreg_newgen) */
     uint64_t freed_at; /* where the interpreter counts the freed ops it has
                         * not reported yet (an address of its memory) */
 } goperl_opreg_t;
@@ -6394,8 +6402,11 @@ static goperl_opreg_t *goperl_opreg_get(goperl_frame_t *f) {
  * is everything else that is kept until the interpreter moves on (the
  * context mirrors, the copy of the parser). */
 static void goperl_gen_bump(void);
+static inline void goperl_opreg_newgen(goperl_opreg_t *r) {
+    if (++r->gen >= GOPERL_GEN_ALWAYS) r->gen = 1;
+}
 static void goperl_opreg_enter(void) {
-    if (goperl_opreg_v) goperl_opreg_v->gen++;
+    if (goperl_opreg_v) goperl_opreg_newgen(goperl_opreg_v);
     goperl_gen_bump();
     /* the interpreter ran since native code last looked at the pads */
     goperl_pads_refresh(goperl_cur_frame_v);
@@ -6452,7 +6463,9 @@ static goperl_opreg_ent_t *goperl_opreg_new(goperl_frame_t *f, goperl_opreg_t *r
     return e;
 }
 
-/* The shadows of the ops the interpreter freed are given up. */
+/* The shadows of the ops the interpreter freed are given up, and the ones
+ * of the ops of finished trees it wrote into are described again. */
+static OP *goperl_op_describe(goperl_frame_t *f, uint64_t tok, int mode);
 static void goperl_opreg_sync(goperl_frame_t *f, goperl_opreg_t *r) {
     if (!r->freed_at)
         r->freed_at = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_OP_FREED, 0, 0, 0);
@@ -6460,10 +6473,28 @@ static void goperl_opreg_sync(goperl_frame_t *f, goperl_opreg_t *r) {
     if (goperl_g32(f, r->freed_at) == 0) return;
     /* -> the tokens of the freed ops, a word each; second: their number */
     uint64_t n = 0;
-    const uint64_t where =
-        goperl_xs_opx(f, GOPERL_OP_OP_DUMP, 0, GOPERL_OPDUMP_FREED, 0, 0, 0, &n);
+    const uint64_t where = goperl_xs_opx(f, GOPERL_OP_OP_DUMP, 0, GOPERL_OPDUMP_FREED,
+                                         (uint64_t)(uintptr_t)r, 0, 0, &n);
     const goperl_gword_t *toks = (const goperl_gword_t *)goperl_guest_mem(f, where);
+    /* the ops written into: described again below, once the list (the
+     * interpreter's, which the next request reuses) is read */
+    uint64_t changed_v[16];
+    uint64_t *changed = changed_v;
+    uint64_t nchanged = 0;
+    if (n > 16) {
+        changed = (uint64_t *)malloc((size_t)n * sizeof(uint64_t));
+        if (!changed) goperl_croakf(f, "op shadow: out of memory");
+    }
     for (uint64_t i = 0; toks && i < n; i++) {
+        if (toks[i] & GOPERL_OPREPORT_CHANGED) {
+            const uint64_t tok = toks[i] & ~(uint64_t)GOPERL_OPREPORT_CHANGED;
+            goperl_opreg_ent_t *const e = goperl_opreg_find(r, tok);
+            if (e) {
+                e->gen = 0;
+                changed[nchanged++] = tok;
+            }
+            continue;
+        }
         const uint64_t tok = toks[i];
         goperl_opreg_ent_t **p = &r->buckets[goperl_opreg_hash(r, tok)];
         for (; *p; p = &(*p)->next)
@@ -6481,20 +6512,23 @@ static void goperl_opreg_sync(goperl_frame_t *f, goperl_opreg_t *r) {
         e->next = r->spare;
         r->spare = e;
     }
+    for (uint64_t i = 0; i < nchanged; i++)
+        if (goperl_opreg_find(r, changed[i])) goperl_op_describe(f, changed[i], GOPERL_OPDUMP_DESCRIBE);
+    if (changed != changed_v) free(changed);
 }
 
 /* The native call that started it all has returned: no shadow has a
- * baseline any more. */
+ * baseline any more (an entry keeps the memory of one for the next). */
 static void goperl_opreg_clear(void) {
     goperl_opreg_t *r = goperl_opreg_v;
     if (!r) return;
     for (goperl_opreg_ent_t *e = r->active; e;) {
         goperl_opreg_ent_t *next = e->active_next;
-        free(e->base);
-        e->base = 0;
         e->active = 0;
         e->active_next = 0;
         if (!e->op.gop && !e->persist) { /* its op was freed meanwhile */
+            free(e->base);
+            e->base = 0;
             free(e->aux_own);
             e->aux_own = 0;
             e->next = r->spare;
@@ -6503,7 +6537,7 @@ static void goperl_opreg_clear(void) {
         e = next;
     }
     r->active = 0;
-    r->gen++;
+    goperl_opreg_newgen(r);
 }
 
 /* The shadow has a baseline from here on: what a module writes into it is
@@ -6521,19 +6555,19 @@ static void goperl_op_activate(goperl_opreg_t *r, goperl_opreg_ent_t *e) {
 /* A native call deeper than the outermost returns, the shadows written back
  * (goperl_xs_leave): the ones it gave a baseline have none any more, so that
  * the flushes of the calls around it do not walk them (a shadow native code
- * looks up again takes a baseline again). The outermost call's are given
- * up when it returns (goperl_opreg_clear). */
+ * looks up again takes a baseline again, in the memory it keeps). The
+ * outermost call's are given up when it returns (goperl_opreg_clear). */
 static void goperl_opreg_retire(int32_t depth) {
     goperl_opreg_t *r = goperl_opreg_v;
     if (!r || depth <= 1 || depth > 255) return;
     goperl_opreg_ent_t *e = r->active;
     while (e && e->active >= depth) {
         goperl_opreg_ent_t *next = e->active_next;
-        free(e->base);
-        e->base = 0;
         e->active = 0;
         e->active_next = 0;
         if (!e->op.gop && !e->persist) { /* its op was freed meanwhile */
+            free(e->base);
+            e->base = 0;
             free(e->aux_own);
             e->aux_own = 0;
             e->next = r->spare;
@@ -6569,8 +6603,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     goperl_opreg_ent_t *e = goperl_op_ent(f, r, w[GOPERL_OPREC_TOK]);
     OP *o = &e->op;
     const uint32_t bits = (uint32_t)w[GOPERL_OPREC_BITS];
-    const int edge = (bits & GOPERL_OPBIT_EDGE) != 0;
-    if (edge && e->active) return; /* described already, perhaps written to */
+    const uint32_t gen = (bits & GOPERL_OPBIT_FINISHED) ? GOPERL_GEN_ALWAYS : r->gen;
     o->op_type = (U16)(w[GOPERL_OPREC_TYPE] & 0xFFFF);
     o->op_flags = (U8)(w[GOPERL_OPREC_TYPE] >> 16);
     o->op_private = (U8)(w[GOPERL_OPREC_TYPE] >> 24);
@@ -6590,10 +6623,6 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
          * put in PL_ppaddr after the op was made: the slot the table had
          * for the type before (`o->op_ppaddr == orig_ppaddr[OP_X]`) */
         o->op_ppaddr = o->op_type < OP_max ? goperl_ppaddr_base(f, o->op_type) : 0;
-    if (edge) {
-        goperl_op_activate(r, e);
-        return;
-    }
     o->op_next = goperl_op_link(f, r, w[GOPERL_OPREC_NEXT]);
     o->op_sibparent = goperl_op_link(f, r, w[GOPERL_OPREC_SIBPARENT]);
     o->op_moresib = (bits & GOPERL_OPBIT_MORESIB) ? 1 : 0;
@@ -6605,7 +6634,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         if (links >= 1) o->op_first = goperl_op_link(f, r, w[GOPERL_OPREC_FIRST]);
         if (links >= 2) o->op_other = goperl_op_link(f, r, w[GOPERL_OPREC_OTHER]);
         o->gop_full = 1;
-        e->gen = r->gen;
+        e->gen = gen;
         goperl_op_activate(r, e);
         return;
     }
@@ -6629,7 +6658,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         }
         o->op_code_list = goperl_op_link(f, r, w[GOPERL_OPREC_PMCODELIST]);
         o->gop_full = 1;
-        e->gen = r->gen;
+        e->gen = gen;
         goperl_op_activate(r, e);
         return;
     }
@@ -6639,7 +6668,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     if (o->op_type == OP_CUSTOM && (bits & GOPERL_OPBIT_HOOKED) && o->gop_full &&
         ((bits >> 8) & 0xFF) == 13 /* OPclass_UNOP_AUX */) {
         /* a custom op with auxiliary data: the data is the module's, here */
-        e->gen = r->gen;
+        e->gen = gen;
         goperl_op_activate(r, e);
         return;
     }
@@ -6709,34 +6738,128 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         o->cop_stashpv = p ? goperl_intern(p, (size_t)w[GOPERL_OPREC_STASH_LEN]) : "";
     }
     o->gop_full = 1;
-    e->gen = r->gen;
+    e->gen = gen;
     goperl_op_activate(r, e);
 }
 
-/* Describes the op of the token and, by the mode, the ops around it; what
- * modules wrote into shadows goes to the interpreter first. */
+/* The ops native code can reach from a shadow by its links in its own
+ * memory, each a shadow: the links goperl_op_apply makes (a module's own op
+ * struct has its raw links only, and a PMOP's unions are ops for a
+ * substitution alone). Native code walks them and writes into what it walks
+ * to (Devel::Cover sets op_ppaddr of the op after the one it was handed), so
+ * each has a baseline: those without one get it (goperl_op_activate), and
+ * what they lead to in turn; one with a baseline was reached so already, or
+ * was described just now (goperl_op_describe takes care of what it leads
+ * to). A link native code pointed at an op of its own is no shadow and is
+ * not followed. */
+static inline int goperl_op_current(const OP *o);
+static size_t goperl_op_links_of(const OP *o, OP **out) {
+    size_t n = 0;
+    out[n++] = o->op_next;
+    out[n++] = o->op_sibparent;
+    if (GOPERL_OPENT(o)->persist) {
+        const int links = goperl_raw_links(o);
+        if (links >= 1) out[n++] = o->op_first;
+        if (links >= 2) out[n++] = o->op_other;
+        return n;
+    }
+    out[n++] = o->op_first;
+    out[n++] = o->op_last; /* op_other: the same member */
+    if (o->gop_class == GOPERL_OPCLASS_PMOP + 1) {
+        out[n++] = o->op_code_list;
+        if (o->op_type == OP_SUBST) {
+            out[n++] = o->op_pmreplrootu.op_pmreplroot;
+            out[n++] = o->op_pmstashstartu.op_pmreplstart;
+        }
+    } else if (!o->gop_iscop) {
+        out[n++] = o->op_redoop;
+        out[n++] = o->op_nextop;
+        out[n++] = o->op_lastop;
+    }
+    return n;
+}
+#define GOPERL_OP_LINKS_MAX 8
+/* The ops reached from o get baselines. A shadow whose description is not
+ * good any more (an op of a tree being compiled, described in an earlier
+ * native call) is described again, which gives what it leads to baselines
+ * in turn. A link of a shadow is an entry of the registry (goperl_op_apply
+ * makes it, and a write-back takes no op but the interpreter's): one whose
+ * op was freed has no token and is not followed. */
+static void goperl_op_activate_links(goperl_frame_t *f, goperl_opreg_t *r, OP *from) {
+    OP *inline_v[256];
+    OP **stack = inline_v;
+    size_t cap = 256, n = goperl_op_links_of(from, stack);
+    while (n > 0) {
+        OP *const o = stack[--n];
+        if (!o || !o->gop) continue;
+        goperl_opreg_ent_t *const e = GOPERL_OPENT(o);
+        if (e->active) continue;
+        if (!goperl_op_current(o)) {
+            goperl_op_describe(f, o->gop, GOPERL_OPDUMP_DESCRIBE | (o->gop_iscop ? GOPERL_OPDUMP_IS_COP : 0));
+            continue;
+        }
+        goperl_op_activate(r, e);
+        if (cap - n < GOPERL_OP_LINKS_MAX) {
+            const size_t nc = cap * 2;
+            OP **ns = (OP **)malloc(nc * sizeof(OP *));
+            if (!ns) goperl_croakf(f, "op shadow: out of memory");
+            memcpy(ns, stack, n * sizeof(OP *));
+            if (stack != inline_v) free(stack);
+            stack = ns;
+            cap = nc;
+        }
+        n += goperl_op_links_of(o, stack + n);
+    }
+    if (stack != inline_v) free(stack);
+}
+/* A shadow handed to native code: it and what it leads to have baselines. */
+static OP *goperl_op_handout(goperl_frame_t *f, goperl_opreg_t *r, goperl_opreg_ent_t *e) {
+    if (!e->active) {
+        goperl_op_activate(r, e);
+        goperl_op_activate_links(f, r, &e->op);
+    }
+    return &e->op;
+}
+
+/* Describes the op of the token and every op its links lead to, and theirs
+ * (the interpreter leaves out the ops of finished trees whose descriptions
+ * this registry holds, which are good still): native code that walks links
+ * in its own memory finds every op it reaches described, with its links,
+ * and an op has the same shadow whichever op it was reached from. What
+ * modules wrote into shadows goes to the interpreter first; the reports of
+ * ops freed and written into are taken before (the answer is the
+ * interpreter's memory, which a request made while reading it would
+ * reuse). */
 static OP *goperl_op_describe(goperl_frame_t *f, uint64_t tok, int mode) {
     if (!tok) return 0;
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_optree_flush(f);
-    const uint64_t cap = (mode & 0x7F) == GOPERL_OPDUMP_REACH ? 4000000u : 400000u;
+    goperl_opreg_sync(f, r);
     /* -> the records, GOPERL_OPREC_WORDS words each; second: their number */
     uint64_t n = 0;
-    const uint64_t where = goperl_do_opx(f, GOPERL_OP_OP_DUMP, tok, (cap << 8) | (uint64_t)mode,
-                                         0, 0, 0, &n);
-    goperl_opreg_sync(f, r);
+    const uint64_t where = goperl_do_opx(f, GOPERL_OP_OP_DUMP, tok, (uint64_t)mode,
+                                         (uint64_t)(uintptr_t)r, 0, 0, &n);
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(f, where);
     if (!w || !n) goperl_croakf(f, "op shadow: the interpreter did not describe the op");
-    /* the ops at the edge first, so that the links of the others find them
-     * with their types */
+    /* the shadows described, kept here: giving what they lead to baselines
+     * may describe again, which reuses the interpreter's answer */
+    OP *described_v[64];
+    OP **described = n <= 64 ? described_v : (OP **)malloc((size_t)n * sizeof(OP *));
+    if (!described) goperl_croakf(f, "op shadow: out of memory");
+    for (uint64_t i = 0; i < n; i++) {
+        goperl_op_apply(f, r, w + i * GOPERL_OPREC_WORDS);
+        described[i] = &goperl_opreg_find(r, w[i * GOPERL_OPREC_WORDS + GOPERL_OPREC_TOK])->op;
+    }
+    goperl_opreg_ent_t *const e = goperl_opreg_find(r, tok);
+    /* what the described ops lead to has baselines too: the ops this
+     * registry holds already, left out of the answer */
     for (uint64_t i = 0; i < n; i++)
-        if (w[i * GOPERL_OPREC_WORDS + GOPERL_OPREC_BITS] & GOPERL_OPBIT_EDGE)
-            goperl_op_apply(f, r, w + i * GOPERL_OPREC_WORDS);
-    for (uint64_t i = 0; i < n; i++)
-        if (!(w[i * GOPERL_OPREC_WORDS + GOPERL_OPREC_BITS] & GOPERL_OPBIT_EDGE))
-            goperl_op_apply(f, r, w + i * GOPERL_OPREC_WORDS);
-    goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
+        if (described[i]->gop) goperl_op_activate_links(f, r, described[i]);
+    if (described != described_v) free(described);
     return e ? &e->op : 0;
+}
+static OP *goperl_op_describe_tok(goperl_frame_t *f, uint64_t tok) {
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 /* The shadow of an op, whatever is known of it (with a baseline: native code
@@ -6746,11 +6869,8 @@ static OP *goperl_op_shadow(goperl_frame_t *f, uint64_t tok) {
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e) {
-        if (!e->active) goperl_op_activate(r, e);
-        return &e->op;
-    }
-    return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+    if (e) return goperl_op_handout(f, r, e);
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 /* What an op is, as a word: targ<<32 | private<<24 | flags<<16 | type, as
@@ -6767,23 +6887,18 @@ static inline uint64_t goperl_op_fields_word(const OP *o) {
  * assignment to a lexical becomes a padsv_store), and a run loop of native
  * code that ran the op by its shadow would run the pp function of the type
  * the op had before.
- * An op whose pp function is native code's own (a custom op's, LRU::Cache's)
- * is described with what is below it every time, as a pp hook's op is
- * (__goperl_pp_invoke): the function reads the op's links and kids, which
- * the interpreter set after native code made the op (its op_next, by which
- * the function says what runs next, was none when the checker made it). */
+ * A description from an earlier native call is good if it is of a finished
+ * tree (the interpreter reports what it writes there); one of a tree being
+ * compiled is asked for again (the links of an op a checker made, which the
+ * interpreter set after it returned). */
 static OP *goperl_op_shadow_as(goperl_frame_t *f, uint64_t tok, uint64_t fields) {
     if (!tok) return 0;
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    const int native_pp = e && e->op.op_type < OP_max &&
-                          e->op.op_ppaddr != goperl_ppaddr_base(f, e->op.op_type);
-    if (e && !native_pp && goperl_op_fields_word(&e->op) == fields) {
-        if (!e->active) goperl_op_activate(r, e);
-        return &e->op;
-    }
-    return goperl_op_describe(f, tok, native_pp ? GOPERL_OPDUMP_SUBTREE : GOPERL_OPDUMP_ONE);
+    if (e && goperl_op_current(&e->op) && goperl_op_fields_word(&e->op) == fields)
+        return goperl_op_handout(f, r, e);
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 /* An op as a number: its address in the interpreter with the tag, or for
@@ -6799,12 +6914,15 @@ static OP *goperl_op_of_number(IV iv) {
     goperl_frame_t *const f = goperl_cur_frame_v;
     if (!iv) return 0;
     if (!((UV)iv & GOPERL_OP_NUMBER_TAG)) return (OP *)(intptr_t)iv;
-    /* an op a number names is read as it is now: B::Generate follows a
-     * B::OP object's next, which an op at the edge of what was described,
-     * or one kept from an earlier call, does not have yet */
-    return f ? (OP *)goperl_cop_fields(
-                   (COP *)goperl_op_shadow(f, (uint64_t)((UV)iv & ~GOPERL_OP_NUMBER_TAG)))
-             : 0;
+    /* an op a number names is read as it is now, with every op it leads to
+     * (B::Generate walks op_next from a B::OP object's op) */
+    if (!f) return 0;
+    const uint64_t tok = (uint64_t)((UV)iv & ~GOPERL_OP_NUMBER_TAG);
+    goperl_opreg_t *const r = goperl_opreg_get(f);
+    goperl_opreg_sync(f, r);
+    goperl_opreg_ent_t *const e = goperl_opreg_find(r, tok);
+    if (e && goperl_op_current(&e->op)) return goperl_op_handout(f, r, e);
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 /* The shadow of an op with what is below it, as the interpreter has it
@@ -6814,21 +6932,12 @@ static OP *goperl_op_shadow_full(goperl_frame_t *f, uint64_t tok) {
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e && e->op.gop_full && e->gen == r->gen) {
-        if (!e->active) goperl_op_activate(r, e);
-        return &e->op;
-    }
-    return goperl_op_describe(f, tok, GOPERL_OPDUMP_SUBTREE);
-}
-
-/* The same with every op that can be reached from it: what code that walks
- * op_next chains (a peephole hook) is handed. */
-static OP *goperl_op_shadow_reach(goperl_frame_t *f, uint64_t tok) {
-    return goperl_op_describe(f, tok, GOPERL_OPDUMP_REACH);
+    if (e && goperl_op_current(&e->op)) return goperl_op_handout(f, r, e);
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 static void goperl_op_pull(goperl_frame_t *f, OP *o) {
-    goperl_op_describe(f, o->gop, GOPERL_OPDUMP_ONE |
+    goperl_op_describe(f, o->gop, GOPERL_OPDUMP_DESCRIBE |
                                       (o->gop_iscop ? GOPERL_OPDUMP_IS_COP : 0));
 }
 
@@ -6847,7 +6956,7 @@ static void goperl_op_refresh_tok(goperl_frame_t *f, uint64_t tok) {
     if (!tok) return;
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
-    if (goperl_opreg_find(r, tok)) goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+    if (goperl_opreg_find(r, tok)) goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 
 /* Materialize a token the CALLER knows is a COP (PL_curcop, blk_oldcop):
@@ -6858,9 +6967,9 @@ static COP *goperl_cop_shadow(goperl_frame_t *f, uint64_t tok) {
     goperl_opreg_t *r = goperl_opreg_get(f);
     goperl_opreg_sync(f, r);
     goperl_opreg_ent_t *e = goperl_opreg_find(r, tok);
-    if (e && e->op.gop_iscop && e->gen == r->gen) return (COP *)&e->op;
+    if (e && e->op.gop_iscop && goperl_op_current(&e->op)) return (COP *)goperl_op_handout(f, r, e);
     return (COP *)goperl_op_describe(f, tok,
-                                     GOPERL_OPDUMP_ONE | GOPERL_OPDUMP_IS_COP);
+                                     GOPERL_OPDUMP_DESCRIBE | GOPERL_OPDUMP_IS_COP);
 }
 
 /* In an embedded interpreter PL_curcop CAN be NULL: eval_sv driven from C
@@ -6919,7 +7028,8 @@ static COP **goperl_curcop_ref(goperl_frame_t *f) {
 static inline int goperl_op_current(const OP *o) {
     if (!o->gop_full) return 0;
     const goperl_opreg_t *const r = goperl_opreg_v;
-    return !r || GOPERL_OPENT(o)->gen == r->gen;
+    const uint32_t gen = GOPERL_OPENT(o)->gen;
+    return !r || gen == GOPERL_GEN_ALWAYS || gen == r->gen;
 }
 
 /* A COP at the edge of what was described gets its fields now, as an op
@@ -6928,17 +7038,17 @@ static inline int goperl_op_current(const OP *o) {
 static COP *goperl_cop_fields(COP *c) {
     goperl_frame_t *const f = goperl_cur_frame_v;
     if (c && c->gop && f && !goperl_op_current((const OP *)c))
-        goperl_op_describe(f, c->gop, GOPERL_OPDUMP_ONE);
+        goperl_op_describe(f, c->gop, GOPERL_OPDUMP_DESCRIBE);
     return c;
 }
 
 static OP *goperl_op_sibling(goperl_frame_t *f, OP *o) {
     if (!o) return 0;
     /* an op at the edge of what was described gets its links now */
-    if (o->gop && !goperl_op_current(o)) goperl_op_describe(f, o->gop, GOPERL_OPDUMP_SUBTREE);
+    if (o->gop && !goperl_op_current(o)) goperl_op_describe(f, o->gop, GOPERL_OPDUMP_DESCRIBE);
     OP *sib = o->op_moresib ? o->op_sibparent : 0;
     if (sib && sib->gop && !goperl_op_current(sib))
-        goperl_op_describe(f, sib->gop, GOPERL_OPDUMP_SUBTREE);
+        goperl_op_describe(f, sib->gop, GOPERL_OPDUMP_DESCRIBE);
     return sib;
 }
 
@@ -7451,7 +7561,7 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
         goperl_xs_leave(f);
         return 0;
     }
-    f->plop = goperl_op_describe(f, f->hook_op_tok, GOPERL_OPDUMP_SUBTREE);
+    f->plop = goperl_op_describe(f, f->hook_op_tok, GOPERL_OPDUMP_DESCRIBE);
     f->plop_base = f->plop;
     OP *next = fn();
     uint64_t tok = next ? next->gop : 0;
@@ -12086,7 +12196,7 @@ static uint64_t goperl_op_link_tok(goperl_frame_t *f, OP *kid) {
 
 static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     struct goperl_op_base *b = GOPERL_OPENT(o)->base;
-    if (!o->gop || !b) return;
+    if (!o->gop || !b || !GOPERL_OPENT(o)->active) return;
     /* in a module's own op struct only the links it has are links */
     const int links = GOPERL_OPENT(o)->persist ? goperl_raw_links(o) : 2;
     /* the shadows written back before an operation are every op native
@@ -12363,7 +12473,7 @@ static GOPERL_OP_BUILDER OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux
          * context of every op below a, which code reads next: `start =
          * LINKLIST(o); dup->op_next = kid->op_next`; the passes over a
          * finished tree null ops and relink what runs */
-        goperl_op_describe(f, a->gop, GOPERL_OPDUMP_SUBTREE);
+        goperl_op_describe(f, a->gop, GOPERL_OPDUMP_DESCRIBE);
     } else {
         goperl_op_refresh(f, a);
     }
@@ -12374,7 +12484,7 @@ static GOPERL_OP_BUILDER OP *goperl_op_misc3(goperl_frame_t *f, int sel, I32 aux
         /* the list the result is was relinked below it as well (the kid
          * that was last has a sibling now): every op below it is described
          * again, as code walks the siblings next */
-        return goperl_op_describe(f, tok, GOPERL_OPDUMP_SUBTREE);
+        return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
     return tok ? goperl_op_shadow_full(f, tok) : 0;
 }
 #define goperl_op_misc2(f, sel, aux, a, b)     goperl_op_misc3((f), (sel), (aux), 0, (a), (b))
@@ -12401,12 +12511,12 @@ static GOPERL_OP_BUILDER OP *goperl_op_sibling_splice(goperl_frame_t *f, OP *par
     /* the kids of the parent were relinked, the ones around the splice
      * point and the ones that went in and came out: the parent is described
      * again with everything below it, and so is each op that came out */
-    if (parent) goperl_op_describe(f, parent->gop, GOPERL_OPDUMP_SUBTREE);
+    if (parent) goperl_op_describe(f, parent->gop, GOPERL_OPDUMP_DESCRIBE);
     goperl_op_refresh(f, start);
     goperl_op_refresh(f, insert);
-    OP *const out = tok ? goperl_op_describe(f, tok, GOPERL_OPDUMP_SUBTREE) : 0;
+    OP *const out = tok ? goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE) : 0;
     for (OP *o = out; o && o->op_moresib && o->op_sibparent; o = o->op_sibparent)
-        goperl_op_describe(f, o->op_sibparent->gop, GOPERL_OPDUMP_SUBTREE);
+        goperl_op_describe(f, o->op_sibparent->gop, GOPERL_OPDUMP_DESCRIBE);
     return out;
 }
 
@@ -12856,7 +12966,7 @@ static void goperl_peep_stub(goperl_frame_t *f, int which, OP *o) {
     goperl_do_op3(f, GOPERL_OP_HOOK, GOPERL_HOOK_PEEP_ORIG, o ? o->gop : 0,
                   (uint64_t)(uint32_t)which, 0, 0);
     /* the optimizer rewrites what it is handed */
-    if (o) goperl_op_shadow_reach(f, o->gop);
+    if (o) goperl_op_describe_tok(f, o->gop);
 }
 static void goperl_peep_stub0(pTHX_ OP *o) { goperl_peep_stub(_gof, 0, o); }
 static void goperl_peep_stub1(pTHX_ OP *o) { goperl_peep_stub(_gof, 1, o); }
@@ -12870,7 +12980,7 @@ static OP *goperl_newop_dispatch(pTHX_ int type, OP *o) {
     goperl_optree_flush(_gof);
     uint64_t tok = goperl_do_op3(_gof, GOPERL_OP_HOOK, GOPERL_HOOK_NEWOP_ORIG, o ? o->gop : 0,
                                  (uint64_t)(uint32_t)type, 0, 0);
-    return tok ? goperl_op_describe(_gof, tok, GOPERL_OPDUMP_SUBTREE) : 0;
+    return tok ? goperl_op_describe(_gof, tok, GOPERL_OPDUMP_DESCRIBE) : 0;
 }
 
 static goperl_hooks_t *goperl_hooks_get(goperl_frame_t *f) {
@@ -13102,7 +13212,7 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     case GOPERL_HOST_NEWOP: {
         if (reqlen < 24 || req[1] >= OP_max || !h)
             goperl_croakf(f, "host call: no op checker for the request");
-        OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_SUBTREE);
+        OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_DESCRIBE);
         OP *r = h->newop[req[1]](o);
         if (r && !r->gop)
             goperl_croakf(f, "an op checker returned an op that is not the "
@@ -13115,7 +13225,7 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     case GOPERL_HOST_PEEP: {
         if (reqlen < 24 || req[1] > 1 || !h)
             goperl_croakf(f, "host call: no peephole hook for the request");
-        OP *o = req[2] ? goperl_op_shadow_reach(f, req[2]) : 0;
+        OP *o = req[2] ? goperl_op_describe_tok(f, req[2]) : 0;
         h->peep[req[1]](o);
         goperl_optree_flush(f);
         break;
@@ -13173,7 +13283,7 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
         const goperl_callcks_t *c = goperl_callcks_v;
         if (reqlen < 40 || !c || req[1] == 0 || (int64_t)req[1] > c->n)
             goperl_croakf(f, "host call: no call checker for the request");
-        OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_SUBTREE);
+        OP *o = goperl_op_describe(f, req[2], GOPERL_OPDUMP_DESCRIBE);
         OP *r = c->fns[req[1] - 1](o, (GV *)GOPERL_SV(req[3]), GOPERL_SV(req[4]));
         if (r && !r->gop)
             goperl_croakf(f, "a call checker returned an op that is not the "
@@ -13242,8 +13352,8 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
             goperl_parser_push(f);
         } else {
             if (reqlen < 48) goperl_croakf(f, "host call: short infix request");
-            OP *lhs = req[4] ? goperl_op_describe(f, req[4], GOPERL_OPDUMP_SUBTREE) : 0;
-            OP *rhs = req[5] ? goperl_op_describe(f, req[5], GOPERL_OPDUMP_SUBTREE) : 0;
+            OP *lhs = req[4] ? goperl_op_describe(f, req[4], GOPERL_OPDUMP_DESCRIBE) : 0;
+            OP *rhs = req[5] ? goperl_op_describe(f, req[5], GOPERL_OPDUMP_DESCRIBE) : 0;
             o = def->build_op(&opdata, lhs, rhs, def);
             if (o && !o->gop)
                 goperl_croakf(f, "an infix operator built an op that is not the "
@@ -13764,7 +13874,7 @@ static uint64_t goperl_optok(goperl_frame_t *f, const OP *o) {
 /* The op a builder returned, and the ops it was given described again (it
  * linked them into the new one). */
 static OP *goperl_tree_op(goperl_frame_t *f, uint64_t tok) {
-    return tok ? goperl_op_describe(f, tok, GOPERL_OPDUMP_SUBTREE) : 0;
+    return tok ? goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE) : 0;
 }
 
 #define RV2CVOPCV_MARK_EARLY 0x00000001
@@ -14045,7 +14155,7 @@ static OP *goperl_newopsz(goperl_frame_t *f, size_t size) {
     e->ext = (U16)(size - sizeof(OP));
     e->op.gop = tok;
     goperl_opreg_insert(f, r, e);
-    return goperl_op_describe(f, tok, GOPERL_OPDUMP_ONE);
+    return goperl_op_describe(f, tok, GOPERL_OPDUMP_DESCRIBE);
 }
 #define NewOpSz(m, var, size) ((var) = (OP *)goperl_newopsz(_gof, (size)))
 #define NewOp(m, var, n, type) \
