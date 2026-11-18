@@ -83,7 +83,8 @@ typedef struct goperl_compiler_state {
     int32_t have_layout;
     int32_t nbuckets;
     goperl_padent_t **buckets; /* the shadows of pad structures, by address */
-    goperl_padent_t *active;   /* the ones written back */
+    goperl_padent_t *active;   /* the ones written back: those native code
+                                * has looked at (goperl_padent_fresh) */
     uint32_t gen;              /* the operations of the interpreter since the
                                 * shadows began: a shadow is up to date when
                                 * it was refreshed at this one */
@@ -412,13 +413,8 @@ static __attribute__((unused)) goperl_padent_t *goperl_padent_get(goperl_frame_t
         e->next = c->buckets[h];
         c->buckets[h] = e;
     }
-    if (!e->active) {
-        /* read when native code first looks at it */
-        e->active = 1;
-        e->active_next = c->active;
-        c->active = e;
-        e->gen = c->gen - 1;
-    }
+    /* read when native code first looks at it */
+    if (!e->active) e->gen = c->gen - 1;
     return e;
 }
 
@@ -622,7 +618,11 @@ static __attribute__((unused)) void goperl_pads_refresh(goperl_frame_t *f) {
     goperl_compiler_state_t *c = sh ? (goperl_compiler_state_t *)sh->compiler : 0;
     if (c) c->gen++;
 }
-/* A shadow native code looks at, up to date. */
+/* A shadow native code looks at, up to date. Every accessor of a pad
+ * structure comes here, so a shadow native code stores into is one it has
+ * looked at: from then on it is written back before every operation (a
+ * list's entries have shadows as soon as the list is read, and are not
+ * looked at before every operation for that). */
 static __attribute__((unused)) void *goperl_padent_fresh(goperl_frame_t *f, const void *p) {
     if (!p) return (void *)(uintptr_t)p;
     goperl_padent_t *const e = GOPERL_PADENT_OF(p);
@@ -630,6 +630,11 @@ static __attribute__((unused)) void *goperl_padent_fresh(goperl_frame_t *f, cons
     if (e->gen != c->gen) {
         e->gen = c->gen;
         goperl_padent_refresh(f, e);
+    }
+    if (!e->active) {
+        e->active = 1;
+        e->active_next = c->active;
+        c->active = e;
     }
     return (void *)(uintptr_t)p;
 }

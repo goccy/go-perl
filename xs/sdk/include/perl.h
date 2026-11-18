@@ -4083,6 +4083,7 @@ static void goperl_plshadow_flush(goperl_frame_t *f) {
 }
 
 static void goperl_ppaddr_sync(goperl_frame_t *f);
+static void goperl_ppaddr_rest(goperl_frame_t *f);
 static void goperl_hooks_sync(goperl_frame_t *f);
 static void goperl_bhk_sync(goperl_frame_t *f);
 
@@ -5168,6 +5169,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
         goperl_opreg_clear();
         goperl_pads_rest(f);
         goperl_hooks_rest(f);
+        goperl_ppaddr_rest(f);
         /* a croak path may leave the scope counter high; at rest it is 0 */
         goperl_scope_v = 0;
     }
@@ -6282,6 +6284,15 @@ static void goperl_pp_stack_push(goperl_frame_t *f);
 GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_base_v[OP_max] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) uint8_t goperl_pp_installed_v[OP_max] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_inited_v = 0;
+/* What the table held when it was last synced (goperl_ppaddr_sync): the
+ * sync before every operation compares it with the table in one memcmp,
+ * and walks the slots only when one changed. */
+GOPERL_C __attribute__((weak, visibility("hidden"))) Perl_ppaddr_t goperl_ppaddr_told_v[OP_max] = {0};
+/* The module looked at PL_ppaddr in this native call: an entry may be
+ * assigned any time until the outermost native call returns (as PL_check's,
+ * goperl_hooks_t.touched), and the table is synced before every operation
+ * until then. */
+GOPERL_C __attribute__((weak, visibility("hidden"))) int32_t goperl_ppaddr_touched_v = 0;
 
 /* An op is a shadow of the interpreter's when the registry has it under its
  * token. An op of the module's own making leaves the SDK's fields of the
@@ -6363,7 +6374,10 @@ static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
         GOPERL_PP_SLOT_INIT(goperl_ppaddr_v);
         memcpy(goperl_ppaddr_base_v, goperl_ppaddr_v,
                sizeof(goperl_ppaddr_base_v));
+        memcpy(goperl_ppaddr_told_v, goperl_ppaddr_v,
+               sizeof(goperl_ppaddr_told_v));
     }
+    goperl_ppaddr_touched_v = 1;
     return goperl_ppaddr_v;
 }
 #define PL_ppaddr (goperl_ppaddr_get(_gof))
@@ -6377,7 +6391,9 @@ static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type) {
  * pp hooks. Called from the funnel flush. Uses the raw vtable (never the
  * funnel) to avoid recursion. */
 static void goperl_ppaddr_sync(goperl_frame_t *f) {
-    if (!goperl_ppaddr_inited_v) return;
+    if (!goperl_ppaddr_touched_v ||
+        !memcmp(goperl_ppaddr_v, goperl_ppaddr_told_v, sizeof(goperl_ppaddr_told_v)))
+        return;
     for (int i = 0; i < OP_max; i++) {
         int hooked = goperl_ppaddr_v[i] != goperl_ppaddr_base_v[i];
         if (hooked && !goperl_pp_installed_v[i]) {
@@ -6388,6 +6404,13 @@ static void goperl_ppaddr_sync(goperl_frame_t *f) {
             goperl_api_pp_hook_set(f, i, 0);
         }
     }
+    memcpy(goperl_ppaddr_told_v, goperl_ppaddr_v, sizeof(goperl_ppaddr_told_v));
+}
+/* The outermost native call has returned: no expression is left that could
+ * still assign an entry. */
+static void goperl_ppaddr_rest(goperl_frame_t *f) {
+    goperl_ppaddr_sync(f);
+    goperl_ppaddr_touched_v = 0;
 }
 
 /* ---- save-stack destructors ----------------------------------------------
@@ -10548,6 +10571,17 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     if (!o->gop || !b) return;
     /* in a module's own op struct only the links it has are links */
     const int links = GOPERL_OPENT(o)->persist ? goperl_raw_links(o) : 2;
+    /* the shadows written back before an operation are every op native
+     * code holds, and most are as they were */
+    if (b->op_next == o->op_next && b->op_sibparent == o->op_sibparent &&
+        b->op_moresib == o->op_moresib && (links < 1 || b->op_first == o->op_first) &&
+        (links < 2 || (b->op_last == o->op_last && b->op_other == o->op_other)) &&
+        b->op_targ == o->op_targ && b->op_type == o->op_type && b->op_flags == o->op_flags &&
+        b->op_private == o->op_private && b->op_ppaddr == o->op_ppaddr &&
+        (!o->gop_iscop ||
+         (b->cop_line == o->cop_line && b->cop_warnings == o->cop_warnings &&
+          b->cop_hints == o->cop_hints && b->cop_features == o->cop_features.bits[0])))
+        return;
     if (b->op_next != o->op_next)
         goperl_op_setfield(f, o, GOPERL_OPF_NEXT,
                            goperl_op_link_tok(f, o->op_next));
@@ -11283,7 +11317,8 @@ static goperl_hooks_t *goperl_hooks_get(goperl_frame_t *f) {
 static void goperl_hooks_sync(goperl_frame_t *f) {
     goperl_hooks_t *h = goperl_hooks_v;
     if (!h || !h->touched) return;
-    for (int i = 0; i < OP_max; i++) {
+    /* one memcmp for the table that has not changed since it was told */
+    for (int i = memcmp(h->newop, h->newop_told, sizeof(h->newop)) ? 0 : OP_max; i < OP_max; i++) {
         if (h->newop[i] == h->newop_told[i]) continue;
         h->newop_told[i] = h->newop[i];
         goperl_xs_op(f, GOPERL_OP_HOOK, GOPERL_HOOK_NEWOP_SET,
