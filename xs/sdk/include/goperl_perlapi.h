@@ -5223,10 +5223,12 @@ static void goperl_dtor_tramp(pTHX_ void *idp) {
     const goperl_dtor_t d = goperl_dtor_v[id1 - 1];
     goperl_dtor_v[id1 - 1].used = 0;
     if (!d.used || !d.fn) return;
+    goperl_ss_raw_begin(goperl_cur_frame_v, d.raw);
     if (d.used == GOPERL_DTOR_PLAIN)
         ((void (*)(void *))(void (*)(void))d.fn)(d.arg);
     else
         d.fn(aTHX_ d.arg);
+    goperl_ss_raw_end();
 }
 /* The save stack as native code sees it: the entries below the
  * interpreter's top, each word in native code's form (goperl_ss_kinds),
@@ -5242,8 +5244,81 @@ typedef struct goperl_ssview {
     uint64_t base_g; /* the address of the interpreter's save stack then */
     uint64_t gen;    /* the generation it was loaded in */
     void *inst;      /* the instance it was loaded from */
+    int32_t raw_lo;  /* the run of raw words native code pushed with SSPUSH*
+                      * one after the other: raw_lo .. raw_hi - 1, below the
+                      * destructor to come */
+    int32_t raw_hi;
+    void *raw_inst;  /* the instance they were pushed on (none: no run) */
 } goperl_ssview_t;
 GOPERL_C __attribute__((weak, visibility("hidden"))) __thread goperl_ssview_t goperl_ssview_tl = {0};
+/* The view is given up, and the croak said: the croak's own flush does not
+ * walk it again. */
+static void goperl_ss_view_fail(goperl_frame_t *f, const char *msg) __attribute__((noreturn));
+static void goperl_ss_view_fail(goperl_frame_t *f, const char *msg) {
+    goperl_ssview_tl.inst = 0;
+    goperl_ssview_tl.raw_inst = 0;
+    goperl_croakf(f, "%s", msg);
+}
+/* Whether the run of raw words is there, on a save stack whose top is top
+ * (words popped off its top, by the destructor that reads them, leave the
+ * rest of the run). */
+static int goperl_ss_raw_live(goperl_frame_t *f, int32_t top) {
+    const goperl_ssview_t *const v = &goperl_ssview_tl;
+    return v->raw_inst && v->raw_inst == f->inst && v->raw_lo >= 0 && v->raw_lo < v->raw_hi &&
+           v->raw_lo < top;
+}
+/* Where the run ends on a save stack whose top is top (it is live). */
+static int32_t goperl_ss_raw_hi(int32_t top) {
+    const goperl_ssview_t *const v = &goperl_ssview_tl;
+    return v->raw_hi < top ? v->raw_hi : top;
+}
+/* The raw words of the run right below the word at: the data of a
+ * destructor whose group begins there. */
+static int32_t goperl_ss_raw_below(goperl_frame_t *f, int32_t at) {
+    const goperl_ssview_t *const v = &goperl_ssview_tl;
+    return goperl_ss_raw_live(f, at) && v->raw_hi == at ? v->raw_hi - v->raw_lo : 0;
+}
+/* The raw words of the run on top of the save stack. */
+static int32_t goperl_ss_raw_on_top(goperl_frame_t *f) {
+    return goperl_ss_raw_below(f, *(I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX));
+}
+static void goperl_ss_raw_end(void) { goperl_ssview_tl.raw_inst = 0; }
+/* A destructor of the host's is about to run, its n raw words on top of
+ * the save stack (the interpreter popped its group): they are the run, as
+ * it pops them. */
+static void goperl_ss_raw_begin(goperl_frame_t *f, int32_t n) {
+    goperl_ssview_t *const v = &goperl_ssview_tl;
+    if (n <= 0) {
+        v->raw_inst = 0;
+        return;
+    }
+    const int32_t top = *(I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    v->raw_lo = top - n;
+    v->raw_hi = top;
+    v->raw_inst = v->raw_lo >= 0 ? f->inst : 0;
+}
+/* A raw push (SSPUSH*): the slot above the top, which joins the run (one
+ * begins when the slot does not follow it). */
+static ANY *goperl_ss_raw_slot(goperl_frame_t *f) {
+    ANY *const ss = goperl_ss_view(f);
+    I32 *const ixp = (I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    goperl_ssview_t *const v = &goperl_ssview_tl;
+    if (!goperl_ss_raw_live(f, *ixp) || goperl_ss_raw_hi(*ixp) != *ixp) {
+        v->raw_lo = *ixp;
+        v->raw_inst = f->inst;
+    }
+    v->raw_hi = *ixp + 1;
+    return &ss[(*ixp)++];
+}
+/* The raw words below the group of a destructor of the host's, whose
+ * function word is at a (the thunk, or the trampoline as the view shows
+ * it, with the id as the argument). */
+static int32_t goperl_ss_dtor_raw(goperl_frame_t *f, const ANY *ss, int32_t a, uint64_t thunk) {
+    if (ss[a].any_uv != thunk && ss[a].any_dxptr != goperl_dtor_tramp) return 0;
+    const uint64_t id1 = ss[a + 1].any_uv;
+    if (id1 == 0 || id1 > GOPERL_DTOR_MAX || !goperl_dtor_v[id1 - 1].used) return 0;
+    return goperl_dtor_v[id1 - 1].raw;
+}
 /* The kinds of the words of the group whose type word is at t (the words
  * t - argc .. t - 1, below them the raw words of an allocation): -> the
  * index of the group's lowest word. */
@@ -5251,12 +5326,13 @@ static int32_t goperl_ss_group(goperl_frame_t *f, const ANY *ss, int32_t t, cons
     const UV uv = ss[t].any_uv;
     const U8 type = (U8)(uv & SAVE_MASK);
     if (type > SAVEt_HINTS_HH)
-        goperl_croakf(f, "the save stack has an entry of save type %u, which this perl does not have",
-                      (unsigned)type);
+        goperl_ss_view_fail(f, "the save stack has an entry of a save type this perl does not have");
     *kinds = goperl_ss_kinds[type];
     int32_t lo = t - (int32_t)strlen(*kinds);
     if (type == SAVEt_ALLOC || type == SAVEt_REGCONTEXT) lo -= (int32_t)(uv >> SAVE_TIGHT_SHIFT);
-    if (lo < 0) goperl_croakf(f, "the save stack has an entry that goes below its bottom");
+    /* a destructor of the host's has its raw words below its group */
+    if (type == SAVEt_DESTRUCTOR_X && lo >= 0) lo -= goperl_ss_dtor_raw(f, ss, lo, goperl_dtor_thunk_addr(f));
+    if (lo < 0) goperl_ss_view_fail(f, "the save stack has an entry that goes below its bottom");
     return lo;
 }
 static ANY *goperl_ss_view(goperl_frame_t *f) {
@@ -5268,7 +5344,7 @@ static ANY *goperl_ss_view(goperl_frame_t *f) {
     const int32_t max = (int32_t)(int64_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SAVESTACK_MAX, 0, 0, 0);
     const int32_t n = (int32_t)(int64_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SAVESTACK_IX, 0, 0, 0);
     const int32_t cap = max + 1 + SS_MAXPUSH;
-    if (!base || n < 0 || n > cap) goperl_croakf(f, "the interpreter did not give its save stack");
+    if (!base || n < 0 || n > cap) goperl_ss_view_fail(f, "the interpreter did not give its save stack");
     if (cap > v->cap) {
         ANY *const nv = (ANY *)realloc(v->view, sizeof(ANY) * (size_t)cap);
         if (!nv) goperl_croakf(f, "Out of memory!");
@@ -5281,9 +5357,15 @@ static ANY *goperl_ss_view(goperl_frame_t *f) {
     ANY *const ss = v->view;
     memcpy(ss, goperl_guest_mem(f, base), sizeof(ANY) * (size_t)n);
     memset(ss + n, 0, sizeof(ANY) * (size_t)(v->cap - n));
-    /* each group from the top down, its words in native code's form */
+    /* each group from the top down, its words in native code's form; the
+     * raw words of the run are as they are */
     const uint64_t thunk = goperl_dtor_thunk_addr(f);
+    const int32_t rawhi = goperl_ss_raw_live(f, n) ? goperl_ss_raw_hi(n) : -1;
     for (int32_t t = n - 1; t >= 0;) {
+        if (t == rawhi - 1) {
+            t = v->raw_lo - 1;
+            continue;
+        }
         const char *kinds;
         const int32_t lo = goperl_ss_group(f, ss, t, &kinds);
         const int32_t a = t - (int32_t)strlen(kinds);
@@ -5309,8 +5391,8 @@ static uint64_t goperl_ss_addr_out(goperl_frame_t *f, const void *p) {
     if (!p) return 0;
     const uint64_t g = goperl_guest_addr(f, p);
     if (!g)
-        goperl_croakf(f, "an entry of the save stack was given a pointer that is not in the "
-                         "interpreter's memory, where the interpreter cannot reach it");
+        goperl_ss_view_fail(f, "an entry of the save stack was given a pointer that is not in the "
+                               "interpreter's memory, where the interpreter cannot reach it");
     return g;
 }
 /* What native code wrote into the save stack goes to the interpreter
@@ -5323,7 +5405,7 @@ static void goperl_ss_view_flush(goperl_frame_t *f) {
     if (!v->view || v->inst != f->inst || v->gen != goperl_gen_v) return;
     const goperl_plshadow_t *const s = &goperl_plshadow_v[GOPERL_PL_SAVESTACK_IX];
     const int32_t top = s->live ? (int32_t)(int64_t)s->val : v->n;
-    if (top < 0 || top > v->cap) goperl_croakf(f, "PL_savestack_ix is beyond the save stack");
+    if (top < 0 || top > v->cap) goperl_ss_view_fail(f, "PL_savestack_ix is beyond the save stack");
     int32_t low = top;
     for (int32_t i = 0; i < top; i++)
         if (i >= v->n || memcmp(&v->view[i], &v->conv[i], sizeof(ANY))) {
@@ -5334,7 +5416,17 @@ static void goperl_ss_view_flush(goperl_frame_t *f) {
     ANY *const ss = v->view;
     uint64_t *const g = (uint64_t *)goperl_guest_mem(f, v->base_g);
     const uint64_t thunk = goperl_dtor_thunk_addr(f);
+    const int32_t rawhi = goperl_ss_raw_live(f, top) ? goperl_ss_raw_hi(top) : -1;
     for (int32_t t = top - 1; t >= low;) {
+        if (t == rawhi - 1) {
+            /* the raw words of a destructor to come, as they are */
+            for (int32_t i = (v->raw_lo > low ? v->raw_lo : low); i <= t; i++) {
+                g[i] = ss[i].any_uv;
+                v->conv[i] = ss[i];
+            }
+            t = v->raw_lo - 1;
+            continue;
+        }
         const char *kinds;
         const int32_t lo = goperl_ss_group(f, ss, t, &kinds);
         const int32_t a = t - (int32_t)strlen(kinds);
@@ -5359,11 +5451,14 @@ static void goperl_ss_view_flush(goperl_frame_t *f) {
                         const int32_t j = (goperl_dtor_hint_v + k) % GOPERL_DTOR_MAX;
                         if (!goperl_dtor_v[j].used) id = j;
                     }
-                    if (id < 0) goperl_croakf(f, "save_destructor_x: destructor table full");
+                    if (id < 0) goperl_ss_view_fail(f, "save_destructor_x: destructor table full");
                     goperl_dtor_hint_v = id + 1;
                     goperl_dtor_v[id].fn = fn;
                     goperl_dtor_v[id].arg = arg;
                     goperl_dtor_v[id].used = GOPERL_DTOR_X;
+                    /* the raw words right below are its data */
+                    goperl_dtor_v[id].raw = goperl_ss_raw_below(f, fi);
+                    if (goperl_dtor_v[id].raw) goperl_ss_raw_end();
                     gf = thunk;
                     ga = (uint64_t)(id + 1);
                     ss[fi].any_dxptr = goperl_dtor_tramp;
@@ -5397,14 +5492,14 @@ static void goperl_ss_view_flush(goperl_frame_t *f) {
 #define SS_ADD_DPTR(p) ((ssp++)->any_dptr = (p))
 #define SS_ADD_DXPTR(p) ((ssp++)->any_dxptr = (p))
 #define SS_ADD_END(need) (ix += (need), PL_savestack_ix = ix)
-#define SSPUSHINT(i) (PL_savestack[PL_savestack_ix++].any_i32 = (I32)(i))
-#define SSPUSHLONG(i) (PL_savestack[PL_savestack_ix++].any_long = (long)(i))
-#define SSPUSHBOOL(p) (PL_savestack[PL_savestack_ix++].any_bool = (p))
-#define SSPUSHIV(i) (PL_savestack[PL_savestack_ix++].any_iv = (IV)(i))
-#define SSPUSHUV(u) (PL_savestack[PL_savestack_ix++].any_uv = (UV)(u))
-#define SSPUSHPTR(p) (PL_savestack[PL_savestack_ix++].any_ptr = (void *)(p))
-#define SSPUSHDPTR(p) (PL_savestack[PL_savestack_ix++].any_dptr = (p))
-#define SSPUSHDXPTR(p) (PL_savestack[PL_savestack_ix++].any_dxptr = (p))
+#define SSPUSHINT(i) (goperl_ss_raw_slot(_gof)->any_i32 = (I32)(i))
+#define SSPUSHLONG(i) (goperl_ss_raw_slot(_gof)->any_long = (long)(i))
+#define SSPUSHBOOL(p) (goperl_ss_raw_slot(_gof)->any_bool = (p))
+#define SSPUSHIV(i) (goperl_ss_raw_slot(_gof)->any_iv = (IV)(i))
+#define SSPUSHUV(u) (goperl_ss_raw_slot(_gof)->any_uv = (UV)(u))
+#define SSPUSHPTR(p) (goperl_ss_raw_slot(_gof)->any_ptr = (void *)(p))
+#define SSPUSHDPTR(p) (goperl_ss_raw_slot(_gof)->any_dptr = (p))
+#define SSPUSHDXPTR(p) (goperl_ss_raw_slot(_gof)->any_dxptr = (p))
 #define SSPOPINT (PL_savestack[--PL_savestack_ix].any_i32)
 #define SSPOPLONG (PL_savestack[--PL_savestack_ix].any_long)
 #define SSPOPBOOL (PL_savestack[--PL_savestack_ix].any_bool)
