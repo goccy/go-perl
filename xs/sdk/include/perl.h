@@ -2269,6 +2269,9 @@ typedef struct goperl_shared {
                       * (goperl_compiler.h) */
     void *pio_layers; /* goperl_pio_reg_t (perliol.h): the structs of layers
                        * of native code's, behind goperl_pio_layers_head_t */
+    void *mro_metas; /* goperl_mrometa_t: the copies of the interpreter's
+                      * mro metas HvMROMETA gave in this call of native code,
+                      * in the arena */
 } goperl_shared_t;
 /* Copies made in one call of native code, found by the interpreter's
  * address of what they copy: chains of them, each copy beginning with the
@@ -4671,6 +4674,7 @@ static void goperl_ppaddr_sync(goperl_frame_t *f);
 static void goperl_ppaddr_rest(goperl_frame_t *f);
 static void goperl_ss_view_flush(goperl_frame_t *f);
 static void goperl_plop_writeback(goperl_frame_t *f);
+static void goperl_mrometa_flush(goperl_frame_t *f);
 static void goperl_plop_refresh(goperl_frame_t *f);
 static void goperl_magic_taken_rest(void);
 static void goperl_hooks_sync(goperl_frame_t *f);
@@ -4821,6 +4825,7 @@ static void goperl_flush(goperl_frame_t *f) {
                                 0, 0);
     }
     goperl_ss_view_flush(f);
+    if (GOPERL_SHARED->mro_metas) goperl_mrometa_flush(f);
     if (f->plop != f->plop_base) goperl_plop_writeback(f);
     goperl_plshadow_flush(f);
     goperl_lvslot_flush(f);
@@ -7941,6 +7946,7 @@ static void goperl_arena_free_all(void) {
     GOPERL_SHARED->rx_bodies = 0; /* so were they */
     GOPERL_SHARED->mg_found = 0;  /* and the copies mg_find made */
     GOPERL_SHARED->hv_arrays = 0; /* and the arrays HvARRAY gave */
+    GOPERL_SHARED->mro_metas = 0; /* and the copies of mro metas */
     /* and so may the chain SvMAGIC showed be (its copies of the
      * interpreter's magic): the slot was written back before */
     GOPERL_SHARED->svmagic_sv = 0;
@@ -8918,14 +8924,33 @@ static HV *goperl_gv_stashsv(goperl_frame_t *f, SV *name, I32 flags) {
 #define SvAMAGIC_off(sv) \
     ((void)goperl_op0(GOPERL_OP_SV_AMAGIC_SET, GOPERL_TOK(sv), 0))
 
-/* The mro generations of a stash, read the way Moose's mop.c reads one
- * (HvAUX(stash)->xhv_mro_meta->pkg_gen) and the way DBI reads the other
- * (HvMROMETA(stash)->cache_gen, which says whether a method it looked up
- * and kept is still the one the stash resolves to). Only these chains are
- * modeled: a scratch one-deep view refreshed from the guest on every call. */
+/* The method resolution order of a stash (hv.h): the algorithm's name, and
+ * resolve, a function of this process that has the interpreter run the
+ * algorithm's own (next::XS asks the c3 one for the linearized @ISA). */
+struct mro_alg {
+    AV *(*resolve)(pTHX_ HV *stash, U32 level);
+    const char *name;
+    U16 length;
+    U16 kflags;
+    U32 hash;
+};
+/* The mro data of a stash (hv.h), as the interpreter has it in its memory:
+ * the generations (Moose's mop.c reads HvAUX(stash)->xhv_mro_meta->pkg_gen,
+ * DBI HvMROMETA(stash)->cache_gen), the caches (next::XS keeps its own in
+ * mro_nextmethod, which it makes), and the algorithm in use. A copy of it
+ * for each stash in a call of native code (goperl_mrometa_t): what native
+ * code assigns is written back before the next operation. */
 struct mro_meta {
-    U32 pkg_gen;
+    HV *mro_linear_all;
+    SV *mro_linear_current;
+    HV *mro_nextmethod;
     U32 cache_gen;
+    U32 pkg_gen;
+    const struct mro_alg *mro_which;
+    HV *isa;
+    HV *super;
+    CV *destroy;
+    U32 destroy_gen;
 };
 /* the interpreter randomizes the order of a hash's keys (hv.h) */
 #define PERL_HASH_RANDOMIZE_KEYS 1
@@ -8939,19 +8964,11 @@ struct xpvhv_aux {
     U32 xhv_last_rand; /* the value before the last split */
 };
 static struct {
-    struct mro_meta meta;
     struct xpvhv_aux aux;
 } goperl_hvaux_v;
+static struct mro_meta *goperl_mrometa_of(goperl_frame_t *f, HV *hv, int make);
 static struct xpvhv_aux *goperl_hvaux(goperl_frame_t *f, HV *hv) {
-    uint64_t r = goperl_do_op(f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 0, 0, 0);
-    if (r >> 32) {
-        goperl_hvaux_v.meta.pkg_gen = (U32)r;
-        goperl_hvaux_v.meta.cache_gen = (U32)goperl_do_op(
-            f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 1, 0, 0);
-        goperl_hvaux_v.aux.xhv_mro_meta = &goperl_hvaux_v.meta;
-    } else {
-        goperl_hvaux_v.aux.xhv_mro_meta = 0;
-    }
+    goperl_hvaux_v.aux.xhv_mro_meta = goperl_mrometa_of(f, hv, 0);
     /* FIELD 1 and 2: the back references and the iterator position */
     goperl_hvaux_v.aux.xhv_backreferences = (AV *)GOPERL_SV(goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(1), 0, 0));
     goperl_hvaux_v.aux.xhv_riter = (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_FIELD, GOPERL_TOK(hv), 0, (uint64_t)(2), 0, 0);
@@ -8961,14 +8978,152 @@ static struct xpvhv_aux *goperl_hvaux(goperl_frame_t *f, HV *hv) {
     return &goperl_hvaux_v.aux;
 }
 #define HvAUX(hv) goperl_hvaux(_gof, (HV *)(hv))
-/* HvMROMETA never returns NULL in core: a stash without the meta gets one. */
-static struct mro_meta *goperl_hvmrometa(goperl_frame_t *f, HV *hv) {
-    uint64_t r = goperl_do_op(f, GOPERL_OP_HV_PKG_GEN, GOPERL_TOK(hv), 1, 0, 0);
-    goperl_hvaux_v.meta.pkg_gen = (U32)(r >> 32);
-    goperl_hvaux_v.meta.cache_gen = (U32)r;
-    return &goperl_hvaux_v.meta;
+/* ---- the mro data of a stash ------------------------------------------------
+ * INTERNAL MROMETA gives where the interpreter has a stash's struct
+ * mro_meta (making it, as HvMROMETA does, or not: HvAUX's xhv_mro_meta);
+ * its words are copied here as they are (an SV there is its token, which
+ * is what an SV* is here) but mro_which, which is the algorithm's view
+ * (goperl_mroalg_view). Copies are kept for the call, one for each meta,
+ * and what native code assigned is written back before every operation. */
+#define GOPERL_INT_MROMETA 46     /* a: a stash, b: 1 to make the meta -> its address */
+#define GOPERL_INT_MRO_RESOLVE 47 /* a: a stash, b: an algorithm's address, high
+                                   * half of c: the level -> the AV it resolves */
+#define GOPERL_INT_MRO_BY_NAME 48 /* a: a name SV -> the algorithm's address, or 0 */
+#define GOPERL_MROALG_MAX 8
+typedef struct goperl_mroalg_view {
+    struct mro_alg alg;
+    uint64_t g; /* the algorithm's address in the interpreter, set last */
+} goperl_mroalg_view_t;
+/* one table for the module's every file (hidden: another module has its own) */
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_mroalg_view_t goperl_mroalgs_g[GOPERL_MROALG_MAX] = {{{0, 0, 0, 0, 0}, 0}};
+GOPERL_C __attribute__((weak, visibility("hidden"))) int goperl_mroalgs_lock_v = 0;
+static AV *goperl_mro_resolve_at(int i, HV *stash, U32 level) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    /* (GOPERL_INTERNAL_HI, which goperl_compiler.h defines after this) */
+    return (AV *)GOPERL_SV(goperl_do_op3(f, GOPERL_OP_INTERNAL, GOPERL_TOK(stash), goperl_mroalgs_g[i].g,
+                                         (uint64_t)GOPERL_INT_MRO_RESOLVE | ((uint64_t)level << 32), 0, 0));
 }
-#define HvMROMETA(hv) goperl_hvmrometa(_gof, (HV *)(hv))
+#define GOPERL_MRO_RESOLVE_FN(i) \
+    static AV *goperl_mro_resolve_##i(pTHX_ HV *stash, U32 level) { return goperl_mro_resolve_at(i, stash, level); }
+GOPERL_MRO_RESOLVE_FN(0) GOPERL_MRO_RESOLVE_FN(1) GOPERL_MRO_RESOLVE_FN(2) GOPERL_MRO_RESOLVE_FN(3)
+GOPERL_MRO_RESOLVE_FN(4) GOPERL_MRO_RESOLVE_FN(5) GOPERL_MRO_RESOLVE_FN(6) GOPERL_MRO_RESOLVE_FN(7)
+/* The view of the algorithm at g in the interpreter's memory (struct
+ * mro_alg there: resolve, name, length, kflags, hash), made once for each
+ * algorithm. The algorithms are the interpreter's static data (dfs and
+ * c3), at the same address in every instance, a forked one's too; resolve
+ * runs in the instance of the call it is made in. The name is copied, so
+ * the view outlives the instance it was made in. Views are made under a
+ * lock, and found by g, which is stored last. */
+static const struct mro_alg *goperl_mroalg_view(goperl_frame_t *f, uint64_t g) {
+    static AV *(*const fns[GOPERL_MROALG_MAX])(pTHX_ HV *, U32) = {
+        goperl_mro_resolve_0, goperl_mro_resolve_1, goperl_mro_resolve_2, goperl_mro_resolve_3,
+        goperl_mro_resolve_4, goperl_mro_resolve_5, goperl_mro_resolve_6, goperl_mro_resolve_7};
+    if (!g) return 0;
+    for (int i = 0; i < GOPERL_MROALG_MAX; i++)
+        if (__atomic_load_n(&goperl_mroalgs_g[i].g, __ATOMIC_ACQUIRE) == g)
+            return &goperl_mroalgs_g[i].alg;
+    while (__atomic_exchange_n(&goperl_mroalgs_lock_v, 1, __ATOMIC_ACQUIRE)) {
+    }
+    int at = -1;
+    for (int i = 0; i < GOPERL_MROALG_MAX; i++) {
+        const uint64_t have = goperl_mroalgs_g[i].g;
+        if (have == g) {
+            __atomic_store_n(&goperl_mroalgs_lock_v, 0, __ATOMIC_RELEASE);
+            return &goperl_mroalgs_g[i].alg;
+        }
+        if (!have && at < 0) at = i;
+    }
+    const uint8_t *const w = (const uint8_t *)goperl_guest_mem(f, g);
+    uint64_t name;
+    U16 length;
+    memcpy(&name, w + 8, 8);
+    memcpy(&length, w + 16, 2);
+    char *const copy = at < 0 ? 0 : (char *)malloc((size_t)length + 1);
+    if (!copy) {
+        __atomic_store_n(&goperl_mroalgs_lock_v, 0, __ATOMIC_RELEASE);
+        if (at < 0) goperl_croakf(f, "more method resolution orders than go-perl keeps views of");
+        goperl_croakf(f, "Out of memory!");
+    }
+    if (name) memcpy(copy, goperl_guest_mem(f, name), length);
+    copy[length] = 0;
+    goperl_mroalg_view_t *const v = &goperl_mroalgs_g[at];
+    v->alg.resolve = fns[at];
+    v->alg.name = copy;
+    v->alg.length = length;
+    memcpy(&v->alg.kflags, w + 18, 2);
+    memcpy(&v->alg.hash, w + 20, 4);
+    __atomic_store_n(&v->g, g, __ATOMIC_RELEASE);
+    __atomic_store_n(&goperl_mroalgs_lock_v, 0, __ATOMIC_RELEASE);
+    return &v->alg;
+}
+/* Perl_mro_get_from_name: the registered algorithm of that name */
+static const struct mro_alg *goperl_mro_get_from_name(goperl_frame_t *f, SV *name) {
+    return goperl_mroalg_view(f, goperl_do_op3(f, GOPERL_OP_INTERNAL, GOPERL_TOK(name), 0,
+                                               GOPERL_INT_MRO_BY_NAME, 0, 0));
+}
+#define Perl_mro_get_from_name(name) goperl_mro_get_from_name(_gof, (SV *)(name))
+#define mro_get_from_name(name) goperl_mro_get_from_name(_gof, (SV *)(name))
+typedef struct goperl_mrometa {
+    struct mro_meta meta; /* what native code sees */
+    struct mro_meta base; /* as it was read */
+    uint64_t g;           /* where the interpreter has it */
+    struct goperl_mrometa *next;
+} goperl_mrometa_t;
+/* the guest's struct mro_meta is this one's layout, word for word */
+typedef char goperl_mrometa_layout[sizeof(struct mro_meta) == 72 ? 1 : -1] __attribute__((unused));
+static void goperl_mrometa_read(goperl_frame_t *f, goperl_mrometa_t *m) {
+    memcpy(&m->meta, goperl_guest_mem(f, m->g), sizeof(struct mro_meta));
+    uint64_t which;
+    memcpy(&which, (const uint8_t *)goperl_guest_mem(f, m->g) + offsetof(struct mro_meta, mro_which), 8);
+    m->meta.mro_which = goperl_mroalg_view(f, which);
+    m->base = m->meta;
+}
+/* What native code assigned to a copy, into the interpreter's meta: the
+ * words that differ from what was read. */
+static void goperl_mrometa_write(goperl_frame_t *f, goperl_mrometa_t *m) {
+    if (!memcmp(&m->meta, &m->base, sizeof(struct mro_meta))) return;
+    uint8_t *const g = (uint8_t *)goperl_guest_mem(f, m->g);
+    const uint8_t *const now = (const uint8_t *)&m->meta, *const was = (const uint8_t *)&m->base;
+    for (size_t o = 0; o < sizeof(struct mro_meta); o += 8) {
+        if (!memcmp(now + o, was + o, 8)) continue;
+        if (o == offsetof(struct mro_meta, mro_which)) {
+            uint64_t w = 0;
+            for (int i = 0; i < GOPERL_MROALG_MAX && m->meta.mro_which; i++)
+                if (&goperl_mroalgs_g[i].alg == m->meta.mro_which) w = goperl_mroalgs_g[i].g;
+            if (m->meta.mro_which && !w)
+                goperl_croakf(f, "mro_which of a stash was given an algorithm that is not the "
+                                 "interpreter's: register it with mro_register");
+            memcpy(g + o, &w, 8);
+        } else {
+            memcpy(g + o, now + o, 8);
+        }
+    }
+    m->base = m->meta;
+}
+static void goperl_mrometa_flush(goperl_frame_t *f) {
+    for (goperl_mrometa_t *m = (goperl_mrometa_t *)GOPERL_SHARED->mro_metas; m; m = m->next)
+        goperl_mrometa_write(f, m);
+}
+/* HvMROMETA (make 1: a stash without the meta gets one, as in core) and
+ * HvAUX's xhv_mro_meta (make 0: NULL for a stash without one) */
+static struct mro_meta *goperl_mrometa_of(goperl_frame_t *f, HV *hv, int make) {
+    goperl_flush(f);
+    const uint64_t g =
+        goperl_do_op3(f, GOPERL_OP_INTERNAL, GOPERL_TOK(hv), (uint64_t)make, GOPERL_INT_MROMETA, 0, 0);
+    if (!g) return 0;
+    goperl_mrometa_t *m = (goperl_mrometa_t *)GOPERL_SHARED->mro_metas;
+    while (m && m->g != g) m = m->next;
+    if (!m) {
+        m = (goperl_mrometa_t *)goperl_arena_alloc(sizeof(goperl_mrometa_t));
+        if (!m) goperl_croakf(f, "Out of memory!");
+        m->g = g;
+        m->next = (goperl_mrometa_t *)GOPERL_SHARED->mro_metas;
+        GOPERL_SHARED->mro_metas = m;
+    }
+    goperl_mrometa_read(f, m);
+    return &m->meta;
+}
+#define HvMROMETA(hv) goperl_mrometa_of(_gof, (HV *)(hv), 1)
 
 /* The hash of a key, as the keys of the interpreter's hashes have it
  * (HeHASH, HEK_HASH, SvSHARED_HASH): a module compares one it computed with
