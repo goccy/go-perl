@@ -4641,18 +4641,21 @@ static void goperl_mini_mktime(struct tm *ptm) {
 #undef PL_tmps_floor
 #define PL_tmps_floor (*(SSize_t *)goperl_plint_ref(_gof, GOPERL_PL_TMPS_FLOOR))
 
-/* ---- the save stack and the temporaries stack, where they are ------------
- * Their entries are the interpreter's words in its memory, read and written
- * in place: an SV, an array, a pad there is its token, which is what an SV*
- * is here; a function pointer of an entry is the interpreter's (a
- * destructor, a save of native code's own, is the interpreter's trampoline
- * with the native function's number), to be copied, not called; an op
- * pointer is the interpreter's address of the op, not a shadow of it.
- * Native code that takes entries off (PL_savestack_ix -= n) or puts them
- * on (dSS_ADD ... SS_ADD_END) moves the index, which is an lvalue written
- * back before the next operation. Room is the interpreter's to make (the
- * stacks move when they grow): SSCHECK and EXTEND_MORTAL, and dSS_ADD for
- * the SS_MAXPUSH entries perl keeps spare above the top. */
+/* ---- the save stack and the temporaries stack -----------------------------
+ * The temporaries stack is the interpreter's array of SV tokens, read and
+ * written in place. The save stack's entries are shown in native code's
+ * pointers (see goperl_ss_view): an SV, an array, a pad is its token, which
+ * is what an SV* is here; a location a save names, or a string, is the
+ * address of the interpreter's memory as this process has it, so that it
+ * compares with PL_curpad and SvPVX; a destructor of native code's is a
+ * function native code may call (goperl_dtor_tramp), which runs it; an op,
+ * a COP or a function of the interpreter's stays the interpreter's
+ * address. Native code that takes entries off (PL_savestack_ix -= n) or
+ * puts them on (dSS_ADD ... SS_ADD_END) moves the index, which is an
+ * lvalue written back before the next operation, as the entries it wrote
+ * are. Room is the interpreter's to make (the stacks move when they grow):
+ * SSCHECK and EXTEND_MORTAL, and dSS_ADD for the SS_MAXPUSH entries perl
+ * keeps spare above the top. */
 #define GOPERL_PL_SAVESTACK_ADDR 119
 #define GOPERL_PL_TMPS_STACK_ADDR 120
 #define GOPERL_PL_SAVESTACK_MAX 121
@@ -4691,17 +4694,17 @@ static OP **goperl_restartop_ref(goperl_frame_t *f) {
 #define PL_savestack_ix (*(I32 *)goperl_plint_ref(_gof, GOPERL_PL_SAVESTACK_IX))
 #undef PL_tmps_ix
 #define PL_tmps_ix (*(SSize_t *)goperl_plint_ref(_gof, GOPERL_PL_TMPS_IX))
-#define PL_savestack ((ANY *)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_SAVESTACK_ADDR)))
+static ANY *goperl_ss_view(goperl_frame_t *f);
+#define PL_savestack (goperl_ss_view(_gof))
 #define PL_savestack_max ((I32)(int64_t)GOPERL_PLVAR(GOPERL_PL_SAVESTACK_MAX))
 #define PL_tmps_stack ((SV **)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_TMPS_STACK_ADDR)))
 #define PL_tmps_max ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_MAX))
 #define CATCH_GET (GOPERL_PLVAR(GOPERL_PL_CATCH) != 0)
 /* room for n entries above the top of the save stack (and the SS_MAXPUSH
- * spare ones perl keeps above it) */
+ * spare ones perl keeps above it); -> the save stack as native code sees it */
 static ANY *goperl_ss_room(goperl_frame_t *f, int n) {
-    return (ANY *)goperl_guest_mem(
-        f, goperl_do_op3(f, GOPERL_OP_CALL, 0, (uint64_t)(int64_t)n,
-                         (uint64_t)GOPERL_CALL_SS_ROOM, 0, 0));
+    (void)goperl_do_op3(f, GOPERL_OP_CALL, 0, (uint64_t)(int64_t)n, (uint64_t)GOPERL_CALL_SS_ROOM, 0, 0);
+    return goperl_ss_view(f);
 }
 #define SSCHECK(need) ((void)goperl_ss_room(_gof, (int)(need)))
 #define SSGROW(need) SSCHECK(need)
@@ -4773,6 +4776,209 @@ static ANY *goperl_ss_room(goperl_frame_t *f, int n) {
 #define SAVEt_AELEM 58
 #define SAVEt_DELETE 59
 #define SAVEt_HINTS_HH 60
+/* The words of each save type below its type word, the arguments in the
+ * order perl pushes them (scope.c): R as it is (an integer, the token of an
+ * SV, an array, a hash, a glob or a pad; an op, a COP, a parser, a
+ * refcounted_he, a function of the interpreter's, a value of no known
+ * kind), A an address of the interpreter's memory (a location saved, a
+ * string), F and P a destructor's function and its argument. SAVEt_ALLOC
+ * and SAVEt_REGCONTEXT have as many raw words below the type word as it
+ * says above SAVE_TIGHT_SHIFT. */
+static const char *const goperl_ss_kinds[61] = {
+    "", "", "", "", "",                /* ALLOC CLEARPADRANGE CLEARSV REGCONTEXT PADSV_NULL */
+    "R", "A", "A", "A", "R",           /* TMPSFLOOR BOOL COMPILE_WARNINGS CURCOP_WARNINGS COMPPAD */
+    "R", "R", "A", "R", "A",           /* FREECOPHH FREEOP FREEPV FREESV I16 */
+    "A", "A", "A", "R", "R",           /* I32_SMALL I8 INT_SMALL MORTALIZESV NSTAB */
+    "R", "R", "R", "R", "R",           /* OP PARSER STACK_POS READONLY_OFF FREEPADNAME */
+    "A", "A", "R", "R",                /* STRLEN_SMALL FREERCPV FREE_REXC_STATE PADSV */
+    "RR", "RR", "FP", "AA", "AR",      /* AV DESTRUCTOR DESTRUCTOR_X GENERIC_PVREF GENERIC_SVREF */
+    "RR", "RR", "RR", "RA", "RR",      /* GP GVSV HINTS HPTR HV */
+    "RA", "RA", "RR", "RA", "AA",      /* I32 INT ITEM IV PPTR */
+    "RR", "AA", "RA", "RA", "RR",      /* SAVESWITCHSTACK SHARED_PVREF SPTR STRLEN SV */
+    "AR", "RA", "RR", "RA", "AA",      /* SVREF VPTR ADELETE APTR RCPV */
+    "RRR", "RRR", "RRR", "RAR", "RRR", /* HELEM PADSV_AND_MORTALIZE SET_SVFLAGS GVSLOT AELEM */
+    "ARR", "RRR"                       /* DELETE HINTS_HH */
+};
+/* The function the interpreter's save stack names for a destructor of the
+ * host's, with the id (1-based) as the argument (perl-wasm PLVAR 130). Its
+ * address is the interpreter's binary's, the same in every instance. */
+#define GOPERL_PL_DTOR_THUNK 130
+static uint64_t goperl_dtor_thunk_addr(goperl_frame_t *f) {
+    static uint64_t addr;
+    if (!addr) addr = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)GOPERL_PL_DTOR_THUNK, 0, 0, 0);
+    return addr;
+}
+/* A destructor of the host's as native code that reads it off the save
+ * stack sees it: called with the id, it runs the destructor and gives the
+ * id up, as the interpreter's call of the thunk does when the scope ends
+ * (Future::AsyncAwait runs the finally block of a sub it cancels so); put
+ * on the save stack again, it is the thunk with the id. */
+static void goperl_dtor_tramp(pTHX_ void *idp) {
+    const uint32_t id1 = (uint32_t)(uintptr_t)idp;
+    if (id1 == 0 || id1 > GOPERL_DTOR_MAX) return;
+    const goperl_dtor_t d = goperl_dtor_v[id1 - 1];
+    goperl_dtor_v[id1 - 1].used = 0;
+    if (!d.used || !d.fn) return;
+    if (d.used == GOPERL_DTOR_PLAIN)
+        ((void (*)(void *))(void (*)(void))d.fn)(d.arg);
+    else
+        d.fn(aTHX_ d.arg);
+}
+/* The save stack as native code sees it: the entries below the
+ * interpreter's top, each word in native code's form (goperl_ss_kinds),
+ * read when native code first looks at the save stack after an operation,
+ * and what it was then, for the write-back before the next operation. One
+ * for each thread of the module's files (a weak, hidden definition each
+ * file has, which the link makes one). */
+typedef struct goperl_ssview {
+    ANY *view;       /* the entries in native code's form, room for cap */
+    ANY *conv;       /* the same as loaded */
+    int32_t cap;
+    int32_t n;       /* the interpreter's PL_savestack_ix when loaded */
+    uint64_t base_g; /* the address of the interpreter's save stack then */
+    uint64_t gen;    /* the generation it was loaded in */
+    void *inst;      /* the instance it was loaded from */
+} goperl_ssview_t;
+GOPERL_C __attribute__((weak, visibility("hidden"))) __thread goperl_ssview_t goperl_ssview_tl = {0};
+/* The kinds of the words of the group whose type word is at t (the words
+ * t - argc .. t - 1, below them the raw words of an allocation): -> the
+ * index of the group's lowest word. */
+static int32_t goperl_ss_group(goperl_frame_t *f, const ANY *ss, int32_t t, const char **kinds) {
+    const UV uv = ss[t].any_uv;
+    const U8 type = (U8)(uv & SAVE_MASK);
+    if (type > SAVEt_HINTS_HH)
+        goperl_croakf(f, "the save stack has an entry of save type %u, which this perl does not have",
+                      (unsigned)type);
+    *kinds = goperl_ss_kinds[type];
+    int32_t lo = t - (int32_t)strlen(*kinds);
+    if (type == SAVEt_ALLOC || type == SAVEt_REGCONTEXT) lo -= (int32_t)(uv >> SAVE_TIGHT_SHIFT);
+    if (lo < 0) goperl_croakf(f, "the save stack has an entry that goes below its bottom");
+    return lo;
+}
+static ANY *goperl_ss_view(goperl_frame_t *f) {
+    goperl_ssview_t *const v = &goperl_ssview_tl;
+    if (v->view && v->inst == f->inst && v->gen == goperl_gen_v) return v->view;
+    /* not operations of the funnel: nothing is to be written back now, and
+     * the generation stays */
+    const uint64_t base = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SAVESTACK_ADDR, 0, 0, 0);
+    const int32_t max = (int32_t)(int64_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SAVESTACK_MAX, 0, 0, 0);
+    const int32_t n = (int32_t)(int64_t)goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_SAVESTACK_IX, 0, 0, 0);
+    const int32_t cap = max + 1 + SS_MAXPUSH;
+    if (!base || n < 0 || n > cap) goperl_croakf(f, "the interpreter did not give its save stack");
+    if (cap > v->cap) {
+        ANY *const nv = (ANY *)realloc(v->view, sizeof(ANY) * (size_t)cap);
+        if (!nv) goperl_croakf(f, "Out of memory!");
+        v->view = nv;
+        ANY *const nc = (ANY *)realloc(v->conv, sizeof(ANY) * (size_t)cap);
+        if (!nc) goperl_croakf(f, "Out of memory!");
+        v->conv = nc;
+        v->cap = cap;
+    }
+    ANY *const ss = v->view;
+    memcpy(ss, goperl_guest_mem(f, base), sizeof(ANY) * (size_t)n);
+    memset(ss + n, 0, sizeof(ANY) * (size_t)(v->cap - n));
+    /* each group from the top down, its words in native code's form */
+    const uint64_t thunk = goperl_dtor_thunk_addr(f);
+    for (int32_t t = n - 1; t >= 0;) {
+        const char *kinds;
+        const int32_t lo = goperl_ss_group(f, ss, t, &kinds);
+        const int32_t a = t - (int32_t)strlen(kinds);
+        for (int32_t k = 0; kinds[k]; k++) {
+            ANY *const e = &ss[a + k];
+            if (kinds[k] == 'A' && e->any_uv)
+                e->any_ptr = (void *)(f->membase + e->any_uv);
+            else if (kinds[k] == 'F' && e->any_uv == thunk)
+                e->any_dxptr = goperl_dtor_tramp;
+        }
+        t = lo - 1;
+    }
+    memcpy(v->conv, ss, sizeof(ANY) * (size_t)v->cap);
+    v->n = n;
+    v->base_g = base;
+    v->gen = goperl_gen_v;
+    v->inst = f->inst;
+    return ss;
+}
+/* An address of the interpreter's memory in a word of the save stack, as
+ * the interpreter has it. */
+static uint64_t goperl_ss_addr_out(goperl_frame_t *f, const void *p) {
+    if (!p) return 0;
+    const uint64_t g = goperl_guest_addr(f, p);
+    if (!g)
+        goperl_croakf(f, "an entry of the save stack was given a pointer that is not in the "
+                         "interpreter's memory, where the interpreter cannot reach it");
+    return g;
+}
+/* What native code wrote into the save stack goes to the interpreter
+ * (before every operation, goperl_flush): the words that differ from what
+ * was loaded, and every word between the top it was loaded with and the top
+ * native code moved it to, each in the interpreter's form. A destructor of
+ * native code's own pushed raw is registered as save_destructor_x does. */
+static void goperl_ss_view_flush(goperl_frame_t *f) {
+    goperl_ssview_t *const v = &goperl_ssview_tl;
+    if (!v->view || v->inst != f->inst || v->gen != goperl_gen_v) return;
+    const goperl_plshadow_t *const s = &goperl_plshadow_v[GOPERL_PL_SAVESTACK_IX];
+    const int32_t top = s->live ? (int32_t)(int64_t)s->val : v->n;
+    if (top < 0 || top > v->cap) goperl_croakf(f, "PL_savestack_ix is beyond the save stack");
+    int32_t low = top;
+    for (int32_t i = 0; i < top; i++)
+        if (i >= v->n || memcmp(&v->view[i], &v->conv[i], sizeof(ANY))) {
+            low = i;
+            break;
+        }
+    if (low == top) return;
+    ANY *const ss = v->view;
+    uint64_t *const g = (uint64_t *)goperl_guest_mem(f, v->base_g);
+    const uint64_t thunk = goperl_dtor_thunk_addr(f);
+    for (int32_t t = top - 1; t >= low;) {
+        const char *kinds;
+        const int32_t lo = goperl_ss_group(f, ss, t, &kinds);
+        const int32_t a = t - (int32_t)strlen(kinds);
+        for (int32_t i = (lo > low ? lo : low); i <= t; i++) {
+            if (i < v->n && !memcmp(&ss[i], &v->conv[i], sizeof(ANY))) continue;
+            const char kind = i >= a && i < t ? kinds[i - a] : 'R';
+            uint64_t w = ss[i].any_uv;
+            if (kind == 'A') {
+                w = goperl_ss_addr_out(f, ss[i].any_ptr);
+            } else if (kind == 'F' || kind == 'P') {
+                /* the pair: the thunk with an id, as the view showed it, or
+                 * a destructor of native code's own, registered now */
+                const int32_t fi = kind == 'F' ? i : i - 1;
+                void (*const fn)(pTHX_ void *) = ss[fi].any_dxptr;
+                void *const arg = ss[fi + 1].any_ptr;
+                uint64_t gf = (uint64_t)(uintptr_t)fn, ga = (uint64_t)(uintptr_t)arg;
+                if (fn == goperl_dtor_tramp) {
+                    gf = thunk;
+                } else if ((uint64_t)(uintptr_t)fn != thunk) {
+                    int32_t id = -1;
+                    for (int32_t k = 0; k < GOPERL_DTOR_MAX && id < 0; k++) {
+                        const int32_t j = (goperl_dtor_hint_v + k) % GOPERL_DTOR_MAX;
+                        if (!goperl_dtor_v[j].used) id = j;
+                    }
+                    if (id < 0) goperl_croakf(f, "save_destructor_x: destructor table full");
+                    goperl_dtor_hint_v = id + 1;
+                    goperl_dtor_v[id].fn = fn;
+                    goperl_dtor_v[id].arg = arg;
+                    goperl_dtor_v[id].used = GOPERL_DTOR_X;
+                    gf = thunk;
+                    ga = (uint64_t)(id + 1);
+                    ss[fi].any_dxptr = goperl_dtor_tramp;
+                    ss[fi + 1].any_ptr = (void *)(uintptr_t)ga;
+                }
+                g[fi] = gf;
+                g[fi + 1] = ga;
+                v->conv[fi] = ss[fi];
+                v->conv[fi + 1] = ss[fi + 1];
+                if (kind == 'F') i++;
+                continue;
+            }
+            g[i] = w;
+            v->conv[i] = ss[i];
+        }
+        t = lo - 1;
+    }
+    if (top > v->n) v->n = top;
+}
 /* the raw pushes of scope.h: entries written in place above the top, the
  * index moved at the end (room: SSCHECK first, or the spare entries) */
 #define dSS_ADD                                         \
@@ -4841,21 +5047,15 @@ static void goperl_save_pushi32ptr(goperl_frame_t *f, I32 i, const void *ptr, in
 #define savestack_grow_cnt(n) SSCHECK(n)
 #define Perl_savestack_grow_cnt(n) savestack_grow_cnt(n)
 /* A string freed when the scope ends. A string of the interpreter's memory
- * goes on the save stack as perl's save_freepv pushes it: its address as
- * the interpreter has it, which is what an entry of the save stack holds,
- * so that an entry taken off is pushed again as it was (Future::AsyncAwait
- * suspends and resumes a sub's saves so). A block of the module's
- * allocators, or of the C library, which the interpreter cannot reach, is
- * freed by the module when the scope ends. */
+ * goes on the save stack as perl's save_freepv pushes it (an entry taken
+ * off is pushed again as it was: Future::AsyncAwait suspends and resumes a
+ * sub's saves so). A block of the module's allocators, or of the C
+ * library, which the interpreter cannot reach, is freed by the module when
+ * the scope ends. */
 static void goperl_savefreepv_cb(pTHX_ void *p);
-static int goperl_block_size(const void *p, size_t *size);
 static void goperl_save_freepv(goperl_frame_t *f, char *pv) __attribute__((unused));
 static void goperl_save_freepv(goperl_frame_t *f, char *pv) {
-    size_t n;
-    const uint64_t g = goperl_guest_addr(f, pv);
-    if (g || !pv)
-        goperl_save_pushptr(f, (const void *)(uintptr_t)g, SAVEt_FREEPV);
-    else if (!goperl_block_size(pv, &n) && (uintptr_t)pv < *f->memsize)
+    if (!pv || goperl_guest_addr(f, pv))
         goperl_save_pushptr(f, pv, SAVEt_FREEPV);
     else
         goperl_save_destructor(f, goperl_savefreepv_cb, (void *)pv, GOPERL_DTOR_CALL_OWN);
