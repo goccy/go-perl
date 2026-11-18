@@ -1894,10 +1894,15 @@ static void goperl_borrow(void *tid, goperl_frame_t *f) {
  * The thread's own slot, cached, is what a thread with a frame finds; the
  * waiting call is looked for only while the own slot holds no frame, and
  * is neither cached nor put into the own slot. */
-static goperl_frame_t **goperl_curframe_slot(void) {
+static goperl_frame_t **goperl_curframe_find(void);
+static inline __attribute__((always_inline)) goperl_frame_t **goperl_curframe_slot(void) {
     goperl_forked_check();
-    goperl_frame_t **own = goperl_curframe_cache;
+    goperl_frame_t **const own = goperl_curframe_cache;
     if (__builtin_expect(own != 0 && *own != 0, 1)) return own;
+    return goperl_curframe_find();
+}
+static goperl_frame_t **goperl_curframe_find(void) {
+    goperl_frame_t **own = goperl_curframe_cache;
     void *const tid = (void *)pthread_self();
     if (!own) {
         if (!goperl_api_v) {
@@ -4295,10 +4300,15 @@ static void goperl_lvslot_flush(goperl_frame_t *f) {
     if (!st) return;
     /* a slot with several users is looked at once for each: the second
      * look finds it written back */
-    for (int32_t i = 0; i < st->nuses; i++)
-        goperl_lvslot_store(f, st->uses[i].slot);
-    for (int32_t i = 0; i < st->nrecent; i++)
-        goperl_lvslot_store(f, st->recent[i]);
+    for (int32_t i = 0; i < st->nuses; i++) {
+        goperl_lvslot_t *const m = st->uses[i].slot;
+        /* a field stored into, or a body, which is compared slot by slot */
+        if (m->val != m->shadow || GOPERL_LV_IS_BODY(m->field)) goperl_lvslot_store(f, m);
+    }
+    for (int32_t i = 0; i < st->nrecent; i++) {
+        goperl_lvslot_t *const m = st->recent[i];
+        if (m->val != m->shadow || GOPERL_LV_IS_BODY(m->field)) goperl_lvslot_store(f, m);
+    }
 }
 
 /* Forgets every lvalue slot (the outermost native call has returned, and
@@ -4942,7 +4952,24 @@ static SV **goperl_stack_extend(goperl_frame_t *f, SV **sp, SSize_t n) {
 /* Where native code that runs long lets the interpreter deliver what is
  * pending: the handler of a signal, an interruption of the program. */
 static void goperl_croak_errsv(goperl_frame_t *f) __attribute__((noreturn));
+/* PERL_ASYNC_CHECK: what is pending is delivered, as between ops. What is
+ * pending the interpreter says in two flags, PL_sig_pending and the
+ * interrupt flag the host sets, which are read where they are (their
+ * addresses are the interpreter's binary's, the same in every instance);
+ * only when one is set is the interpreter asked to deliver, as perl tests
+ * PL_sig_pending before it calls the signal hook. A native run loop
+ * (Test::LeakTrace's) does it after every op. */
+#define GOPERL_PL_INTERRUPT_ADDR 132
+static void goperl_croak_errsv(goperl_frame_t *f);
 static inline __attribute__((unused)) void goperl_async(goperl_frame_t *f) {
+    static uint64_t sig_g, intr_g;
+    if (!intr_g) {
+        sig_g = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, 117 /* GOPERL_PL_SIG_PENDING_ADDR */, 0, 0, 0);
+        intr_g = goperl_xs_op(f, GOPERL_OP_PLVAR_GET, GOPERL_PL_INTERRUPT_ADDR, 0, 0, 0);
+        if (!sig_g || !intr_g) goperl_croakf(f, "PERL_ASYNC_CHECK: the interpreter did not give its flags");
+    }
+    if (!*(volatile int *)(f->membase + sig_g) && !*(volatile uint32_t *)(f->membase + intr_g))
+        return;
     /* GOPERL_CALL_ASYNC: 1 when a handler died, which is this code's die */
     if (goperl_do_op3(f, GOPERL_OP_CALL, 0, 0, (uint64_t)(16), 0, 0))
         goperl_croak_errsv(f);
@@ -6112,6 +6139,7 @@ static void goperl_op_base_capture(OP *o);
 static int goperl_raw_links(const OP *o);
 static void goperl_optree_flush(goperl_frame_t *f);
 static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f);
+static Perl_ppaddr_t *goperl_ppaddr_table(void);
 static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type);
 
 static goperl_opreg_t *goperl_opreg_get(goperl_frame_t *f) {
@@ -6295,7 +6323,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     if (bits & GOPERL_OPBIT_TYPEHOOK)
         /* made while a module had its type: PL_ppaddr's function of the
          * type, the module's (perl's newOP copies PL_ppaddr[type]) */
-        o->op_ppaddr = o->op_type < OP_max ? goperl_ppaddr_get(f)[o->op_type] : 0;
+        o->op_ppaddr = o->op_type < OP_max ? goperl_ppaddr_table()[o->op_type] : 0;
     else if (!(bits & GOPERL_OPBIT_HOOKED))
         /* the interpreter's own pp function of its type, whatever a module
          * put in PL_ppaddr after the op was made: the slot the table had
@@ -6708,8 +6736,9 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     return 0;
 }
 
-static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
-    (void)f;
+/* The table, made when it is first looked at (by the SDK itself too, which
+ * does not store into it: that is not the module evaluating PL_ppaddr). */
+static Perl_ppaddr_t *goperl_ppaddr_table(void) {
     if (!goperl_ppaddr_inited_v) {
         goperl_ppaddr_inited_v = 1;
         GOPERL_PP_SLOT_INIT(goperl_ppaddr_v);
@@ -6718,13 +6747,19 @@ static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
         memcpy(goperl_ppaddr_told_v, goperl_ppaddr_v,
                sizeof(goperl_ppaddr_told_v));
     }
+    return goperl_ppaddr_v;
+}
+static Perl_ppaddr_t *goperl_ppaddr_get(goperl_frame_t *f) {
+    (void)f;
+    goperl_ppaddr_table();
     goperl_ppaddr_touched_v = 1;
     return goperl_ppaddr_v;
 }
 #define PL_ppaddr (goperl_ppaddr_get(_gof))
 /* The slot PL_ppaddr had for a type before any module wrote it. */
 static Perl_ppaddr_t goperl_ppaddr_base(goperl_frame_t *f, int type) {
-    goperl_ppaddr_get(f);
+    (void)f;
+    goperl_ppaddr_table();
     return goperl_ppaddr_base_v[type];
 }
 
@@ -11711,7 +11746,7 @@ static void goperl_optree_flush(goperl_frame_t *f) {
 static void goperl_perop_pp_register(goperl_frame_t *f, OP *o) {
     if (!goperl_api_v->perop_pp_set)
         goperl_croakf(f, "op_ppaddr write needs a newer go-perl loader");
-    if (o->op_type < OP_max && o->op_ppaddr == goperl_ppaddr_get(f)[o->op_type]) {
+    if (o->op_type < OP_max && o->op_ppaddr == goperl_ppaddr_table()[o->op_type]) {
         /* the pp function of its type again */
         goperl_api_perop_pp_set(f, o->gop, 0);
         goperl_op_setfield(f, o, GOPERL_OPF_PPADDR_OWN, 0);
