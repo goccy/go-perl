@@ -14467,10 +14467,13 @@ struct op_argcheck_aux {
     ((void)goperl_do_op3(_gof, GOPERL_OP_PAD, GOPERL_PAD_SETSV, GOPERL_TOK(sv), \
                          (uint64_t)(ix), 0, 0))
 
+/* gv_fetchsv: the name is characters when the SV is (perl's passes
+ * flags | SvUTF8(name)) */
 static GV *goperl_gv_fetchsv(goperl_frame_t *f, SV *name, I32 flags,
                              int svt) {
     STRLEN len;
     const char *pv = SvPV((SV *)name, len);
+    if (SvUTF8((SV *)name)) flags |= SVf_UTF8;
     return (GV *)GOPERL_SV(goperl_do_op(f, GOPERL_OP_GV_FETCH,
                                         (uint64_t)(int64_t)flags,
                                         (uint64_t)(int64_t)svt, pv,
