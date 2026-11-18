@@ -385,17 +385,36 @@ typedef int64_t SSize_t;
 struct goperl_no_value {
     char goperl_no_value_[0];
 };
-struct goperl_sv {
-    void *goperl_sv_any_;
-    uint32_t goperl_sv_refcnt_;
-    uint32_t sv_flags;
-    union {
-        void *goperl_sv_u_;
-        struct goperl_no_value svu_iv, svu_uv, svu_nv, svu_pv, svu_rv, svu_array, svu_hash,
-            svu_gp, svu_fp, svu_rx;
+#define GOPERL_SV_HEAD                                                                      \
+    void *goperl_sv_any_;                                                                   \
+    uint32_t goperl_sv_refcnt_;                                                             \
+    uint32_t sv_flags;                                                                      \
+    union {                                                                                 \
+        void *goperl_sv_u_;                                                                 \
+        struct goperl_no_value svu_iv, svu_uv, svu_nv, svu_pv, svu_rv, svu_array, svu_hash, \
+            svu_gp, svu_fp, svu_rx;                                                         \
     } sv_u;
+struct goperl_sv {
+    GOPERL_SV_HEAD
 };
 typedef struct goperl_sv SV;
+/* The kinds of scalar are types of their own, laid out as SV is, as perl's
+ * are (struct cv, av, hv, gv, io): C++ code overloads functions on them. */
+struct goperl_cv {
+    GOPERL_SV_HEAD
+};
+struct goperl_av {
+    GOPERL_SV_HEAD
+};
+struct goperl_hv {
+    GOPERL_SV_HEAD
+};
+struct goperl_gv {
+    GOPERL_SV_HEAD
+};
+struct goperl_io {
+    GOPERL_SV_HEAD
+};
 /* The body of an IV as the interpreter lays it out (the head of a string's
  * body, 32 bytes, then the integer), for the offset of its integer
  * (STRUCT_OFFSET(XPVIV, xiv_iv)) in perl's bodyless IV; the members give
@@ -409,11 +428,11 @@ typedef struct xpviv {
 } XPVIV;
 #define xiv_iv xiv_u.xivu_iv
 #define xuv_uv xiv_u.xivu_uv
-typedef struct goperl_sv CV;
-typedef struct goperl_sv AV;
-typedef struct goperl_sv HV;
-typedef struct goperl_sv GV;
-typedef struct goperl_sv IO;
+typedef struct goperl_cv CV;
+typedef struct goperl_av AV;
+typedef struct goperl_hv HV;
+typedef struct goperl_gv GV;
+typedef struct goperl_io IO;
 typedef struct goperl_interp PerlInterpreter;
 /* HE and HEK are perl's own (hv.h), laid out as the interpreter has them:
  * an entry the interpreter hands out (hv_fetch_ent, hv_store_ent,
@@ -3780,14 +3799,27 @@ template <class T> static inline int goperl_is_value_ptr(T) { return 1; }
 template <class T> static inline int goperl_is_value_ptr(T *) { return 0; }
 static inline int goperl_is_value_ptr(struct goperl_sv *) { return 1; }
 static inline int goperl_is_value_ptr(const struct goperl_sv *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_cv *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_cv *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_av *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_av *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_hv *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_hv *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_gv *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_gv *) { return 1; }
+static inline int goperl_is_value_ptr(struct goperl_io *) { return 1; }
+static inline int goperl_is_value_ptr(const struct goperl_io *) { return 1; }
 static inline int goperl_is_value_ptr(void *) { return 1; }
 static inline int goperl_is_value_ptr(const void *) { return 1; }
 }
 #define GOPERL_IS_VALUE_PTR(p) goperl_is_value_ptr(p)
 #else
-#define GOPERL_IS_VALUE_PTR(p)           \
-    _Generic((p), struct goperl_sv *: 1, \
-             const struct goperl_sv *: 1, void *: 1, const void *: 1, default: 0)
+#define GOPERL_IS_VALUE_PTR(p)                                                              \
+    _Generic((p), struct goperl_sv *: 1, const struct goperl_sv *: 1, struct goperl_cv *: 1, \
+             const struct goperl_cv *: 1, struct goperl_av *: 1, const struct goperl_av *: 1,   \
+             struct goperl_hv *: 1, const struct goperl_hv *: 1, struct goperl_gv *: 1,         \
+             const struct goperl_gv *: 1, struct goperl_io *: 1, const struct goperl_io *: 1,   \
+             void *: 1, const void *: 1, default: 0)
 #endif
 #define SvREFCNT_inc(sv) \
     ({ GOPERL_ONCE(goperl_SvREFCNT_inc_sv_, sv); \
@@ -5733,7 +5765,7 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
 #define GvSV(gv) \
     (*(SV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVSV, GOPERL_LV_AT))
 #define GvIO(gv) \
-    GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 6))
+    ((IO *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 6)))
 #define GvNAME(gv) \
     ((char *)goperl_intern_op(_gof, GOPERL_OP_GV_NAME, GOPERL_TOK(gv), 0, 0))
 #define isGV_with_GP(sv) \
