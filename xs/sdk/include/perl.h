@@ -9328,6 +9328,11 @@ static char *goperl_sv_pv_force(goperl_frame_t *f, SV *sv, STRLEN *lenp) {
 #define sv_utf8_downgrade(sv, fail_ok) \
     ((bool)goperl_op0(GOPERL_OP_SV_UTF8_DOWNGRADE, GOPERL_TOK(sv), \
                       (fail_ok) ? 1 : 0))
+/* c: the flags, with its high half 1 */
+#define sv_utf8_downgrade_flags(sv, fail_ok, flags)                          \
+    ((bool)goperl_do_op3(_gof, GOPERL_OP_SV_UTF8_DOWNGRADE, GOPERL_TOK(sv),  \
+                         (fail_ok) ? 1 : 0, ((uint64_t)1 << 32) | (U32)(flags), 0, 0))
+#define sv_utf8_downgrade_nomg(sv, fail_ok) sv_utf8_downgrade_flags((sv), (fail_ok), 0)
 #define mg_set(sv) ((void)goperl_op0(GOPERL_OP_MG_SET, GOPERL_TOK(sv), 0), 0)
 #define SvSETMAGIC(sv) ((void)mg_set(sv))
 #define sv_setiv_mg(sv, i) \
@@ -12314,7 +12319,17 @@ enum {
     GOPERL_CC_SPACE = 3,
     GOPERL_CC_DIGIT = 4,
     GOPERL_CC_ALPHA = 5,
-    GOPERL_CC_UPPER = 6
+    GOPERL_CC_UPPER = 6,
+    GOPERL_CC_LOWER = 100,
+    GOPERL_CC_CNTRL = 101,
+    GOPERL_CC_GRAPH = 102,
+    GOPERL_CC_PRINT = 103,
+    GOPERL_CC_PUNCT = 104,
+    GOPERL_CC_XDIGIT = 105,
+    GOPERL_CC_ALPHANUMERIC = 106,
+    GOPERL_CC_BLANK = 107,
+    GOPERL_CC_PSXSPC = 108,
+    GOPERL_CC_ASCII = 109
 };
 static int goperl_charclass_uv(goperl_frame_t *f, int cls, UV cp) {
     return (int)goperl_do_op(f, GOPERL_OP_CHARCLASS,
@@ -12366,6 +12381,120 @@ static UV goperl_utf8_cp(goperl_frame_t *f, const U8 *p, const U8 *e) {
 #define isALNUM_utf8_safe(p, e) \
     goperl_charclass_uv(_gof, GOPERL_CC_WORDCHAR, \
                         goperl_utf8_cp(_gof, (const U8 *)(p), (const U8 *)(e)))
+
+/* The rest of handy.h's classes of a code point: below 256 perl's Latin-1
+ * table (as perl's own macros look it up), above it the interpreter's
+ * Unicode tables. */
+#define GOPERL_CC_UVCHR(cls, l1, c)                                         \
+    ({ const UV goperl_ccu_ = (UV)(c);                                      \
+       goperl_ccu_ < 256 ? (int)generic_isCC_(goperl_ccu_, l1)              \
+                         : goperl_charclass_uv(_gof, (cls), goperl_ccu_); })
+#define isLOWER_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_LOWER, CC_LOWER_, (c))
+#define isCNTRL_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_CNTRL, CC_CNTRL_, (c))
+#define isGRAPH_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_GRAPH, CC_GRAPH_, (c))
+#define isPRINT_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_PRINT, CC_PRINT_, (c))
+#define isPUNCT_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_PUNCT, CC_PUNCT_, (c))
+#define isXDIGIT_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_XDIGIT, CC_XDIGIT_, (c))
+#define isALPHANUMERIC_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_ALPHANUMERIC, CC_ALPHANUMERIC_, (c))
+#define isBLANK_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_BLANK, CC_BLANK_, (c))
+#define isPSXSPC_uvchr(c) GOPERL_CC_UVCHR(GOPERL_CC_PSXSPC, CC_SPACE_, (c))
+#define isASCII_uvchr(c) ((UV)(c) < 128)
+#define isALPHANUMERIC(c) isALPHANUMERIC_A(c)
+#define isLOWER_uni(c) isLOWER_uvchr(c)
+#define isCNTRL_uni(c) isCNTRL_uvchr(c)
+#define isGRAPH_uni(c) isGRAPH_uvchr(c)
+#define isPRINT_uni(c) isPRINT_uvchr(c)
+#define isPUNCT_uni(c) isPUNCT_uvchr(c)
+#define isXDIGIT_uni(c) isXDIGIT_uvchr(c)
+#define isALPHANUMERIC_uni(c) isALPHANUMERIC_uvchr(c)
+#define isBLANK_uni(c) isBLANK_uvchr(c)
+#define isPSXSPC_uni(c) isPSXSPC_uvchr(c)
+#define isASCII_uni(c) isASCII_uvchr(c)
+#define toLOWER_uni(c, s, l) toLOWER_uvchr((c), (s), (l))
+#define toUPPER_uni(c, s, l) toUPPER_uvchr((c), (s), (l))
+#define toTITLE_uni(c, s, l) toTITLE_uvchr((c), (s), (l))
+#define toFOLD_uni(c, s, l) toFOLD_uvchr((c), (s), (l))
+/* Under the locale: below 256 the locale's class (the C locale's, which
+ * is the ASCII one), above it the code point's. */
+#define GOPERL_CC_LC_UVCHR(lc, uvchr, c)                                    \
+    ({ const UV goperl_cclu_ = (UV)(c); goperl_cclu_ < 256 ? (int)lc(goperl_cclu_) : (int)uvchr(goperl_cclu_); })
+#define isALPHA_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isALPHA_LC, isALPHA_uvchr, (c))
+#define isALPHANUMERIC_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isALPHANUMERIC_LC, isALPHANUMERIC_uvchr, (c))
+#define isASCII_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isASCII_LC, isASCII_uvchr, (c))
+#define isBLANK_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isBLANK_LC, isBLANK_uvchr, (c))
+#define isCNTRL_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isCNTRL_LC, isCNTRL_uvchr, (c))
+#define isDIGIT_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isDIGIT_LC, isDIGIT_uvchr, (c))
+#define isGRAPH_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isGRAPH_LC, isGRAPH_uvchr, (c))
+#define isIDCONT_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isIDCONT_LC, isIDCONT_uvchr, (c))
+#define isIDFIRST_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isIDFIRST_LC, isIDFIRST_uvchr, (c))
+#define isLOWER_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isLOWER_LC, isLOWER_uvchr, (c))
+#define isPRINT_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isPRINT_LC, isPRINT_uvchr, (c))
+#define isPSXSPC_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isPSXSPC_LC, isPSXSPC_uvchr, (c))
+#define isPUNCT_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isPUNCT_LC, isPUNCT_uvchr, (c))
+#define isSPACE_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isSPACE_LC, isSPACE_uvchr, (c))
+#define isUPPER_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isUPPER_LC, isUPPER_uvchr, (c))
+#define isWORDCHAR_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isWORDCHAR_LC, isWORDCHAR_uvchr, (c))
+#define isXDIGIT_LC_uvchr(c) GOPERL_CC_LC_UVCHR(isXDIGIT_LC, isXDIGIT_uvchr, (c))
+#define isALNUM_LC_uvchr(c) isWORDCHAR_LC_uvchr(c)
+#define isALNUMC_LC_uvchr(c) isALPHANUMERIC_LC_uvchr(c)
+#define isALNUM_A(c) isWORDCHAR_A(c)
+#define isALNUM_LC(c) isWORDCHAR_LC(c)
+/* The class of the character at p (not past e). */
+#define GOPERL_CC_UTF8(uvchr, p, e) uvchr(goperl_utf8_cp(_gof, (const U8 *)(p), (const U8 *)(e)))
+#define isALPHA_utf8_safe(p, e) GOPERL_CC_UTF8(isALPHA_uvchr, (p), (e))
+#define isALPHANUMERIC_utf8_safe(p, e) GOPERL_CC_UTF8(isALPHANUMERIC_uvchr, (p), (e))
+#define isASCII_utf8_safe(p, e) isASCII(*(const U8 *)(p))
+#define isBLANK_utf8_safe(p, e) GOPERL_CC_UTF8(isBLANK_uvchr, (p), (e))
+#define isCNTRL_utf8_safe(p, e) GOPERL_CC_UTF8(isCNTRL_uvchr, (p), (e))
+#define isDIGIT_utf8_safe(p, e) GOPERL_CC_UTF8(isDIGIT_uvchr, (p), (e))
+#define isGRAPH_utf8_safe(p, e) GOPERL_CC_UTF8(isGRAPH_uvchr, (p), (e))
+#define isLOWER_utf8_safe(p, e) GOPERL_CC_UTF8(isLOWER_uvchr, (p), (e))
+#define isPRINT_utf8_safe(p, e) GOPERL_CC_UTF8(isPRINT_uvchr, (p), (e))
+#define isPSXSPC_utf8_safe(p, e) GOPERL_CC_UTF8(isPSXSPC_uvchr, (p), (e))
+#define isPUNCT_utf8_safe(p, e) GOPERL_CC_UTF8(isPUNCT_uvchr, (p), (e))
+#define isSPACE_utf8_safe(p, e) GOPERL_CC_UTF8(isSPACE_uvchr, (p), (e))
+#define isUPPER_utf8_safe(p, e) GOPERL_CC_UTF8(isUPPER_uvchr, (p), (e))
+#define isXDIGIT_utf8_safe(p, e) GOPERL_CC_UTF8(isXDIGIT_uvchr, (p), (e))
+#define isALPHA_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isALPHA_LC_uvchr, (p), (e))
+#define isALPHANUMERIC_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isALPHANUMERIC_LC_uvchr, (p), (e))
+#define isASCII_LC_utf8_safe(p, e) isASCII_LC(*(const U8 *)(p))
+#define isBLANK_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isBLANK_LC_uvchr, (p), (e))
+#define isCNTRL_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isCNTRL_LC_uvchr, (p), (e))
+#define isDIGIT_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isDIGIT_LC_uvchr, (p), (e))
+#define isGRAPH_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isGRAPH_LC_uvchr, (p), (e))
+#define isIDCONT_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isIDCONT_LC_uvchr, (p), (e))
+#define isIDFIRST_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isIDFIRST_LC_uvchr, (p), (e))
+#define isLOWER_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isLOWER_LC_uvchr, (p), (e))
+#define isPRINT_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isPRINT_LC_uvchr, (p), (e))
+#define isPSXSPC_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isPSXSPC_LC_uvchr, (p), (e))
+#define isPUNCT_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isPUNCT_LC_uvchr, (p), (e))
+#define isSPACE_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isSPACE_LC_uvchr, (p), (e))
+#define isUPPER_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isUPPER_LC_uvchr, (p), (e))
+#define isWORDCHAR_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isWORDCHAR_LC_uvchr, (p), (e))
+#define isXDIGIT_LC_utf8_safe(p, e) GOPERL_CC_UTF8(isXDIGIT_LC_uvchr, (p), (e))
+/* The _utf8 forms take the end (perl 5.32 on), or not (the forms of before
+ * it, which read the whole character). */
+#define GOPERL_CC_UTF8_ARGS_(safe, p, e, ...) safe((p), (e))
+#define GOPERL_CC_UTF8_ARGS(safe, p, ...) \
+    GOPERL_CC_UTF8_ARGS_(safe, p, ##__VA_ARGS__, (const U8 *)(p) + UTF8_MAXBYTES)
+#define isALPHA_utf8(...) GOPERL_CC_UTF8_ARGS(isALPHA_utf8_safe, __VA_ARGS__)
+#define isALPHANUMERIC_utf8(...) GOPERL_CC_UTF8_ARGS(isALPHANUMERIC_utf8_safe, __VA_ARGS__)
+#define isASCII_utf8(...) GOPERL_CC_UTF8_ARGS(isASCII_utf8_safe, __VA_ARGS__)
+#define isBLANK_utf8(...) GOPERL_CC_UTF8_ARGS(isBLANK_utf8_safe, __VA_ARGS__)
+#define isCNTRL_utf8(...) GOPERL_CC_UTF8_ARGS(isCNTRL_utf8_safe, __VA_ARGS__)
+#define isDIGIT_utf8(...) GOPERL_CC_UTF8_ARGS(isDIGIT_utf8_safe, __VA_ARGS__)
+#define isGRAPH_utf8(...) GOPERL_CC_UTF8_ARGS(isGRAPH_utf8_safe, __VA_ARGS__)
+#define isIDCONT_utf8(...) GOPERL_CC_UTF8_ARGS(isIDCONT_utf8_safe, __VA_ARGS__)
+#define isIDFIRST_utf8(...) GOPERL_CC_UTF8_ARGS(isIDFIRST_utf8_safe, __VA_ARGS__)
+#define isLOWER_utf8(...) GOPERL_CC_UTF8_ARGS(isLOWER_utf8_safe, __VA_ARGS__)
+#define isPRINT_utf8(...) GOPERL_CC_UTF8_ARGS(isPRINT_utf8_safe, __VA_ARGS__)
+#define isPSXSPC_utf8(...) GOPERL_CC_UTF8_ARGS(isPSXSPC_utf8_safe, __VA_ARGS__)
+#define isPUNCT_utf8(...) GOPERL_CC_UTF8_ARGS(isPUNCT_utf8_safe, __VA_ARGS__)
+#define isSPACE_utf8(...) GOPERL_CC_UTF8_ARGS(isSPACE_utf8_safe, __VA_ARGS__)
+#define isUPPER_utf8(...) GOPERL_CC_UTF8_ARGS(isUPPER_utf8_safe, __VA_ARGS__)
+#define isWORDCHAR_utf8(...) GOPERL_CC_UTF8_ARGS(isWORDCHAR_utf8_safe, __VA_ARGS__)
+#define isXDIGIT_utf8(...) GOPERL_CC_UTF8_ARGS(isXDIGIT_utf8_safe, __VA_ARGS__)
+#define isALNUM_utf8(...) GOPERL_CC_UTF8_ARGS(isWORDCHAR_utf8_safe, __VA_ARGS__)
 
 /* ---- assorted compat the parse dists use -------------------------------- */
 
@@ -13067,6 +13196,7 @@ __goperl_shared_release(void *raw) {
 #define Perl_get_context() ((void *)goperl_interp_cur())
 #endif
 #include "goperl_longnames.h"
+#include "goperl_longnames_core.h"
 #include "goperl_argsassert.h"
 /* last: the internals go-perl does not give native code (their names stay
  * out of every header above) */

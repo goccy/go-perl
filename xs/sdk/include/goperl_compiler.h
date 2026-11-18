@@ -41,6 +41,9 @@ enum {
     GOPERL_INT_HASH = 32,       /* s+b: a key's bytes -> its hash (PERL_HASH) */
     GOPERL_INT_PUSHSTACK = 33,  /* b: the stackinfo type: PUSHSTACKi */
     GOPERL_INT_POPSTACK = 34,   /* POPSTACK */
+    GOPERL_INT_PADNAMELIST_NEW = 60, /* b: max -> newPADNAMELIST's list */
+    GOPERL_INT_PADNAMELIST_FREE = 61, /* a: the list: PadnamelistREFCNT_dec */
+    GOPERL_INT_PADNAME_OUTER = 62,  /* a: a pad name -> newPADNAMEouter's */
     GOPERL_INT_UTF8 = 42        /* a: the flags | (GOPERL_UTF8_* | GOPERL_UTF8_MSGS)
                                  * << 32; s+b: one character's bytes, or b: a
                                  * code point -> words */
@@ -755,6 +758,20 @@ static __attribute__((unused)) PADNAME **goperl_padnamelist_store(goperl_frame_t
 }
 #define padnamelist_store(pnl, key, val) \
     goperl_padnamelist_store(_gof, (pnl), (SSize_t)(key), (val))
+/* A new list of pad names, the interpreter's, with room for max + 1. */
+#define newPADNAMELIST(max)                                                 \
+    goperl_padnamelist_shadow(                                              \
+        _gof, GOPERL_INTERNAL(_gof, GOPERL_INT_PADNAMELIST_NEW, 0, (uint64_t)(size_t)(max)))
+#define PadnamelistREFCNT_dec(pnl)                                          \
+    ((void)GOPERL_INTERNAL(_gof, GOPERL_INT_PADNAMELIST_FREE,               \
+                           goperl_padstruct_tok(pnl), 0))
+#define padnamelist_free(pnl) PadnamelistREFCNT_dec(pnl)
+/* A pad name for a closure's copy of the outer one (newPADNAMEouter). */
+#define newPADNAMEouter(outer)                                              \
+    ((PADNAME *)goperl_padent_fresh(                                        \
+        _gof, goperl_padname_shadow(                                        \
+                  _gof, GOPERL_INTERNAL(_gof, GOPERL_INT_PADNAME_OUTER,     \
+                                        goperl_padstruct_tok(outer), 0))))
 /* pad_new: the flags of pad.h. */
 #define padnew_CLONE 1
 #define padnew_SAVE 2
@@ -1411,8 +1428,6 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
        const char *const goperl_gfms_p_ = SvPV(goperl_gfms_n_, goperl_gfms_l_); \
        gv_fetchmeth_pvn((stash), goperl_gfms_p_, goperl_gfms_l_, (level),   \
                         (flags) | (SvUTF8(goperl_gfms_n_) ? SVf_UTF8 : 0)); })
-#define isSPACE_utf8(p) \
-    goperl_charclass_uv(_gof, GOPERL_CC_SPACE, goperl_utf8_cp(_gof, (const U8 *)(p), (const U8 *)(p) + UTF8_MAXBYTES))
 /* The name of a stash, as a shared key. */
 #define HvNAME_HEK(hv)                                                      \
     ({ HV *const goperl_hnh_hv_ = (HV *)(hv);                               \
@@ -1885,6 +1900,11 @@ static __attribute__((unused)) PerlIO *goperl_error_log(goperl_frame_t *f) {
 #define Direntry_t struct dirent
 /* a string the SV points at that is static (with SVf_IsCOW) */
 #define SVppv_STATIC 0x40000000
+/* the glob of a sub set (gv.c's cvgv_set, which CvGV_set is) */
+#define cvgv_set(cv, gv) CvGV_set((cv), (gv))
+/* a mask of the lowest n bits, and the largest number of n bits (handy.h) */
+#define nBIT_MASK(n) (((n) == 0) ? 0 : (((UINTMAX_C(1) << ((n) - 1)) - 1) << 1) | 1)
+#define nBIT_UMAX(n) nBIT_MASK(n)
 #define CvISXSUB_on(cv) (CvFLAGS(cv) |= CVf_ISXSUB)
 #define CvISXSUB_off(cv) (CvFLAGS(cv) &= ~CVf_ISXSUB)
 /* TARG set to a number, as pp.h's (the cheap path of an IV target is the
@@ -2210,6 +2230,30 @@ static inline __attribute__((unused)) bool goperl_utf8_string_flags(const U8 *s,
     is_utf8_string_loclen_flags((s), (len), (ep), (STRLEN *)0, (flags))
 #define is_utf8_string_flags(s, len, flags) \
     is_utf8_string_loclen_flags((s), (len), (const U8 **)0, (STRLEN *)0, (flags))
+/* Strict UTF-8: no surrogate, no noncharacter and nothing above Unicode;
+ * C9 strict: noncharacters allowed (Unicode Corrigendum #9). */
+#define is_strict_utf8_string_loclen(s, len, ep, el) \
+    is_utf8_string_loclen_flags((s), (len), (ep), (el), UTF8_DISALLOW_ILLEGAL_INTERCHANGE)
+#define is_strict_utf8_string_loc(s, len, ep) is_strict_utf8_string_loclen((s), (len), (ep), (STRLEN *)0)
+#define is_strict_utf8_string(s, len) is_strict_utf8_string_loclen((s), (len), (const U8 **)0, (STRLEN *)0)
+#define is_c9strict_utf8_string_loclen(s, len, ep, el) \
+    is_utf8_string_loclen_flags((s), (len), (ep), (el), UTF8_DISALLOW_ILLEGAL_C9_INTERCHANGE)
+#define is_c9strict_utf8_string_loc(s, len, ep) \
+    is_c9strict_utf8_string_loclen((s), (len), (ep), (STRLEN *)0)
+#define is_c9strict_utf8_string(s, len) \
+    is_c9strict_utf8_string_loclen((s), (len), (const U8 **)0, (STRLEN *)0)
+/* The string is valid UTF-8 up to a character its end cuts off. */
+#define is_utf8_fixed_width_buf_loclen_flags(s, len, ep, el, flags)          \
+    ({ const U8 *const goperl_fwb_s_ = (const U8 *)(s);                     \
+       const STRLEN goperl_fwb_len_ = (STRLEN)(len);                        \
+       const U8 *goperl_fwb_e_;                                             \
+       const U8 **const goperl_fwb_ep_ = (ep) ? (const U8 **)(ep) : &goperl_fwb_e_; \
+       is_utf8_string_loclen_flags(goperl_fwb_s_, goperl_fwb_len_, goperl_fwb_ep_, (el), (flags)) || \
+           is_utf8_valid_partial_char_flags(*goperl_fwb_ep_, goperl_fwb_s_ + goperl_fwb_len_, (flags)); })
+#define is_utf8_fixed_width_buf_loc_flags(s, len, loc, flags) \
+    is_utf8_fixed_width_buf_loclen_flags((s), (len), (loc), (STRLEN *)0, (flags))
+#define is_utf8_fixed_width_buf_flags(s, len, flags) \
+    is_utf8_fixed_width_buf_loclen_flags((s), (len), (const U8 **)0, (STRLEN *)0, (flags))
 /* uvchr_to_utf8_flags_msgs: perl's encoder (utf8.c). A code point that is
  * no surrogate, no noncharacter and not above Unicode, or any one up to
  * IV_MAX under no flags, is encoded here; any other by the interpreter,

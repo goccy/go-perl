@@ -1623,6 +1623,14 @@ static char *goperl_sv_setpv_bufsize(goperl_frame_t *f, SV *sv, STRLEN cur,
 #define sv_utf8_upgrade_flags(sv, flags) \
     ((STRLEN)GOPERL_SVCALL(GOPERL_SVCALL_UTF8_UPGRADE, sv, (U32)(flags)))
 #define sv_utf8_upgrade_nomg(sv) sv_utf8_upgrade_flags(sv, 0)
+/* upgraded with room for extra bytes more and the NUL after them */
+#define sv_utf8_upgrade_flags_grow(sv, flags, extra)                        \
+    ({ SV *const goperl_sufg_sv_ = (SV *)(sv);                              \
+       const STRLEN goperl_sufg_extra_ = (STRLEN)(extra);                   \
+       const STRLEN goperl_sufg_len_ = sv_utf8_upgrade_flags(goperl_sufg_sv_, (flags)); \
+       if (SvLEN(goperl_sufg_sv_) < SvCUR(goperl_sufg_sv_) + goperl_sufg_extra_ + 1) \
+           SvGROW(goperl_sufg_sv_, SvCUR(goperl_sufg_sv_) + goperl_sufg_extra_ + 1); \
+       goperl_sufg_len_; })
 #define sv_unref_flags(sv, flags) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_UNREF, sv, (U32)(flags)))
 #define sv_unref(sv) sv_unref_flags(sv, 0)
@@ -3545,6 +3553,108 @@ static NV goperl_my_atof(goperl_frame_t *f, const char *s) {
 }
 #define my_atof(s) goperl_my_atof(_gof, (s))
 #define Atof my_atof
+/* my_atof3 (numeric.c): the number in the len bytes at orig (its strlen
+ * when 0) into *value, as the interpreter reads one; -> where it ended, or
+ * NULL where perl answers NULL (*value then as perl leaves it). */
+static char *goperl_my_atof3(goperl_frame_t *f, const char *orig, NV *value, STRLEN len)
+    __attribute__((unused));
+static char *goperl_my_atof3(goperl_frame_t *f, const char *orig, NV *value, STRLEN len) {
+    union {
+        uint64_t u;
+        NV d;
+    } cvt;
+    uint64_t end = 0;
+    if (len == 0) len = __builtin_strlen(orig);
+    cvt.d = *value;
+    /* CALL 9: ATOF; hi 1: my_atof3 from the NV in b; second: 1 + the bytes */
+    cvt.u = goperl_do_opx(f, GOPERL_OP_CALL, 0, cvt.u, (uint64_t)9 | ((uint64_t)1 << 32), orig,
+                          len, &end);
+    *value = cvt.d;
+    return end ? (char *)orig + (end - 1) : (char *)0;
+}
+#define my_atof3(orig, value, len) \
+    goperl_my_atof3(_gof, (const char *)(orig), (NV *)(value), (STRLEN)(len))
+#define my_atof2(orig, value) my_atof3((orig), (value), 0)
+/* call_list: the subs of the array (BEGIN, UNITCHECK, ...) run and taken
+ * off it, as perl.c's. */
+#define GOPERL_CALL_CALL_LIST 100
+#define call_list(oldscope, av)                                             \
+    ((void)(goperl_optree_flush(_gof),                                      \
+            goperl_do_op3(_gof, GOPERL_OP_CALL, GOPERL_TOK(av),             \
+                          (uint64_t)(int64_t)(I32)(oldscope), (uint64_t)GOPERL_CALL_CALL_LIST, 0, 0)))
+/* hv_scalar: what a hash is in scalar context (its count of keys, or what
+ * a tied hash's SCALAR says), a mortal. */
+#define GOPERL_CALL_HV_SCALAR 101
+#define hv_scalar(hv)                                                       \
+    ((SV *)(uintptr_t)goperl_do_op3(_gof, GOPERL_OP_CALL, GOPERL_TOK(hv), 0, \
+                                    (uint64_t)GOPERL_CALL_HV_SCALAR, 0, 0))
+/* packlist and unpackstring (pp_pack.c): pack's and unpack's work on the
+ * values from beglist up to endlist, and on the bytes from s up to strend,
+ * whose values are pushed on the stack. */
+#define GOPERL_CALL_PACKLIST 102
+#define GOPERL_CALL_UNPACKSTRING 103
+static void goperl_packlist(goperl_frame_t *f, SV *cat, const char *pat, const char *patend,
+                            SV **beglist, SV **endlist) __attribute__((unused));
+static void goperl_packlist(goperl_frame_t *f, SV *cat, const char *pat, const char *patend,
+                            SV **beglist, SV **endlist) {
+    const size_t plen = (size_t)(patend - pat), n = endlist > beglist ? (size_t)(endlist - beglist) : 0;
+    const size_t size = 2 * sizeof(goperl_gword_t) + n * sizeof(goperl_gword_t) + plen;
+    char *const buf = (char *)malloc(size ? size : 1);
+    if (!buf) goperl_croakf(f, "Out of memory!");
+    goperl_gword_t w[2] = {(goperl_gword_t)plen, (goperl_gword_t)n};
+    memcpy(buf, w, sizeof w);
+    for (size_t i = 0; i < n; i++) {
+        const goperl_gword_t tok = GOPERL_TOK(beglist[i]);
+        memcpy(buf + sizeof w + i * sizeof tok, &tok, sizeof tok);
+    }
+    memcpy(buf + sizeof w + n * sizeof(goperl_gword_t), pat, plen);
+    goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(cat), 0, (uint64_t)GOPERL_CALL_PACKLIST, buf, size);
+    free(buf);
+}
+#define packlist(cat, pat, patend, beglist, endlist)                        \
+    goperl_packlist(_gof, (SV *)(cat), (const char *)(pat), (const char *)(patend), \
+                    (SV **)(beglist), (SV **)(endlist))
+static SSize_t goperl_unpackstring(goperl_frame_t *f, const char *pat, const char *patend,
+                                   const char *s, const char *strend, U32 flags)
+    __attribute__((unused));
+static SSize_t goperl_unpackstring(goperl_frame_t *f, const char *pat, const char *patend,
+                                   const char *s, const char *strend, U32 flags) {
+    const goperl_gword_t plen = (goperl_gword_t)(patend - pat);
+    const size_t slen = strend > s ? (size_t)(strend - s) : 0;
+    const size_t size = sizeof plen + (size_t)plen + slen;
+    char *const buf = (char *)malloc(size);
+    if (!buf) goperl_croakf(f, "Out of memory!");
+    memcpy(buf, &plen, sizeof plen);
+    memcpy(buf + sizeof plen, pat, (size_t)plen);
+    memcpy(buf + sizeof plen + plen, s, slen);
+    goperl_stk(f);
+    uint64_t second = 0;
+    const uint64_t words =
+        goperl_do_opx(f, GOPERL_OP_CALL, 0, 0,
+                      (uint64_t)GOPERL_CALL_UNPACKSTRING | ((uint64_t)flags << 32), buf, size,
+                      &second);
+    free(buf);
+    const I32 count = (I32)(second & 0x7FFFFFFF);
+    goperl_call_results_take(f, words, count);
+    return (SSize_t)count;
+}
+#define unpackstring(pat, patend, s, strend, flags)                         \
+    goperl_unpackstring(_gof, (const char *)(pat), (const char *)(patend), \
+                        (const char *)(s), (const char *)(strend), (U32)(flags))
+/* the embedding calls: native code runs inside the program's interpreter
+ * and cannot make or end one */
+#define GOPERL_NO_EMBEDDING(name)                                           \
+    (goperl_croakf(goperl_cur_frame_v, "%s: go-perl does not let native code make or end an " \
+                   "interpreter", name), 0)
+#define perl_alloc() ((PerlInterpreter *)(uintptr_t)GOPERL_NO_EMBEDDING("perl_alloc"))
+#define perl_construct(i) ((void)(i), (void)GOPERL_NO_EMBEDDING("perl_construct"))
+#define perl_parse(i, x, c, v, e) \
+    ((void)(i), (void)(x), (void)(c), (void)(v), (void)(e), GOPERL_NO_EMBEDDING("perl_parse"))
+#define perl_run(i) ((void)(i), GOPERL_NO_EMBEDDING("perl_run"))
+#define perl_destruct(i) ((void)(i), GOPERL_NO_EMBEDDING("perl_destruct"))
+#define perl_free(i) ((void)(i), (void)GOPERL_NO_EMBEDDING("perl_free"))
+#define perl_clone(i, flags) \
+    ((void)(i), (void)(flags), (PerlInterpreter *)(uintptr_t)GOPERL_NO_EMBEDDING("perl_clone"))
 #define HV_ITERNEXT_WANTPLACEHOLDERS 0x01
 #define hv_iternext_flags(hv, flags)                                         \
     goperl_he_at(_gof, goperl_op0(GOPERL_OP_HV_ITERNEXT, GOPERL_TOK(hv),     \
