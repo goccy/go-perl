@@ -2670,6 +2670,44 @@ static void goperl_text_put(goperl_text_t *t, const char *src, size_t n,
  * rendered by snprintf into a buffer of the size it needs. */
 #define GOPERL_VA(app, type) \
     ((app) ? va_arg(*(app), type) : (goperl_missing = 1, (type)0))
+/* An infinity or a NaN as perl formats one (sv.c): Inf, -Inf, NaN, and
+ * +Inf under the + or the space flag; to the width with the zeros of the 0
+ * flag or with spaces, on the right under the - flag. -> 0 for any other
+ * number, which the C library formats. */
+static int goperl_text_infnan(goperl_text_t *t, const char *spec, double v)
+    __attribute__((unused));
+static int goperl_text_infnan(goperl_text_t *t, const char *spec, double v) {
+    if (!isinf(v) && !isnan(v)) return 0;
+    int left = 0, plus = 0, zero = 0;
+    const char *p = spec + 1;
+    for (; *p && strchr("-+ #0", *p); p++) {
+        if (*p == '-') left = 1;
+        else if (*p == '+' || *p == ' ') plus = 1;
+        else if (*p == '0') zero = 1;
+    }
+    long width = 0;
+    if (*p == '-') { /* a negative width from `*`: left-justified */
+        left = 1;
+        p++;
+    }
+    while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+    char text[8];
+    size_t n = 0;
+    if (isnan(v)) {
+        memcpy(text, "NaN", 3);
+        n = 3;
+    } else {
+        if (v < 0) text[n++] = '-';
+        else if (plus) text[n++] = '+';
+        memcpy(text + n, "Inf", 3);
+        n += 3;
+    }
+    const size_t pad = width > (long)n ? (size_t)width - n : 0;
+    for (size_t i = 0; !left && i < pad; i++) goperl_text_put(t, zero ? "0" : " ", 1, 0);
+    goperl_text_put(t, text, n, 0);
+    for (size_t i = 0; left && i < pad; i++) goperl_text_put(t, " ", 1, 0);
+    return 1;
+}
 #define GOPERL_TEXT_CONV(t, spec, app, type)                             \
     do {                                                                 \
         type goperl_arg = GOPERL_VA(app, type);                          \
@@ -2854,8 +2892,13 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
         case 'F':
         case 'g':
         case 'G':
-            if (goperl_lmod == 7) GOPERL_TEXT_CONV(t, spec, app, long double);
-            else GOPERL_TEXT_CONV(t, spec, app, double);
+            if (goperl_lmod == 7) {
+                const long double ld = GOPERL_VA(app, long double);
+                if (!goperl_text_infnan(t, spec, (double)ld)) GOPERL_TEXT_VALUE(t, spec, ld);
+            } else {
+                const double d = GOPERL_VA(app, double);
+                if (!goperl_text_infnan(t, spec, d)) GOPERL_TEXT_VALUE(t, spec, d);
+            }
             break;
         default: {
             char unknown[8];
