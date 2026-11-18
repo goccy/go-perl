@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -74,7 +75,10 @@ func cachedStdlib() (string, error) {
 // temporary name next to its final one and renamed into place, so processes
 // racing to create it all end up on one whole copy.
 func stdlibInCache(root string) (string, error) {
-	sum := sha256.Sum256(stdlibZip)
+	sum, err := stdlibDigest(stdlibZip)
+	if err != nil {
+		return "", err
+	}
 	dir := filepath.Join(root, "stdlib-"+hex.EncodeToString(sum[:16]))
 	if _, err := os.Stat(dir); err == nil {
 		return dir, nil
@@ -94,6 +98,38 @@ func stdlibInCache(root string) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// stdlibDigest names the content of the library archive lib: a SHA-256 of
+// what the archive's central directory records of each entry, in its order
+// (its name, whether it is a directory, its uncompressed size and the
+// CRC-32 of its content, the check the zip format itself relies on), which
+// is what an unpacked copy is made of. It reads the directory alone, not
+// the archive's ten megabytes: every process start names the directory,
+// and a SHA-256 of the whole archive was a third of what starting an
+// interpreter cost.
+func stdlibDigest(lib []byte) ([sha256.Size]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(lib), int64(len(lib)))
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("open embedded stdlib: %w", err)
+	}
+	h := sha256.New()
+	var rec [13]byte
+	for _, f := range zr.File {
+		binary.LittleEndian.PutUint64(rec[0:8], uint64(len(f.Name)))
+		h.Write(rec[:8])
+		io.WriteString(h, f.Name)
+		rec[0] = 0
+		if f.FileInfo().IsDir() {
+			rec[0] = 1
+		}
+		binary.LittleEndian.PutUint64(rec[1:9], f.UncompressedSize64)
+		binary.LittleEndian.PutUint32(rec[9:13], f.CRC32)
+		h.Write(rec[:])
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	return sum, nil
 }
 
 // extractStdlibTo unpacks the embedded zip into a new directory under parent
