@@ -141,6 +141,31 @@
 #define HAS_SYSCONF
 #define HAS_GETPAGESIZE
 
+/* System V IPC, the semaphores, message queues and segments the
+ * interpreter's semget, msgget and shmget reach too. semctl's fourth
+ * argument is a union semun, which darwin's <sys/sem.h> declares (unless a
+ * strict POSIX environment is asked for) and glibc's leaves to the program,
+ * as perl.h then gives it. */
+#define HAS_MSG
+#define HAS_MSGCTL
+#define HAS_MSGGET
+#define HAS_MSGRCV
+#define HAS_MSGSND
+#define HAS_SEM
+#define HAS_SEMCTL
+#define HAS_SEMGET
+#define HAS_SEMOP
+#define HAS_SHM
+#define HAS_SHMAT
+#define HAS_SHMCTL
+#define HAS_SHMDT
+#define HAS_SHMGET
+#define HAS_SHMAT_PROTOTYPE
+#define USE_SEMCTL_SEMUN
+#if defined(__APPLE__) && (!defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE))
+#define HAS_UNION_SEMUN
+#endif
+
 /* the compiler */
 #define HASCONST
 #define HASVOLATILE

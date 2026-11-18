@@ -336,6 +336,17 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_sighandler_t signal(
 /* What the C environment has, as perl's config.h says it. */
 #include "config.h"
 
+/* perl.h's union semun, where the system leaves it to the program, and
+ * its call of semctl with one (HAS_SEM: <sys/sem.h> is included above). */
+#ifndef HAS_UNION_SEMUN
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
+#endif
+#define Semctl(id, num, cmd, semun) semctl(id, num, cmd, semun)
+
 /* A dist's bundled ppport.h is a portability layer for REAL perl headers;
  * against this SDK it must not activate. Its include guard is pre-defined
  * so the #include turns into a no-op. */
