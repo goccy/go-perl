@@ -3259,8 +3259,11 @@ static void *goperl_svany(goperl_frame_t *f, SV *sv) {
 #define RX_OFFS_VALID(rx, n) RXp_OFFS_VALID(ReANY(rx), (n))
 #define RX_UTF8(rx) SvUTF8((SV *)(rx))
 #define RX_MATCH_UTF8(rx) cBOOL(RX_EXTFLAGS(rx) & RXf_MATCH_UTF8)
+/* The character set of a pattern is a field of its flags, where the
+ * interpreter has it (RXf_PMf_CHARSET, its lowest bit the shift). */
+#define RXf_PMf_CHARSET_SHIFT_ (__builtin_ctz(RXf_PMf_CHARSET))
 #define get_regex_charset(flags) \
-    ((regex_charset)(((flags) & RXf_PMf_CHARSET) >> 5))
+    ((regex_charset)(((flags) & RXf_PMf_CHARSET) >> RXf_PMf_CHARSET_SHIFT_))
 typedef enum {
     REGEX_DEPENDS_CHARSET = 0,
     REGEX_LOCALE_CHARSET,
@@ -3269,7 +3272,7 @@ typedef enum {
     REGEX_ASCII_MORE_RESTRICTED_CHARSET
 } regex_charset;
 #define set_regex_charset(flagsp, cs) \
-    (*(flagsp) = (*(flagsp) & ~RXf_PMf_CHARSET) | ((U32)(cs) << 5))
+    (*(flagsp) = (*(flagsp) & ~RXf_PMf_CHARSET) | ((U32)(cs) << RXf_PMf_CHARSET_SHIFT_))
 
 /* pregexec matches in a string of the interpreter's memory (the buffer of
  * the SV it is given, as a rule). A string that lies elsewhere is matched
