@@ -439,6 +439,60 @@ typedef struct xpviv {
 } XPVIV;
 #define xiv_iv xiv_u.xivu_iv
 #define xuv_uv xiv_u.xivu_uv
+/* The other bodies of SVs and the ops of each class, as large as the
+ * interpreter lays them out (perl 5.44, LP64), for the memory modules
+ * reckon with them: sizeof(struct xpv) (Sort::External), sizeof(XPVMG)
+ * (Hash::SharedMem), sizeof(struct unop) (Devel::Size). What they hold is
+ * the interpreter's memory, which native code reads through the perl API
+ * and not through SvANY or a cast of an op: their bytes have no names. */
+#define GOPERL_SIZED(tag, size) \
+    struct tag {                \
+        char goperl_size_[size];  \
+    }
+/* The head of a string's body: the stash and the magic, then the length
+ * (xpv_cur, which gives its offset and no value: perl allocates the body of
+ * a PV from there on, and Devel::Size reckons with sizeof(XPV) less it),
+ * then the room. */
+struct xpv {
+    char goperl_xpv_mg_[16];
+    struct goperl_no_value xpv_cur;
+    char goperl_xpv_len_[16];
+};
+GOPERL_SIZED(xpvuv, 40);
+GOPERL_SIZED(xpvnv, 48);
+GOPERL_SIZED(xpvmg, 48);
+GOPERL_SIZED(xpvlv, 80);
+GOPERL_SIZED(xpvinvlist, 56);
+GOPERL_SIZED(xpvgv, 48);
+GOPERL_SIZED(xpvav, 40);
+GOPERL_SIZED(xpvhv, 32);
+GOPERL_SIZED(xpvfm, 104);
+GOPERL_SIZED(xpvio, 136);
+GOPERL_SIZED(xobject, 40);
+typedef struct xpv XPV;
+typedef struct xpvuv XPVUV;
+typedef struct xpvnv XPVNV;
+typedef struct xpvmg XPVMG;
+typedef struct xpvlv XPVLV;
+typedef struct xpvinvlist XPVINVLIST;
+typedef struct xpvgv XPVGV;
+typedef struct xpvav XPVAV;
+typedef struct xpvhv XPVHV;
+typedef struct xpvfm XPVFM;
+typedef struct xpvio XPVIO;
+typedef struct xobject XPVOBJ;
+GOPERL_SIZED(unop, 48);
+GOPERL_SIZED(unop_aux, 56);
+GOPERL_SIZED(binop, 56);
+GOPERL_SIZED(logop, 56);
+GOPERL_SIZED(listop, 56);
+GOPERL_SIZED(pmop, 96);
+GOPERL_SIZED(svop, 48);
+GOPERL_SIZED(padop, 48);
+GOPERL_SIZED(pvop, 48);
+GOPERL_SIZED(loop, 80);
+GOPERL_SIZED(methop, 56);
+GOPERL_SIZED(cop, 88);
 typedef struct goperl_cv CV;
 typedef struct goperl_av AV;
 typedef struct goperl_hv HV;
@@ -468,6 +522,8 @@ typedef struct hek {
     I32 hek_len;
     char hek_key[1];
 } HEK;
+/* the bytes of a key before its text (hv.h) */
+#define HEK_BASESIZE STRUCT_OFFSET(HEK, hek_key[0])
 #define cBOOL(x) ((bool)!!(x))
 #define DO_UTF8(sv) SvUTF8(sv)
 typedef struct goperl_he HE;
@@ -3593,6 +3649,16 @@ static SV *goperl_newSVpvn(goperl_frame_t *f, const char *p, STRLEN len) {
 #define sv_mortalcopy(sv) \
     GOPERL_SV(goperl_op0(GOPERL_OP_SV_MORTALCOPY, GOPERL_TOK(sv), 0))
 #define sv_newmortal() sv_2mortal(newSV(0))
+/* A mortal copy with the flags of sv_setsv_flags; SV_GMAGIC runs the get
+ * magic of the value first, before the new scalar is made, as perl's does
+ * (Stats::LikeR copies the tied arguments of a call with SV_NOSTEAL). */
+#define sv_mortalcopy_flags(sv, flags)                                      \
+    ({ SV *const goperl_smcf_o_ = (SV *)(sv);                              \
+       const U32 goperl_smcf_f_ = (U32)(flags);                            \
+       if (goperl_smcf_f_ & SV_GMAGIC) SvGETMAGIC(goperl_smcf_o_);         \
+       SV *const goperl_smcf_n_ = sv_newmortal();                          \
+       sv_setsv_flags(goperl_smcf_n_, goperl_smcf_o_, goperl_smcf_f_ & ~SV_GMAGIC); \
+       goperl_smcf_n_; })
 
 static SV *goperl_newSVnv(goperl_frame_t *f, double d) {
     union {
@@ -5986,6 +6052,10 @@ static void goperl_hostsave_small(goperl_frame_t *f, void *loc, int width) {
 #define save_hptr(hvp) goperl_save_vptr(_gof, (void **)(hvp))
 #define save_aptr(avp) goperl_save_vptr(_gof, (void **)(avp))
 #define SAVEVPTR(v) goperl_save_vptr(_gof, (void **)&(v))
+/* SAVESPTR and SAVEGENERICSV (below) as functions: the slot by its address
+ * (List::Keywords saves a pad entry, &PAD_SVl(targ)) */
+#define save_sptr(sptr) goperl_save_sv_slot(_gof, (SV **)(sptr), 0)
+#define save_generic_svref(sptr) goperl_save_sv_slot(_gof, (SV **)(sptr), 1)
 
 /* SAVESPTR/SAVEGENERICSV on PL_diehook/PL_warnhook route to the guest's
  * own save stack (they must be restored by the matching guest LEAVE, in

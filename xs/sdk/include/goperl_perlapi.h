@@ -1251,6 +1251,8 @@ typedef Signal_t (*Sighandler3_t)(int, siginfo_t *, void *);
 #define NV_MANT_DIG DBL_MANT_DIG
 #define NV_MAX_EXP DBL_MAX_EXP
 #define NV_MIN_EXP DBL_MIN_EXP
+#define NV_MAX_10_EXP DBL_MAX_10_EXP
+#define NV_MIN_10_EXP DBL_MIN_10_EXP
 #define NV_EPSILON DBL_EPSILON
 #include <limits.h>
 
@@ -2146,8 +2148,12 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
        (void)GOPERL_SVSTR(GOPERL_SVSTR_HV_NAME_SET, hv,                     \
                           (U32)(flags) | (goperl_hv_name_set_name_ ? 0u : 0x80000000u), \
                           goperl_hv_name_set_name_, goperl_hv_name_set_name_ ? (len) : 0); })
-/* GvGP is an identity: modules test it and compare it, never look inside. */
-#define GvGP(gv) ((void *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
+/* GvGP is an identity: modules test it and compare it, never look inside.
+ * GP is its type, as perl's, for the modules that keep one (Stats::LikeR:
+ * a GP * in its own struct); struct gp stays incomplete here, so nothing
+ * reads or sizes the interpreter's. */
+typedef struct gp GP;
+#define GvGP(gv) ((GP *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
 #define GvFILE(gv) \
     ((char *)goperl_intern_op(_gof, GOPERL_OP_GV_CALL, GOPERL_TOK(gv), 0, GOPERL_GVCALL_FILE))
 #define GvLINE(gv) ((U32)GOPERL_GVCALL(GOPERL_GVCALL_LINE, gv, 0))
@@ -3080,6 +3086,24 @@ enum {
     (*(char *)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTYPE, GOPERL_LV_AT))
 #define LvTARG(sv) \
     (*(SV **)goperl_lv_ref(_gof, (SV *)(sv), GOPERL_LV_LVTARG, GOPERL_LV_AT))
+/* The offset and the length of an lvalue scalar's target (LvTARGOFF,
+ * LvTARGLEN; Devel::FindRef reports them), lvalues as perl's: the words of
+ * its body, which is the interpreter's memory, where they are. perl 5.44
+ * lays out the body of a PVLV as the head of a string's body (32 bytes),
+ * the integer and the number, then xlv_targoff and xlv_targlen. */
+#define GOPERL_XPVLV_TARGOFF 48
+#define GOPERL_XPVLV_TARGLEN 56
+static inline __attribute__((unused)) STRLEN *goperl_lv_body_word(goperl_frame_t *f, SV *sv,
+                                                                   uint64_t off,
+                                                                   const char *name) {
+    /* the head: the body's address, then the count and the flags */
+    const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
+    if (!head || (svtype)((head[1] >> 32) & SVTYPEMASK) != SVt_PVLV || !head[0])
+        goperl_croakf(f, "%s: the scalar is not an lvalue scalar (PVLV)", name);
+    return (STRLEN *)goperl_guest_mem(f, head[0] + off);
+}
+#define LvTARGOFF(sv) (*goperl_lv_body_word(_gof, (SV *)(sv), GOPERL_XPVLV_TARGOFF, "LvTARGOFF"))
+#define LvTARGLEN(sv) (*goperl_lv_body_word(_gof, (SV *)(sv), GOPERL_XPVLV_TARGLEN, "LvTARGLEN"))
 #define SvSHARED_HASH(sv) ((U32)GOPERL_FIELD(GOPERL_FIELD_SHARED_HASH, sv, 0))
 #define SvIS_FREED(sv) (GOPERL_FIELD(GOPERL_FIELD_IS_FREED, sv, 0) != 0)
 #define HvRITER_get(hv) ((I32)(int64_t)GOPERL_FIELD(GOPERL_FIELD_HVAUX_RITER, hv, 0))
@@ -3875,13 +3899,26 @@ static SSize_t goperl_unpackstring(goperl_frame_t *f, const char *pat, const cha
 #define GOPERL_NO_EMBEDDING(name)                                           \
     (goperl_croakf(goperl_cur_frame_v, "%s: go-perl does not let native code make or end an " \
                    "interpreter", name), 0)
-#define perl_alloc() ((PerlInterpreter *)(uintptr_t)GOPERL_NO_EMBEDDING("perl_alloc"))
+/* perl_alloc and perl_free are perl's without MULTIPLICITY: the memory of
+ * an interpreter that is never constructed, which no call of the perl API
+ * reads, since every call works on the one interpreter. DBD::Firebird's
+ * event callback, on a thread of the client library, allocates one, makes
+ * it the context and frees it after calling back into Perl. The
+ * interpreter the program runs in is not native code's to free. */
+static inline __attribute__((unused)) PerlInterpreter *goperl_perl_alloc(void) {
+    return (PerlInterpreter *)calloc(1, sizeof(void *));
+}
+static inline __attribute__((unused)) void goperl_perl_free(PerlInterpreter *i) {
+    if (i && i == goperl_interp_cur()) (void)GOPERL_NO_EMBEDDING("perl_free");
+    free(i);
+}
+#define perl_alloc() goperl_perl_alloc()
 #define perl_construct(i) ((void)(i), (void)GOPERL_NO_EMBEDDING("perl_construct"))
 #define perl_parse(i, x, c, v, e) \
     ((void)(i), (void)(x), (void)(c), (void)(v), (void)(e), GOPERL_NO_EMBEDDING("perl_parse"))
 #define perl_run(i) ((void)(i), GOPERL_NO_EMBEDDING("perl_run"))
 #define perl_destruct(i) ((void)(i), GOPERL_NO_EMBEDDING("perl_destruct"))
-#define perl_free(i) ((void)(i), (void)GOPERL_NO_EMBEDDING("perl_free"))
+#define perl_free(i) goperl_perl_free((PerlInterpreter *)(i))
 #define perl_clone(i, flags) \
     ((void)(i), (void)(flags), (PerlInterpreter *)(uintptr_t)GOPERL_NO_EMBEDDING("perl_clone"))
 #define HV_ITERNEXT_WANTPLACEHOLDERS 0x01
