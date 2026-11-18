@@ -117,6 +117,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 /* what perl.h includes besides, on Linux (I_PWD, I_GRP, I_UTIME, I_CRYPT,
  * I_SYS_UTSNAME, the System V IPC of HAS_SEM) */
 #include <pwd.h>
@@ -12097,11 +12098,25 @@ static void goperl_call_atexit(goperl_frame_t *f, ATEXIT_t fn, void *arg) {
 
 static int32_t goperl_host_invoke_fn(goperl_frame_t *f, const goperl_gword_t *req,
                                      uint32_t reqlen, goperl_gword_t *resp);
+/* Whether n bytes from p are mapped memory of the process: msync fails
+ * (ENOMEM) for a range with a page that is not mapped, on Linux and on
+ * darwin (whose mincore does not fail for one). A page mapped without
+ * read permission (a guard page) counts as there. */
+static int goperl_memory_there(const void *p, size_t n) {
+    const uintptr_t page = (uintptr_t)getpagesize();
+    const uintptr_t start = (uintptr_t)p & ~(page - 1);
+    if ((uintptr_t)p + n < (uintptr_t)p) return 0;
+    return msync((void *)start, (size_t)((uintptr_t)p + n - start), MS_ASYNC) == 0;
+}
 /* An op an op of native code points at, for B (GOPERL_HOST_NATIVE_OP): the
  * interpreter's number of the op a shadow stands for, or the address of an
  * op of the module's own. */
 static goperl_gword_t goperl_native_op_word(goperl_frame_t *f, const OP *o) {
-    if (!o) return 0;
+    /* a link of a module's own op may hold whatever its memory held (an
+     * op on the C stack whose op_next alone was set): one that is no
+     * pointer to memory there is no op */
+    if (!o || ((uintptr_t)o & (sizeof(void *) - 1)) || !goperl_memory_there(o, sizeof(OP)))
+        return 0;
     return goperl_op_is_shadow(f, o) ? (goperl_gword_t)(o->gop | GOPERL_OP_NUMBER_TAG)
                                      : (goperl_gword_t)(uintptr_t)o;
 }

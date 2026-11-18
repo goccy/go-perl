@@ -27,7 +27,9 @@ static SV *bop_by_next(pTHX_ OP *op) {
     OP stalk;
     SV *stalkbop, *bop;
     dSP;
-    Zero(&stalk, 1, OP);
+    /* the rest of the op holds what the stack held, as B::CallChecker's
+     * does: here a byte pattern of addresses nothing is mapped at */
+    memset(&stalk, 0x08, sizeof stalk);
     stalk.op_next = op;
     stalkbop = sv_2mortal(newRV_noinc(newSViv(INT2PTR(IV, &stalk))));
     sv_bless(stalkbop, gv_stashpv("B::OP", GV_ADD));
