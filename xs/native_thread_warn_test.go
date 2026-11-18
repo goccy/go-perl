@@ -15,13 +15,13 @@ import (
 	goperlfs "github.com/goccy/go-perl/fs"
 )
 
-// A thread of native code's own, which runs no part of the interpreter,
-// that warns (GLib logs from its worker thread through Glib's log handler,
-// which calls warn) has the message written to the process's standard
-// error, and the program goes on. Before, the SDK entered the interpreter
-// without a frame and the process died of SIGSEGV (Glib t/9.t). The message
-// leaves the process past the interpreter's STDERR, so the case runs in a
-// process of its own.
+// A thread of native code's own that warns while the native call that
+// started it waits for it (GLib logs from its worker thread through Glib's
+// log handler, which calls warn) warns through the interpreter, in that
+// call, as on perl: the message says where the program is, and the program
+// goes on, and $SIG{__WARN__} takes it. Before, the SDK entered the
+// interpreter without a frame and the process died of SIGSEGV (Glib t/9.t).
+// The case runs in a process of its own.
 const threadWarnModule = `#include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -58,8 +58,10 @@ func TestNativeThreadWarns(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
-	if err != nil || !strings.Contains(out.String(), "result: joined; after\n") ||
-		!strings.Contains(errOut.String(), "a warning-from a thread of native code\n") {
+	// where the program is: the line of the program's eval, whatever eval
+	// number the instance gave it
+	if err != nil || !strings.Contains(out.String(), "result: joined; after; warned: a warning-from a thread of native code at (eval ") ||
+		!strings.Contains(out.String(), ") line 1.\n\n") {
 		t.Fatalf("err=%v\nstdout %q\nstderr %q", err, out.String(), errOut.String())
 	}
 }
@@ -86,7 +88,7 @@ func threadWarnChild(t *testing.T, so string) {
 		[]byte("package ThreadWarn;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, err := p.Eval(context.Background(), `unshift @INC, '`+libdir+`'; require ThreadWarn; ThreadWarn::run() . "; after"`)
+	r, err := p.Eval(context.Background(), `unshift @INC, '`+libdir+`'; require ThreadWarn; my $w = ""; local $SIG{__WARN__} = sub { $w .= $_[0] }; ThreadWarn::run() . "; after; warned: $w"`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}

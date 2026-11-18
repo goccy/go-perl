@@ -1095,6 +1095,25 @@ typedef char goperl_opbox_layout[(__builtin_offsetof(goperl_opbox_t, c) == 16 &&
                                   __builtin_offsetof(goperl_opbox_t, s) == 48)
                                      ? 1
                                      : -1] __attribute__((unused));
+/* An operation of the interpreter on a thread that has no frame: a thread
+ * of native code's own while no native call of the interpreter waits for
+ * it (see goperl_curframe_slot), or code that runs before the module is
+ * booted. There is nothing to unwind to, so it says so and ends the
+ * process, as a croak there does. */
+static void goperl_no_frame_die(void) __attribute__((noreturn, cold));
+static void goperl_no_frame_die(void) {
+    static const char msg[] =
+        "goperl native XS: the interpreter was used from a thread of native code while no native "
+        "call of the interpreter's was waiting: such a thread can use it only while a native call "
+        "of the interpreter waits for it\n";
+    (void)!write(2, msg, sizeof msg - 1);
+    abort();
+}
+/* f, which an operation of the interpreter is about to use */
+static inline goperl_frame_t *goperl_frame_of_op(goperl_frame_t *f) {
+    if (__builtin_expect(!f, 0)) goperl_no_frame_die();
+    return f;
+}
 static inline __attribute__((unused)) uint64_t goperl_xs_op_box(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint32_t slen) {
@@ -1120,6 +1139,7 @@ static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
     const char *s, uint64_t slen, uint64_t *second) {
     goperl_forked_check();
+    goperl_frame_of_op(f);
     if (goperl_pending_blocks_any()) goperl_pending_block_string(f, op, a, b);
     if (goperl_pv_views_g) goperl_pv_view_hook(f, op, a, b);
     const int goperl_e_ = errno;
@@ -1741,33 +1761,65 @@ static void goperl_errno_leave(goperl_frame_t *f) {
  * lookup runs once per thread and file. Every SDK macro reaches the current
  * frame through here. */
 static __thread goperl_frame_t **goperl_curframe_cache;
-static goperl_frame_t **goperl_curframe_slot(void) {
-    goperl_forked_check();
-    goperl_frame_t **const cached = goperl_curframe_cache;
-    if (__builtin_expect(cached != 0, 1)) return cached;
-    if (!goperl_api_v) {
-        /* the module is not booted yet: code that runs while it is being
-         * loaded (a C++ static initializer) has no frame */
-        static goperl_frame_t *goperl_no_frame;
-        goperl_no_frame = 0;
-        return &goperl_no_frame;
-    }
-    void *tid = (void *)pthread_self();
+/* The frame slot of the one thread that is inside a native call of the
+ * interpreter's, other than self; NULL when no thread is, or more than one
+ * (the native calls of two instances: which one a thread belongs to cannot
+ * be told). */
+static goperl_frame_t **goperl_waiting_call(void *self) {
     goperl_tframe_t *tf = GOPERL_PROCESS->tf;
-    uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
+    goperl_frame_t **found = 0;
     for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS; i++) {
-        goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
-        if (e->tid == tid) return goperl_curframe_cache = &e->f;
-        if (e->tid == 0) {
-            /* claim: threads only ever insert their OWN slot, so a lost
-             * race means someone else claimed a different tid here */
-            if (__sync_bool_compare_and_swap(&e->tid, (void *)0, tid))
-                return goperl_curframe_cache = &e->f;
-            if (e->tid == tid) return goperl_curframe_cache = &e->f;
+        goperl_tframe_t *const e = &tf[i];
+        if (e->tid && e->tid != self && e->f) {
+            if (found) return 0;
+            found = &e->f;
         }
     }
-    /* table full: unrecoverable configuration error */
-    abort();
+    return found;
+}
+/* The frame slot of the thread. A thread of native code's own, which has
+ * no frame (a C library's worker thread that calls back into Perl while
+ * the native call that started the work waits for it: Affix's callbacks),
+ * uses the interpreter through the frame of the native call that waits,
+ * as on a perl without threads, where any thread uses the one interpreter
+ * (modules compiled against this SDK are, and call no PERL_SET_CONTEXT):
+ * its operations and the native calls they make run on it, in that call.
+ * Using it from two threads at once is the program's race, as on perl.
+ * The thread's own slot, cached, is what a thread with a frame finds; the
+ * waiting call is looked for only while the own slot holds no frame, and
+ * is neither cached nor put into the own slot. */
+static goperl_frame_t **goperl_curframe_slot(void) {
+    goperl_forked_check();
+    goperl_frame_t **own = goperl_curframe_cache;
+    if (__builtin_expect(own != 0 && *own != 0, 1)) return own;
+    void *const tid = (void *)pthread_self();
+    if (!own) {
+        if (!goperl_api_v) {
+            /* the module is not booted yet: code that runs while it is
+             * being loaded (a C++ static initializer) has no frame */
+            static goperl_frame_t *goperl_no_frame;
+            goperl_no_frame = 0;
+            return &goperl_no_frame;
+        }
+        goperl_tframe_t *tf = GOPERL_PROCESS->tf;
+        uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
+        for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS && !own; i++) {
+            goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
+            if (e->tid == tid) own = &e->f;
+            else if (e->tid == 0) {
+                /* claim: threads only ever insert their OWN slot, so a lost
+                 * race means someone else claimed a different tid here */
+                if (__sync_bool_compare_and_swap(&e->tid, (void *)0, tid) || e->tid == tid)
+                    own = &e->f;
+            }
+        }
+        /* table full: unrecoverable configuration error */
+        if (!own) abort();
+        goperl_curframe_cache = own;
+        if (*own) return own;
+    }
+    goperl_frame_t **const waiting = goperl_waiting_call(tid);
+    return waiting ? waiting : own;
 }
 #define goperl_cur_frame_v (*goperl_curframe_slot())
 
@@ -4341,6 +4393,7 @@ static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
 }
 static void goperl_svmagic_writeback(goperl_frame_t *f) { goperl_svmagic_writeback_at(f, 0); }
 static void goperl_flush(goperl_frame_t *f) {
+    goperl_frame_of_op(f);
     goperl_pp_sync_out(f);
     goperl_svmagic_writeback(f);
     goperl_svcur_writeback(f);
@@ -4595,7 +4648,7 @@ static I32 goperl_sv_cmp_fn(pTHX_ SV *a, SV *b) {
 
 /* The frame, its stack as native code sees it (a pp function's is the
  * interpreter's own, re-read after every operation: goperl_pp_sync_in). */
-static inline goperl_frame_t *goperl_stk(goperl_frame_t *f) { return f; }
+static inline goperl_frame_t *goperl_stk(goperl_frame_t *f) { return goperl_frame_of_op(f); }
 #define PL_stack_base (goperl_stk(_gof)->stbase)
 #define PL_stack_sp (goperl_stk(_gof)->psp)
 
