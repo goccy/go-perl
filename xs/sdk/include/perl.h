@@ -113,6 +113,7 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -9810,6 +9811,121 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait3(
 GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t wait4(
     pid_t pid, int *status, int options, struct rusage *usage) GOPERL_LIBC_THROWNL {
     return goperl_wait_child(pid, status, options, usage);
+}
+/* ---- the SIGPIPE of a write of native code ---------------------------------
+ * A write into a pipe or a socket nobody reads fails with EPIPE, and the
+ * kernel sends the writer SIGPIPE as the call returns; perl's handler runs
+ * at the next op. The process's copy of the signal does not reach the
+ * program (the runtime posts the guest's own writes' SIGPIPE at the write,
+ * and drops the host's later copy), so native code's write, writev, send,
+ * sendto and sendmsg tell the interpreter themselves (GOPERL_INT_RAISE).
+ * A send with MSG_NOSIGNAL, and a socket set SO_NOSIGPIPE (darwin), raise
+ * none, as on the host, and so does a process whose action for SIGPIPE
+ * native code set (ignored, or a handler of its own): the kernel's signal
+ * went there. */
+#define GOPERL_INT_RAISE 65 /* b: a signal of the program's: it arrives for
+                             * the program, as raise sends it */
+static void goperl_write_failed(int fd, int flags) {
+    if (errno != EPIPE) return;
+    const int e = errno;
+#ifdef MSG_NOSIGNAL
+    if (flags & MSG_NOSIGNAL) return;
+#else
+    (void)flags;
+#endif
+#ifdef SO_NOSIGPIPE
+    {
+        int v = 0;
+        socklen_t l = sizeof v;
+        const int r = getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &v, &l);
+        errno = e;
+        if (r == 0 && v) return;
+    }
+#else
+    (void)fd;
+#endif
+    /* the process's action for the signal: the program's only while it is
+     * the runtime's handler; one native code set (ignored, or a handler of
+     * its own) is what the kernel delivered to, as on perl */
+    {
+        struct sigaction act;
+        if (!goperl_libc_sigaction)
+            goperl_libc_sigaction = (int (*)(int, const struct sigaction *, struct sigaction *))
+                dlsym(RTLD_NEXT, "sigaction");
+        const int r = goperl_libc_sigaction ? goperl_libc_sigaction(SIGPIPE, NULL, &act) : -1;
+        errno = e;
+        if (r != 0 || !goperl_runtime_action(&act)) return;
+    }
+    goperl_frame_t *const f = goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
+                                  ? goperl_thread_frame()
+                                  : NULL;
+    if (!f) return;
+    (void)goperl_xs_opx(f, GOPERL_OP_INTERNAL, 0, (uint64_t)goperl_signal_guest(SIGPIPE),
+                        GOPERL_INT_RAISE, 0, 0, 0);
+    errno = e;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_write)(int, const void *,
+                                                                                  size_t) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t write(int fd, const void *buf,
+                                                                   size_t n) {
+    if (!goperl_libc_write)
+        goperl_libc_write = (ssize_t (*)(int, const void *, size_t))dlsym(RTLD_NEXT, "write");
+    const ssize_t r = goperl_libc_write(fd, buf, n);
+    if (r < 0) goperl_write_failed(fd, 0);
+    return r;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_writev)(
+    int, const struct iovec *, int) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t writev(int fd, const struct iovec *iov,
+                                                                    int n) {
+    if (!goperl_libc_writev)
+        goperl_libc_writev = (ssize_t (*)(int, const struct iovec *, int))dlsym(RTLD_NEXT, "writev");
+    const ssize_t r = goperl_libc_writev(fd, iov, n);
+    if (r < 0) goperl_write_failed(fd, 0);
+    return r;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_send)(int, const void *,
+                                                                                 size_t, int) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t send(int fd, const void *buf, size_t n,
+                                                                  int flags) {
+    if (!goperl_libc_send)
+        goperl_libc_send = (ssize_t (*)(int, const void *, size_t, int))dlsym(RTLD_NEXT, "send");
+    const ssize_t r = goperl_libc_send(fd, buf, n, flags);
+    if (r < 0) goperl_write_failed(fd, flags);
+    return r;
+}
+/* glibc declares sendto's address for GNU C as a transparent union */
+#if defined(__SOCKADDR_ALLTYPES) && !defined(__cplusplus)
+#define GOPERL_SENDTO_ADDR __CONST_SOCKADDR_ARG
+#define GOPERL_SENDTO_PTR(a) ((a).__sockaddr__)
+#else
+#define GOPERL_SENDTO_ADDR const struct sockaddr *
+#define GOPERL_SENDTO_PTR(a) (a)
+#endif
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_sendto)(
+    int, const void *, size_t, int, const struct sockaddr *, socklen_t) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t sendto(int fd, const void *buf,
+                                                                    size_t n, int flags,
+                                                                    GOPERL_SENDTO_ADDR to,
+                                                                    socklen_t tolen) {
+    if (!goperl_libc_sendto)
+        goperl_libc_sendto = (ssize_t (*)(int, const void *, size_t, int, const struct sockaddr *,
+                                          socklen_t))dlsym(RTLD_NEXT, "sendto");
+    const ssize_t r = goperl_libc_sendto(fd, buf, n, flags, GOPERL_SENDTO_PTR(to), tolen);
+    if (r < 0) goperl_write_failed(fd, flags);
+    return r;
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_sendmsg)(
+    int, const struct msghdr *, int) = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t sendmsg(int fd,
+                                                                     const struct msghdr *msg,
+                                                                     int flags) {
+    if (!goperl_libc_sendmsg)
+        goperl_libc_sendmsg = (ssize_t (*)(int, const struct msghdr *, int))dlsym(RTLD_NEXT,
+                                                                                  "sendmsg");
+    const ssize_t r = goperl_libc_sendmsg(fd, msg, flags);
+    if (r < 0) goperl_write_failed(fd, flags);
+    return r;
 }
 /* ---- waits with a signal mask -----------------------------------------------
  * epoll_pwait, ppoll and pselect put the signal mask they are given in
