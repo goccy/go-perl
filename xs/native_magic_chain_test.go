@@ -180,8 +180,8 @@ XS_EXTERNAL(boot_MagicWalk) {
 // value by walking that chain, as Clone does, copies a tie (its object
 // too) and the UTF-8 cache, and a MAGIC of the module's own linked onto
 // the end of such a chain, or before its head, is the value's, while
-// unlinking the interpreter's magic by hand, which gperl cannot do, fails
-// saying so. Before, the chain showed only
+// unlinking the interpreter's magic by hand takes it off the value, as on
+// perl (a tie unlinked so is gone, with what the tie held). Before, the chain showed only
 // what native code had attached: the copy of a tied hash, array or scalar
 // was an untied empty one, and its UTF-8 cache was lost (Clone's t/04-tie.t,
 // t/07-magic.t, t/32-tied-mgobj-leak.t).
@@ -203,7 +203,7 @@ func TestNativeMagicChainShowsTheInterpretersMagic(t *testing.T) {
 		{"a MAGIC of the module's before the interpreter's", ties + ` MagicWalk::mark_head(\%h); join ",", MagicWalk::marked(\%h), MagicWalk::types(\%h), (tied(%h) ? "still tied" : "untied"), $h{b}`, "42,P~,still tied,2"},
 		{"the module's MAGIC on an untied value", `my %h = (a => 1); MagicWalk::mark_head(\%h); MagicWalk::mark(\%h); join ",", MagicWalk::marked(\%h), MagicWalk::types(\%h)`, "42,~~"},
 		{"unlinking the module's own MAGIC", `my %h = (a => 1); MagicWalk::mark(\%h); MagicWalk::unlink_head(\%h); join ",", MagicWalk::marked(\%h), "[" . MagicWalk::types(\%h) . "]"`, "-1,[]"},
-		{"unlinking the interpreter's magic", ties + ` eval { MagicWalk::unlink_head(\%h); 1 } ? "unlinked" : ($@ =~ /unlinked magic 'P' that the interpreter keeps/ ? "refused" : $@) . " " . (tied(%h) ? "still tied" : "untied")`, "refused still tied"},
+		{"unlinking the interpreter's magic", ties + ` (eval { MagicWalk::unlink_head(\%h); 1 } ? "unlinked" : $@) . " " . (tied(%h) ? "still tied" : "untied") . " [" . join(",", sort keys %h) . "]"`, "unlinked untied []"},
 	} {
 		if got := requireModule(t, "MagicWalk", so, tc.code); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)

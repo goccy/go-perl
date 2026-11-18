@@ -4084,6 +4084,7 @@ static void goperl_plshadow_flush(goperl_frame_t *f) {
 
 static void goperl_ppaddr_sync(goperl_frame_t *f);
 static void goperl_ppaddr_rest(goperl_frame_t *f);
+static void goperl_magic_taken_rest(void);
 static void goperl_hooks_sync(goperl_frame_t *f);
 static void goperl_bhk_sync(goperl_frame_t *f);
 
@@ -4108,6 +4109,7 @@ static void goperl_statcache_writeback(goperl_frame_t *f);
  * which this cannot do, and the call fails saying so. */
 static MAGIC *goperl_magic_chain_of_native(goperl_frame_t *f, MAGIC *mg);
 static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg);
+static void goperl_magic_take_off(goperl_frame_t *f, uint64_t sv, const MAGIC *c);
 /* Whether native code took the chain SvMAGIC showed off the value whole,
  * the interpreter's magic with it: Tk's trace of a variable sets SvMAGIC
  * to NULL, attaches a magic of its own with sv_magic (which would not add
@@ -4154,17 +4156,8 @@ static void goperl_svmagic_writeback_at(goperl_frame_t *f, int settle) {
         int on = 0;
         for (MAGIC *mg = val; mg && !on; mg = mg->mg_moremagic)
             on = goperl_magic_is_interp_copy(f, mg) && mg->mg_type == end->mg_type;
-        if (on) continue;
-        sh->svmagic_sv = 0; /* the slot is done with */
-        if (!f->failed) {
-            snprintf(f->err, sizeof f->err,
-                     "SvMAGIC: native code unlinked magic '%c' that the interpreter keeps on "
-                     "the value from its chain; gperl cannot take the interpreter's own "
-                     "magic off a value that way (sv_unmagic can)",
-                     end->mg_type);
-            f->failed = 1;
-        }
-        return;
+        /* unlinked: taken off the value (see goperl_magic_take_off) */
+        if (!on) goperl_magic_take_off(f, sh->svmagic_sv, end);
     }
     /* end is the zeroed MAGIC after the copies */
     MAGIC *const head = goperl_magic_chain_of_native(f, val);
@@ -5170,6 +5163,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
         goperl_pads_rest(f);
         goperl_hooks_rest(f);
         goperl_ppaddr_rest(f);
+        goperl_magic_taken_rest();
         /* a croak path may leave the scope counter high; at rest it is 0 */
         goperl_scope_v = 0;
     }
@@ -7454,6 +7448,11 @@ static void goperl_svmagic_changed(goperl_frame_t *f, uint64_t sv) {
         goperl_svmagic_sv_v = 0;
 }
 #define GOPERL_CALL_MG_LIST 26
+/* CALL 33: a MAGIC of the interpreter's own taken off its chain, not freed */
+#define GOPERL_CALL_MG_UNLINK 33
+/* The data of uvar magic of the interpreter's, as native code reads it
+ * (see goperl_uvar_data_copy). */
+static char *goperl_uvar_data_copy(goperl_frame_t *f, uint64_t g);
 static int goperl_magic_is_interp_copy(goperl_frame_t *f, const MAGIC *mg) {
     return mg && mg->mg_virtual == &((goperl_shared_t *)f->inst)->interp_magic_vtbl;
 }
@@ -7511,6 +7510,8 @@ static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
             mg->mg_private = (U16)c[5];
             if (mg->mg_len == HEf_SVKEY)
                 mg->mg_ptr = (char *)GOPERL_SV(c[4]); /* the name is an SV */
+            else if (mg->mg_type == 'U' && c[4])
+                mg->mg_ptr = goperl_uvar_data_copy(f, c[4]);
             else
                 mg->mg_ptr = c[4] ? (char *)goperl_guest_mem(f, c[4]) : 0;
         }
@@ -7556,6 +7557,8 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
         mg->mg_ptr = (char *)GOPERL_SV(c[4]); /* the name is an SV */
     else if (type == 'c') /* PERL_MAGIC_overload_table */
         mg->mg_ptr = (char *)goperl_amt(f, (SV *)sv);
+    else if (type == 'U' && c[4])
+        mg->mg_ptr = goperl_uvar_data_copy(f, c[4]);
     else
         mg->mg_ptr = c[4] ? (char *)goperl_guest_mem(f, c[4]) : 0;
     return mg;
@@ -7570,16 +7573,78 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
         goperl_api_magic_del(_gof, GOPERL_TOK(goperl_sv_unmagicext_sv_), (int32_t)(how), \
                              (const void *)(vtbl)),                    \
         goperl_svmagic_changed(_gof, GOPERL_TOK(goperl_sv_unmagicext_sv_)), 0); })
-/* Replace the mirror chain's head (the SvMAGIC_set idiom for unlinking an
- * entry the module found via SvMAGIC). The unlinked node's cleanup stays
- * with the module (Safefree), exactly as with real perl. */
-static void goperl_magic_unlinked(goperl_frame_t *f, int type) __attribute__((noreturn));
-static void goperl_magic_unlinked(goperl_frame_t *f, int type) {
-    goperl_croakf(f,
-                  "SvMAGIC: native code unlinked magic '%c' that the interpreter keeps on "
-                  "the value from its chain; gperl cannot take the interpreter's own "
-                  "magic off a value that way (sv_unmagic can)",
-                  type);
+/* The interpreter's own magic native code took off a value by unlinking
+ * the copy SvMAGIC showed of it (Variable::Magic takes Hash::Util::
+ * FieldHash's uvar magic off a field hash to put its own first): taken off
+ * the interpreter's chain then, not freed, as on perl; native code frees
+ * the MAGIC and its data with Safefree, which frees the interpreter's
+ * (goperl_magic_taken_free). The copy and its data stand for the two until
+ * then, or until the outermost native call returns (the copy goes then). */
+typedef struct {
+    const void *copy; /* the copy SvMAGIC showed, freed: 0 */
+    const void *data; /* its mg_ptr, freed: 0 */
+    uint64_t gmg;     /* the interpreter's MAGIC */
+    uint64_t gdata;   /* the interpreter's data, 0 for none or an SV */
+} goperl_mg_taken_t;
+#define GOPERL_MG_TAKEN_MAX 8
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_mg_taken_t
+    goperl_mg_taken_v[GOPERL_MG_TAKEN_MAX] = {{0, 0, 0, 0}};
+static uint64_t goperl_uvar_data_guest(const char *data);
+static inline uint64_t goperl_guest_addr(const goperl_frame_t *f, const void *p);
+static void goperl_magic_take_off(goperl_frame_t *f, uint64_t sv, const MAGIC *c) {
+    uint64_t gdata = 0, key = 0;
+    if (c->mg_len == HEf_SVKEY)
+        key = GOPERL_TOK((SV *)c->mg_ptr);
+    else if (c->mg_type == 'U' && c->mg_ptr)
+        key = gdata = goperl_uvar_data_guest(c->mg_ptr);
+    else if (c->mg_ptr)
+        key = gdata = goperl_guest_addr(f, c->mg_ptr);
+    /* not an operation of the funnel: this runs in the write-back before
+     * one */
+    const uint64_t gmg = goperl_xs_opx(f, GOPERL_OP_CALL, sv, key,
+                                       (uint64_t)GOPERL_CALL_MG_UNLINK |
+                                           ((uint64_t)(unsigned char)c->mg_type << 32),
+                                       0, 0, 0);
+    if (!gmg)
+        goperl_croakf(f, "SvMAGIC: native code unlinked magic '%c' that the interpreter no "
+                         "longer keeps on the value",
+                      c->mg_type);
+    for (int i = 0; i < GOPERL_MG_TAKEN_MAX; i++) {
+        goperl_mg_taken_t *t = &goperl_mg_taken_v[i];
+        if (t->copy || t->data) continue;
+        t->copy = c;
+        t->data = c->mg_ptr;
+        t->gmg = gmg;
+        t->gdata = gdata;
+        return;
+    }
+    goperl_croakf(f, "SvMAGIC: native code took more of the interpreter's magic off values "
+                     "without freeing it than the SDK keeps (%d)",
+                  GOPERL_MG_TAKEN_MAX);
+}
+/* Safefree of a MAGIC native code took off (see goperl_magic_take_off), or
+ * of its data: the interpreter's is freed. */
+static int goperl_magic_taken_free(goperl_frame_t *f, const void *p) {
+    for (int i = 0; i < GOPERL_MG_TAKEN_MAX; i++) {
+        goperl_mg_taken_t *t = &goperl_mg_taken_v[i];
+        if (t->copy && t->copy == p) {
+            t->copy = 0;
+            goperl_do_op(f, GOPERL_OP_MEM_FREE, t->gmg, 0, 0, 0);
+            return 1;
+        }
+        if (t->data && t->data == p) {
+            t->data = 0;
+            if (t->gdata) goperl_do_op(f, GOPERL_OP_MEM_FREE, t->gdata, 0, 0, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+/* The outermost native call has returned: the copies are gone, and what
+ * native code did not free of the magic it took off stays the
+ * interpreter's memory, unlinked. */
+static void goperl_magic_taken_rest(void) {
+    memset(goperl_mg_taken_v, 0, sizeof goperl_mg_taken_v);
 }
 /* The chain mg starts, as the head of sv's: every type of the
  * interpreter's magic the chain SvMAGIC showed of sv has is still on it (a
@@ -7592,7 +7657,7 @@ static void goperl_svmagic_set(goperl_frame_t *f, SV *sv, MAGIC *mg) {
             int on = 0;
             for (const MAGIC *m = mg; m && !on; m = m->mg_moremagic)
                 on = goperl_magic_is_interp_copy(f, m) && m->mg_type == c->mg_type;
-            if (!on) goperl_magic_unlinked(f, c->mg_type);
+            if (!on) goperl_magic_take_off(f, GOPERL_TOK(sv), c);
         }
     goperl_api_magic_set_head(f, GOPERL_TOK(sv), goperl_magic_chain_of_native(f, mg));
     goperl_svmagic_changed(f, GOPERL_TOK(sv));
@@ -7630,10 +7695,94 @@ static int goperl_uvar_set(SV *sv, MAGIC *mg) {
 }
 GOPERL_C __attribute__((weak, visibility("hidden"))) MGVTBL PL_vtbl_uvar = {
     goperl_uvar_get, goperl_uvar_set, 0, 0, 0, 0, 0, 0};
+/* The functions of a struct ufuncs of the interpreter's (Hash::Util::
+ * FieldHash's on a field hash) are the interpreter's functions; native
+ * code that reads the data of such magic finds host functions in their
+ * place, which call them (CALL 34), and that it can keep and call
+ * (Variable::Magic calls the uvar functions it found before its own).
+ * Each stands for one function of the interpreter's, in a slot of this
+ * module's. Uvar magic native code makes of them alone is the
+ * interpreter's own again (goperl_sv_magic). */
+#define GOPERL_CALL_UF_CALL 34
+#define GOPERL_CALL_UVAR_OWN 35
+#define GOPERL_GUEST_UF_SLOTS 8
+GOPERL_C __attribute__((weak, visibility("hidden"))) uint64_t
+    goperl_guest_uf_v[GOPERL_GUEST_UF_SLOTS] = {0};
+static I32 goperl_guest_uf_call(int slot, IV arg, SV *sv) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    const goperl_gword_t fn = goperl_guest_uf_v[slot];
+    return (I32)(int64_t)goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), (uint64_t)(int64_t)arg,
+                                       (uint64_t)GOPERL_CALL_UF_CALL, (const char *)&fn,
+                                       sizeof fn);
+}
+#define GOPERL_GUEST_UF(n) \
+    static I32 goperl_guest_uf_##n(IV arg, SV *sv) { return goperl_guest_uf_call(n, arg, sv); }
+GOPERL_GUEST_UF(0)
+GOPERL_GUEST_UF(1)
+GOPERL_GUEST_UF(2)
+GOPERL_GUEST_UF(3)
+GOPERL_GUEST_UF(4)
+GOPERL_GUEST_UF(5)
+GOPERL_GUEST_UF(6)
+GOPERL_GUEST_UF(7)
+typedef I32 (*goperl_uf_fn_t)(IV, SV *);
+static const goperl_uf_fn_t goperl_guest_uf_fns[GOPERL_GUEST_UF_SLOTS] = {
+    goperl_guest_uf_0, goperl_guest_uf_1, goperl_guest_uf_2, goperl_guest_uf_3,
+    goperl_guest_uf_4, goperl_guest_uf_5, goperl_guest_uf_6, goperl_guest_uf_7};
+/* The host function that stands for the interpreter's function fn. */
+static goperl_uf_fn_t goperl_guest_uf_host(goperl_frame_t *f, uint64_t fn) {
+    if (!fn) return 0;
+    for (int i = 0; i < GOPERL_GUEST_UF_SLOTS; i++) {
+        if (goperl_guest_uf_v[i] == fn) return goperl_guest_uf_fns[i];
+        if (!goperl_guest_uf_v[i]) {
+            goperl_guest_uf_v[i] = fn;
+            return goperl_guest_uf_fns[i];
+        }
+    }
+    goperl_croakf(f, "uvar magic: more functions of the interpreter's uvar magic than the "
+                     "SDK has slots for (%d)",
+                  GOPERL_GUEST_UF_SLOTS);
+}
+/* The interpreter's function a host function stands for, or 0. */
+static uint64_t goperl_guest_uf_of(goperl_uf_fn_t h) {
+    for (int i = 0; h && i < GOPERL_GUEST_UF_SLOTS; i++)
+        if (goperl_guest_uf_fns[i] == h) return goperl_guest_uf_v[i];
+    return 0;
+}
+/* The data of the interpreter's uvar magic as native code reads it: its
+ * struct ufuncs with host functions for the interpreter's, and where the
+ * interpreter has it (goperl_uvar_data_guest), until the outermost native
+ * call returns. */
+typedef struct {
+    struct ufuncs uf;
+    uint64_t g;
+} goperl_uvar_data_t;
+static char *goperl_uvar_data_copy(goperl_frame_t *f, uint64_t g) {
+    const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(f, g);
+    goperl_uvar_data_t *d = (goperl_uvar_data_t *)goperl_arena_alloc(sizeof *d);
+    if (!w || !d) goperl_croakf(f, "Out of memory!");
+    d->uf.uf_val = (I32(*)(IV, SV *))goperl_guest_uf_host(f, w[0]);
+    d->uf.uf_set = (I32(*)(IV, SV *))goperl_guest_uf_host(f, w[1]);
+    d->uf.uf_index = (IV)(int64_t)w[2];
+    d->g = g;
+    return (char *)&d->uf;
+}
+static uint64_t goperl_uvar_data_guest(const char *data) {
+    return ((const goperl_uvar_data_t *)(const void *)data)->g;
+}
 static void goperl_safefree(void *p) __attribute__((unused));
+static void goperl_mg_magical(goperl_frame_t *f, SV *sv);
 static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
                             const char *name, I32 namlen) {
     if (how == PERL_MAGIC_uvar) {
+        /* native code that took its own uvar magic off (unlinked it and
+         * freed it) has no uvar magic on the value any more, and the
+         * interpreter's magic that stood for it goes before another is
+         * attached (Variable::Magic's dispell puts Hash::Util::FieldHash's
+         * back): perl's sv_magic attaches one of a type only once. A
+         * value that has no magic yet has none to let go (and no slot for
+         * a chain that mg_magical could read) */
+        if (SvTYPE(sv) >= SVt_PVMG) goperl_mg_magical(f, sv);
         /* The name is the module's struct ufuncs, copied (namlen is its
          * size) or kept (0). A shorter one is not, nor is none: a module
          * that attaches the magic with some other name, or with none,
@@ -7644,6 +7793,19 @@ static void goperl_sv_magic(goperl_frame_t *f, SV *sv, SV *obj, int how,
         if (name && (namlen == 0 || namlen >= (I32)sizeof(struct ufuncs))) {
             const struct ufuncs *uf = (const struct ufuncs *)name;
             calls = (uf->uf_val ? 1 : 0) | (uf->uf_set ? 2 : 0);
+            /* functions of the interpreter's uvar magic, which native code
+             * took off the value before (Variable::Magic's dispell puts
+             * Hash::Util::FieldHash's back): the interpreter's own magic
+             * again, as it was */
+            const uint64_t gval = goperl_guest_uf_of((goperl_uf_fn_t)uf->uf_val);
+            const uint64_t gset = goperl_guest_uf_of((goperl_uf_fn_t)uf->uf_set);
+            if ((gval || gset) && (!uf->uf_val || gval) && (!uf->uf_set || gset)) {
+                const goperl_gword_t w[3] = {gval, gset, (goperl_gword_t)(int64_t)uf->uf_index};
+                goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), 0,
+                              (uint64_t)GOPERL_CALL_UVAR_OWN, (const char *)w, sizeof w);
+                goperl_svmagic_changed(f, GOPERL_TOK(sv));
+                return;
+            }
         }
         /* CALL 11: UVAR; bit 0: uf_val, bit 1: uf_set */
         goperl_do_op3(f, GOPERL_OP_CALL, GOPERL_TOK(sv), calls, (uint64_t)(11), 0, 0);
@@ -9512,27 +9674,33 @@ static void *goperl_block_alloc(size_t n, int zeroed) {
 static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_safefree(void *p) {
     goperl_frame_t *f = goperl_cur_frame_v;
-    /* a copy SvMAGIC showed of the interpreter's magic is the SDK's, and
-     * the magic stays the interpreter's (a module that frees the MAGIC it
-     * unlinked meant to take it off the value) */
+    /* a MAGIC native code unlinked by relinking the chain SvMAGIC showed
+     * (prev->mg_moremagic = next) is taken off before it is freed */
+    if (f && p && ((const goperl_shared_t *)f->inst)->svmagic_sv) goperl_svmagic_writeback(f);
+    /* the interpreter's magic native code took off, or its data */
+    if (f && p && goperl_magic_taken_free(f, p)) return;
+    /* a copy SvMAGIC showed of the interpreter's magic that is still on
+     * the value is the SDK's, and the magic stays the interpreter's */
     if (f && p && goperl_magic_is_interp_copy(f, (const MAGIC *)p))
-        goperl_magic_unlinked(f, ((const MAGIC *)p)->mg_type);
+        goperl_croakf(f,
+                      "Safefree: native code freed magic '%c' that the interpreter keeps on "
+                      "the value; perl's MAGIC is freed once it is taken off the chain",
+                      ((const MAGIC *)p)->mg_type);
+    /* nor is what such a copy has as its data (the ufuncs of uvar magic,
+     * a name): the interpreter's MAGIC holds it and would be left with it
+     * freed, as perl's would (native code that frees the data of magic it
+     * keeps on the value) */
+    const goperl_shared_t *const sh = f ? (const goperl_shared_t *)f->inst : 0;
+    if (p && sh && sh->svmagic_sv)
+        for (const MAGIC *c = sh->svmagic_orig; goperl_magic_is_interp_copy(f, c); c++)
+            if (c->mg_ptr == (const char *)p)
+                goperl_croakf(f,
+                              "Safefree: native code freed the data of magic '%c' that "
+                              "the interpreter keeps on the value; gperl cannot free "
+                              "what the interpreter's own magic holds",
+                              c->mg_type);
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
     if (g) {
-        /* nor is what such a copy has as its data (the ufuncs of uvar
-         * magic, a name): the interpreter's MAGIC holds it and would be
-         * left with it freed (Variable::Magic's dispell frees the data of
-         * the first uvar magic as its own, which on a field hash is
-         * Hash::Util::FieldHash's) */
-        const goperl_shared_t *const sh = (const goperl_shared_t *)f->inst;
-        if (sh && sh->svmagic_sv)
-            for (const MAGIC *c = sh->svmagic_orig; goperl_magic_is_interp_copy(f, c); c++)
-                if (c->mg_ptr == (const char *)p)
-                    goperl_croakf(f,
-                                  "Safefree: native code freed the data of magic '%c' that "
-                                  "the interpreter keeps on the value; gperl cannot free "
-                                  "what the interpreter's own magic holds",
-                                  c->mg_type);
         goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
     } else {
         goperl_block_forget(p, 0);
