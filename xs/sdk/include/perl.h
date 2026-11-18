@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 42u
+#define GOPERL_XS_ABI 43u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -2431,6 +2431,11 @@ static void goperl_calltab_add(void **tabp, goperl_calltab_ent_t **chain,
  * shadows, which a store gives the interpreter (see goperl_plroot_load). */
 #define GOPERL_LV_PLROOT 400 /* to 403 */
 #define GOPERL_LV_IS_PLROOT(field) ((field) >= GOPERL_LV_PLROOT && (field) < GOPERL_LV_PLROOT + 4)
+/* A glob's format and effective glob, fields of its GP (goperl_gp_of). */
+#define GOPERL_LV_GVFORM 49
+#define GOPERL_LV_GVEGV 50
+/* A hash's placeholder count (INTERNAL HV_PLACEHOLDERS). */
+#define GOPERL_LV_HVPLACEHOLDERS 51
 #define GOPERL_LV_IS_IOWORD(field) ((field) >= GOPERL_LV_IOWORD && (field) < GOPERL_LV_IOWORD + 10)
 #define GOPERL_IOWORD_IS_NAME(w) ((w) >= 7)
 /* The slots whose value is the address of a body here (goperl_compiler.h). */
@@ -4932,6 +4937,38 @@ static void goperl_avbody_load(goperl_frame_t *f, goperl_lvslot_t *m) {
  * pointing that much before the head's sv_u. -> 0 for a scalar that has no
  * such slot, or holds a reference or a glob where it would be (the
  * interpreter's view of those, see GOPERL_OP_SV_SLOT_GET, is the mirror's). */
+/* A glob's GP (gv.h) as the interpreter has it in its memory: GvGP is its
+ * address there, and the glob's slots are its fields, as on perl (GvSV(gv)
+ * = sv, and &GvSV(gv) is the field's address, which code saves and writes
+ * through later). The SVs in it are the interpreter's tokens, as an SV* is
+ * here; gp_file_hek is the interpreter's address of the name. */
+struct gp {
+    SV *gp_sv;
+    IO *gp_io;
+    CV *gp_cv;
+    U32 gp_cvgen;
+    U32 gp_refcnt;
+    HV *gp_hv;
+    AV *gp_av;
+    CV *gp_form;
+    GV *gp_egv;
+    U32 gp_line : 31;
+    U32 gp_flags : 1;
+    void *gp_file_hek;
+};
+typedef struct gp GP;
+typedef char goperl_gp_layout[sizeof(GP) == 80 ? 1 : -1] __attribute__((unused));
+/* The GP of a glob that has one (isGV_with_GP: a glob or a glob in an
+ * lvalue scalar, with the GP flag and no string), where the interpreter has
+ * it, read from the head (sv_u) -> 0 for anything else. */
+static GP *goperl_gp_of(goperl_frame_t *f, uint64_t tok) {
+    if (!tok) return 0;
+    const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, tok);
+    const uint32_t flags = (uint32_t)(head[1] >> 32); /* after the U32 refcnt */
+    const unsigned t = flags & 0xff;
+    if ((flags & (SVp_SCREAM | SVp_POK)) != SVp_SCREAM || (t != SVt_PVGV && t != SVt_PVLV)) return 0;
+    return head[2] ? (GP *)goperl_guest_mem(f, head[2]) : 0;
+}
 static uint64_t *goperl_sv_numslot(goperl_frame_t *f, uint64_t tok, int field) {
     if (!tok) return 0;
     const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, tok);
@@ -4961,6 +4998,22 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
     if (field <= GOPERL_LV_NV) {
         uint64_t *const slot = goperl_sv_numslot(f, tok, field);
         if (slot) return slot;
+    }
+    if (field == GOPERL_LV_GVSV || field == GOPERL_LV_GVAV || field == GOPERL_LV_GVHV ||
+        field == GOPERL_LV_GVFORM || field == GOPERL_LV_GVEGV) {
+        GP *const gp = goperl_gp_of(f, tok);
+        if (gp) {
+            switch (field) {
+            case GOPERL_LV_GVSV: return (uint64_t *)(void *)&gp->gp_sv;
+            case GOPERL_LV_GVAV: return (uint64_t *)(void *)&gp->gp_av;
+            case GOPERL_LV_GVHV: return (uint64_t *)(void *)&gp->gp_hv;
+            case GOPERL_LV_GVFORM: return (uint64_t *)(void *)&gp->gp_form;
+            default: return (uint64_t *)(void *)&gp->gp_egv;
+            }
+        }
+        if (field == GOPERL_LV_GVFORM || field == GOPERL_LV_GVEGV)
+            goperl_croakf(f, "%s of something that is no glob with a GP",
+                          field == GOPERL_LV_GVFORM ? "GvFORM" : "GvEGV");
     }
     goperl_lvstate_t *st = goperl_lvstate_v;
     if (!st) {
@@ -11456,8 +11509,11 @@ typedef pid_t Pid_t;
 #define strnEQ(a, b, n) (strncmp((a), (b), (n)) == 0)
 #define strnNE(a, b, n) (strncmp((a), (b), (n)) != 0)
 typedef U16 OPCODE;
+/* the effective glob and the format of a glob: fields of its GP, lvalues */
 #define GvEGV(gv) \
-    ((GV *)GOPERL_SV(goperl_op0(GOPERL_OP_GV_PTR, GOPERL_TOK(gv), 4)))
+    (*(GV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVEGV, GOPERL_LV_AT))
+#define GvFORM(gv) \
+    (*(CV **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVFORM, GOPERL_LV_AT))
 #define GvNAMELEN(gv) ((U32)goperl_op_second(_gof, GOPERL_OP_GV_NAME, GOPERL_TOK(gv), 0, 0))
 #define hv_clear(hv) ((void)goperl_op0(GOPERL_OP_HV_CLEAR, GOPERL_TOK(hv), 0))
 #define hv_delete(hv, key, klen, flags)                                    \
@@ -12145,6 +12201,159 @@ typedef UV PADOFFSET;
  * entered and after every operation that moves it: a copy. What a module
  * writes into bufptr, error_count, in_my, expect, copline and in_my_stash
  * goes back before the next such operation. */
+/* A token's value (perly.h), and the kinds of token of the interpreter's
+ * grammar: native code that hands the lexer tokens of its own (Data::Alias
+ * puts KW_DO before a block) uses these numbers. */
+union YYSTYPE {
+    I32 ival;
+    void *pval;
+    OP *opval;
+    GV *gvval;
+};
+typedef union YYSTYPE YYSTYPE;
+enum yytokentype {
+    YYEMPTY = -2,
+    YYEOF = 0,                     /* "end of file"  */
+    YYerror = 256,                 /* error  */
+    YYUNDEF = 257,                 /* "invalid token"  */
+    GRAMPROG = 258,                /* GRAMPROG  */
+    GRAMEXPR = 259,                /* GRAMEXPR  */
+    GRAMBLOCK = 260,               /* GRAMBLOCK  */
+    GRAMBARESTMT = 261,            /* GRAMBARESTMT  */
+    GRAMFULLSTMT = 262,            /* GRAMFULLSTMT  */
+    GRAMSTMTSEQ = 263,             /* GRAMSTMTSEQ  */
+    GRAMSUBSIGNATURE = 264,        /* GRAMSUBSIGNATURE  */
+    PERLY_AMPERSAND = 265,         /* PERLY_AMPERSAND  */
+    PERLY_BRACE_OPEN = 266,        /* PERLY_BRACE_OPEN  */
+    PERLY_BRACE_CLOSE = 267,       /* PERLY_BRACE_CLOSE  */
+    PERLY_BRACKET_OPEN = 268,      /* PERLY_BRACKET_OPEN  */
+    PERLY_BRACKET_CLOSE = 269,     /* PERLY_BRACKET_CLOSE  */
+    PERLY_COMMA = 270,             /* PERLY_COMMA  */
+    PERLY_DOLLAR = 271,            /* PERLY_DOLLAR  */
+    PERLY_DOT = 272,               /* PERLY_DOT  */
+    PERLY_EQUAL_SIGN = 273,        /* PERLY_EQUAL_SIGN  */
+    PERLY_MINUS = 274,             /* PERLY_MINUS  */
+    PERLY_PERCENT_SIGN = 275,      /* PERLY_PERCENT_SIGN  */
+    PERLY_PLUS = 276,              /* PERLY_PLUS  */
+    PERLY_SEMICOLON = 277,         /* PERLY_SEMICOLON  */
+    PERLY_SLASH = 278,             /* PERLY_SLASH  */
+    PERLY_SNAIL = 279,             /* PERLY_SNAIL  */
+    PERLY_STAR = 280,              /* PERLY_STAR  */
+    KW_FORMAT = 281,               /* KW_FORMAT  */
+    KW_PACKAGE = 282,              /* KW_PACKAGE  */
+    KW_CLASS = 283,                /* KW_CLASS  */
+    KW_LOCAL = 284,                /* KW_LOCAL  */
+    KW_MY = 285,                   /* KW_MY  */
+    KW_FIELD = 286,                /* KW_FIELD  */
+    KW_IF = 287,                   /* KW_IF  */
+    KW_ELSE = 288,                 /* KW_ELSE  */
+    KW_ELSIF = 289,                /* KW_ELSIF  */
+    KW_UNLESS = 290,               /* KW_UNLESS  */
+    KW_FOR = 291,                  /* KW_FOR  */
+    KW_UNTIL = 292,                /* KW_UNTIL  */
+    KW_WHILE = 293,                /* KW_WHILE  */
+    KW_CONTINUE = 294,             /* KW_CONTINUE  */
+    KW_GIVEN = 295,                /* KW_GIVEN  */
+    KW_WHEN = 296,                 /* KW_WHEN  */
+    KW_DEFAULT = 297,              /* KW_DEFAULT  */
+    KW_TRY = 298,                  /* KW_TRY  */
+    KW_CATCH = 299,                /* KW_CATCH  */
+    KW_FINALLY = 300,              /* KW_FINALLY  */
+    KW_DEFER = 301,                /* KW_DEFER  */
+    KW_REQUIRE = 302,              /* KW_REQUIRE  */
+    KW_DO = 303,                   /* KW_DO  */
+    KW_USE_or_NO = 304,            /* KW_USE_or_NO  */
+    KW_SUB_named = 305,            /* KW_SUB_named  */
+    KW_SUB_named_sig = 306,        /* KW_SUB_named_sig  */
+    KW_SUB_anon = 307,             /* KW_SUB_anon  */
+    KW_SUB_anon_sig = 308,         /* KW_SUB_anon_sig  */
+    KW_METHOD_named = 309,         /* KW_METHOD_named  */
+    KW_METHOD_anon = 310,          /* KW_METHOD_anon  */
+    BAREWORD = 311,                /* BAREWORD  */
+    METHCALL0 = 312,               /* METHCALL0  */
+    METHCALL = 313,                /* METHCALL  */
+    ATTRLIST = 314,                /* ATTRLIST  */
+    THING = 315,                   /* THING  */
+    PMFUNC = 316,                  /* PMFUNC  */
+    PRIVATEREF = 317,              /* PRIVATEREF  */
+    QWLIST = 318,                  /* QWLIST  */
+    FUNC0OP = 319,                 /* FUNC0OP  */
+    FUNC0SUB = 320,                /* FUNC0SUB  */
+    UNIOPSUB = 321,                /* UNIOPSUB  */
+    LSTOPSUB = 322,                /* LSTOPSUB  */
+    PLUGEXPR = 323,                /* PLUGEXPR  */
+    PLUGSTMT = 324,                /* PLUGSTMT  */
+    LABEL = 325,                   /* LABEL  */
+    PROTOTYPE = 326,               /* PROTOTYPE  */
+    LOOPEX = 327,                  /* LOOPEX  */
+    DOTDOT = 328,                  /* DOTDOT  */
+    YADAYADA = 329,                /* YADAYADA  */
+    FUNC0 = 330,                   /* FUNC0  */
+    FUNC1 = 331,                   /* FUNC1  */
+    FUNC = 332,                    /* FUNC  */
+    UNIOP = 333,                   /* UNIOP  */
+    LSTOP = 334,                   /* LSTOP  */
+    BLKLSTOP = 335,                /* BLKLSTOP  */
+    POWOP = 336,                   /* POWOP  */
+    MULOP = 337,                   /* MULOP  */
+    ADDOP = 338,                   /* ADDOP  */
+    DOLSHARP = 339,                /* DOLSHARP  */
+    HASHBRACK = 340,               /* HASHBRACK  */
+    NOAMP = 341,                   /* NOAMP  */
+    COLONATTR = 342,               /* COLONATTR  */
+    FORMLBRACK = 343,              /* FORMLBRACK  */
+    FORMRBRACK = 344,              /* FORMRBRACK  */
+    SUBLEXSTART = 345,             /* SUBLEXSTART  */
+    SUBLEXEND = 346,               /* SUBLEXEND  */
+    PHASER = 347,                  /* PHASER  */
+    PREC_LOW = 348,                /* PREC_LOW  */
+    PLUGIN_LOW_OP = 349,           /* PLUGIN_LOW_OP  */
+    OROP = 350,                    /* OROP  */
+    PLUGIN_LOGICAL_OR_LOW_OP = 351, /* PLUGIN_LOGICAL_OR_LOW_OP  */
+    ANDOP = 352,                   /* ANDOP  */
+    PLUGIN_LOGICAL_AND_LOW_OP = 353, /* PLUGIN_LOGICAL_AND_LOW_OP  */
+    NOTOP = 354,                   /* NOTOP  */
+    ASSIGNOP = 355,                /* ASSIGNOP  */
+    PLUGIN_ASSIGN_OP = 356,        /* PLUGIN_ASSIGN_OP  */
+    PERLY_QUESTION_MARK = 357,     /* PERLY_QUESTION_MARK  */
+    PERLY_COLON = 358,             /* PERLY_COLON  */
+    OROR = 359,                    /* OROR  */
+    DORDOR = 360,                  /* DORDOR  */
+    PLUGIN_LOGICAL_OR_OP = 361,    /* PLUGIN_LOGICAL_OR_OP  */
+    ANDAND = 362,                  /* ANDAND  */
+    PLUGIN_LOGICAL_AND_OP = 363,   /* PLUGIN_LOGICAL_AND_OP  */
+    BITOROP = 364,                 /* BITOROP  */
+    BITANDOP = 365,                /* BITANDOP  */
+    CHEQOP = 366,                  /* CHEQOP  */
+    NCEQOP = 367,                  /* NCEQOP  */
+    CHRELOP = 368,                 /* CHRELOP  */
+    NCRELOP = 369,                 /* NCRELOP  */
+    PLUGIN_REL_OP = 370,           /* PLUGIN_REL_OP  */
+    SHIFTOP = 371,                 /* SHIFTOP  */
+    PLUGIN_ADD_OP = 372,           /* PLUGIN_ADD_OP  */
+    PLUGIN_MUL_OP = 373,           /* PLUGIN_MUL_OP  */
+    MATCHOP = 374,                 /* MATCHOP  */
+    PERLY_EXCLAMATION_MARK = 375,  /* PERLY_EXCLAMATION_MARK  */
+    PERLY_TILDE = 376,             /* PERLY_TILDE  */
+    UMINUS = 377,                  /* UMINUS  */
+    REFGEN = 378,                  /* REFGEN  */
+    PLUGIN_POW_OP = 379,           /* PLUGIN_POW_OP  */
+    PREINC = 380,                  /* PREINC  */
+    PREDEC = 381,                  /* PREDEC  */
+    POSTINC = 382,                 /* POSTINC  */
+    POSTDEC = 383,                 /* POSTDEC  */
+    POSTJOIN = 384,                /* POSTJOIN  */
+    PLUGIN_HIGH_OP = 385,          /* PLUGIN_HIGH_OP  */
+    ARROW = 386,                   /* ARROW  */
+    PERLY_PAREN_CLOSE = 387,       /* PERLY_PAREN_CLOSE  */
+    PERLY_PAREN_OPEN = 388         /* PERLY_PAREN_OPEN  */
+};
+/* The next token the lexer reads, from a check function or a keyword
+ * plugin while it runs (INTERNAL YYLEX); the parser's fields are read again
+ * after it. */
+#define GOPERL_INT_YYLEX 50
+#define yylex() ((int)(int64_t)goperl_do_op3(_gof, GOPERL_OP_INTERNAL, 0, 0, GOPERL_INT_YYLEX, 0, 0))
+#define Perl_yylex(...) yylex()
 typedef struct yy_parser {
     SV *linestr;   /* guest SV handle */
     char *bufptr;  /* host views into the guest linestr PV */
@@ -12177,6 +12386,13 @@ typedef struct yy_parser {
     U8 filtered;          /* source filters are applied to the text */
     U16 last_lop_op;
     char tokenbuf[256];
+    /* the tokens to come and the lookahead's value, the interpreter's
+     * fields (YYSTYPE: their words as they are, an OP or a GV the
+     * interpreter's address) */
+    YYSTYPE yylval;
+    YYSTYPE nextval[5];
+    I32 nexttype[5];
+    U8 nexttoke;
 } yy_parser;
 /* How the next token is to be read (parser->expect). */
 typedef enum {
@@ -12249,6 +12465,14 @@ typedef struct goperl_parser_state {
     yy_parser seen;
     uint64_t tokenbuf; /* the address of the interpreter's parser's tokenbuf */
 } goperl_parser_state_t;
+/* Where the interpreter's parser has nexttoke, nexttype, nextval and yylval,
+ * from its tokenbuf: four signed 16-bit distances (INTERNAL PARSER_FIELD),
+ * the same for every parser of the interpreter's build; read once. */
+#define GOPERL_INT_PARSER_FIELD 51
+GOPERL_C __attribute__((weak, visibility("hidden"))) uint64_t goperl_parser_lexat_g = 0;
+static int64_t goperl_parser_lexat(int i) {
+    return (int64_t)(int16_t)(uint16_t)(goperl_parser_lexat_g >> (16 * i));
+}
 #define goperl_parser_state_v (*(goperl_parser_state_t **)&GOPERL_SHARED->parser_shadow)
 #define goperl_parser_ptr_v (*(yy_parser **)&GOPERL_SHARED->parser_ptr)
 #define goperl_parser_pvg_v (GOPERL_SHARED->parser_pvg)
@@ -12261,6 +12485,8 @@ static void goperl_parser_pull(goperl_frame_t *f) {
     /* CALL 15: the parser's fields, or nothing when there is no parser */
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
         f, goperl_do_op3(f, GOPERL_OP_CALL, 0, 0, (uint64_t)(15), 0, 0));
+    if (w && !goperl_parser_lexat_g)
+        goperl_parser_lexat_g = goperl_do_op3(f, GOPERL_OP_INTERNAL, 0, 0, GOPERL_INT_PARSER_FIELD, 0, 0);
     goperl_parser_gen_v = GOPERL_SHARED->gen + 1;
     if (!w) {
         goperl_parser_ptr_v = 0;
@@ -12313,8 +12539,14 @@ static void goperl_parser_pull(goperl_frame_t *f) {
     p->filtered = (U8)w[GOPERL_PARSERW_FILTERED];
     p->last_lop_op = (U16)w[GOPERL_PARSERW_LAST_LOP_OP];
     st->tokenbuf = w[GOPERL_PARSERW_TOKENBUF];
-    if (st->tokenbuf)
-        memcpy(p->tokenbuf, goperl_guest_mem(f, st->tokenbuf), sizeof p->tokenbuf);
+    if (st->tokenbuf) {
+        const char *const tb = (const char *)goperl_guest_mem(f, st->tokenbuf);
+        memcpy(p->tokenbuf, tb, sizeof p->tokenbuf);
+        p->nexttoke = *(const U8 *)(tb + goperl_parser_lexat(0));
+        memcpy(p->nexttype, tb + goperl_parser_lexat(1), sizeof p->nexttype);
+        memcpy(p->nextval, tb + goperl_parser_lexat(2), sizeof p->nextval);
+        memcpy(&p->yylval, tb + goperl_parser_lexat(3), sizeof p->yylval);
+    }
     st->seen = *p;
     goperl_parser_ptr_v = p;
 }
@@ -12352,6 +12584,25 @@ static void goperl_parser_push(goperl_frame_t *f) {
         return;
     }
     if (!p || !st) return;
+    /* the tokens to come and yylval, in place in the interpreter's parser
+     * (what the module assigned of them) */
+    if (st->tokenbuf) {
+        char *const tb = (char *)goperl_guest_mem(f, st->tokenbuf);
+        if (p->nexttoke != st->seen.nexttoke)
+            *(U8 *)(tb + goperl_parser_lexat(0)) = st->seen.nexttoke = p->nexttoke;
+        if (memcmp(p->nexttype, st->seen.nexttype, sizeof p->nexttype)) {
+            memcpy(tb + goperl_parser_lexat(1), p->nexttype, sizeof p->nexttype);
+            memcpy(st->seen.nexttype, p->nexttype, sizeof p->nexttype);
+        }
+        if (memcmp(p->nextval, st->seen.nextval, sizeof p->nextval)) {
+            memcpy(tb + goperl_parser_lexat(2), p->nextval, sizeof p->nextval);
+            memcpy(st->seen.nextval, p->nextval, sizeof p->nextval);
+        }
+        if (memcmp(&p->yylval, &st->seen.yylval, sizeof p->yylval)) {
+            memcpy(tb + goperl_parser_lexat(3), &p->yylval, sizeof p->yylval);
+            st->seen.yylval = p->yylval;
+        }
+    }
     /* Only what the module assigned goes to the interpreter: a field the
      * module left alone may have moved on there since it was read (a parse
      * that failed counted an error), and must not be put back.

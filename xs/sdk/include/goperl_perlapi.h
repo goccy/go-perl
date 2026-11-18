@@ -797,6 +797,8 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 3, 0, 0);
     case GOPERL_LV_GVSV:
         return goperl_do_op(f, GOPERL_OP_GV_PTR, tok, 5, 0, 0);
+    case GOPERL_LV_HVPLACEHOLDERS: /* INTERNAL HV_PLACEHOLDERS (49) */
+        return (uint32_t)goperl_do_op3(f, GOPERL_OP_INTERNAL, tok, 0, 49, 0, 0);
     case GOPERL_LV_REFCNT:
         return goperl_do_op(f, GOPERL_OP_SV_REFCNT, tok, 0, 0, 0);
     case GOPERL_LV_PVX:
@@ -900,6 +902,9 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
         break;
     case GOPERL_LV_GVSV:
         goperl_xs_opx(f, GOPERL_OP_GV_CALL, tok, val, (uint64_t)(GOPERL_GVCALL_SV_SET), 0, 0, 0);
+        break;
+    case GOPERL_LV_HVPLACEHOLDERS: /* INTERNAL HV_PLACEHOLDERS (49), set */
+        goperl_xs_opx(f, GOPERL_OP_INTERNAL, tok, 1, 49 | ((uint64_t)(uint32_t)val << 32), 0, 0, 0);
         break;
     case GOPERL_LV_PVX:
         goperl_sv_pvx_store(f, tok, (const void *)(uintptr_t)val);
@@ -2132,7 +2137,6 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
  * of gv.h. */
 #define GvIOp(gv) \
     (*(IO **)goperl_lv_ref(_gof, (SV *)(gv), GOPERL_LV_GVIO, GOPERL_LV_AT))
-#define GvFORM(gv) ((CV *)GOPERL_SV(GOPERL_GVCALL(GOPERL_GVCALL_FORM, gv, 0)))
 /* An expression whose value is the CV stored, as gv.h's assignment is
  * (Package::Stash::XS tests it: `if ((GvCV_set(g, cv))) GvIMPORTED_CV_on(g)`). */
 #define GvCV_set(gv, cv)                                                   \
@@ -2174,12 +2178,38 @@ static char *goperl_vform(goperl_frame_t *f, const char *pat, va_list *args) {
        (void)GOPERL_SVSTR(GOPERL_SVSTR_HV_NAME_SET, hv,                     \
                           (U32)(flags) | (goperl_hv_name_set_name_ ? 0u : 0x80000000u), \
                           goperl_hv_name_set_name_, goperl_hv_name_set_name_ ? (len) : 0); })
-/* GvGP is an identity: modules test it and compare it, never look inside.
- * GP is its type, as perl's, for the modules that keep one (Stats::LikeR:
- * a GP * in its own struct); struct gp stays incomplete here, so nothing
- * reads or sizes the interpreter's. */
-typedef struct gp GP;
-#define GvGP(gv) ((GP *)(uintptr_t)GOPERL_GVCALL(GOPERL_GVCALL_GP, gv, 0))
+/* perl.h's message for local through a reference */
+#define PL_no_localize_ref "Can't localize through a reference"
+/* the end of the mark stack, where markstack_grow is due */
+#define PL_markstack_max (goperl_marks(_gof) + goperl_marks_cap(_gof))
+/* GvGP is the glob's GP where the interpreter has it (goperl_gp_of), or
+ * NULL; GvGP_set attaches one (and NULL detaches it), a plain store into the
+ * head, as gv.h's: Data::Alias gives the GP it localized back to a glob of
+ * its own, whose free counts it down. */
+static GP *goperl_gvgp(goperl_frame_t *f, const GV *gv) {
+    goperl_flush(f);
+    return goperl_gp_of(f, GOPERL_TOK(gv));
+}
+static void goperl_gvgp_set(goperl_frame_t *f, GV *gv, GP *gp) {
+    goperl_flush(f);
+    const uint64_t g = gp ? goperl_guest_addr(f, gp) : 0;
+    if (gp && !g) goperl_croakf(f, "GvGP_set with a GP that is not in the interpreter's memory");
+    ((uint64_t *)goperl_guest_mem(f, GOPERL_TOK(gv)))[2] = g;
+}
+#define GvGP(gv) goperl_gvgp(_gof, (const GV *)(gv))
+#define GvGP_set(gv, gp) goperl_gvgp_set(_gof, (GV *)(gv), (GP *)(gp))
+#define isGV_with_GP_on(sv) ((void)(SvFLAGS(sv) |= SVpgv_GP))
+#define isGV_with_GP_off(sv) ((void)(SvFLAGS(sv) &= ~(U32)SVpgv_GP))
+/* A hash's placeholder count, an lvalue (HvPLACEHOLDERS(hv)++, as
+ * Data::Alias does for an element it deletes from a restricted hash). */
+#define GOPERL_INT_HV_PLACEHOLDERS 49
+#define HvPLACEHOLDERS(hv) \
+    (*(I32 *)goperl_lv_ref(_gof, (SV *)(hv), GOPERL_LV_HVPLACEHOLDERS, GOPERL_LV_AT))
+#define HvPLACEHOLDERS_get(hv) \
+    ((I32)goperl_do_op3(_gof, GOPERL_OP_INTERNAL, GOPERL_TOK(hv), 0, GOPERL_INT_HV_PLACEHOLDERS, 0, 0))
+#define HvPLACEHOLDERS_set(hv, p)                                                      \
+    ((void)goperl_do_op3(_gof, GOPERL_OP_INTERNAL, GOPERL_TOK(hv), 1,                  \
+                         (uint64_t)GOPERL_INT_HV_PLACEHOLDERS | ((uint64_t)(uint32_t)(I32)(p) << 32), 0, 0))
 #define GvFILE(gv) \
     ((char *)goperl_intern_op(_gof, GOPERL_OP_GV_CALL, GOPERL_TOK(gv), 0, GOPERL_GVCALL_FILE))
 #define GvLINE(gv) ((U32)GOPERL_GVCALL(GOPERL_GVCALL_LINE, gv, 0))
