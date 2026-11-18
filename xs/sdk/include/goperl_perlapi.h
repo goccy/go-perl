@@ -1362,6 +1362,14 @@ static inline UV goperl_cast_uv(NV f) {
                 ? (goperl_croakf(_gof, "%s", "panic: memory wrap"), 0)    \
                 : 0))
 #define MEM_WRAP_CHECK_(n, t) MEM_WRAP_CHECK(n, t),
+/* perl.h's and handy.h's sizes of a string's buffer: n rounded up to a
+ * multiple of a size_t (POSIX::2008 sizes the buffers of its strings so) */
+#define PERL_STRLEN_ROUNDUP_QUANTUM Size_t_size
+#define PERL_STRLEN_ROUNDUP_UNCHECKED_(n) \
+    (((n) - 1 + PERL_STRLEN_ROUNDUP_QUANTUM) & ~((MEM_SIZE)PERL_STRLEN_ROUNDUP_QUANTUM - 1))
+#define PERL_STRLEN_ROUNDUP(n)                                                                   \
+    ((void)(((n) > MEM_SIZE_MAX - 2 * PERL_STRLEN_ROUNDUP_QUANTUM) ? (croak_memory_wrap(), 0) : 0), \
+     PERL_STRLEN_ROUNDUP_UNCHECKED_(n))
 #define Renewc(v, n, t, c) \
     ({ __typeof__(v) *const goperl_Renewc_v_ = &(v); \
        GOPERL_ONCE(goperl_Renewc_n_, n); \

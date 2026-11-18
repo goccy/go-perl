@@ -10115,6 +10115,17 @@ static PerlIO *goperl_pio_fdopen(goperl_frame_t *f, int fd, const char *mode) {
     return io;
 }
 #define PerlIO_fdopen(fd, mode) goperl_pio_fdopen(_gof, (fd), (mode))
+/* perl.h's suffixes of the mode of a handle on a socket and on a pipe
+ * (POSIX::2008 opens one with "r+" SOCKET_OPEN_MODE): none on unix */
+#ifndef PIPESOCK_MODE
+#define PIPESOCK_MODE
+#endif
+#ifndef SOCKET_OPEN_MODE
+#define SOCKET_OPEN_MODE PIPESOCK_MODE
+#endif
+#ifndef PIPE_OPEN_MODE
+#define PIPE_OPEN_MODE PIPESOCK_MODE
+#endif
 /* PerlIO_importFILE: a handle on the descriptor of a stdio stream, open
  * for what mode says, or for what the descriptor is open for when mode is
  * null or empty. What the stream has buffered for output is written first;
