@@ -2772,8 +2772,8 @@ static void goperl_vtext_p(goperl_frame_t *f, goperl_text_t *t, const char *fmt,
             break;
         default: {
             char unknown[8];
-            int un = snprintf(unknown, sizeof unknown, "<%%%c?>", conv);
-            goperl_text_put(t, unknown, (size_t)un, 0);
+            int unknown_len = snprintf(unknown, sizeof unknown, "<%%%c?>", conv);
+            goperl_text_put(t, unknown, (size_t)unknown_len, 0);
             break;
         }
         }
@@ -9418,8 +9418,8 @@ static int goperl_block_size(const void *p, size_t *size) {
     goperl_blocks_unlock();
     return is;
 }
-static void *goperl_block_alloc(size_t n, int zero) {
-    void *p = zero ? calloc(1, n ? n : 1) : malloc(n ? n : 1);
+static void *goperl_block_alloc(size_t n, int zeroed) {
+    void *p = zeroed ? calloc(1, n ? n : 1) : malloc(n ? n : 1);
     goperl_block_note(p, n);
     return p;
 }
