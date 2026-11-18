@@ -27,7 +27,7 @@ func (s *state) enterNative() (prevThread uint64, prevInterrupt func(), entered 
 		return 0, nil, false
 	}
 	prevThread = s.nativeThread.Swap(thread)
-	return prevThread, s.p.SetOutsideInterrupt(s.interruptNative), true
+	return prevThread, s.p.SetOutsideInterrupt(s.interrupt), true
 }
 
 func (s *state) leaveNative(prevThread uint64, prevInterrupt func(), entered bool) {
