@@ -154,10 +154,11 @@ my @a = (1, 2, 3);
 	if got, want := requireModule(t, "Foreign", so, `Foreign::freed_flags()`), "rok:0 pok:0 ok:0 inc:1"; got != want {
 		t.Errorf("flags of a freed scalar: got %q, want %q", got, want)
 	}
+	// a B::OP object of an op of the module's own is an op that stands for
+	// it, as on perl: a zeroed op is a null op with no next op
 	if got, want := requireModule(t, "Foreign", so, `require B;
 my $op = Foreign::bop();
-my $r = eval { $op->next; 1 } ? "lived" : $@;
-$r =~ /\Ago-perl gives native code no access to this interpreter internal: a B::OP object of an op of native code \(0x[0-9a-f]+\) at / ? "died" : $r`), "died"; got != want {
+ref($op->next) . " " . $op->name`), "B::NULL null"; got != want {
 		t.Errorf("B::OP of an op of native code: got %q, want %q", got, want)
 	}
 }
