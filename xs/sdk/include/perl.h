@@ -1044,6 +1044,14 @@ typedef struct goperl_process {
  * lookup runs once per thread and file. Every SDK macro reaches the current
  * frame through here (goperl_curframe_slot). */
 static __thread goperl_frame_t **goperl_curframe_cache;
+/* The thread's own slot (defined below with goperl_curframe_find). A
+ * thread's slot is the same for as long as it lives, and a function of
+ * native code runs on one thread, so the compiler may ask for it once in a
+ * function and keep the answer (const): a use of the current frame is then
+ * a load and a test where it was a lookup of a thread-local variable and a
+ * test of the process block, and a module's code about half as large. The
+ * first call on a thread claims the slot, which a later call finds. */
+static goperl_frame_t **goperl_own_slot(void) __attribute__((const, noinline));
 
 /* ---- fork(2) in native code ----------------------------------------------
  * The interpreter runs inside a Go program, whose runtime keeps threads of
@@ -1065,7 +1073,13 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t fork(void) GOPERL_LIB
         }
     }
     const pid_t pid = goperl_libc_fork();
-    if (pid == 0 && goperl_api_v) GOPERL_PROCESS->forked = 1;
+    if (pid == 0 && goperl_api_v) {
+        GOPERL_PROCESS->forked = 1;
+        /* The thread's slot holds no frame in the child: the next use of
+         * the current frame, in any module, takes the slow path, which
+         * ends the child (goperl_curframe_find). */
+        *goperl_own_slot() = 0;
+    }
     return pid;
 }
 static void goperl_forked_exit(void) __attribute__((noreturn, unused));
@@ -1945,9 +1959,8 @@ static void goperl_borrow(void *tid, goperl_frame_t *f) {
  * (goperl_entry_slot). */
 static goperl_frame_t **goperl_curframe_find(void);
 static inline __attribute__((always_inline)) goperl_frame_t **goperl_curframe_slot(void) {
-    goperl_forked_check();
-    goperl_frame_t **const own = goperl_curframe_cache;
-    if (__builtin_expect(own != 0 && *own != 0, 1)) return own;
+    goperl_frame_t **const own = goperl_own_slot();
+    if (__builtin_expect(*own != 0, 1)) return own;
     return goperl_curframe_find();
 }
 /* The thread's own slot, claimed on its first use. */
@@ -1980,6 +1993,7 @@ static goperl_frame_t **goperl_own_slot(void) {
     return own;
 }
 static goperl_frame_t **goperl_curframe_find(void) {
+    goperl_forked_check();
     goperl_frame_t **const own = goperl_own_slot();
     if (*own || !goperl_api_v) return own;
     void *const tid = (void *)pthread_self();
