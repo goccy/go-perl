@@ -1950,7 +1950,9 @@ static void goperl_borrow(void *tid, goperl_frame_t *f) {
  * Using it from two threads at once is the program's race, as on perl.
  * The thread's own slot, cached, is what a thread with a frame finds; the
  * waiting call is looked for only while the own slot holds no frame, and
- * is neither cached nor put into the own slot. */
+ * is neither cached nor put into the own slot. A call of the loader's into
+ * the module looks for it only on a thread that has used one
+ * (goperl_entry_slot). */
 static goperl_frame_t **goperl_curframe_find(void);
 static inline __attribute__((always_inline)) goperl_frame_t **goperl_curframe_slot(void) {
     goperl_forked_check();
@@ -1958,39 +1960,65 @@ static inline __attribute__((always_inline)) goperl_frame_t **goperl_curframe_sl
     if (__builtin_expect(own != 0 && *own != 0, 1)) return own;
     return goperl_curframe_find();
 }
-static goperl_frame_t **goperl_curframe_find(void) {
+/* The thread's own slot, claimed on its first use. */
+static goperl_frame_t **goperl_own_slot(void) {
     goperl_frame_t **own = goperl_curframe_cache;
-    void *const tid = (void *)pthread_self();
-    if (!own) {
-        if (!goperl_api_v) {
-            /* the module is not booted yet: code that runs while it is
-             * being loaded (a C++ static initializer) has no frame */
-            static goperl_frame_t *goperl_no_frame;
-            goperl_no_frame = 0;
-            return &goperl_no_frame;
-        }
-        goperl_tframe_t *tf = GOPERL_PROCESS->tf;
-        uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
-        for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS && !own; i++) {
-            goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
-            if (e->tid == tid) own = &e->f;
-            else if (e->tid == 0) {
-                /* claim: threads only ever insert their OWN slot, so a lost
-                 * race means someone else claimed a different tid here */
-                if (__sync_bool_compare_and_swap(&e->tid, (void *)0, tid) || e->tid == tid)
-                    own = &e->f;
-            }
-        }
-        /* table full: unrecoverable configuration error */
-        if (!own) abort();
-        goperl_curframe_cache = own;
-        if (*own) return own;
+    if (own) return own;
+    if (!goperl_api_v) {
+        /* the module is not booted yet: code that runs while it is
+         * being loaded (a C++ static initializer) has no frame */
+        static goperl_frame_t *goperl_no_frame;
+        goperl_no_frame = 0;
+        return &goperl_no_frame;
     }
+    void *const tid = (void *)pthread_self();
+    goperl_tframe_t *tf = GOPERL_PROCESS->tf;
+    uint32_t h = (uint32_t)(((uintptr_t)tid >> 4) % GOPERL_TFRAME_SLOTS);
+    for (uint32_t i = 0; i < GOPERL_TFRAME_SLOTS && !own; i++) {
+        goperl_tframe_t *e = &tf[(h + i) % GOPERL_TFRAME_SLOTS];
+        if (e->tid == tid) own = &e->f;
+        else if (e->tid == 0) {
+            /* claim: threads only ever insert their OWN slot, so a lost
+             * race means someone else claimed a different tid here */
+            if (__sync_bool_compare_and_swap(&e->tid, (void *)0, tid) || e->tid == tid)
+                own = &e->f;
+        }
+    }
+    /* table full: unrecoverable configuration error */
+    if (!own) abort();
+    goperl_curframe_cache = own;
+    return own;
+}
+static goperl_frame_t **goperl_curframe_find(void) {
+    goperl_frame_t **const own = goperl_own_slot();
+    if (*own || !goperl_api_v) return own;
+    void *const tid = (void *)pthread_self();
     goperl_frame_t **const waiting = goperl_waiting_call(tid);
     if (!waiting) return own;
     if (GOPERL_PROCESS->serving_in_init) goperl_init_serving_die();
     goperl_borrow(tid, *waiting);
     return waiting;
+}
+/* The frame slot a call of the loader's into the module (an XSUB's entry,
+ * a destructor, a MAGIC hook, a pp function, a keyword plugin, a host
+ * call) makes its frame current in, and the one read when such a call is
+ * done (goperl_xs_autoleave, __goperl_xs_epilogue). The loader makes these
+ * calls on a thread of the interpreter's, or on a thread of native code's
+ * own inside one of that thread's operations, which used a waiting call's
+ * frame (goperl_curframe_find) and keeps it under the borrow key: only that
+ * thread's calls run in the waiting call. A thread of the interpreter's,
+ * whose own slot holds no frame at an outermost call, has no waiting call
+ * to look for: another thread inside a native call then is in a call of
+ * another instance, not of its own. */
+static goperl_frame_t **goperl_entry_slot(void) {
+    goperl_forked_check();
+    goperl_frame_t **const own = goperl_own_slot();
+    if (*own || !goperl_api_v) return own;
+    goperl_process_t *const p = GOPERL_PROCESS;
+    if (__atomic_load_n(&p->borrow_key_state, __ATOMIC_ACQUIRE) != 2 ||
+        !pthread_getspecific((pthread_key_t)p->borrow_key))
+        return own;
+    return goperl_curframe_find();
 }
 #define goperl_cur_frame_v (*goperl_curframe_slot())
 
@@ -4920,14 +4948,18 @@ static int32_t goperl_stack_lo(goperl_frame_t *f) {
  * pointer the frame that was current had moved is taken into its marks
  * first. An activation that opens on the frame that is current already (an
  * XSUB called by C pointer from another) keeps the pointer: its caller may
- * have moved it for it. */
-static void goperl_frame_enter(goperl_frame_t *f) {
-    goperl_frame_t *prev = goperl_cur_frame_v;
-    if (prev == f) return;
+ * have moved it for it. A call of the loader's into the module does this
+ * first, in the slot it runs in (goperl_entry_slot), and is given the frame
+ * that was current. */
+static goperl_frame_t *goperl_frame_enter(goperl_frame_t *f) {
+    goperl_frame_t **const slot = goperl_entry_slot();
+    goperl_frame_t *const prev = *slot;
+    if (prev == f) return prev;
     if (prev && goperl_markstack_owner_v == prev && goperl_markstack_ptr_v)
         prev->markidx = (int32_t)(goperl_markstack_ptr_v - goperl_marks(prev));
-    goperl_cur_frame_v = f;
+    *slot = f;
     goperl_marks_publish(f);
+    return prev;
 }
 /* The pointer as an lvalue: what the code moved it to before (Inline's
  * void XSUBs push a mark with `temp = PL_markstack_ptr++` and compare the
@@ -5650,7 +5682,7 @@ static void goperl_xs_leave(goperl_frame_t *f) {
  * by C pointer) would jump into it. The activation is still open exactly
  * when the frame's catch point is this function's own buffer. */
 static void goperl_xs_autoleave(jmp_buf *jb) {
-    goperl_frame_t *f = goperl_cur_frame_v;
+    goperl_frame_t *f = *goperl_entry_slot();
     if (f && f->jb == (void *)jb) goperl_xs_leave(f);
 }
 
@@ -7059,11 +7091,10 @@ __goperl_dtor_invoke(goperl_frame_t *f, uint32_t id1) {
     if (id1 == 0 || id1 > GOPERL_DTOR_MAX) return;
     jmp_buf jb;
     void *prev_jb = f->jb;
-    goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
     /* current frame before the table read: the destructor table is
      * per-instance state reached through it */
-    goperl_frame_enter(f);
+    goperl_frame_t *const prev_frame = goperl_frame_enter(f);
     goperl_dtor_t d = goperl_dtor_v[id1 - 1];
     goperl_dtor_v[id1 - 1].used = 0;
     if (!d.used || !d.fn) {
@@ -7099,8 +7130,7 @@ GOPERL_C __attribute__((weak, visibility("default"), used)) void
 __goperl_xs_invoke(goperl_frame_t *f, void *fnv, uint64_t cv) {
     void (*fn)(pTHX_ CV *) = (void (*)(pTHX_ CV *))fnv;
     jmp_buf _gof_jb __attribute__((cleanup(goperl_xs_autoleave)));
-    goperl_frame_t *prev_cur = goperl_cur_frame_v;
-    goperl_frame_enter(f);
+    goperl_frame_t *const prev_cur = goperl_frame_enter(f);
     /* the outermost activation: a croak returns to the loader, also when
      * the module is C++ */
     GOPERL_XS_OPEN_WITH(f, prev_cur, return;)
@@ -7127,7 +7157,7 @@ __goperl_xs_epilogue(goperl_frame_t *f) {
             __atomic_store_n(&p->borrower, (void *)0, __ATOMIC_RELEASE);
         }
     }
-    while (goperl_cur_frame_v == f && goperl_xs_depth_v > 0 && n < 64) {
+    while (*goperl_entry_slot() == f && goperl_xs_depth_v > 0 && n < 64) {
         goperl_frame_t *prev = (goperl_frame_t *)f->prev_frame;
         goperl_xs_leave(f);
         n++;
@@ -7147,9 +7177,8 @@ __goperl_svt_invoke(goperl_frame_t *f, void *fnv, uint64_t sv, void *mg) {
     int (*fn)(pTHX_ SV *, MAGIC *) = (int (*)(pTHX_ SV *, MAGIC *))fnv;
     jmp_buf jb;
     void *prev_jb = f->jb;
-    goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
-    goperl_frame_enter(f);
+    goperl_frame_t *const prev_frame = goperl_frame_enter(f);
     if (GOPERL_SETJMP(jb)) {
         f->failed = 0;
         f->jb = prev_jb;
@@ -7232,8 +7261,7 @@ __goperl_pp_invoke(goperl_frame_t *f, void *fnv) {
     OP *(*fn)(pTHX) = (OP * (*)(pTHX)) fnv;
     jmp_buf jb;
     f->jb = (void *)&jb;
-    f->prev_frame = (void *)goperl_cur_frame_v;
-    goperl_frame_enter(f);
+    f->prev_frame = (void *)goperl_frame_enter(f);
     goperl_xs_depth_v++;
     goperl_opreg_enter();
     f->native_call = 1;
@@ -12402,10 +12430,9 @@ __goperl_keyword_invoke(goperl_frame_t *f, const char *word, uint32_t wordlen,
                         uint32_t kind, uint32_t *ret_out, uint64_t *op_out) {
     jmp_buf jb;
     void *prev_jb = f->jb;
-    goperl_frame_t *prev_frame = goperl_cur_frame_v;
     f->jb = (void *)&jb;
+    goperl_frame_t *const prev_frame = goperl_frame_enter(f);
     f->prev_frame = (void *)prev_frame;
-    goperl_frame_enter(f);
     goperl_xs_depth_v++;
     f->hostsave_base = goperl_hostsave_n;
     goperl_opreg_enter();
@@ -12688,8 +12715,7 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
     jmp_buf jb;
     int32_t rlen = 0;
     f->jb = (void *)&jb;
-    f->prev_frame = (void *)goperl_cur_frame_v;
-    goperl_frame_enter(f);
+    f->prev_frame = (void *)goperl_frame_enter(f);
     goperl_xs_depth_v++;
     goperl_opreg_enter();
     f->native_call = 1;
