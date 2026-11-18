@@ -9675,7 +9675,29 @@ static int goperl_wait_mask_end(goperl_frame_t *f, uint64_t old, int r) {
  * interpreter cannot be asked (see goperl_wait_frame), the C library's
  * call alone. Functions of the module itself (hidden), as sigaction is. */
 #define GOPERL_INT_SIGMASK 63 /* a: how (0 block, 1 unblock, 2 set, 3 ask), b: the
-                               * mask of the program's signals -> the mask before */
+                               * mask of the program's signals -> the mask before;
+                               * or a: 4, b: the address of a sigset_t of the
+                               * interpreter's -> the mask it holds */
+#define GOPERL_INT_SIGSET_STORE 64 /* a: the address of a sigset_t of the
+                                    * interpreter's, b: a mask of the program's
+                                    * signals: the set becomes that mask */
+/* Whether p, a sigset_t native code hands over, is one of the
+ * interpreter's (a POSIX::SigSet's buffer, in the interpreter's memory, as
+ * native code is given it): its address there, or 0. */
+static uint64_t goperl_guest_sigset(goperl_frame_t *f, const void *p) {
+    const char *const m = (const char *)p;
+    return f->membase && m >= f->membase && m < f->membase + *f->memsize ? (uint64_t)(m - f->membase)
+                                                                        : 0;
+}
+/* The host's sigset_t of a mask of the program's signals. */
+static void goperl_host_sigset(uint64_t mask, sigset_t *set) {
+    sigemptyset(set);
+    for (int g = 1; g <= 64; g++)
+        if (mask & ((uint64_t)1 << (g - 1))) {
+            const int h = goperl_signal_host(g);
+            if (h > 0 && h < NSIG) sigaddset(set, h);
+        }
+}
 static int goperl_sigmask_call(int how, const sigset_t *set, sigset_t *old,
                                int (*libc)(int, const sigset_t *, sigset_t *)) {
     goperl_frame_t *const f = goperl_api_v && !GOPERL_PROCESS->forked && !goperl_in_signal_handler()
@@ -9684,6 +9706,8 @@ static int goperl_sigmask_call(int how, const sigset_t *set, sigset_t *old,
     if (!f) return libc(how, set, old);
     uint64_t b = 0;
     int kind = 3;
+    const sigset_t *host_set = set;
+    sigset_t own;
     if (set) {
         switch (how) {
         case SIG_BLOCK: kind = 0; break;
@@ -9691,24 +9715,35 @@ static int goperl_sigmask_call(int how, const sigset_t *set, sigset_t *old,
         case SIG_SETMASK: kind = 2; break;
         default: return libc(how, set, old); /* EINVAL, as the C library says */
         }
-        for (int g = 1; g <= 64; g++)
-            if (sigismember(set, goperl_signal_host(g)) == 1) b |= (uint64_t)1 << (g - 1);
+        const uint64_t at = goperl_guest_sigset(f, set);
+        if (at) {
+            /* the interpreter's set: it says what the set holds, and the
+             * host thread is given that in a set of its own */
+            const int e = errno;
+            b = goperl_xs_opx(f, GOPERL_OP_INTERNAL, 4, at, GOPERL_INT_SIGMASK, 0, 0, 0);
+            errno = e;
+            goperl_host_sigset(b, &own);
+            host_set = &own;
+        } else {
+            for (int g = 1; g <= 64; g++)
+                if (sigismember(set, goperl_signal_host(g)) == 1) b |= (uint64_t)1 << (g - 1);
+        }
     }
     sigset_t host_old;
-    const int r = libc(how, set, &host_old);
+    const int r = libc(how, host_set, &host_old);
     if (r != 0) return r;
     const int e = errno;
     const uint64_t was =
         goperl_xs_opx(f, GOPERL_OP_INTERNAL, (uint64_t)kind, b, GOPERL_INT_SIGMASK, 0, 0, 0);
-    errno = e;
     if (old) {
-        sigemptyset(old);
-        for (int g = 1; g <= 64; g++)
-            if (was & ((uint64_t)1 << (g - 1))) {
-                const int h = goperl_signal_host(g);
-                if (h > 0 && h < NSIG) sigaddset(old, h);
-            }
+        /* the set before, in the interpreter's set or the host's */
+        const uint64_t at = goperl_guest_sigset(f, old);
+        if (at)
+            (void)goperl_xs_opx(f, GOPERL_OP_INTERNAL, at, was, GOPERL_INT_SIGSET_STORE, 0, 0, 0);
+        else
+            goperl_host_sigset(was, old);
     }
+    errno = e;
     return 0;
 }
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigprocmask)(
