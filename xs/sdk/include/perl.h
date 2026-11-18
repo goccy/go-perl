@@ -5843,7 +5843,12 @@ static void goperl_save_sv_slot(goperl_frame_t *f, SV **loc, int generic) {
 #define SAVESPTR(s) goperl_save_sv_slot(_gof, (SV **)&(s), 0)
 #define SAVEGENERICSV(s) goperl_save_sv_slot(_gof, (SV **)&(s), 1)
 
-#define SAVEOP() ((void)goperl_op0(GOPERL_OP_SAVE_OP, 0, 0))
+/* The interpreter puts its PL_op back at the end of the scope, and the op
+ * native code has as PL_op with it, as SAVEVPTR(PL_op) does: a module that
+ * points PL_op at an op of its own until LEAVE (Syntax::Infix::Smartmatch's
+ * match op) goes on from the op it was running. */
+#define SAVEOP() \
+    ((void)goperl_op0(GOPERL_OP_SAVE_OP, 0, 0), goperl_hostsave_ptr(_gof, (void **)&_gof->plop))
 #define save_op() SAVEOP()
 #define SAVEDELETE(hv, key, klen) goperl_save_delete(_gof, (hv), (key), (klen))
 static void goperl_save_delete(goperl_frame_t *f, HV *hv, char *key,
@@ -6678,6 +6683,7 @@ static void goperl_do_op_dump(I32 level, void *fp, const OP *o) {
  * function of the type on a copy of this function's stack (RUN_PP). */
 
 static OP *goperl_pp_dispatch(pTHX_ int type);
+static void goperl_op_flush_one(goperl_frame_t *f, OP *o);
 static OP *goperl_newop_dispatch(pTHX_ int type, OP *o);
 #include "goperl_ppslots.h"
 
@@ -6714,6 +6720,10 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
          * the stack as this function leaves it */
         /* the op is PL_op while its pp runs (it is already, unless a run
          * loop of native code made it PL_op) */
+        /* what the module wrote into the op is the op's before its pp
+         * function reads it, as on perl (PM_SETRE of a match op the module
+         * made, then pp_match: Syntax::Infix::Smartmatch) */
+        goperl_op_flush_one(_gof, cur);
         /* -> the next op; second: what it is now */
         uint64_t fields = 0;
         uint64_t next = goperl_do_opx(_gof, GOPERL_OP_RUN_ORIGINAL,
