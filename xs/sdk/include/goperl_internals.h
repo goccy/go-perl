@@ -22,16 +22,6 @@
 
 #define GOPERL_NO_INTERNAL_PRAGMA(x) _Pragma(#x)
 
-/* the save stack (scope.h) */
-#undef save_alloc
-#define save_alloc GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: save_alloc") 0
-#undef Perl_save_alloc
-#define Perl_save_alloc GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_save_alloc") 0
-#undef leave_scope
-#define leave_scope GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: leave_scope") 0
-#undef Perl_leave_scope
-#define Perl_leave_scope GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: Perl_leave_scope") 0
-
 /* the pads and the context and stackinfo stacks */
 #undef pad_push
 #define pad_push GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: pad_push") 0

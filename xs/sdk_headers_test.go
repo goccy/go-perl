@@ -136,7 +136,7 @@ static int uses(SV *sv, PerlIO *f) {
     SSize_t n = sizeof(XPVMG);
     int t = CATCH_SET(1);
     PerlIO_funcs *tab = PerlIO_find_layer(aTHX_ "encoding", 8, 1);
-    save_alloc(8, 0);
+    pad_push(NULL, 0);
     (void)sv; (void)f; (void)top; (void)n; (void)root; (void)tab;
     return (int)base + t;
 }
@@ -145,7 +145,7 @@ static int uses(SV *sv, PerlIO *f) {
 		t.Fatal("a module using perl's internals built")
 	}
 	const phrase = "go-perl gives native code no access to this interpreter internal: "
-	for _, name := range []string{"PL_main_root", "PL_eval_root", "XPVMG", "CATCH_SET", "PerlIO_find_layer", "save_alloc"} {
+	for _, name := range []string{"PL_main_root", "PL_eval_root", "XPVMG", "CATCH_SET", "PerlIO_find_layer", "pad_push"} {
 		if !strings.Contains(string(out), phrase+name) {
 			t.Errorf("no %q in what the compiler said:\n%s", phrase+name, out)
 		}

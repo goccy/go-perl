@@ -520,6 +520,7 @@ enum {
 #define AMGf_force_scalar 0x0100
 
 /* scope.h */
+#define SAVEf_SETMAGIC 1
 #define SAVEf_KEEPOLDELEM 2
 
 /* op.h want bits. */
@@ -7163,6 +7164,13 @@ typedef struct goperl_si PERL_SI;
  * (sub, format, eval, loop) are apart here, where the interpreter overlays
  * them: each is filled for a context of its kind. What native code writes
  * into a context does not reach the interpreter. */
+/* the iteration variable of a loop context (struct block_loop) */
+typedef union goperl_itervar {
+    SV **svp;
+    GV *gv;
+    SV *sv;
+    SV **gvp;
+} goperl_itervar_t;
 typedef struct goperl_context {
     U8 cx_type; /* CXt_ type and CXp_ bits, as in the interpreter */
     U8 blk_gimme;
@@ -7196,15 +7204,18 @@ typedef struct goperl_context {
     } blk_eval;
     /* perl's: the loop op, the iteration variable (for a lexical one the
      * address of its pad slot, in the interpreter's memory), the value it
-     * had before, and where the iteration is */
+     * had before, and where the iteration is. A given or a when block has
+     * its op and the $_ it saved (blk_givwhen) where a loop has its op and
+     * variable, as perl's blocks share a union. */
     struct block_loop {
-        OP *my_op;
         union {
-            SV **svp;
-            GV *gv;
-            SV *sv;
-            SV **gvp;
-        } itervar_u;
+            OP *my_op;
+            OP *leave_op; /* blk_givwhen's */
+        };
+        union {
+            goperl_itervar_t itervar_u;
+            SV *defsv_save; /* blk_givwhen's */
+        };
         SV *itersave;
         union {
             struct {
@@ -7226,6 +7237,7 @@ typedef struct goperl_context {
         } state_u;
     } blk_loop;
 } PERL_CONTEXT;
+#define blk_givwhen blk_loop
 struct goperl_si {
     uint64_t tok;
     PERL_CONTEXT *si_cxstack;
@@ -7529,6 +7541,11 @@ static PERL_SI *goperl_si_materialize_from(goperl_frame_t *f, uint64_t si_tok, i
             cx->blk_eval.old_eval_root = goperl_op_shadow(f, c[14]);
             cx->blk_eval.cur_top_env = (JMPENV *)(uintptr_t)c[15];
             break;
+        case CXt_GIVEN:
+        case CXt_WHEN:
+            cx->blk_givwhen.leave_op = goperl_op_shadow_full(f, c[10]);
+            cx->blk_givwhen.defsv_save = GOPERL_SV(c[11]);
+            break;
         default:
             cx->blk_loop.my_op = goperl_op_shadow_full(f, c[10]);
             /* a pad slot is the interpreter's memory, where native code
@@ -7724,6 +7741,11 @@ static void goperl_cx_writeback(goperl_frame_t *f) {
                 GOPERL_CX_FIELD(13, blk_eval.cv, GOPERL_TOK(cx->blk_eval.cv))
                 GOPERL_CX_FIELD(14, blk_eval.old_eval_root, goperl_cx_op_tok(f, cx->blk_eval.old_eval_root))
                 GOPERL_CX_FIELD(15, blk_eval.cur_top_env, (uintptr_t)cx->blk_eval.cur_top_env)
+                break;
+            case CXt_GIVEN:
+            case CXt_WHEN:
+                GOPERL_CX_FIELD(10, blk_givwhen.leave_op, goperl_cx_op_tok(f, cx->blk_givwhen.leave_op))
+                GOPERL_CX_FIELD(11, blk_givwhen.defsv_save, GOPERL_TOK(cx->blk_givwhen.defsv_save))
                 break;
             default:
                 if (CxTYPE_is_LOOP(was)) {

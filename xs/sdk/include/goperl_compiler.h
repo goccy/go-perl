@@ -42,6 +42,7 @@ enum {
     GOPERL_INT_PUSHSTACK = 33,  /* b: the stackinfo type: PUSHSTACKi */
     GOPERL_INT_POPSTACK = 34,   /* POPSTACK */
     GOPERL_INT_DOCATCH = 43,    /* a: the running op: docatch with its pp function first */
+    GOPERL_INT_SAVE_AELEM = 44, /* a: an array; b: flags<<32 | the index */
     GOPERL_INT_PADNAMELIST_NEW = 60, /* b: max -> newPADNAMELIST's list */
     GOPERL_INT_PADNAMELIST_FREE = 61, /* a: the list: PadnamelistREFCNT_dec */
     GOPERL_INT_PADNAME_OUTER = 62,  /* a: a pad name -> newPADNAMEouter's */
@@ -234,6 +235,17 @@ static __attribute__((unused)) int goperl_save_routed(goperl_frame_t *f, void *l
        (void)GOPERL_INTERNAL(_gof, GOPERL_INT_SAVE_FREEOP,                  \
                              goperl_SAVEFREEOP_o_ ? goperl_SAVEFREEOP_o_->gop : 0, 0); })
 #define save_freeop(o) SAVEFREEOP(o)
+/* save_aelem (scope.c): the interpreter saves the element of its array and
+ * puts a new value in its place (the address native code gives is the one
+ * av_fetch gave: the interpreter fetches the element itself) */
+#define save_aelem_flags(av, idx, svp, flags)                                         \
+    ((void)(svp), (void)GOPERL_INTERNAL(_gof, GOPERL_INT_SAVE_AELEM, GOPERL_TOK(av),   \
+                                        ((uint64_t)(U32)(flags) << 32) |             \
+                                            (uint64_t)(uint32_t)(I32)(idx)))
+#define save_aelem(av, idx, svp) save_aelem_flags((av), (idx), (svp), SAVEf_SETMAGIC)
+/* the length of a refcounted string of the interpreter's (cop.h's RCPV: a
+ * COP's warnings), from its header before the bytes */
+#define RCPV_LEN(pv) (((const STRLEN *)(const void *)(pv))[-1] - 1)
 
 /* ---- interpreter variables of a compilation ---------------------------------
  * Lvalues like the others (goperl_plint_ref): read from the interpreter,

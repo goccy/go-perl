@@ -4861,6 +4861,35 @@ static void goperl_save_freepv(goperl_frame_t *f, char *pv) {
         goperl_save_destructor(f, goperl_savefreepv_cb, (void *)pv, GOPERL_DTOR_CALL_OWN);
 }
 #define save_freepv(pv) goperl_save_freepv(_gof, (char *)(pv))
+/* save_alloc (scope.c): room for size bytes on the interpreter's save stack
+ * after pad bytes, in whole entries, under a SAVEt_ALLOC entry; -> where
+ * the room begins, in bytes from the bottom of the save stack (Scope::Upper
+ * pads the save stack with it so that its destructor lands where it wants) */
+static SSize_t goperl_save_alloc(goperl_frame_t *f, SSize_t size, I32 pad) __attribute__((unused));
+static SSize_t goperl_save_alloc(goperl_frame_t *f, SSize_t size, I32 pad) {
+    const UV elems = 1 + (UV)((size + pad - 1) / (SSize_t)sizeof(ANY));
+    const UV elems_shifted = elems << SAVE_TIGHT_SHIFT;
+    if ((elems_shifted >> SAVE_TIGHT_SHIFT) != elems)
+        goperl_croakf(f, "panic: save_alloc elems %lu out of range (%ld-%ld)", (unsigned long)elems,
+                      (long)size, (long)pad);
+    ANY *const ss = goperl_ss_room(f, (int)(elems + 1));
+    I32 *const ixp = (I32 *)goperl_plint_ref(f, GOPERL_PL_SAVESTACK_IX);
+    const SSize_t start = pad + (SSize_t)*ixp * (SSize_t)sizeof(ANY);
+    *ixp += (I32)elems;
+    ss[*ixp].any_uv = (UV)SAVEt_ALLOC | elems_shifted;
+    *ixp += 1;
+    return start;
+}
+#define save_alloc(size, pad) goperl_save_alloc(_gof, (SSize_t)(size), (I32)(pad))
+#define Perl_save_alloc(size, pad) save_alloc(size, pad)
+/* leave_scope (scope.c): the saves above base are undone, as LEAVE_SCOPE */
+#define leave_scope(base) LEAVE_SCOPE(base)
+#define Perl_leave_scope(base) leave_scope(base)
+/* PL_DBgv, the glob *DB::DB (NULL unless the debugger is in), as it is
+ * now (a value: the variables with a slot to store into are those below
+ * GOPERL_PLSHADOW_MAX) */
+#define GOPERL_PL_DBGV 131
+#define PL_DBgv ((GV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_DBGV)))
 /* The mask of the ops a compilation refuses (Safe's opmask), MAXO bytes in
  * the interpreter's memory, or NULL: in this process, a pointer into that
  * memory (where the buffer of a string is, SvPVX). */
