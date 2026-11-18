@@ -300,6 +300,15 @@ typedef struct padnamelist PADNAMELIST;
 typedef struct padname PADNAME;
 typedef AV PAD;
 struct padname_fieldinfo;
+/* A pad name with its string after it, as perl 5.44 lays out a name of its
+ * own (pad.h), for the size of one (Devel::Size: STRUCT_OFFSET(struct
+ * padname_with_str, xpadn_str[0])): the name part is the fields of the
+ * interpreter's struct padname without its padding (PADNAME_BASE), 50
+ * bytes. */
+struct padname_with_str {
+    char goperl_padname_[50];
+    char xpadn_str[1];
+};
 struct padname {
     char *xpadn_pv;
     HV *xpadn_ourstash;
@@ -1320,8 +1329,40 @@ static __attribute__((unused)) void **goperl_sv_any(goperl_frame_t *f, SV *sv, c
         return (void **)goperl_lv_ref(f, sv, GOPERL_LV_CVBODY, site, frame);
     return (void **)goperl_lv_ref(f, sv, GOPERL_LV_SVANY, site, frame);
 }
+/* SvANY of a REGEXP is its body, a struct regexp: the copy ReANY makes,
+ * which code reads (Devel::Size: SvANY(rx)->nparens). */
+static __attribute__((unused)) regexp **goperl_rx_any(goperl_frame_t *f, const REGEXP *rx) {
+    static __thread regexp *slot;
+    slot = rx ? goperl_reany(f, (REGEXP *)(uintptr_t)rx) : (regexp *)0;
+    return &slot;
+}
 #undef SvANY
-#define SvANY(sv) (*goperl_sv_any(_gof, (SV *)(sv), GOPERL_LV_AT))
+#ifdef __cplusplus
+extern "C++" {
+static inline __attribute__((unused)) void **goperl_svany_of(goperl_frame_t *f, const void *sv,
+                                                              const void *site, uintptr_t frame) {
+    return goperl_sv_any(f, (SV *)(uintptr_t)sv, site, frame);
+}
+static inline __attribute__((unused)) regexp **goperl_svany_of(goperl_frame_t *f, const REGEXP *rx,
+                                                                const void *, uintptr_t) {
+    return goperl_rx_any(f, rx);
+}
+}
+#define SvANY(sv) (*goperl_svany_of(_gof, (sv), GOPERL_LV_AT))
+#else
+/* the address of the body's slot, of the type the value's type says */
+static __attribute__((unused)) void **goperl_svany_typed(goperl_frame_t *f, const void *sv, int rx,
+                                                         const void *site, uintptr_t frame) {
+    if (rx) return (void **)goperl_rx_any(f, (const REGEXP *)sv);
+    return goperl_sv_any(f, (SV *)(uintptr_t)sv, site, frame);
+}
+#define GOPERL_SVANY_IS_RX(sv) _Generic((sv), REGEXP *: 1, const REGEXP *: 1, default: 0)
+#define GOPERL_SVANY_PTR_T(sv) \
+    __typeof__(_Generic((sv), REGEXP *: (regexp **)0, const REGEXP *: (regexp **)0, default: (void **)0))
+#define SvANY(sv) \
+    (*(GOPERL_SVANY_PTR_T(sv))goperl_svany_typed(_gof, (const void *)(sv), GOPERL_SVANY_IS_RX(sv), \
+                                                 GOPERL_LV_AT))
+#endif
 /* A key shared by the interpreter, shared once more, as hv.h's: a key of
  * the interpreter's memory (HeKEY_hek, SvSHARED_HEK_FROM_PV) counts one
  * more holder in the shared_he it is the key of, which the interpreter
