@@ -572,6 +572,8 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
     goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, len, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
 }
 static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);
+static uint64_t goperl_plroot_load(goperl_frame_t *f, int field);
+static void goperl_plroot_store(goperl_frame_t *f, int field, uint64_t val);
 static void goperl_cvfield_store(goperl_frame_t *f, uint64_t tok, int field, uint64_t val);
 /* CvXSUB of an XSUB of the interpreter's (B's, POSIX's): a function of
  * this process that calls the sub through the interpreter, as calling the
@@ -593,6 +595,7 @@ static uint64_t goperl_lv_load_field(goperl_frame_t *f, uint64_t tok, int field)
         if (GOPERL_IOWORD_IS_NAME(w)) return v ? (uint64_t)(uintptr_t)goperl_guest_mem(f, v) : 0;
         return v;
     }
+    if (GOPERL_LV_IS_PLROOT(field)) return goperl_plroot_load(f, field);
     switch (field) {
     case GOPERL_LV_IV:
         return goperl_do_op3(f, GOPERL_OP_SV_SLOT_GET, tok, 0, (uint64_t)(2), 0, 0);
@@ -682,6 +685,10 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
         } else {
             goperl_xs_opx(f, GOPERL_OP_FIELD, tok, val, c, 0, 0, 0);
         }
+        return;
+    }
+    if (GOPERL_LV_IS_PLROOT(field)) {
+        goperl_plroot_store(f, field, val);
         return;
     }
     switch (field) {
@@ -1316,6 +1323,11 @@ static void goperl_sv_ok_off(goperl_frame_t *f, SV *sv, U32 clear) {
 #define SvGMAGICAL_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_GMG, 0)
 #define SvGMAGICAL_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_GMG)
 #define SvSMAGICAL(sv) (SvFLAGS(sv) & SVs_SMG)
+/* Whether a string has a Boyer-Moore table attached as magic (sv.h). */
+#define SvVALID(sv)                                                         \
+    ({ GOPERL_ONCE(goperl_SvVALID_sv_, (SV *)(sv));                         \
+       (SvPOKp(goperl_SvVALID_sv_) && SvSMAGICAL(goperl_SvVALID_sv_) &&     \
+        mg_find(goperl_SvVALID_sv_, PERL_MAGIC_bm) != 0); })
 #define SvSMAGICAL_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_SMG, 0)
 #define SvSMAGICAL_off(sv) GOPERL_FLAGS_CHANGE(sv, 0, SVs_SMG)
 #define SvRMAGICAL_on(sv) GOPERL_FLAGS_CHANGE(sv, SVs_RMG, 0)
@@ -2960,6 +2972,23 @@ static inline __attribute__((unused)) STRLEN *goperl_lv_body_word(goperl_frame_t
 #define cMETHOPo_meth cMETHOPx_meth(o)
 #define cMETHOP_meth cMETHOPx_meth(PL_op)
 typedef struct op PMOP;
+#define cPMOPo cPMOPx(o)
+#define cPMOP cPMOPx(PL_op)
+#define cPADOPo cPADOPx(o)
+#define cPADOP cPADOPx(PL_op)
+/* The fields of an op that is at the edge of what the interpreter
+ * described (a link, which has its type only) are asked for first. */
+#define goperl_op_fields(o) ((OP *)goperl_cop_fields((COP *)(o)))
+/* The regexp of a match op, as perl without threads keeps it: the field
+ * (PM_GETRE), and a store of it, which takes the reference it is given
+ * (PM_SETRE); the store reaches the interpreter as the op's other fields
+ * written into a shadow do. */
+#define PM_GETRE(o) ((REGEXP *)goperl_op_fields(o)->op_pmregexp)
+#define PM_SETRE(o, r) ((void)(goperl_op_fields(o)->op_pmregexp = (REGEXP *)(r)))
+#define PmopSTASH(o)                                                      \
+    ({ GOPERL_ONCE(goperl_PmopSTASH_o_, goperl_op_fields(o));             \
+       (goperl_PmopSTASH_o_->op_pmflags & PMf_ONCE)                       \
+           ? goperl_PmopSTASH_o_->op_pmstashstartu.op_pmstash : (HV *)0; })
 
 /* The class of an op, as an OA_ value: the interpreter's for an op of its
  * own (a custom op has the class it was registered with), and the class of
@@ -4227,6 +4256,9 @@ typedef enum {
     OPclass_METHOP,
     OPclass_UNOP_AUX
 } OPclass;
+/* the numbers goperl_op_apply reads the record's class by */
+typedef char goperl_opclass_numbers_agree
+    [(GOPERL_OPCLASS_PMOP == OPclass_PMOP && GOPERL_OPCLASS_PADOP == OPclass_PADOP) ? 1 : -1];
 static OPclass goperl_op_class_of(const OP *o) __attribute__((unused));
 static OPclass goperl_op_class_of(const OP *o) {
     bool custom = 0;
@@ -4733,6 +4765,40 @@ static OP **goperl_restartop_ref(goperl_frame_t *f) {
 #define PL_tmps_stack ((SV **)goperl_guest_mem(_gof, GOPERL_PLVAR(GOPERL_PL_TMPS_STACK_ADDR)))
 #define PL_tmps_max ((SSize_t)(int64_t)GOPERL_PLVAR(GOPERL_PL_TMPS_MAX))
 #define CATCH_GET (GOPERL_PLVAR(GOPERL_PL_CATCH) != 0)
+/* whether the run loop of the jump environment native code runs in must
+ * catch a die an eval inside it catches (Syntax::Infix::Smartmatch around
+ * the run of an overloaded ~~) */
+#define CATCH_SET(v) GOPERL_PLVAR_STORE(GOPERL_PL_CATCH, (v) ? 1 : 0)
+/* The roots and starts of the main program and of the eval being compiled:
+ * op shadows of the whole tree below, as CvROOT's are, and lvalues, whose
+ * store is the interpreter's at the next operation (B::Generate). */
+#define GOPERL_PL_MAIN_ROOT 400
+#define GOPERL_PL_MAIN_START 401
+#define GOPERL_PL_EVAL_ROOT 402
+#define GOPERL_PL_EVAL_START 403
+static uint64_t goperl_op_field_tok(goperl_frame_t *f, uint64_t val);
+static uint64_t goperl_plroot_load(goperl_frame_t *f, int field) {
+    const int id = GOPERL_PL_MAIN_ROOT + (field - GOPERL_LV_PLROOT);
+    return (uint64_t)(uintptr_t)goperl_op_shadow_full(
+        f, goperl_do_op(f, GOPERL_OP_PLVAR_GET, (uint64_t)id, 0, 0, 0));
+}
+static void goperl_plroot_store(goperl_frame_t *f, int field, uint64_t val) {
+    const int id = GOPERL_PL_MAIN_ROOT + (field - GOPERL_LV_PLROOT);
+    goperl_xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)id, goperl_op_field_tok(f, val), 0, 0);
+}
+#define GOPERL_PLROOT(n) \
+    (*(OP **)goperl_lv_ref(_gof, (SV *)0, GOPERL_LV_PLROOT + (n), GOPERL_LV_AT))
+#define PL_main_root GOPERL_PLROOT(0)
+#define PL_main_start GOPERL_PLROOT(1)
+#define PL_eval_root GOPERL_PLROOT(2)
+#define PL_eval_start GOPERL_PLROOT(3)
+/* The names and the descriptions of custom ops by their pp functions, the
+ * tables of before XOPs, which the interpreter keeps (NULL until some code
+ * fills them): hashes, read as they are (B::Generate). */
+#define GOPERL_PL_CUSTOM_OP_NAMES 404
+#define GOPERL_PL_CUSTOM_OP_DESCS 405
+#define PL_custom_op_names ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_CUSTOM_OP_NAMES)))
+#define PL_custom_op_descs ((HV *)GOPERL_SV(GOPERL_PLVAR(GOPERL_PL_CUSTOM_OP_DESCS)))
 /* room for n entries above the top of the save stack (and the SS_MAXPUSH
  * spare ones perl keeps above it) */
 static ANY *goperl_ss_room(goperl_frame_t *f, int n) {

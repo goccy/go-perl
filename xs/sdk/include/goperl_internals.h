@@ -48,24 +48,6 @@
 #undef SWITCHSTACK
 #define SWITCHSTACK GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: SWITCHSTACK") 0
 
-/* the op tree and the match op's regexp */
-#undef cPMOPo
-#define cPMOPo GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: cPMOPo") 0
-#undef cPMOP
-#define cPMOP GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: cPMOP") 0
-#undef PM_GETRE
-#define PM_GETRE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PM_GETRE") 0
-#undef PM_SETRE
-#define PM_SETRE GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PM_SETRE") 0
-#undef PL_main_root
-#define PL_main_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_main_root") 0
-#undef PL_main_start
-#define PL_main_start GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_main_start") 0
-#undef PL_eval_root
-#define PL_eval_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_eval_root") 0
-#undef PL_eval_start
-#define PL_eval_start GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_eval_start") 0
-
 /* the bodies of SVs (sv.h, av.h) */
 #undef AvALLOC
 #define AvALLOC GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: AvALLOC") 0
@@ -73,10 +55,6 @@
 /* the SV arenas: PL_sv_arenaroot is the interpreter's first arena (perl.h) */
 #undef PL_sv_root
 #define PL_sv_root GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: PL_sv_root") 0
-
-/* the catch flag of the jump environment */
-#undef CATCH_SET
-#define CATCH_SET GOPERL_NO_INTERNAL_PRAGMA(GCC error "go-perl gives native code no access to this interpreter internal: CATCH_SET") 0
 
 /* the directory stream of a dirhandle */
 #undef IoDIRP
