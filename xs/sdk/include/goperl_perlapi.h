@@ -4440,7 +4440,7 @@ typedef enum {
 /* the numbers goperl_op_apply reads the record's class by */
 typedef char goperl_opclass_numbers_agree
     [(GOPERL_OPCLASS_PMOP == OPclass_PMOP && GOPERL_OPCLASS_PADOP == OPclass_PADOP &&
-      GOPERL_OPCLASS_SVOP == OPclass_SVOP) ? 1 : -1];
+      GOPERL_OPCLASS_SVOP == OPclass_SVOP && GOPERL_OPCLASS_METHOP == OPclass_METHOP) ? 1 : -1];
 static OPclass goperl_op_class_of(const OP *o) __attribute__((unused));
 static OPclass goperl_op_class_of(const OP *o) {
     bool custom = 0;

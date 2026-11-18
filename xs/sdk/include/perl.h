@@ -6320,13 +6320,15 @@ enum {
     GOPERL_OPREC_PADIX = GOPERL_OPREC_AUX_N,
     GOPERL_OPREC_HINTSHASH = GOPERL_OPREC_SV,
     GOPERL_OPREC_FILEGV = GOPERL_OPREC_PV,
-    GOPERL_OPREC_COPSTASH = GOPERL_OPREC_AUX
+    GOPERL_OPREC_COPSTASH = GOPERL_OPREC_AUX,
+    GOPERL_OPREC_RCLASS = GOPERL_OPREC_PV /* a METHOP's class SV */
 };
 /* The classes of ops as the record's bits name them (the interpreter's
  * OPclass, goperl_perlapi.h) that have words of their own. */
 #define GOPERL_OPCLASS_PMOP 6
 #define GOPERL_OPCLASS_PADOP 8
 #define GOPERL_OPCLASS_SVOP 7
+#define GOPERL_OPCLASS_METHOP 12
 #define GOPERL_OPBIT_MORESIB 1
 #define GOPERL_OPBIT_COP 2
 #define GOPERL_OPBIT_HOOKED 4
@@ -6679,9 +6681,14 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     } else {
         o->op_sv = GOPERL_SV(w[GOPERL_OPREC_SV]);
         o->op_u.op_meth_sv = o->op_sv;
-        o->op_pv = w[GOPERL_OPREC_PV]
-                       ? (char *)goperl_guest_mem(f, w[GOPERL_OPREC_PV])
-                       : 0;
+        if (cls == GOPERL_OPCLASS_METHOP) {
+            o->op_rclass_sv = GOPERL_SV(w[GOPERL_OPREC_RCLASS]);
+            o->op_pv = 0;
+        } else {
+            o->op_pv = w[GOPERL_OPREC_PV]
+                           ? (char *)goperl_guest_mem(f, w[GOPERL_OPREC_PV])
+                           : 0;
+        }
     }
     if (cls == GOPERL_OPCLASS_PADOP) {
         o->op_padix = (UV)w[GOPERL_OPREC_PADIX];
@@ -12109,6 +12116,7 @@ struct goperl_op_base {
     OP *op_code_list;
     UV op_padix;
     SV *op_sv; /* an SVOP's */
+    SV *op_rclass_sv; /* a METHOP's */
 };
 
 /* guest field selectors for OP_SET */
@@ -12132,7 +12140,8 @@ enum {
     GOPERL_OPF_PMSTASHSTART = 403,
     GOPERL_OPF_PMCODELIST = 404,
     GOPERL_OPF_PADIX = 405,
-    GOPERL_OPF_SV = 406 /* the SV of an SVOP */
+    GOPERL_OPF_SV = 406, /* the SV of an SVOP */
+    GOPERL_OPF_RCLASS = 407 /* the class SV of a METHOP */
 };
 
 /* The word one of a PMOP's unions holds as the interpreter keeps it (an
@@ -12175,6 +12184,7 @@ static void goperl_op_base_capture(OP *o) {
     b->op_code_list = o->op_code_list;
     b->op_padix = o->op_padix;
     b->op_sv = o->op_sv;
+    b->op_rclass_sv = o->op_rclass_sv;
 }
 
 static void goperl_perop_pp_register(goperl_frame_t *f, OP *o);
@@ -12210,7 +12220,7 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
         b->op_pmreplroot == goperl_op_union_word(o, 0) &&
         b->op_pmstashstart == goperl_op_union_word(o, 1) &&
         b->op_code_list == o->op_code_list && b->op_padix == o->op_padix &&
-        b->op_sv == o->op_sv &&
+        b->op_sv == o->op_sv && b->op_rclass_sv == o->op_rclass_sv &&
         (!o->gop_iscop ||
          (b->cop_line == o->cop_line && b->cop_warnings == o->cop_warnings &&
           b->cop_hints == o->cop_hints && b->cop_features == o->cop_features.bits[0])))
@@ -12255,6 +12265,9 @@ static void goperl_op_flush_one(goperl_frame_t *f, OP *o) {
     /* the SV an SVOP holds (the class the interpreter gave the op, plus one) */
     if (b->op_sv != o->op_sv && o->gop_class == GOPERL_OPCLASS_SVOP + 1)
         goperl_op_setfield(f, o, GOPERL_OPF_SV, GOPERL_TOK(o->op_sv));
+    /* the class SV a METHOP holds */
+    if (b->op_rclass_sv != o->op_rclass_sv && o->gop_class == GOPERL_OPCLASS_METHOP + 1)
+        goperl_op_setfield(f, o, GOPERL_OPF_RCLASS, GOPERL_TOK(o->op_rclass_sv));
     if (o->gop_iscop) {
         /* COP_SET: 0 the line, 1 the warnings, 2 the hints */
         if (b->cop_line != o->cop_line)
