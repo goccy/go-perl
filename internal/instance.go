@@ -577,18 +577,21 @@ func memoryCeiling(opts InstanceOptions, least uint64) uint64 {
 
 // bootOwn starts the instance on memory of its own: a private mapping that
 // keeps one address for the instance's life (native code holds pointers
-// into it) and holds the data segments of a module constructed for the
-// purpose. Nothing is imaged first; the instance's first fork images its
-// memory (base.ForkMemory with the image AnonymousMemory returned).
+// into it), into which the data segments are installed before the module
+// is constructed on it. Nothing is imaged or copied first; the instance's
+// first fork images its memory (base.ForkMemory with the image
+// AnonymousMemoryInPlace returned).
 func (p *Perl) bootOwn(opts InstanceOptions, wasi *base.WasiStubs) error {
-	from := wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
-	img, mem, err := base.AnonymousMemory(from, memoryCeiling(opts, wasm2go.InitialMemoryBytes))
+	img, g, mem, err := base.AnonymousMemoryInPlace(memoryCeiling(opts, wasm2go.InitialMemoryBytes), func(mem []byte) (*base.Module, error) {
+		wasm2go.InstallDataSegments(mem)
+		return wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes), nil
+	})
 	if err != nil {
 		// No mapping to be had: memory of the Go heap, which moves when
 		// it grows past what was reserved.
 		return p.bootPrivate(opts, wasi)
 	}
-	p.m.g = wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes)
+	p.m.g = g
 	p.mapped = mem
 	p.image = (&memoryImage{img: img}).retain()
 	return p.start(opts)

@@ -25,8 +25,8 @@ package internal
 // with gperl build), and for that one building the snapshot first — start an
 // interpreter, write its memory into an image, map the image again — costs
 // as much as starting it. The first instance starts on memory of its own
-// that keeps one address (base.AnonymousMemory); its first fork images its
-// memory as any fork does.
+// that keeps one address (base.AnonymousMemoryInPlace); its first fork
+// images its memory as any fork does.
 
 import (
 	"bytes"
