@@ -12731,13 +12731,16 @@ static int goperl_raw_links(const OP *o) {
 }
 /* A registered custom op is the interpreter's too: it is told the name,
  * the description and the class, and gives the op a number that the ops
- * running this pp function carry (see goperl_perop_pp_register). */
+ * running this pp function carry (see goperl_perop_pp_register). A pp
+ * function registered again is registered with the new XOP, as perl's
+ * custom_op_register replaces the old one, under its number. */
 static void goperl_custom_op_register(goperl_frame_t *f, Perl_ppaddr_t pp,
                                       const XOP *xop) {
     goperl_hooks_t *h = goperl_hooks_get(f);
+    int32_t at = h->xop_n;
     for (int32_t i = 0; i < h->xop_n; i++)
-        if (h->xops[i].pp == pp) return;
-    if (h->xop_n >= GOPERL_XOP_MAX)
+        if (h->xops[i].pp == pp) at = i;
+    if (at == h->xop_n && h->xop_n >= GOPERL_XOP_MAX)
         goperl_croakf(f, "too many custom ops registered");
     const char *name = XopENTRY(xop, xop_name);
     const char *desc = XopENTRY(xop, xop_desc);
@@ -12746,13 +12749,15 @@ static void goperl_custom_op_register(goperl_frame_t *f, Perl_ppaddr_t pp,
     if (!req) goperl_croakf(f, "Out of memory!");
     memcpy(req, name, nl);
     memcpy(req + nl, desc, dl);
-    /* CALL 12: XOP; the class as the interpreter's OA_ value */
-    const uint32_t number = (uint32_t)goperl_do_op3(f, GOPERL_OP_CALL, 0, XopENTRY(xop, xop_class), (uint64_t)(12), req, nl + dl);
+    /* CALL 12: XOP; the class as the interpreter's OA_ value, and the
+     * number of the one registered before */
+    const uint64_t before = at < h->xop_n ? (uint64_t)h->xops[at].number : 0;
+    const uint32_t number = (uint32_t)goperl_do_op3(f, GOPERL_OP_CALL, before, XopENTRY(xop, xop_class), (uint64_t)(12), req, nl + dl);
     free(req);
-    h->xops[h->xop_n].pp = pp;
-    h->xops[h->xop_n].xop = xop;
-    h->xops[h->xop_n].number = number;
-    h->xop_n++;
+    h->xops[at].pp = pp;
+    h->xops[at].xop = xop;
+    h->xops[at].number = number;
+    if (at == h->xop_n) h->xop_n++;
 }
 #define Perl_custom_op_register(...) goperl_custom_op_register(_gof, __VA_ARGS__)
 #define custom_op_register(pp, xop) \
