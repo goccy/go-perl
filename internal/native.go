@@ -276,13 +276,17 @@ func (p *Perl) XSOpBox() (uint64, error) {
 // XSOpRun runs the operation whose arguments are in the operation box, as
 // XSHelperOp runs one; its result is in the box when it returns nil.
 func (p *Perl) XSOpRun() error {
-	parked := false
-	_, err := p.opInvoke(midXSOp, nil, func(g *base.Module, req, n wptr) (int64, error) {
-		r, err := wasm2go.Inv_0_25(g, req, n)
-		parked = p.parkGuestJump()
-		return r, err
-	})
-	if parked {
+	if p.xsOpCall == nil {
+		p.xsOpCall = func(g *base.Module, req, n wptr) (int64, error) {
+			r, err := wasm2go.Inv_0_25(g, req, n)
+			p.xsOpParked = p.parkGuestJump()
+			return r, err
+		}
+	}
+	p.xsOpParked = false
+	_, err := p.opInvoke(midXSOp, nil, p.xsOpCall)
+	if p.xsOpParked {
+		p.xsOpParked = false
 		return ErrGuestJump
 	}
 	return err

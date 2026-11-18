@@ -133,6 +133,11 @@ type Perl struct {
 	// belong to the goroutine that runs the interpreter.
 	callbackDepth int
 	jump          guestJump
+	// xsOpCall is XSOpRun's call of the guest, made once (a closure made
+	// for every operation native code runs was allocated each time), and
+	// xsOpParked whether the operation it ran last parked a jump.
+	xsOpCall   invoker
+	xsOpParked bool
 
 	// UserHandler receives every callback whose method id is not one of the
 	// reserved hook ids: the Perl->Go function bridge. The public package

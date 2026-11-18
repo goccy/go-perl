@@ -366,6 +366,10 @@ func loadDir(p *internal.Perl, dir string) error {
 type state struct {
 	p  *internal.Perl
 	mu sync.Mutex
+	// interrupt is interruptNative as a value, made once: every native call
+	// hands it to the runtime (enterNative), and a method value made there
+	// would be allocated each time.
+	interrupt func()
 	// libs and syms are what DynaLoader's dl_load_file and dl_find_symbol
 	// handed to Perl code: the library handles and the addresses of the
 	// symbols themselves, as perl's dl_dlopen.xs hands them (SPVM passes
@@ -580,8 +584,7 @@ func readProcessMemory(addr uint64, n int64) ([]byte, error) {
 		return nil, errors.New("read of the memory of the process at address 0")
 	}
 	if n < 0 {
-		l, _, _ := purego.SyscallN(strlenFn, uintptr(addr))
-		n = int64(l)
+		n = int64(foreignStrlen(uintptr(addr)))
 	}
 	return copyIn(uintptr(addr), int(n)), nil
 }
@@ -594,35 +597,46 @@ var (
 	vtable     *cAPI
 
 	// liveFrames pins every frame for the duration of its native call: it
-	// keeps the frame reachable while only C holds its address, and it lets
-	// vtable callbacks recover the *cFrame from the raw address without an
-	// unsafe uintptr->pointer conversion.
-	liveFrames sync.Map // uintptr -> *cFrame
+	// keeps the frame reachable while only C holds its address. A callback
+	// finds its frame at that address (frameAt).
+	liveFramesMu sync.Mutex
+	liveFrames   = map[uintptr]*cFrame{}
 )
 
 func pinFrame(f *cFrame) uintptr {
 	addr := uintptr(unsafe.Pointer(f))
-	liveFrames.Store(addr, f)
+	liveFramesMu.Lock()
+	liveFrames[addr] = f
+	liveFramesMu.Unlock()
 	return addr
 }
 
 // unpinFrame ends a frame: its stack is released if it grew onto the heap.
 func unpinFrame(addr uintptr) {
-	if f := lookupFrame(addr); f != nil {
+	liveFramesMu.Lock()
+	f := liveFrames[addr]
+	delete(liveFrames, addr)
+	liveFramesMu.Unlock()
+	if f != nil {
 		f.releaseStack()
 	}
-	liveFrames.Delete(addr)
 }
 
-// lookupFrame resolves a callback's frame argument WITHOUT converting the
-// uintptr back into a Go pointer: the pin registry keyed by address hands the
-// original *cFrame back. (A direct conversion trips checkptr under -race on
-// the purego callback path.)
+// pinnedFrame is the frame pinned at addr, or nil.
+func pinnedFrame(addr uintptr) *cFrame {
+	liveFramesMu.Lock()
+	f := liveFrames[addr]
+	liveFramesMu.Unlock()
+	return f
+}
+
+// lookupFrame resolves a callback's frame argument: the frame of a native
+// call in progress, pinned (frameAt).
 func lookupFrame(addr uintptr) *cFrame {
-	if v, ok := liveFrames.Load(addr); ok {
-		return v.(*cFrame)
+	if addr == 0 {
+		return nil
 	}
-	return nil
+	return frameAt(addr)
 }
 
 func stateFor(p *internal.Perl) *state {
@@ -644,6 +658,7 @@ func stateFor(p *internal.Perl) *state {
 			sharedRaw:   cMalloc(sharedBlockSize),
 		}
 		pokeBytes(s.sharedRaw, make([]byte, sharedBlockSize))
+		s.interrupt = s.interruptNative
 		// the box is required (loaderState says so when there is none)
 		if box, err := p.XSOpBox(); err == nil {
 			s.opbox = box
@@ -2462,7 +2477,7 @@ func (f *cFrame) stackAt(i int) uint64 {
 	if f.inlineStack() {
 		return f.st[i]
 	}
-	return binary.LittleEndian.Uint64(copyIn(f.stBase+uintptr(i)*8, 8))
+	return foreignLoadU64(f.stBase + uintptr(i)*8)
 }
 
 // releaseStack frees what the frame holds on the C heap when it ends: the
@@ -2480,7 +2495,7 @@ func (f *cFrame) releaseStack() {
 	}
 	for f.tmpMore != 0 {
 		b := f.tmpMore
-		f.tmpMore = uintptr(binary.LittleEndian.Uint64(copyIn(b, 8)))
+		f.tmpMore = uintptr(foreignLoadU64(b))
 		cFree(b)
 	}
 }
@@ -2494,13 +2509,9 @@ func (f *cFrame) fail(msg string) {
 	f.err[n] = 0
 }
 
-// Foreign-memory access. checkptr (enabled under -race) fatals on any Go
-// dereference of memory it cannot attribute to a Go allocation — which is
-// exactly what the dlopen'd library's strings and C stack are. So Go never
-// dereferences foreign memory here: libc does the touching, driven through
-// purego (strlen to size a C string, memcpy to move bytes across, malloc/
-// free for the MAGIC mirrors C reads), and Go only ever reads its own
-// buffers.
+// The C library's functions: malloc and free for the blocks C reads, and
+// strlen and memcpy for foreign memory in a -race build (foreignmem_race.go;
+// other builds read and write it in place, foreignmem.go).
 var (
 	libcOnce sync.Once
 	strlenFn uintptr
@@ -2559,7 +2570,7 @@ func cFree(p uintptr) {
 
 func cMemcpy(dst, src uintptr, n int) {
 	if n > 0 {
-		purego.SyscallN(memcpyFn, dst, src, uintptr(n))
+		foreignMove(dst, src, n)
 	}
 }
 
@@ -2569,8 +2580,7 @@ func copyIn(src uintptr, n int) []byte {
 		return nil
 	}
 	buf := make([]byte, n)
-	purego.SyscallN(memcpyFn, uintptr(unsafe.Pointer(&buf[0])), src, uintptr(n))
-	runtime.KeepAlive(buf)
+	foreignRead(buf, src)
 	return buf
 }
 
@@ -2579,8 +2589,7 @@ func cString(ptr uintptr) string {
 	if ptr == 0 {
 		return ""
 	}
-	n, _, _ := purego.SyscallN(strlenFn, ptr)
-	return string(copyIn(ptr, int(n)))
+	return string(copyIn(ptr, foreignStrlen(ptr)))
 }
 
 // goBytesString copies n bytes of foreign memory at ptr into a Go string.
@@ -2590,21 +2599,10 @@ func goBytesString(ptr uintptr, n int) string {
 
 // pokeU64 writes an 8-byte little-endian value into foreign memory (an
 // out-parameter on the native caller's stack).
-func pokeU64(dst uintptr, v uint64) {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], v)
-	purego.SyscallN(memcpyFn, dst, uintptr(unsafe.Pointer(&buf[0])), 8)
-	runtime.KeepAlive(&buf)
-}
+func pokeU64(dst uintptr, v uint64) { foreignStoreU64(dst, v) }
 
 // pokeBytes writes a Go byte slice into foreign memory.
-func pokeBytes(dst uintptr, b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	purego.SyscallN(memcpyFn, dst, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
-	runtime.KeepAlive(b)
-}
+func pokeBytes(dst uintptr, b []byte) { foreignWrite(dst, b) }
 
 // errString reads the frame's croak message (Go memory; plain Go access).
 func (f *cFrame) errString() string {
