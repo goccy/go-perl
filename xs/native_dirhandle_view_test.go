@@ -10,8 +10,9 @@ import (
 )
 
 // The directory stream of a dirhandle (IoDIRP) is native code's to read
-// with readdir and its fellows, as IO::Dirent reads names, inodes and types
-// and File::StatX takes dirfd for statx; a DIR native code opens and stores
+// with readdir and its fellows, as IO::Dirent reads names, inodes and types,
+// File::StatX takes dirfd for statx and POSIX::2008 perl's my_dirfd for
+// openat (HAS_DIRFD); a DIR native code opens and stores
 // there (POSIX::2008's fdopendir) is the dirhandle's from then on, and one
 // it closes and sets to NULL leaves the dirhandle closed. Before, IoDIRP did
 // not compile. The expected string is what perl prints with the same
@@ -49,13 +50,19 @@ XS(XS_MyDirv_names) {
     }
     PUTBACK;
 }
-/* the descriptor of the stream is one of the host's, of a directory */
+/* the descriptor of the stream is one of the host's, of a directory, by
+ * dirfd or by perl's my_dirfd (as POSIX::2008 finds it) */
 XS(XS_MyDirv_fd_kind) {
     dXSARGS;
     struct stat st;
     int fd;
-    if (items != 1) croak_xs_usage(cv, "dh");
-    fd = dirfd(MyDirv_dir(aTHX_ ST(0)));
+    if (items != 2) croak_xs_usage(cv, "dh, perls");
+#ifdef HAS_DIRFD
+    if (SvTRUE(ST(1)))
+        fd = my_dirfd(MyDirv_dir(aTHX_ ST(0)));
+    else
+#endif
+        fd = dirfd(MyDirv_dir(aTHX_ ST(0)));
     ST(0) = sv_2mortal(newSVpv(fd < 0 ? "no fd" : fstat(fd, &st) ? "no stat" : S_ISDIR(st.st_mode) ? "dir" : "other", 0));
     XSRETURN(1);
 }
@@ -122,14 +129,14 @@ my @r = join ",", sort(MyDirv::names($dh, 0));
 rewinddir $dh;
 push @r, join ",", sort(MyDirv::names($dh, 1));
 rewinddir $dh;
-push @r, MyDirv::fd_kind($dh), MyDirv::seek_back($dh);
+push @r, MyDirv::fd_kind($dh, 0) . "," . MyDirv::fd_kind($dh, 1), MyDirv::seek_back($dh);
 opendir(my $other, $e) or die;
 MyDirv::adopt($other, $d);
 push @r, join ",", sort grep { !/^\./ } readdir $other;
 MyDirv::close($dh);
 { no warnings; push @r, defined(readdir $dh) ? "open" : "closed" }
 join "|", @r`)
-	want := "a,b,c|a:f,b:f,c:d|dir|same|a,b,c|closed"
+	want := "a,b,c|a:f,b:f,c:d|dir,dir|same|a,b,c|closed"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}

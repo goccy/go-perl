@@ -93,6 +93,7 @@
 #define HAS_LSTAT
 #define HAS_FCHMOD
 #define HAS_FCHOWN
+#define HAS_DIRFD
 #define HAS_FTRUNCATE
 #define HAS_TRUNCATE
 #define HAS_FSYNC

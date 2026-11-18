@@ -12100,6 +12100,11 @@ static __attribute__((unused)) int goperl_dirfd(DIR *d) {
 #define rewinddir(d) goperl_rewinddir(d)
 #define closedir(d) goperl_closedir(d)
 #define dirfd(d) goperl_dirfd(d)
+/* perl's my_dirfd: the descriptor of a stream, -1 for none (POSIX::2008
+ * finds a dirhandle's so) */
+static __attribute__((unused)) int goperl_my_dirfd(DIR *d) { return d ? goperl_dirfd(d) : -1; }
+#define my_dirfd(d) goperl_my_dirfd(d)
+#define Perl_my_dirfd(d) goperl_my_dirfd(d)
 #define IoDIRP(io) (*(DIR **)goperl_lv_ref(_gof, (SV *)(io), GOPERL_LV_IODIRP, GOPERL_LV_AT))
 #define PerlEnv_putenv(str) putenv(str)
 #define PerlEnv_ENVgetenv(str) PerlEnv_getenv((str))
