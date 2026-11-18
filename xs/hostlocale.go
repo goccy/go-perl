@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	"github.com/goccy/go-perl/internal/ccall"
 )
 
 // The C library's locale for native code. perl sets the locale of its
@@ -34,7 +35,7 @@ func setHostLocale(env []string) {
 		}
 		set := func(category int, name string) bool {
 			b := append([]byte(name), 0)
-			r, _, _ := purego.SyscallN(fn, uintptr(category), uintptr(unsafe.Pointer(&b[0])))
+			r := ccall.Invoke(fn, uintptr(category), uintptr(unsafe.Pointer(&b[0])))
 			runtime.KeepAlive(b)
 			return r != 0
 		}

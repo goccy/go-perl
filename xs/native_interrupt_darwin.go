@@ -7,6 +7,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	"github.com/goccy/go-perl/internal/ccall"
 )
 
 // nativeInterruptSignal is the host signal that interrupts native code:
@@ -54,7 +55,7 @@ var nativeInterruptReady = sync.OnceValue(func() bool {
 		*sym.dst = fn
 	}
 	var act darwinSigaction
-	if rc, _, _ := purego.SyscallN(sigaction, nativeInterruptSignal, 0, uintptr(unsafe.Pointer(&act))); int32(rc) != 0 {
+	if rc := ccall.Invoke(sigaction, nativeInterruptSignal, 0, uintptr(unsafe.Pointer(&act))); int32(rc) != 0 {
 		return false
 	}
 	const sigDFL, sigIGN = 0, 1
@@ -65,7 +66,7 @@ var nativeInterruptReady = sync.OnceValue(func() bool {
 		return true
 	}
 	act.flags &^= saRestart
-	rc, _, _ := purego.SyscallN(sigaction, nativeInterruptSignal, uintptr(unsafe.Pointer(&act)), 0)
+	rc := ccall.Invoke(sigaction, nativeInterruptSignal, uintptr(unsafe.Pointer(&act)), 0)
 	return int32(rc) == 0
 })
 
@@ -76,11 +77,11 @@ func (s *state) nativeThreadSelf() (thread uint64, ok bool) {
 	if !nativeInterruptReady() {
 		return 0, false
 	}
-	self, _, _ := purego.SyscallN(nativeInterruptLibc.pthreadSelf)
+	self := ccall.Invoke(nativeInterruptLibc.pthreadSelf)
 	return uint64(self), true
 }
 
 // interruptNativeThread sends nativeInterruptSignal to the thread.
 func interruptNativeThread(thread uint64) {
-	purego.SyscallN(nativeInterruptLibc.pthreadKill, uintptr(thread), nativeInterruptSignal)
+	ccall.Invoke(nativeInterruptLibc.pthreadKill, uintptr(thread), nativeInterruptSignal)
 }

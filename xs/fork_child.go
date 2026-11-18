@@ -35,8 +35,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/ebitengine/purego"
 	"github.com/goccy/go-perl/internal"
+	"github.com/goccy/go-perl/internal/ccall"
 )
 
 // The interpreter's state a fork child's handlers decide by: PL_phase
@@ -332,7 +332,7 @@ func libraryOf(fn uintptr) string {
 	info := cMalloc(32)
 	defer cFree(info)
 	pokeBytes(info, make([]byte, 32))
-	if ok, _, _ := purego.SyscallN(dladdrFn, fn, info); ok == 0 {
+	if ok := ccall.Invoke(dladdrFn, fn, info); ok == 0 {
 		return ""
 	}
 	return cString(uintptr(binary.LittleEndian.Uint64(copyIn(info, 8))))
