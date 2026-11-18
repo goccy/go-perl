@@ -380,6 +380,13 @@ static void goperl_blocks_handed_free(void) {
         goperl_pending_blocks_v = b->next;
         free(b);
     }
+    goperl_freed_bufs_forget();
+    /* a native call that died left them (one that returned took them) */
+    while (goperl_pending_views_v) {
+        goperl_pending_view_t *const v = goperl_pending_views_v;
+        goperl_pending_views_v = v->next;
+        free(v);
+    }
 }
 static void goperl_pending_block_note(goperl_frame_t *f, uint64_t tok, const void *p) {
     size_t n = 0;
@@ -392,6 +399,51 @@ static void goperl_pending_block_note(goperl_frame_t *f, uint64_t tok, const voi
     b->n = n;
     b->next = goperl_pending_blocks_v;
     goperl_pending_blocks_v = b;
+}
+/* The buffer of the SV tok when it is a copy the interpreter was given of a
+ * buffer of native code's (goperl_pv_copy_in), 0 otherwise. What is kept
+ * for the SV says so: kept[0] is native code's pointer, kept[1] the copy's
+ * address while the SV's slot holds that address (kept[1] is the room of
+ * the buffer only while the slot holds GOPERL_PV_HOST, which no buffer
+ * is). An entry left from an SV that was at the address before counts
+ * only if the SV there now has a buffer at the address of that SV's copy,
+ * and a buffer native code freed in this call is no copy (see
+ * goperl_freed_buf_t). */
+static uint64_t goperl_pv_copy_of(goperl_frame_t *f, uint64_t tok, void **kept) {
+    if (!kept || !kept[1]) return 0;
+    const uint64_t pv = goperl_xs_opx(f, GOPERL_OP_SV_PVX_RAW, tok, 0, 0, 0, 0, 0);
+    if (!pv || pv == GOPERL_PV_HOST || (uint64_t)(uintptr_t)kept[1] != pv) return 0;
+    return goperl_freed_buf_is(pv) ? 0 : pv;
+}
+/* The interpreter's copy of native code's buffer p, as the buffer of the
+ * SV tok: need bytes, the first ncopy of them p's, then a NUL for a string
+ * (nul). The SV owns the copy (SvLEN is its size) and frees it with
+ * itself. A copy the SV has already of a buffer of native code's is used
+ * again, grown when it is too small: native code that points the SV at its
+ * buffer again (Crypt::SecretBuffer's get magic does on every read, and
+ * again after it moved the buffer) gives perl the bytes there now and frees
+ * no buffer of the SV's, as on perl, where the SV owned none. 0 when there
+ * is no memory for it (the SV is left as it was). */
+static uint64_t goperl_pv_copy_in(goperl_frame_t *f, uint64_t tok, const void *p, size_t need,
+                                  size_t ncopy, int nul) {
+    void **kept = f->api->pv_host(f, tok, 1);
+    if (!kept) return 0;
+    uint64_t g = goperl_pv_copy_of(f, tok, kept);
+    uint64_t len = g ? goperl_xs_opx(f, GOPERL_OP_SV_LEN_BUF, tok, 0, 0, 0, 0, 0) : 0;
+    if (!g || len < need) {
+        g = goperl_xs_opx(f, GOPERL_OP_MEM_REALLOC, g, need ? need : 1, 0, 0, 0, 0);
+        if (!g) return 0;
+        len = need ? need : 1;
+    }
+    char *const d = (char *)goperl_guest_mem(f, g);
+    if (ncopy) memcpy(d, p, ncopy);
+    if (nul) d[ncopy] = 0;
+    goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, g, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
+    goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, len, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
+    kept[0] = (void *)p;
+    kept[1] = (void *)(uintptr_t)g;
+    goperl_pv_copies_g = 1;
+    return g;
 }
 /* The SV tok makes its pending block its string (owned: the buffer's size
  * was given): the copy is made the first time, the module's block goes
@@ -410,14 +462,15 @@ static void goperl_pending_block_take(goperl_frame_t *f, uint64_t tok, int owned
             free(b);
             return;
         }
-        const uint64_t g = goperl_xs_opx(f, GOPERL_OP_MEM_REALLOC, 0, b->n ? b->n : 1, 0, 0, 0, 0);
-        if (!g) goperl_croakf(f, "Out of memory!");
-        memcpy(goperl_guest_mem(f, g), b->p, b->n);
-        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, g, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
-        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, b->n ? b->n : 1, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
+        if (!goperl_pv_copy_in(f, tok, b->p, b->n ? b->n : 1, b->n, 0))
+            goperl_croakf(f, "Out of memory!");
         b->copied = 1;
     }
     if (owned) {
+        /* the copy is the SV's own buffer from now on, as the block was on
+         * perl: no copy of native code's buffer any more */
+        void **kept = f->api->pv_host(f, tok, 0);
+        if (kept) kept[1] = 0;
         goperl_handed_t *h = (goperl_handed_t *)malloc(sizeof(goperl_handed_t));
         if (h) {
             goperl_block_forget(b->p, 0);
@@ -473,18 +526,74 @@ static int goperl_pv_view_building(int32_t op) {
     }
     return 0;
 }
+/* The refusal of a string over native code's memory that perl could write
+ * through (see goperl_pv_view_g): before an operation it dies; at the end of
+ * the native call (op -1), which has returned already, the loader reports
+ * it. */
+static const char goperl_pv_view_refusal[] =
+    "the string of a scalar cannot be in native memory on go-perl: native code set "
+    "the scalar's buffer (SvPVX, SvPV_set) to an address outside the interpreter's "
+    "memory and made it a string that perl can write to; gperl gives the "
+    "interpreter a copy of such a string only when it is read-only";
+static void goperl_pv_view_refuse(goperl_frame_t *f, int32_t op) {
+    goperl_pv_view_busy = 0;
+    if (op >= 0) goperl_croakf(f, "%s", goperl_pv_view_refusal);
+    if (!f->failed) {
+        snprintf(f->err, sizeof f->err, "%s", goperl_pv_view_refusal);
+        f->failed = 1;
+    }
+}
+static void goperl_pending_view_drop(uint64_t tok) {
+    goperl_pending_view_t **pp = &goperl_pending_views_v;
+    while (*pp) {
+        goperl_pending_view_t *const v = *pp;
+        if (v->tok == tok) {
+            *pp = v->next;
+            free(v);
+        } else {
+            pp = &v->next;
+        }
+    }
+}
+/* The SVs given native code's memory while they were strings get their
+ * copies, of the length they have now, before an operation that does not
+ * make them (op on a) and at the end of the native call (op -1). Their
+ * making is over then, so one perl could write through is refused at once,
+ * and keeps the string it had. 0 when one was refused. */
+static int goperl_pending_views_take(goperl_frame_t *f, int32_t op, uint64_t a) {
+    goperl_pending_view_t **pp = &goperl_pending_views_v;
+    while (*pp) {
+        goperl_pending_view_t *const v = *pp;
+        if (op >= 0 && a == v->tok && goperl_pv_view_building(op)) {
+            pp = &v->next;
+            continue;
+        }
+        *pp = v->next;
+        const uint64_t tok = v->tok, oldcur = v->oldcur;
+        const void *const p = v->p;
+        free(v);
+        if (!(goperl_xs_opx(f, GOPERL_OP_SV_INFO, tok, 0, 0, 0, 0, 0) & GOPERL_INFO_READONLY)) {
+            /* the scalar keeps the string it had */
+            goperl_xs_opx(f, GOPERL_OP_SV_CUR_SET, tok, oldcur, 0, 0, 0, 0);
+            goperl_pv_view_refuse(f, op);
+            return 0;
+        }
+        const uint64_t cur = goperl_xs_opx(f, GOPERL_OP_SV_CUR, tok, 0, 0, 0, 0, 0);
+        if (!goperl_pv_copy_in(f, tok, p, (size_t)cur + 1, (size_t)cur, 1)) {
+            goperl_pv_view_busy = 0;
+            goperl_croakf(f, "Out of memory!");
+        }
+    }
+    return 1;
+}
 static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b) {
     if (goperl_pv_view_busy) return;
     goperl_pv_view_busy = 1;
+    if (goperl_pending_views_v && !goperl_pending_views_take(f, op, a)) return;
     if (goperl_pv_view_g && !(a == goperl_pv_view_g && goperl_pv_view_building(op))) {
         const uint64_t tok = goperl_pv_view_g;
         goperl_pv_view_g = 0;
         if (!(goperl_xs_opx(f, GOPERL_OP_SV_INFO, tok, 0, 0, 0, 0, 0) & GOPERL_INFO_READONLY)) {
-            static const char msg[] =
-                "the string of a scalar cannot be in native memory on go-perl: native code set "
-                "the scalar's buffer (SvPVX, SvPV_set) to an address outside the interpreter's "
-                "memory and made it a string that perl can write to; gperl gives the "
-                "interpreter a copy of such a string only when it is read-only";
             /* the scalar is left no string, its buffer slot native code's
              * pointer again, and the copy is freed */
             const uint64_t copy = goperl_xs_opx(f, GOPERL_OP_SV_PVX_RAW, tok, 0, 0, 0, 0, 0);
@@ -493,15 +602,12 @@ static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint6
             goperl_xs_opx(f, GOPERL_OP_SV_CUR_SET, tok, 0, 0, 0, 0, 0);
             goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, GOPERL_PV_HOST, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
             goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, 0, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
-            if (copy && copy != GOPERL_PV_HOST) goperl_xs_opx(f, GOPERL_OP_MEM_FREE, copy, 0, 0, 0, 0, 0);
-            goperl_pv_view_busy = 0;
-            /* at the end of the native call (op -1) the call has returned
-             * already: the loader reports the failure */
-            if (op >= 0) goperl_croakf(f, "%s", msg);
-            if (!f->failed) {
-                snprintf(f->err, sizeof f->err, "%s", msg);
-                f->failed = 1;
+            {
+                void **kept = f->api->pv_host(f, tok, 0);
+                if (kept) kept[1] = 0; /* the room of no buffer: no copy */
             }
+            if (copy && copy != GOPERL_PV_HOST) goperl_xs_opx(f, GOPERL_OP_MEM_FREE, copy, 0, 0, 0, 0, 0);
+            goperl_pv_view_refuse(f, op);
             return;
         }
     }
@@ -520,32 +626,79 @@ static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint6
             const uint64_t t = goperl_xs_opx(f, GOPERL_OP_SV_TYPE, a, 0, 0, 0, 0, 0);
             if (cur && t >= SVt_PV && t != SVt_PVAV && t != SVt_PVHV && t != SVt_PVCV &&
                 t != SVt_PVFM && t != SVt_PVIO && t != SVt_PVGV) {
-                const uint64_t g = goperl_xs_opx(f, GOPERL_OP_MEM_REALLOC, 0, cur + 1, 0, 0, 0, 0);
-                if (!g) {
+                if (!goperl_pv_copy_in(f, a, kept[0], (size_t)cur + 1, (size_t)cur, 1)) {
                     goperl_pv_view_busy = 0;
                     goperl_croakf(f, "Out of memory!");
                 }
-                char *const d = (char *)goperl_guest_mem(f, g);
-                memcpy(d, kept[0], (size_t)cur);
-                d[cur] = 0;
-                goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, a, g, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
-                goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, a, cur + 1, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
                 if (!(info & GOPERL_INFO_READONLY)) goperl_pv_view_g = a;
             }
         }
     }
     goperl_pv_view_busy = 0;
 }
+/* Whether the SV tok is a string (the flag of one and a length) of a type
+ * that has a string: the interpreter takes no pointer of this process's
+ * into the buffer slot of such an SV (GOPERL_PV_HOST), as no byte of it
+ * could be read. The length, 0 for no string. */
+static uint64_t goperl_sv_is_string(goperl_frame_t *f, uint64_t tok) {
+    const uint64_t info = goperl_xs_opx(f, GOPERL_OP_SV_INFO, tok, 0, 0, 0, 0, 0);
+    if (!(info & (GOPERL_INFO_POK | GOPERL_INFO_POKp)) || (info & (GOPERL_INFO_ROK | GOPERL_INFO_ISGV)))
+        return 0;
+    const uint64_t t = goperl_xs_opx(f, GOPERL_OP_SV_TYPE, tok, 0, 0, 0, 0, 0);
+    if (t < SVt_PV || t == SVt_PVAV || t == SVt_PVHV || t == SVt_PVCV || t == SVt_PVFM ||
+        t == SVt_PVIO)
+        return 0;
+    return goperl_xs_opx(f, GOPERL_OP_SV_CUR, tok, 0, 0, 0, 0, 0);
+}
 /* Stores a pointer in the buffer slot of an SV: one into the interpreter's
  * memory as its address there, any other with the loader (a block of this
  * module's allocators waits to be handed over, goperl_pending_block_t; a
- * view gets a copy when it becomes a string, goperl_pv_view_hook). */
+ * view gets a copy when it becomes a string, goperl_pv_view_hook).
+ *
+ * An SV that is a string already cannot wait for a length or the flag of a
+ * string: a block gets its copy at once (Encode's Unicode.xs moves the
+ * string of its result to a smaller block of its own with SvPV_set, then
+ * hands the block over with SvLEN_set; Crypt::SecretBuffer points its
+ * string at its buffer again on every read), other memory when its length
+ * is known (goperl_pending_view_t).
+ *
+ * A copy the SV owned only as the copy of an earlier buffer of native
+ * code's goes when native code gives the SV another buffer, and the SV
+ * owns no buffer then, as it owned none on perl. */
 static void goperl_sv_pvx_store(goperl_frame_t *f, uint64_t tok, const void *p) {
     uint64_t g = goperl_guest_addr(f, p);
-    if (p && !g) goperl_pending_block_note(f, tok, p);
+    if (goperl_pending_views_v) goperl_pending_view_drop(tok);
     if (p && !g) {
-        void **kept = f->api->pv_host(f, tok, 1);
-        if (!kept) goperl_croakf(f, "out of memory for the buffer slot of an SV");
+        goperl_pending_block_note(f, tok, p);
+        const uint64_t cur = goperl_sv_is_string(f, tok);
+        if (cur) {
+            size_t n = 0;
+            if (goperl_block_size(p, &n)) {
+                if (!goperl_pv_copy_in(f, tok, p, n ? n : 1, n, 0)) goperl_croakf(f, "Out of memory!");
+                for (goperl_pending_block_t *b = goperl_pending_blocks_v; b; b = b->next)
+                    if (b->tok == tok) b->copied = 1;
+            } else {
+                goperl_pending_view_t *const v = (goperl_pending_view_t *)malloc(sizeof *v);
+                if (!v) goperl_croakf(f, "Out of memory!");
+                v->tok = tok;
+                v->p = p;
+                v->oldcur = cur;
+                v->next = goperl_pending_views_v;
+                goperl_pending_views_v = v;
+                goperl_pv_views_g = 1;
+            }
+            return;
+        }
+    }
+    void **kept = f->api->pv_host(f, tok, p && !g);
+    if (p && !g && !kept) goperl_croakf(f, "out of memory for the buffer slot of an SV");
+    const uint64_t old = goperl_pv_copy_of(f, tok, kept);
+    if (old && old != g) {
+        goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, 0, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
+        goperl_xs_opx(f, GOPERL_OP_MEM_FREE, old, 0, 0, 0, 0, 0);
+        kept[1] = 0;
+    }
+    if (p && !g) {
         kept[0] = (void *)p;
         kept[1] = 0;
         g = GOPERL_PV_HOST;
@@ -562,6 +715,9 @@ static uint64_t goperl_sv_len_load(goperl_frame_t *f, uint64_t tok) {
     void **kept = goperl_pv_host_of(f, tok);
     return kept ? (uint64_t)(uintptr_t)kept[1] : 0;
 }
+/* The size native code gives the buffer of an SV whose buffer is the copy
+ * of one of native code's (goperl_pv_copy_in) is that buffer's: the copy's
+ * own stays the SV's, which frees the copy with itself. */
 static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
     if (goperl_pending_blocks_v && len) goperl_pending_block_take(f, tok, 1);
     void **kept = goperl_pv_host_of(f, tok);
@@ -569,6 +725,7 @@ static void goperl_sv_len_store(goperl_frame_t *f, uint64_t tok, uint64_t len) {
         kept[1] = (void *)(uintptr_t)len;
         return;
     }
+    if (goperl_pv_copy_of(f, tok, f->api->pv_host(f, tok, 0))) return;
     goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, len, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
 }
 static uint64_t goperl_cvfield_load(goperl_frame_t *f, uint64_t tok, int field);

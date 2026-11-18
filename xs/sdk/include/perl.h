@@ -1172,6 +1172,20 @@ static void *goperl_pending_blocks_any(void);
  * in this native call, which a scalar made a string over gets a copy of
  * (goperl_pv_view_hook). */
 GOPERL_C __attribute__((weak, visibility("hidden"))) int goperl_pv_views_g = 0;
+/* Native code's memory that is no block of its allocators, given to an SV
+ * that is a string already (Crypt::SecretBuffer's get magic points its
+ * string at "" once it has no buffer): the SV gets its copy when its length
+ * is known, at the first operation that does not make the SV, or at the end
+ * of the native call (goperl_pv_view_hook). Until then the interpreter's
+ * slot keeps the buffer it had, which no operation reads in between, and
+ * SvPVX gives native code its own pointer. */
+typedef struct goperl_pending_view {
+    struct goperl_pending_view *next;
+    uint64_t tok;
+    const void *p;
+    uint64_t oldcur; /* the length it had, which it keeps if it is refused */
+} goperl_pending_view_t;
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_pending_view_t *goperl_pending_views_v = 0;
 static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b);
 static inline __attribute__((unused)) uint64_t goperl_xs_opx(
     goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b, uint64_t c,
@@ -3401,6 +3415,8 @@ static void **goperl_pv_host_of(goperl_frame_t *f, uint64_t tok) {
                : 0;
 }
 static char *goperl_sv_pvx(goperl_frame_t *f, SV *sv) {
+    for (const goperl_pending_view_t *v = goperl_pending_views_v; v; v = v->next)
+        if (v->tok == GOPERL_TOK(sv)) return (char *)v->p;
     uint64_t gp =
         goperl_do_op(f, GOPERL_OP_SV_PVX_RAW, GOPERL_TOK(sv), 0, 0, 0);
     if (!gp) return 0;
@@ -10535,6 +10551,38 @@ static void *goperl_block_alloc(size_t n, int zeroed) {
     goperl_block_note(p, n);
     return p;
 }
+/* The buffers of the interpreter's that native code freed (Safefree) or
+ * moved (Renew) in this native call, once the module has given an SV a copy
+ * of a buffer of its own (goperl_pv_copy_in): an SV may still hold such a
+ * buffer (Encode's Unicode.xs frees the string of its result before it
+ * gives the result another), and it is then no copy to use again or free.
+ * They are forgotten when the outermost native call returns. */
+typedef struct goperl_freed_buf {
+    struct goperl_freed_buf *next;
+    uint64_t g;
+} goperl_freed_buf_t;
+GOPERL_C __attribute__((weak, visibility("hidden"))) goperl_freed_buf_t *goperl_freed_bufs_v = 0;
+GOPERL_C __attribute__((weak, visibility("hidden"))) int goperl_pv_copies_g = 0;
+static void goperl_freed_buf_note(uint64_t g) {
+    if (!goperl_pv_copies_g) return;
+    goperl_freed_buf_t *const b = (goperl_freed_buf_t *)malloc(sizeof *b);
+    if (!b) return;
+    b->g = g;
+    b->next = goperl_freed_bufs_v;
+    goperl_freed_bufs_v = b;
+}
+static int goperl_freed_buf_is(uint64_t g) {
+    for (const goperl_freed_buf_t *b = goperl_freed_bufs_v; b; b = b->next)
+        if (b->g == g) return 1;
+    return 0;
+}
+static void goperl_freed_bufs_forget(void) {
+    while (goperl_freed_bufs_v) {
+        goperl_freed_buf_t *const b = goperl_freed_bufs_v;
+        goperl_freed_bufs_v = b->next;
+        free(b);
+    }
+}
 static void goperl_safefree(void *p) __attribute__((unused));
 static void goperl_safefree(void *p) {
     goperl_frame_t *f = goperl_cur_frame_v;
@@ -10566,6 +10614,7 @@ static void goperl_safefree(void *p) {
     const uint64_t g = f ? goperl_guest_addr(f, p) : 0;
     if (g) {
         goperl_do_op(f, GOPERL_OP_MEM_FREE, g, 0, 0, 0);
+        goperl_freed_buf_note(g);
     } else {
         goperl_block_forget(p, 0);
         free(p);
@@ -10584,6 +10633,7 @@ static void *goperl_saferealloc(void *p, size_t n) {
         return q;
     }
     const uint64_t moved = goperl_do_op(f, GOPERL_OP_MEM_REALLOC, g, n, 0, 0);
+    if (moved && moved != g) goperl_freed_buf_note(g);
     return moved ? f->membase + moved : 0;
 }
 #define Newx(ptr, n, t) ((ptr) = (t *)goperl_block_alloc((size_t)(n) * sizeof(t), 0))
