@@ -1512,6 +1512,18 @@ static void goperl_sv_nv_set(goperl_frame_t *f, SV *sv, NV v) {
                            (const void *)(p)); })
 #define SvPV_shrink_to_cur(sv) \
     ((void)GOPERL_SVCALL(GOPERL_SVCALL_SHRINK_TO_CUR, sv, 0))
+/* The buffer made n bytes long, as sv.h has it: the interpreter's realloc
+ * of the interpreter's buffer (saferealloc of an interpreter address). */
+#define SvPV_renew(sv, n)                                                  \
+    STMT_START {                                                           \
+        SV *const goperl_SvPV_renew_sv_ = (SV *)(sv);                      \
+        const STRLEN goperl_SvPV_renew_n_ = (STRLEN)(n);                   \
+        SvLEN_set(goperl_SvPV_renew_sv_, goperl_SvPV_renew_n_);            \
+        SvPV_set(goperl_SvPV_renew_sv_,                                    \
+                 (char *)saferealloc((Malloc_t)SvPVX(goperl_SvPV_renew_sv_), \
+                                     (MEM_SIZE)goperl_SvPV_renew_n_));     \
+    }                                                                      \
+    STMT_END
 #define SvPVCLEAR(sv) sv_setpvs((sv), "")
 #define Sv_Grow(sv, n) sv_grow((sv), (n))
 #define SvGROW_mutable(sv, n) SvGROW((sv), (n))
