@@ -60,9 +60,9 @@ const abiVersion = 37
 
 // nativeHdrWords is the number of header words of a native-XSUB request
 // (GOPERL_NATIVE_HDR_WORDS in perl-wasm): the function id, the CV, the
-// item count, the interpreter's stack index of the first item (ax) and
-// where its stack is; the items follow.
-const nativeHdrWords = 5
+// item count, the interpreter's stack index of the first item (ax), where
+// its stack is, and its errno; the items follow.
+const nativeHdrWords = 6
 
 // maxStackIndex bounds the stack index a request may name.
 const maxStackIndex = 1 << 28
@@ -1138,6 +1138,11 @@ func (s *state) dispatch(req []byte) []byte {
 	f.psp = f.stBase + uintptr(ax-1+items)*8
 	f.gstack = wordAt(req, 4)
 	f.below = int32(ax)
+	// The XSUB starts with the interpreter's errno in errno, as perl's
+	// XSUBs do, where $! and errno are one variable; an errno it leaves
+	// that differs from that is what $! says after it.
+	entryErrno := int32(1 + int64(wordAt(req, 5)))
+	f.xerrno = entryErrno
 	fp := pinFrame(f)
 	defer func() {
 		unpinFrame(fp)
@@ -1167,7 +1172,7 @@ func (s *state) dispatch(req []byte) []byte {
 	}
 	s.leaveNative(prevThread, prevInterrupt, entered)
 	s.jumpCaught(f)
-	if f.xerrno != 0 {
+	if f.xerrno != 0 && f.xerrno != entryErrno {
 		// What the C code left in errno is what $! says after the call.
 		if _, err := s.p.XSHelperOp(opPlvarSet, plErrno, uint64(f.xerrno-1), 0, ""); err != nil {
 			return fail("native XS dispatch: " + err.Error())

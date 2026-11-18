@@ -1040,10 +1040,15 @@ static void goperl_forked_exit(void) {
  * The host's errno is native code's own: a call into the loader (which runs
  * the Go runtime on this thread, and the interpreter with its separate errno)
  * leaves it as it was, as a call of a perl API function leaves it alone
- * unless it fails. What an XSUB leaves in it when it returns becomes the
+ * unless it fails. An XSUB the interpreter calls starts with the
+ * interpreter's errno in it, as on perl, where errno and $! are one variable
+ * (Affix's errno() reads in an XSUB of its own what the call before set):
+ * the loader puts it in the frame (xerrno, 1 + it in the interpreter's
+ * numbering). What the XSUB leaves in it when it returns becomes the
  * interpreter's errno, so that `$!` after the call says what the C code set:
- * the XSUB starts with a value no C code sets (GOPERL_ERRNO_UNSET), and
- * anything else found at its end was put there by it. */
+ * a value other than the one it started with was put there by it. Another
+ * activation (a function the loader runs on the side) starts with a value
+ * no C code sets (GOPERL_ERRNO_UNSET). */
 #define GOPERL_ERRNO_UNSET (-0x676f70)
 #define GOPERL_KEEP_ERRNO(type, call) \
     do {                              \
@@ -1720,9 +1725,14 @@ static int goperl_errno_host(int e) {
     }
     return EIO;
 }
+/* The errno an activation on the frame starts with: the interpreter's,
+ * when the loader gave it. */
+static int goperl_errno_entry(const goperl_frame_t *f) {
+    return f->xerrno ? goperl_errno_host(f->xerrno - 1) : GOPERL_ERRNO_UNSET;
+}
 /* The end of an XSUB: an errno it set is noted in the frame for the loader. */
 static void goperl_errno_leave(goperl_frame_t *f) {
-    if (errno != GOPERL_ERRNO_UNSET) f->xerrno = 1 + goperl_errno_guest(errno);
+    if (errno != goperl_errno_entry(f)) f->xerrno = 1 + goperl_errno_guest(errno);
 }
 
 /* The slot of this thread in the table, as this file of the module found
@@ -5358,7 +5368,7 @@ static void goperl_xs_autoleave(jmp_buf *jb) {
 #define GOPERL_XS_OPEN_WITH(frame, prev_cur, after_croak)  \
     {                                                      \
         int32_t goperl_entry_base = goperl_hostsave_n;     \
-        errno = GOPERL_ERRNO_UNSET;                        \
+        errno = goperl_errno_entry(frame);                 \
         goperl_hostsave_i32((frame), &(frame)->hostsave_base); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->prev_frame); \
         goperl_hostsave_ptr((frame), (void **)&(frame)->jb); \
