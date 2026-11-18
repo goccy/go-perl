@@ -443,9 +443,32 @@ static __attribute__((unused)) PADNAMELIST *goperl_padnamelist_shadow(goperl_fra
 static __attribute__((unused)) PADLIST *goperl_padlist_shadow(goperl_frame_t *f, uint64_t tok) {
     return tok ? &goperl_padent_get(f, tok, GOPERL_PADK_PADLIST)->u.pl : (PADLIST *)0;
 }
-/* The address in the interpreter of the structure a shadow stands for. */
+/* The number of a pad structure as B gives it (the number of a B::PADLIST,
+ * B::PADNAMELIST or B::PADNAME object): its address in the interpreter with
+ * bit 61 set and its kind (GOPERL_PADK_*) in bits 59 and 60, which no
+ * address of this process has (perl-wasm scripts/wasi-configure.sh). A
+ * module takes the number for the structure, by INT2PTR or by a cast of
+ * the scalar pointer B::SV's typemap made of it (B::Flags), and every
+ * accessor takes it to the structure's shadow (goperl_padent_fresh). */
+#define GOPERL_PAD_NUMBER_TAG ((uint64_t)1 << 61)
+#define GOPERL_PAD_NUMBER_KIND_SHIFT 59
+#define GOPERL_PAD_NUMBER_ADDR_MASK (((uint64_t)1 << GOPERL_PAD_NUMBER_KIND_SHIFT) - 1)
+static __attribute__((unused)) int goperl_is_pad_number(const void *p) {
+    return ((uint64_t)(uintptr_t)p & GOPERL_PAD_NUMBER_TAG) != 0;
+}
+static __attribute__((unused)) void *goperl_pad_of_number(goperl_frame_t *f, const void *p) {
+    const uint64_t n = (uint64_t)(uintptr_t)p;
+    const int kind = (int)((n >> GOPERL_PAD_NUMBER_KIND_SHIFT) & 3);
+    if (kind != GOPERL_PADK_NAME && kind != GOPERL_PADK_NAMELIST && kind != GOPERL_PADK_PADLIST)
+        goperl_croakf(f, "the number of a pad structure has no kind");
+    return &goperl_padent_get(f, n & GOPERL_PAD_NUMBER_ADDR_MASK, kind)->u;
+}
+/* The address in the interpreter of the structure a shadow (or a number
+ * of B's) stands for. */
 static __attribute__((unused)) uint64_t goperl_padstruct_tok(const void *p) {
-    return p ? GOPERL_PADENT_OF(p)->tok : 0;
+    if (!p) return 0;
+    if (goperl_is_pad_number(p)) return (uint64_t)(uintptr_t)p & GOPERL_PAD_NUMBER_ADDR_MASK;
+    return GOPERL_PADENT_OF(p)->tok;
 }
 
 /* Room for n entries in the arrays of a list. */
@@ -640,6 +663,7 @@ static __attribute__((unused)) void goperl_pads_refresh(goperl_frame_t *f) {
  * looked at before every operation for that). */
 static __attribute__((unused)) void *goperl_padent_fresh(goperl_frame_t *f, const void *p) {
     if (!p) return (void *)(uintptr_t)p;
+    if (goperl_is_pad_number(p)) p = goperl_pad_of_number(f, p);
     goperl_padent_t *const e = GOPERL_PADENT_OF(p);
     goperl_compiler_state_t *const c = goperl_compiler(f);
     if (e->gen != c->gen) {
