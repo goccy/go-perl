@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 40u
+#define GOPERL_XS_ABI 42u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -5132,7 +5132,16 @@ enum {
     GOPERL_PIO_ARG_FETCH = 304,
     GOPERL_PIO_STD_FUNCS = 305,
     GOPERL_PIO_FUNCS_INFO = 306,
-    GOPERL_PIO_MODESTR = 307
+    GOPERL_PIO_MODESTR = 307,
+    /* the lists of layers (perliol.h), handles, and the open flags */
+    GOPERL_PIO_LIST_INFO = 308,
+    GOPERL_PIO_KNOWN_LAYERS = 309,
+    GOPERL_PIO_DEF_LAYERLIST = 310,
+    GOPERL_PIO_ALLOCATE = 311,
+    GOPERL_PIO_APPLY_LAYERA = 312,
+    GOPERL_PIO_FDUPOPEN = 313,
+    GOPERL_PIO_UNIX_OFLAGS = 314,
+    GOPERL_PIO_OFLAGS = 315
 };
 #define GOPERL_PIO_READ_MAX 65536
 #define GOPERL_PL_ERRNO 60
@@ -5172,7 +5181,8 @@ static inline __attribute__((unused)) const goperl_pio_slot_t *goperl_pio_view_o
  * operation (out) and come back after it, so that the operation runs on
  * the layers as native code left them, and native code sees what the
  * operation did. rest hands them all back when the outermost native call
- * returns. */
+ * returns, before the arena goes, and registers the views that outlive
+ * the call (goperl_pio_views_v). */
 typedef struct goperl_pio_layers_head {
     int32_t active; /* the structs here now (activations) */
     void (*sync)(goperl_frame_t *f, int out);
@@ -5361,8 +5371,77 @@ static int PerlIO_apply_layers(pTHX_ const void *h, const char *mode,
     if (r != 0) goperl_errno_from_interp(_gof);
     return r;
 }
+/* The open flags (open(2)'s) of native code are this system's; the
+ * interpreter's are its own (wasi-libc's, other bits). They map where they
+ * cross, in both directions: the access mode, then each flag below by
+ * itself. A flag with no counterpart on the other side has none there.
+ * KEEP IN SYNC with GOPERL_PIO_OFLAGS in perl.cc (the same order). */
+#define GOPERL_OFLAGS_N 14
+static const int goperl_oflag_host_v[GOPERL_OFLAGS_N] = {
+    O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL,
+#ifdef O_NOCTTY
+    O_NOCTTY,
+#else
+    0,
+#endif
+    O_TRUNC, O_APPEND, O_NONBLOCK,
+#ifdef O_SYNC
+    O_SYNC,
+#else
+    0,
+#endif
+#ifdef O_DSYNC
+    O_DSYNC,
+#else
+    0,
+#endif
+#ifdef O_DIRECTORY
+    O_DIRECTORY,
+#else
+    0,
+#endif
+#ifdef O_NOFOLLOW
+    O_NOFOLLOW,
+#else
+    0,
+#endif
+#ifdef O_CLOEXEC
+    O_CLOEXEC,
+#else
+    0,
+#endif
+};
+/* the interpreter's values of the same flags (0 for one it has not):
+ * constants of its build, which it keeps in its memory */
+static const uint64_t *goperl_oflag_guest(goperl_frame_t *f) __attribute__((unused));
+static const uint64_t *goperl_oflag_guest(goperl_frame_t *f) {
+    const uint64_t *w = (const uint64_t *)goperl_guest_mem(
+        f, goperl_do_op3(f, GOPERL_OP_PERLIO, 0, 0, (uint64_t)GOPERL_PIO_OFLAGS, 0, 0));
+    if (!w) goperl_croakf(f, "%s", "the interpreter gave no open flags");
+    return w;
+}
+static int goperl_oflags_to_guest(goperl_frame_t *f, int h) __attribute__((unused));
+static int goperl_oflags_to_guest(goperl_frame_t *f, int h) {
+    const uint64_t *const g = goperl_oflag_guest(f);
+    const int acc = h & O_ACCMODE;
+    uint64_t r = acc == O_WRONLY ? g[1] : acc == O_RDWR ? g[2] : g[0];
+    for (int i = 3; i < GOPERL_OFLAGS_N; i++)
+        if (goperl_oflag_host_v[i] && (h & goperl_oflag_host_v[i]) == goperl_oflag_host_v[i])
+            r |= g[i];
+    return (int)r;
+}
+static int goperl_oflags_to_host(goperl_frame_t *f, int64_t gv) __attribute__((unused));
+static int goperl_oflags_to_host(goperl_frame_t *f, int64_t gv) {
+    const uint64_t *const g = goperl_oflag_guest(f);
+    const uint64_t v = (uint64_t)gv;
+    int r = (v & g[2]) == g[2] && g[2] ? O_RDWR : (v & g[1]) == g[1] && g[1] ? O_WRONLY : O_RDONLY;
+    for (int i = 3; i < GOPERL_OFLAGS_N; i++)
+        if (g[i] && (v & g[i]) == g[i]) r |= goperl_oflag_host_v[i];
+    return r;
+}
 /* PerlIO_openn: the open behind every open of the interpreter's, with the
- * layers, the mode, a descriptor (-1 for none), the open(2) mode and
+ * layers, the mode, a descriptor (-1 for none), the open(2) mode (this
+ * system's flags, the interpreter's when they cross) and
  * permissions, the handle to reuse (or NULL) and the arguments (a path, a
  * reference to a scalar for :scalar, ...). The handle is the
  * interpreter's (Hyperman opens its request bodies with ":scalar"). */
@@ -5380,7 +5459,8 @@ static PerlIO *PerlIO_openn(pTHX_ const char *layers, const char *mode, int fd,
     const size_t len = 4 * 8 + (size_t)narg * 8 + ll + 1 + ml + 1;
     char *req = (char *)malloc(len);
     if (!req) goperl_croakf(_gof, "%s", "Out of memory!");
-    const goperl_gword_t head[4] = {(goperl_gword_t)(int64_t)fd, (goperl_gword_t)(int64_t)imode,
+    const goperl_gword_t head[4] = {(goperl_gword_t)(int64_t)fd,
+                                    (goperl_gword_t)(int64_t)goperl_oflags_to_guest(_gof, imode),
                                     (goperl_gword_t)(int64_t)perm, (goperl_gword_t)narg};
     memcpy(req, head, sizeof head);
     for (int i = 0; i < narg; i++) {
@@ -7524,6 +7604,14 @@ static void *goperl_arena_alloc(size_t n) {
 }
 
 static void goperl_arena_free_all(void) {
+    /* the structs of layers of native code's go back to the interpreter,
+     * and the handles native code may keep show copies of their views,
+     * which are in the arena: the views registered from then on are those
+     * (perliol.h) */
+    if (GOPERL_SHARED->pio_layers)
+        ((goperl_pio_layers_head_t *)GOPERL_SHARED->pio_layers)->rest(goperl_cur_frame_v);
+    else
+        goperl_pio_views_v = 0;
     while (goperl_arena_v) {
         goperl_arena_blk_t *n = goperl_arena_v->next;
         free(goperl_arena_v);
@@ -7531,12 +7619,7 @@ static void goperl_arena_free_all(void) {
     }
     goperl_si_cache_v = 0;
     goperl_si_gen_v = 0;
-    /* the structs of layers of native code's go back to the interpreter
-     * (the views that showed them were in the arena) */
-    if (GOPERL_SHARED->pio_layers)
-        ((goperl_pio_layers_head_t *)GOPERL_SHARED->pio_layers)->rest(goperl_cur_frame_v);
-    goperl_pio_views_v = 0; /* they were in the arena */
-    GOPERL_SHARED->rx_bodies = 0; /* so were they */
+    GOPERL_SHARED->rx_bodies = 0; /* they were in the arena */
     GOPERL_SHARED->mg_found = 0;  /* and the copies mg_find made */
     GOPERL_SHARED->hv_arrays = 0; /* and the arrays HvARRAY gave */
     /* and so may the chain SvMAGIC showed be (its copies of the
