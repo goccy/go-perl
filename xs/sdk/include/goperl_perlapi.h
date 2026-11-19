@@ -923,9 +923,14 @@ static void goperl_lv_store_field(goperl_frame_t *f, uint64_t tok, int field,
         break;
     case GOPERL_LV_SVANY: {
         /* the body pointer is a pointer of the interpreter's: an address in
-         * its memory, as &sv->sv_u and the layouts give one; the head is
-         * the interpreter's memory too, and takes it as it is */
+         * its memory, as &sv->sv_u and the layouts give one, or the body
+         * SvANY gave, where this process has it; the head is the
+         * interpreter's memory too, and takes it as it is */
         uint64_t *const head = (uint64_t *)goperl_guest_mem(f, tok);
+        {
+            const uint64_t g = goperl_guest_addr(f, (const void *)(uintptr_t)val);
+            if (g) val = g;
+        }
         if (!head || val >= (uint64_t)*f->memsize)
             goperl_croakf(f, "SvANY: native code stored a body pointer that is not an address "
                              "of the interpreter's memory; go-perl cannot give a value a body "

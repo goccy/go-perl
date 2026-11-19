@@ -1311,17 +1311,25 @@ static __attribute__((unused)) void *goperl_no_body(void) {
     return page;
 }
 /* What SvANY reads of an SV that is not a sub (the slot GOPERL_LV_SVANY
- * loads). */
+ * loads). A scalar's is its body where the interpreter has it: the head's
+ * body pointer (a bodyless IV's or NV's is that much before the head's
+ * sv_u), whose fields native code reaches by the offsets the body structs
+ * name (LMDB_File hands LMDB &((XPVIV*)SvANY(key))->xiv_iv). An aggregate's
+ * body holds the interpreter's pointers, which native code cannot follow:
+ * a page that cannot be read. */
 static void *goperl_sv_any_value(goperl_frame_t *f, SV *sv) {
     const svtype t = (svtype)SvTYPE(sv);
     if (t == SVt_REGEXP) return goperl_reany(f, (REGEXP *)sv);
+    const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
     if (t == SVt_NULL) {
         /* a head without a body has none (NULL), but for the header of an
          * SV arena, whose any is the next arena: what the head says, as
          * the interpreter's token of it */
-        const uint64_t *const head = (const uint64_t *)goperl_guest_mem(f, GOPERL_TOK(sv));
         return head ? (void *)(uintptr_t)head[0] : 0;
     }
+    if (t == SVt_IV || t == SVt_NV || t == SVt_PV || t == SVt_PVIV || t == SVt_PVNV ||
+        t == SVt_PVMG || t == SVt_PVLV)
+        return head && head[0] ? goperl_guest_mem(f, head[0]) : 0;
     return goperl_no_body();
 }
 /* SvANY, an lvalue as perl's is: the body of a sub, and for any other SV
