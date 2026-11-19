@@ -512,11 +512,13 @@ static void goperl_pending_block_string(goperl_frame_t *f, int32_t op, uint64_t 
  * does not reach the copy; nothing tells such a change here. And perl
  * writes into a buffer it does not own in place, through a view that is
  * not read-only (File::Map's mapping of a file); such writes would land in
- * the copy. So the scalar has to be read-only by the end of the native call,
- * or by the next operation that is not on it (MarpaX-ESLIF makes it so
- * after its length, SWISH-3 before), or it fails with the refusal as
- * before. Which scalar waits for that is kept (goperl_pv_view_g): it is
- * decided by a flag native code may set after the copy. */
+ * the copy. So the scalar has to be read-only by the end of the native call
+ * (MarpaX-ESLIF makes it so after its length, SWISH-3 before, File::Map
+ * after its magic and its taint), or it fails with the refusal as before.
+ * Until then the copy is what the interpreter reads, as the operations of
+ * the call need it (sv_magicext on the scalar). Which scalar waits for that
+ * is kept (goperl_pv_view_g): it is decided by a flag native code may set
+ * after the copy, which nothing else records. */
 GOPERL_C __attribute__((weak, visibility("hidden"))) uint64_t goperl_pv_view_g = 0;
 static int goperl_pv_view_busy;
 /* The operations on the scalar that finish making it, which wait for its
@@ -592,31 +594,36 @@ static int goperl_pending_views_take(goperl_frame_t *f, int32_t op, uint64_t a) 
     }
     return 1;
 }
+/* The scalar that waits for its read-only flag (goperl_pv_view_g) is
+ * decided: read-only, it keeps its copy; writable, it is left no string,
+ * its buffer slot native code's pointer again, the copy freed, and it is
+ * refused. One the call freed meanwhile (a mortal of its own scope) is no
+ * string anybody writes through. 0 when it was refused. */
+static int goperl_pv_view_decide(goperl_frame_t *f, int32_t op) {
+    const uint64_t tok = goperl_pv_view_g;
+    goperl_pv_view_g = 0;
+    if (goperl_xs_opx(f, GOPERL_OP_SV_TYPE, tok, 0, 0, 0, 0, 0) == SVTYPEMASK) return 1;
+    if (goperl_xs_opx(f, GOPERL_OP_SV_INFO, tok, 0, 0, 0, 0, 0) & GOPERL_INFO_READONLY) return 1;
+    const uint64_t copy = goperl_xs_opx(f, GOPERL_OP_SV_PVX_RAW, tok, 0, 0, 0, 0, 0);
+    goperl_xs_opx(f, GOPERL_OP_SV_FLAGS, tok,
+                  (uint64_t)(uint32_t)(SVf_POK | SVp_POK | SVf_UTF8) << 32, 0, 0, 0, 0);
+    goperl_xs_opx(f, GOPERL_OP_SV_CUR_SET, tok, 0, 0, 0, 0, 0);
+    goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, GOPERL_PV_HOST, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
+    goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, 0, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
+    {
+        void **kept = f->api->pv_host(f, tok, 0);
+        if (kept) kept[1] = 0; /* the room of no buffer: no copy */
+    }
+    if (copy && copy != GOPERL_PV_HOST) goperl_xs_opx(f, GOPERL_OP_MEM_FREE, copy, 0, 0, 0, 0, 0);
+    goperl_pv_view_refuse(f, op);
+    return 0;
+}
 static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint64_t b) {
     if (goperl_pv_view_busy) return;
     goperl_pv_view_busy = 1;
     if (goperl_pending_views_v && !goperl_pending_views_take(f, op, a)) return;
-    if (goperl_pv_view_g && !(a == goperl_pv_view_g && goperl_pv_view_building(op))) {
-        const uint64_t tok = goperl_pv_view_g;
-        goperl_pv_view_g = 0;
-        if (!(goperl_xs_opx(f, GOPERL_OP_SV_INFO, tok, 0, 0, 0, 0, 0) & GOPERL_INFO_READONLY)) {
-            /* the scalar is left no string, its buffer slot native code's
-             * pointer again, and the copy is freed */
-            const uint64_t copy = goperl_xs_opx(f, GOPERL_OP_SV_PVX_RAW, tok, 0, 0, 0, 0, 0);
-            goperl_xs_opx(f, GOPERL_OP_SV_FLAGS, tok,
-                          (uint64_t)(uint32_t)(SVf_POK | SVp_POK | SVf_UTF8) << 32, 0, 0, 0, 0);
-            goperl_xs_opx(f, GOPERL_OP_SV_CUR_SET, tok, 0, 0, 0, 0, 0);
-            goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, GOPERL_PV_HOST, (uint64_t)(5 /* GOPERL_SVSLOT_PV */), 0, 0, 0);
-            goperl_xs_opx(f, GOPERL_OP_SV_SLOT_SET, tok, 0, (uint64_t)(6 /* GOPERL_SVSLOT_LEN */), 0, 0, 0);
-            {
-                void **kept = f->api->pv_host(f, tok, 0);
-                if (kept) kept[1] = 0; /* the room of no buffer: no copy */
-            }
-            if (copy && copy != GOPERL_PV_HOST) goperl_xs_opx(f, GOPERL_OP_MEM_FREE, copy, 0, 0, 0, 0, 0);
-            goperl_pv_view_refuse(f, op);
-            return;
-        }
-    }
+    /* at the end of the native call (op -1) */
+    if (goperl_pv_view_g && op < 0 && !goperl_pv_view_decide(f, op)) return;
     if (op == GOPERL_OP_SV_CUR_SET || op == GOPERL_OP_SV_POK_ON || op == GOPERL_OP_SV_POK_ONLY ||
         (op == GOPERL_OP_SV_FLAGS && ((uint32_t)b & (SVf_POK | SVp_POK)))) {
         void **kept = f->api->pv_host(f, a, 0);
@@ -636,7 +643,13 @@ static void goperl_pv_view_hook(goperl_frame_t *f, int32_t op, uint64_t a, uint6
                     goperl_pv_view_busy = 0;
                     goperl_croakf(f, "Out of memory!");
                 }
-                if (!(info & GOPERL_INFO_READONLY)) goperl_pv_view_g = a;
+                if (!(info & GOPERL_INFO_READONLY)) {
+                    /* one scalar waits at a time: one waiting still when
+                     * another is made so is decided now */
+                    if (goperl_pv_view_g && goperl_pv_view_g != a && !goperl_pv_view_decide(f, op))
+                        return;
+                    goperl_pv_view_g = a;
+                }
             }
         }
     }
