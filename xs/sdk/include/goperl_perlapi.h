@@ -3533,9 +3533,66 @@ enum {
     GOPERL_RX_COMP = 1,
     GOPERL_RX_EXEC = 2,
     GOPERL_RX_BODY = 3,
-    GOPERL_RX_OFFS = 4,
-    GOPERL_RX_COMP_PV = 5
+    GOPERL_RX_COMP_PV = 5,
+    GOPERL_RX_SET = 400,         /* c's high half: a field (GOPERL_RXF_*); b: its value */
+    GOPERL_RX_ALLOC_OFFS = 401,  /* b: groups -> the address of the regexp's new offsets */
+    GOPERL_RX_SET_WRAPPED = 402, /* s+b: RX_WRAPPED, copied; c's high half: RX_WRAPLEN */
+    GOPERL_RX_SET_SUBBEG = 403,  /* s+b: the string matched, a copy the regexp owns */
+    GOPERL_RX_RE_COMPILE = 404,  /* re_compile: perl's own engine */
+    GOPERL_RX_BUFF = 405         /* perl's function for the groups of a match */
 };
+/* The fields of a body GOPERL_RX_SET stores. */
+enum {
+    GOPERL_RXF_ENGINE = 0,
+    GOPERL_RXF_PAREN_NAMES = 1,
+    GOPERL_RXF_EXTFLAGS = 2,
+    GOPERL_RXF_NPARENS = 3,
+    GOPERL_RXF_LOGICAL_NPARENS = 4,
+    GOPERL_RXF_MINLEN = 5,
+    GOPERL_RXF_MINLENRET = 6,
+    GOPERL_RXF_MAXLEN = 7,
+    GOPERL_RXF_GOFS = 8,
+    GOPERL_RXF_INTFLAGS = 9,
+    GOPERL_RXF_LASTPAREN = 10,
+    GOPERL_RXF_LASTCLOSEPAREN = 11,
+    GOPERL_RXF_PPRIVATE = 12,
+    GOPERL_RXF_PRE_PREFIX = 13,
+    GOPERL_RXF_COMPFLAGS = 14,
+    GOPERL_RXF_SUBBEG = 15,
+    GOPERL_RXF_SUBLEN = 16,
+    GOPERL_RXF_SUBOFFSET = 17,
+    GOPERL_RXF_SUBCOFFSET = 18,
+    GOPERL_RXF_QR_ANONCV = 19,
+    GOPERL_RXF_OFFS = 20,
+    GOPERL_RXF_WRAPLEN = 21,
+    GOPERL_RXF_WRAPPED = 22
+};
+/* The functions of an engine: a bit for each in GOPERL_INT_ENGINE, the
+ * slot of GOPERL_HOST_ENGINE and the function of GOPERL_RX_BUFF. */
+enum {
+    GOPERL_ENG_COMP = 0,
+    GOPERL_ENG_EXEC = 1,
+    GOPERL_ENG_INTUIT = 2,
+    GOPERL_ENG_CHECKSTR = 3,
+    GOPERL_ENG_RXFREE = 4,
+    GOPERL_ENG_NUM_FETCH = 5,
+    GOPERL_ENG_NUM_STORE = 6,
+    GOPERL_ENG_NUM_LENGTH = 7,
+    GOPERL_ENG_NAMED = 8,
+    GOPERL_ENG_NAMED_ITER = 9,
+    GOPERL_ENG_QR_PACKAGE = 10
+};
+/* INTERNAL ENGINE (121), c's high half: the proxy of a host engine (a: the
+ * engine; b: the functions it has, and from bit 16 those that are perl's),
+ * or the host engine of a proxy (a: its address there; 0 for none). */
+#define GOPERL_INT_ENGINE 121
+enum {
+    GOPERL_ENGINE_OF_HOST = 0,
+    GOPERL_ENGINE_HOST = 1
+};
+/* An engine of the interpreter's that is no proxy (perl's own) is its
+ * address there with this bit in a body, which no address here has. */
+#define GOPERL_ENGINE_TAG ((uint64_t)1 << 62)
 #define GOPERL_RX(sel, tok, b)                                              \
     goperl_op3(GOPERL_OP_REGEXP, GOPERL_TOK(tok), (b), sel)
 
@@ -3545,9 +3602,28 @@ enum {
  * it is a type of its own (struct goperl_rx, with the head of an SV), so
  * that SvANY of one is its body as perl types it. */
 typedef struct goperl_rx REGEXP;
-typedef struct regexp_engine {
-    int goperl_opaque;
-} regexp_engine;
+/* perl's (regexp.h): the functions of a regexp engine. One of native code
+ * is given to the interpreter as a proxy (PTR2IV of it, or a regexp whose
+ * engine native code sets), whose functions call these. */
+typedef struct re_scream_pos_data_s re_scream_pos_data;
+struct regexp_engine {
+    REGEXP *(*comp)(pTHX_ SV *const pattern, U32 flags);
+    I32 (*exec)(pTHX_ REGEXP *const rx, char *stringarg, char *strend, char *strbeg,
+                SSize_t minend, SV *sv, void *data, U32 flags);
+    char *(*intuit)(pTHX_ REGEXP *const rx, SV *sv, const char *const strbeg, char *strpos,
+                    char *strend, const U32 flags, re_scream_pos_data *data);
+    SV *(*checkstr)(pTHX_ REGEXP *const rx);
+    void (*rxfree)(pTHX_ REGEXP *const rx);
+    void (*numbered_buff_FETCH)(pTHX_ REGEXP *const rx, const I32 paren, SV *const sv);
+    void (*numbered_buff_STORE)(pTHX_ REGEXP *const rx, const I32 paren, SV const *const value);
+    I32 (*numbered_buff_LENGTH)(pTHX_ REGEXP *const rx, const SV *const sv, const I32 paren);
+    SV *(*named_buff)(pTHX_ REGEXP *const rx, SV *const key, SV *const value, const U32 flags);
+    SV *(*named_buff_iter)(pTHX_ REGEXP *const rx, const SV *const lastkey, const U32 flags);
+    SV *(*qr_package)(pTHX_ REGEXP *const rx);
+    REGEXP *(*op_comp)(pTHX_ SV **const patternp, int pat_count, OP *expr,
+                       const struct regexp_engine *eng, REGEXP *old_re, bool *is_bare_re,
+                       U32 orig_rx_flags, U32 pm_flags);
+};
 typedef struct regexp_paren_pair {
     SSize_t start;
     SSize_t end;
@@ -3575,19 +3651,30 @@ typedef struct regexp {
     STRLEN prelen;
     char *wrapped;
     STRLEN wraplen;
+    /* what an engine fills too */
+    U32 logical_nparens;
+    SSize_t maxlen;
+    void *pprivate; /* native code's own pointer */
+    U32 pre_prefix;
+    CV *qr_anoncv;
 } regexp;
 
 /* The body of a regexp (ReANY, SvANY) is one struct, as perl's is: code
  * keeps the pointer across matches and reads the offsets of each match there
- * (Lucy's RegexTokenizer takes it once and runs pregexec in a loop). So a
+ * (Lucy's RegexTokenizer takes it once and runs pregexec in a loop), and an
+ * engine of native code fills it (re::engine::RE2's comp and exec). So a
  * regexp has one body for the call of native code, in the arena as the
  * other shadows of the call are; ReANY fills it again from the interpreter,
- * and so does every match of that regexp made through the perl API. */
+ * and so does every match of that regexp made through the perl API. Its
+ * offsets are the interpreter's own array, where perl writes a match's and
+ * native code's writes are perl's. What native code wrote into the other
+ * fields goes to the interpreter before the next operation (the flush):
+ * each field that is not what the body was filled with. */
 typedef struct goperl_rxbody {
     struct goperl_rxbody *next;
     uint64_t tok;
-    U32 cap; /* the groups r has room for (nparens + 1) */
-    regexp r; /* then the offsets of the groups */
+    regexp base; /* what the interpreter had when the body was filled */
+    regexp r;
 } goperl_rxbody_t;
 #define goperl_rxbodies_v (*(goperl_rxbody_t **)&GOPERL_SHARED->rx_bodies)
 static goperl_rxbody_t *goperl_rxbody_find(uint64_t tok) __attribute__((unused));
@@ -3596,29 +3683,128 @@ static goperl_rxbody_t *goperl_rxbody_find(uint64_t tok) {
         if (b->tok == tok) return b;
     return 0;
 }
+static uint64_t goperl_engine_guest(goperl_frame_t *f, const regexp_engine *e);
+/* What native code wrote into the body b goes to the interpreter. A
+ * pointer it stored to memory of its own is taken as perl takes it, by
+ * the regexp: the offsets of Newxz(rx->offs, ...), the pattern of
+ * RX_WRAPPED(rx) = savepvn(...) and a copy of the string matched
+ * (re::engine::GNU's) are copied into the interpreter's memory, and the
+ * body has the copy from then on. precomp and prelen are no fields of
+ * perl's body (RX_PRECOMP is a place in the wrapped pattern). */
+static void goperl_rx_writeback(goperl_frame_t *f, goperl_rxbody_t *b) {
+    regexp *const r = &b->r, *const o = &b->base;
+    const uint64_t tok = b->tok;
+#define GOPERL_RX_SETF(field, value)                                                          \
+    goperl_xs_opx(f, GOPERL_OP_REGEXP, tok, (uint64_t)(value),                                \
+                  (uint64_t)GOPERL_RX_SET | ((uint64_t)(field) << 32), 0, 0, 0)
+#define GOPERL_RX_FIELD(name, field, value) \
+    if (r->name != o->name) GOPERL_RX_SETF(field, value)
+    if (r->engine != o->engine) GOPERL_RX_SETF(GOPERL_RXF_ENGINE, goperl_engine_guest(f, r->engine));
+    GOPERL_RX_FIELD(paren_names, GOPERL_RXF_PAREN_NAMES, GOPERL_TOK(r->paren_names));
+    GOPERL_RX_FIELD(extflags, GOPERL_RXF_EXTFLAGS, r->extflags);
+    GOPERL_RX_FIELD(nparens, GOPERL_RXF_NPARENS, r->nparens);
+    GOPERL_RX_FIELD(logical_nparens, GOPERL_RXF_LOGICAL_NPARENS, r->logical_nparens);
+    GOPERL_RX_FIELD(minlen, GOPERL_RXF_MINLEN, (int64_t)r->minlen);
+    GOPERL_RX_FIELD(minlenret, GOPERL_RXF_MINLENRET, (int64_t)r->minlenret);
+    GOPERL_RX_FIELD(maxlen, GOPERL_RXF_MAXLEN, (int64_t)r->maxlen);
+    GOPERL_RX_FIELD(gofs, GOPERL_RXF_GOFS, r->gofs);
+    GOPERL_RX_FIELD(intflags, GOPERL_RXF_INTFLAGS, r->intflags);
+    GOPERL_RX_FIELD(lastparen, GOPERL_RXF_LASTPAREN, r->lastparen);
+    GOPERL_RX_FIELD(lastcloseparen, GOPERL_RXF_LASTCLOSEPAREN, r->lastcloseparen);
+    GOPERL_RX_FIELD(pprivate, GOPERL_RXF_PPRIVATE, (uintptr_t)r->pprivate);
+    GOPERL_RX_FIELD(pre_prefix, GOPERL_RXF_PRE_PREFIX, r->pre_prefix);
+    GOPERL_RX_FIELD(compflags, GOPERL_RXF_COMPFLAGS, r->compflags);
+    GOPERL_RX_FIELD(sublen, GOPERL_RXF_SUBLEN, (int64_t)r->sublen);
+    GOPERL_RX_FIELD(suboffset, GOPERL_RXF_SUBOFFSET, (int64_t)r->suboffset);
+    GOPERL_RX_FIELD(subcoffset, GOPERL_RXF_SUBCOFFSET, (int64_t)r->subcoffset);
+    GOPERL_RX_FIELD(qr_anoncv, GOPERL_RXF_QR_ANONCV, GOPERL_TOK(r->qr_anoncv));
+#undef GOPERL_RX_FIELD
+    size_t bytes = 0;
+    if (r->offs != o->offs) {
+        uint64_t g = r->offs ? goperl_guest_addr(f, r->offs) : 0;
+        if (r->offs && !g) {
+            const int block = goperl_block_size(r->offs, &bytes);
+            size_t n = block ? bytes / sizeof(regexp_paren_pair) : 0;
+            if (!n) n = (size_t)r->nparens + 1;
+            g = goperl_xs_opx(f, GOPERL_OP_REGEXP, tok, (uint64_t)n, GOPERL_RX_ALLOC_OFFS, 0, 0, 0);
+            regexp_paren_pair *const there = g ? (regexp_paren_pair *)goperl_guest_mem(f, g) : 0;
+            if (!there) return; /* the interpreter refused: the frame says why */
+            memcpy(there, r->offs, n * sizeof *there);
+            if (block) {
+                goperl_block_forget(r->offs, 0);
+                free(r->offs);
+            }
+            r->offs = there;
+        } else {
+            GOPERL_RX_SETF(GOPERL_RXF_OFFS, g);
+        }
+    }
+    if (r->subbeg != o->subbeg) {
+        const uint64_t g = r->subbeg ? goperl_guest_addr(f, r->subbeg) : 0;
+        if (!r->subbeg || g) {
+            GOPERL_RX_SETF(GOPERL_RXF_SUBBEG, g);
+        } else {
+            /* the copy is the regexp's (RXp_MATCH_COPIED); native code's
+             * own string goes when it was the regexp's too */
+            const uint64_t copy = goperl_xs_opx(f, GOPERL_OP_REGEXP, tok, (uint64_t)r->sublen,
+                                                GOPERL_RX_SET_SUBBEG, r->subbeg, (uint64_t)r->sublen, 0);
+            if (!copy) return;
+            if ((r->extflags & RXf_COPY_DONE) && goperl_block_size(r->subbeg, &bytes)) {
+                goperl_block_forget(r->subbeg, 0);
+                free(r->subbeg);
+            }
+            r->subbeg = (char *)goperl_guest_mem(f, copy);
+            r->extflags |= RXf_COPY_DONE;
+        }
+    }
+    if (r->wrapped != o->wrapped) {
+        const uint64_t g = r->wrapped ? goperl_guest_addr(f, r->wrapped) : 0;
+        if (!r->wrapped || g) {
+            GOPERL_RX_SETF(GOPERL_RXF_WRAPPED, g);
+        } else {
+            /* the whole of a block of native code's (savepvn's, with its
+             * NUL), or as long as it says */
+            const int block = goperl_block_size(r->wrapped, &bytes);
+            if (!block) bytes = r->wraplen != o->wraplen ? r->wraplen : strlen(r->wrapped);
+            const uint64_t copy = goperl_xs_opx(f, GOPERL_OP_REGEXP, tok, (uint64_t)bytes,
+                                                (uint64_t)GOPERL_RX_SET_WRAPPED | ((uint64_t)r->wraplen << 32),
+                                                r->wrapped, (uint64_t)bytes, 0);
+            if (!copy) return;
+            if (block) {
+                goperl_block_forget(r->wrapped, 0);
+                free(r->wrapped);
+            }
+            r->wrapped = (char *)goperl_guest_mem(f, copy);
+        }
+    }
+    if (r->wraplen != o->wraplen) GOPERL_RX_SETF(GOPERL_RXF_WRAPLEN, r->wraplen);
+#undef GOPERL_RX_SETF
+    memcpy(o, r, sizeof *o);
+}
+static void goperl_rx_writeback_all(goperl_frame_t *f) {
+    for (goperl_rxbody_t *b = (goperl_rxbody_t *)((goperl_shared_t *)f->inst)->rx_bodies; b; b = b->next)
+        if (memcmp(&b->r, &b->base, sizeof b->r)) goperl_rx_writeback(f, b);
+}
 static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) __attribute__((unused));
 static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
+    /* the operation's flush writes back first what native code wrote */
     const goperl_gword_t *w = (const goperl_gword_t *)goperl_guest_mem(
         f, goperl_do_op3(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), 0, (uint64_t)(GOPERL_RX_BODY), 0, 0));
     if (!w) return 0;
-    goperl_gword_t c[20];
+    goperl_gword_t c[26];
     memcpy(c, w, sizeof c);
     goperl_rxbody_t *body = goperl_rxbody_find(GOPERL_TOK(rx));
-    if (!body || body->cap < (U32)c[4] + 1) {
-        /* a body too small for the groups of a regexp now at the address
-         * stays where it is: code may still hold it */
-        const size_t n = sizeof(goperl_rxbody_t) + sizeof(regexp_paren_pair) * ((size_t)c[4] + 1);
-        goperl_rxbody_t *nb = (goperl_rxbody_t *)goperl_arena_alloc(n);
-        if (!nb) goperl_croakf(f, "Out of memory!");
-        memset(nb, 0, n);
-        nb->tok = GOPERL_TOK(rx);
-        nb->cap = (U32)c[4] + 1;
-        nb->next = goperl_rxbodies_v;
-        goperl_rxbodies_v = nb;
-        body = nb;
+    if (!body) {
+        body = (goperl_rxbody_t *)goperl_arena_alloc(sizeof *body);
+        if (!body) goperl_croakf(f, "Out of memory!");
+        memset(body, 0, sizeof *body);
+        body->tok = GOPERL_TOK(rx);
+        body->next = goperl_rxbodies_v;
+        goperl_rxbodies_v = body;
     }
     regexp *r = &body->r;
-    /* an engine is known by its address in the interpreter */
+    /* an engine of native code is itself, another its address in the
+     * interpreter with GOPERL_ENGINE_TAG */
     r->engine = (const regexp_engine *)(uintptr_t)c[0];
     r->mother_re = (REGEXP *)GOPERL_SV(c[1]);
     r->paren_names = (HV *)GOPERL_SV(c[2]);
@@ -3639,24 +3825,151 @@ static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
     r->prelen = (STRLEN)c[17];
     r->wrapped = c[18] ? (char *)goperl_guest_mem(f, c[18]) : 0;
     r->wraplen = (STRLEN)c[19];
-    r->offs = (regexp_paren_pair *)(r + 1);
-    for (U32 i = 0; i <= r->nparens; i++) {
-        /* -> the start of the group; second: its end */
-        uint64_t end = 0;
-        const uint64_t start = goperl_do_opx(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), i,
-                                             GOPERL_RX_OFFS, 0, 0, &end);
-        r->offs[i].start = (SSize_t)(int64_t)start;
-        r->offs[i].end = (SSize_t)(int64_t)end;
-        r->offs[i].start_tmp = -1;
-    }
+    r->logical_nparens = (U32)c[20];
+    r->maxlen = (SSize_t)(int64_t)c[21];
+    r->pprivate = (void *)(uintptr_t)c[22];
+    r->pre_prefix = (U32)c[23];
+    r->qr_anoncv = (CV *)GOPERL_SV(c[24]);
+    r->offs = c[25] ? (regexp_paren_pair *)goperl_guest_mem(f, c[25]) : 0;
+    memcpy(&body->base, r, sizeof *r);
     return r;
 }
 #define ReANY(rx) goperl_reany(_gof, (REGEXP *)(rx))
 
+/* perl's functions for the groups of a match, which an engine of native
+ * code names for perl's own (re::engine::RE2's numbered_buff_FETCH and the
+ * rest) and may call: perl's run in the interpreter. One function in a
+ * module (weak), whose address an engine's slot is compared with. */
+static uint64_t goperl_rx_buff(REGEXP *const rx, int which, const goperl_gword_t *w, size_t n) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    return goperl_do_opx(f, GOPERL_OP_REGEXP, GOPERL_TOK(rx), (uint64_t)(n * sizeof *w),
+                         (uint64_t)GOPERL_RX_BUFF | ((uint64_t)which << 32), (const char *)w,
+                         n * sizeof *w, 0);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) void Perl_reg_numbered_buff_fetch(
+    pTHX_ REGEXP *const rx, const I32 paren, SV *const sv) {
+    const goperl_gword_t w[2] = {(goperl_gword_t)(int64_t)paren, GOPERL_TOK(sv)};
+    goperl_rx_buff(rx, GOPERL_ENG_NUM_FETCH, w, 2);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) void Perl_reg_numbered_buff_store(
+    pTHX_ REGEXP *const rx, const I32 paren, SV const *const value) {
+    const goperl_gword_t w[2] = {(goperl_gword_t)(int64_t)paren, GOPERL_TOK(value)};
+    goperl_rx_buff(rx, GOPERL_ENG_NUM_STORE, w, 2);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) I32 Perl_reg_numbered_buff_length(
+    pTHX_ REGEXP *const rx, const SV *const sv, const I32 paren) {
+    const goperl_gword_t w[2] = {GOPERL_TOK(sv), (goperl_gword_t)(int64_t)paren};
+    return (I32)(int64_t)goperl_rx_buff(rx, GOPERL_ENG_NUM_LENGTH, w, 2);
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) SV *Perl_reg_named_buff(
+    pTHX_ REGEXP *const rx, SV *const key, SV *const value, const U32 flags) {
+    const goperl_gword_t w[3] = {GOPERL_TOK(key), GOPERL_TOK(value), flags};
+    return GOPERL_SV(goperl_rx_buff(rx, GOPERL_ENG_NAMED, w, 3));
+}
+GOPERL_C __attribute__((weak, visibility("hidden"))) SV *Perl_reg_named_buff_iter(
+    pTHX_ REGEXP *const rx, const SV *const lastkey, const U32 flags) {
+    const goperl_gword_t w[2] = {GOPERL_TOK(lastkey), flags};
+    return GOPERL_SV(goperl_rx_buff(rx, GOPERL_ENG_NAMED_ITER, w, 2));
+}
+
+/* The interpreter's address of the engine e: perl's own (a body gives it
+ * with GOPERL_ENGINE_TAG), or the proxy of an engine of native code, which
+ * the interpreter makes once, with the functions the engine has and those
+ * of them that are perl's. */
+static uint64_t goperl_engine_guest(goperl_frame_t *f, const regexp_engine *e) {
+    if (!e) return 0;
+    if ((uint64_t)(uintptr_t)e & GOPERL_ENGINE_TAG) return (uint64_t)(uintptr_t)e & ~GOPERL_ENGINE_TAG;
+    if (e->op_comp)
+        goperl_croakf(f, "a regexp engine of native code with an op_comp of its own: go-perl "
+                         "compiles a pattern's ops in the interpreter, as perl's own engine does");
+    uint32_t has = 0, perls = 0;
+#define GOPERL_ENG_HAS(bit, fn) \
+    if (e->fn) has |= 1u << (bit)
+#define GOPERL_ENG_PERLS(bit, fn, perl) \
+    if (e->fn == &perl) perls |= 1u << (bit)
+    GOPERL_ENG_HAS(GOPERL_ENG_COMP, comp);
+    GOPERL_ENG_HAS(GOPERL_ENG_EXEC, exec);
+    GOPERL_ENG_HAS(GOPERL_ENG_INTUIT, intuit);
+    GOPERL_ENG_HAS(GOPERL_ENG_CHECKSTR, checkstr);
+    GOPERL_ENG_HAS(GOPERL_ENG_RXFREE, rxfree);
+    GOPERL_ENG_HAS(GOPERL_ENG_NUM_FETCH, numbered_buff_FETCH);
+    GOPERL_ENG_HAS(GOPERL_ENG_NUM_STORE, numbered_buff_STORE);
+    GOPERL_ENG_HAS(GOPERL_ENG_NUM_LENGTH, numbered_buff_LENGTH);
+    GOPERL_ENG_HAS(GOPERL_ENG_NAMED, named_buff);
+    GOPERL_ENG_HAS(GOPERL_ENG_NAMED_ITER, named_buff_iter);
+    GOPERL_ENG_HAS(GOPERL_ENG_QR_PACKAGE, qr_package);
+    GOPERL_ENG_PERLS(GOPERL_ENG_NUM_FETCH, numbered_buff_FETCH, Perl_reg_numbered_buff_fetch);
+    GOPERL_ENG_PERLS(GOPERL_ENG_NUM_STORE, numbered_buff_STORE, Perl_reg_numbered_buff_store);
+    GOPERL_ENG_PERLS(GOPERL_ENG_NUM_LENGTH, numbered_buff_LENGTH, Perl_reg_numbered_buff_length);
+    GOPERL_ENG_PERLS(GOPERL_ENG_NAMED, named_buff, Perl_reg_named_buff);
+    GOPERL_ENG_PERLS(GOPERL_ENG_NAMED_ITER, named_buff_iter, Perl_reg_named_buff_iter);
+#undef GOPERL_ENG_HAS
+#undef GOPERL_ENG_PERLS
+    return goperl_xs_opx(f, GOPERL_OP_INTERNAL, (uint64_t)(uintptr_t)e, has | ((uint64_t)perls << 16),
+                         (uint64_t)GOPERL_INT_ENGINE | ((uint64_t)GOPERL_ENGINE_OF_HOST << 32), 0, 0, 0);
+}
+static IV goperl_engine_number(const regexp_engine *e) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (!f) return (IV)(intptr_t)e;
+    const int32_t failed_before = f->failed;
+    const uint64_t g = goperl_engine_guest(f, e);
+    if (!failed_before && f->failed && f->jb) goperl_raise(f);
+    return (IV)g;
+}
+static const regexp_engine *goperl_engine_of_number(IV iv) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (!iv || !f) return (const regexp_engine *)(intptr_t)iv;
+    const uint64_t host = goperl_xs_opx(f, GOPERL_OP_INTERNAL, (uint64_t)iv, 0,
+                                        (uint64_t)GOPERL_INT_ENGINE | ((uint64_t)GOPERL_ENGINE_HOST << 32),
+                                        0, 0, 0);
+    return (const regexp_engine *)(uintptr_t)(host ? host : ((uint64_t)iv | GOPERL_ENGINE_TAG));
+}
+/* A function of an engine of native code the interpreter calls through
+ * the engine's proxy: req is [GOPERL_HOST_ENGINE][engine][slot] and the
+ * function's arguments, addresses and tokens of the interpreter's. */
+static goperl_gword_t goperl_engine_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t n) {
+    static const uint8_t nargs[] = {2, 8, 7, 1, 1, 3, 3, 3, 4, 3, 1};
+    if (n < 3 || !req[1] || req[2] >= sizeof nargs || n - 3 < nargs[req[2]])
+        goperl_croakf(f, "host call: no regexp engine function for the request");
+    const regexp_engine *const e = (const regexp_engine *)(uintptr_t)req[1];
+    const goperl_gword_t *const a = req + 3;
+    REGEXP *const rx = (REGEXP *)GOPERL_SV(a[0]);
+#define GOPERL_ENG_MEM(w) ((w) ? goperl_guest_mem(f, (w)) : 0)
+    switch (req[2]) {
+    case GOPERL_ENG_COMP: return GOPERL_TOK(e->comp(GOPERL_SV(a[0]), (U32)a[1]));
+    case GOPERL_ENG_EXEC:
+        return (goperl_gword_t)(int64_t)e->exec(rx, (char *)GOPERL_ENG_MEM(a[1]), (char *)GOPERL_ENG_MEM(a[2]),
+                                                (char *)GOPERL_ENG_MEM(a[3]), (SSize_t)(int64_t)a[4],
+                                                GOPERL_SV(a[5]), GOPERL_ENG_MEM(a[6]), (U32)a[7]);
+    case GOPERL_ENG_INTUIT: {
+        char *const at = e->intuit(rx, GOPERL_SV(a[1]), (const char *)GOPERL_ENG_MEM(a[2]),
+                                   (char *)GOPERL_ENG_MEM(a[3]), (char *)GOPERL_ENG_MEM(a[4]), (U32)a[5],
+                                   (re_scream_pos_data *)GOPERL_ENG_MEM(a[6]));
+        const uint64_t g = at ? goperl_guest_addr(f, at) : 0;
+        if (at && !g) goperl_croakf(f, "a regexp engine's intuit gave a place that is in no string");
+        return g;
+    }
+    case GOPERL_ENG_CHECKSTR: return GOPERL_TOK(e->checkstr(rx));
+    case GOPERL_ENG_RXFREE: e->rxfree(rx); return 0;
+    case GOPERL_ENG_NUM_FETCH: e->numbered_buff_FETCH(rx, (I32)(int64_t)a[1], GOPERL_SV(a[2])); return 0;
+    case GOPERL_ENG_NUM_STORE: e->numbered_buff_STORE(rx, (I32)(int64_t)a[1], GOPERL_SV(a[2])); return 0;
+    case GOPERL_ENG_NUM_LENGTH:
+        return (goperl_gword_t)(int64_t)e->numbered_buff_LENGTH(rx, GOPERL_SV(a[1]), (I32)(int64_t)a[2]);
+    case GOPERL_ENG_NAMED: return GOPERL_TOK(e->named_buff(rx, GOPERL_SV(a[1]), GOPERL_SV(a[2]), (U32)a[3]));
+    case GOPERL_ENG_NAMED_ITER: return GOPERL_TOK(e->named_buff_iter(rx, GOPERL_SV(a[1]), (U32)a[2]));
+    case GOPERL_ENG_QR_PACKAGE: return GOPERL_TOK(e->qr_package(rx));
+    }
+#undef GOPERL_ENG_MEM
+    goperl_croakf(f, "host call: no such function of a regexp engine: %u", (unsigned)req[2]);
+}
+
 #define SvRX(sv) ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_OF_SV, sv, 0)))
 #define pregcomp(pattern, flags) \
     ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_COMP, pattern, (U32)(flags))))
-#define re_compile(pattern, flags) pregcomp((pattern), (flags))
+/* perl's own engine, whatever engine is in force (an engine's comp that
+ * leaves a pattern to perl: re::engine::RE2's) */
+#define re_compile(pattern, flags) \
+    ((REGEXP *)GOPERL_SV(GOPERL_RX(GOPERL_RX_RE_COMPILE, pattern, (U32)(flags))))
 #define CALLREGCOMP(pattern, flags) pregcomp((pattern), (flags))
 #define pregfree(rx) SvREFCNT_dec((SV *)(rx))
 #define ReREFCNT_dec(rx) SvREFCNT_dec((SV *)(rx))
@@ -3708,6 +4021,49 @@ static regexp *goperl_reany(goperl_frame_t *f, REGEXP *rx) {
 #define RX_OFFS_VALID(rx, n) RXp_OFFS_VALID(ReANY(rx), (n))
 #define RX_UTF8(rx) SvUTF8((SV *)(rx))
 #define RX_MATCH_UTF8(rx) cBOOL(RX_EXTFLAGS(rx) & RXf_MATCH_UTF8)
+#define RXp_MATCH_UTF8(prog) (RXp_EXTFLAGS(prog) & RXf_MATCH_UTF8)
+#define RXp_MATCH_UTF8_on(prog) (RXp_EXTFLAGS(prog) |= RXf_MATCH_UTF8)
+#define RXp_MATCH_UTF8_off(prog) (RXp_EXTFLAGS(prog) &= ~RXf_MATCH_UTF8)
+#define RXp_MATCH_UTF8_set(prog, t) ((t) ? RXp_MATCH_UTF8_on(prog) : RXp_MATCH_UTF8_off(prog))
+#define RX_MATCH_UTF8_on(rx) RXp_MATCH_UTF8_on(ReANY(rx))
+#define RX_MATCH_UTF8_off(rx) RXp_MATCH_UTF8_off(ReANY(rx))
+#define RX_MATCH_UTF8_set(rx, t) RXp_MATCH_UTF8_set(ReANY(rx), t)
+#define RXp_MATCH_TAINTED(prog) (RXp_EXTFLAGS(prog) & RXf_TAINTED_SEEN)
+#define RXp_MATCH_TAINTED_on(prog) (RXp_EXTFLAGS(prog) |= RXf_TAINTED_SEEN)
+#define RXp_MATCH_TAINTED_off(prog) (RXp_EXTFLAGS(prog) &= ~RXf_TAINTED_SEEN)
+#define RX_MATCH_TAINTED(rx) RXp_MATCH_TAINTED(ReANY(rx))
+#define RX_MATCH_TAINTED_on(rx) RXp_MATCH_TAINTED_on(ReANY(rx))
+#define RX_MATCH_TAINTED_off(rx) RXp_MATCH_TAINTED_off(ReANY(rx))
+#define RX_MATCH_TAINTED_set(rx, t) ((t) ? RX_MATCH_TAINTED_on(rx) : RX_MATCH_TAINTED_off(rx))
+/* the string matched is a copy the regexp owns (RXf_COPY_DONE) */
+#define RXp_MATCH_COPIED(prog) (RXp_EXTFLAGS(prog) & RXf_COPY_DONE)
+#define RXp_MATCH_COPIED_on(prog) (RXp_EXTFLAGS(prog) |= RXf_COPY_DONE)
+#define RXp_MATCH_COPIED_off(prog) (RXp_EXTFLAGS(prog) &= ~RXf_COPY_DONE)
+#define RX_MATCH_COPIED(rx) RXp_MATCH_COPIED(ReANY(rx))
+#define RX_MATCH_COPIED_on(rx) RXp_MATCH_COPIED_on(ReANY(rx))
+#define RX_MATCH_COPIED_off(rx) RXp_MATCH_COPIED_off(ReANY(rx))
+#define RX_MATCH_COPIED_set(rx, t) ((t) ? RX_MATCH_COPIED_on(rx) : RX_MATCH_COPIED_off(rx))
+#define RXp_MATCH_COPY_FREE(prog)       \
+    STMT_START {                        \
+        if (RXp_MATCH_COPIED(prog)) {   \
+            Safefree(RXp_SUBBEG(prog)); \
+            RXp_MATCH_COPIED_off(prog); \
+        }                               \
+    }                                   \
+    STMT_END
+#define RX_MATCH_COPY_FREE(rx) RXp_MATCH_COPY_FREE(ReANY(rx))
+#define RXp_LOGICAL_NPARENS(prog) ((prog)->logical_nparens)
+#define RX_LOGICAL_NPARENS(rx) RXp_LOGICAL_NPARENS(ReANY(rx))
+#define RXp_PPRIVATE(prog) ((prog)->pprivate)
+#define RX_PPRIVATE(rx) RXp_PPRIVATE(ReANY(rx))
+#define RXp_QR_ANONCV(prog) ((prog)->qr_anoncv)
+#define RX_QR_ANONCV(rx) RXp_QR_ANONCV(ReANY(rx))
+#define RXp_PRE_PREFIX(prog) ((prog)->pre_prefix)
+#define RX_PRE_PREFIX(rx) RXp_PRE_PREFIX(ReANY(rx))
+#define RXp_MOTHER_RE(prog) ((prog)->mother_re)
+#define RX_MOTHER_RE(rx) RXp_MOTHER_RE(ReANY(rx))
+/* split's flag of a pattern (RXf_PMf_SPLIT), as an engine's comp sees it */
+#define RXf_SPLIT RXf_PMf_SPLIT
 /* The character set of a pattern is a field of its flags, where the
  * interpreter has it (RXf_PMf_CHARSET, its lowest bit the shift). */
 #define RXf_PMf_CHARSET_SHIFT_ (__builtin_ctz(RXf_PMf_CHARSET))

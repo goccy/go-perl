@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 43u
+#define GOPERL_XS_ABI 44u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -2780,6 +2780,7 @@ static uint64_t *goperl_lv_ref(goperl_frame_t *f, SV *sv, int field,
 static void goperl_hostsave_ptr(goperl_frame_t *f, void **loc);
 static void goperl_hostsave_i32(goperl_frame_t *f, int32_t *loc);
 static void goperl_svcur_writeback(goperl_frame_t *f);
+static void goperl_rx_writeback_all(goperl_frame_t *f);
 static void goperl_gen_bump(void);
 
 static void goperl_raise(goperl_frame_t *f) __attribute__((noreturn, unused));
@@ -4392,11 +4393,20 @@ static SV *goperl_sv_setref_pv(goperl_frame_t *f, SV *rv,
 #define GOPERL_OP_NUMBER_TAG ((UV)1 << 62)
 static IV goperl_op_number(const OP *o);
 static OP *goperl_op_of_number(IV iv);
+/* A regexp engine of native code as a number (re::engine::RE2's ENGINE,
+ * which $^H{regcomp} holds) is the address of its proxy in the
+ * interpreter, and the number of a proxy gives the engine back
+ * (goperl_perlapi.h). */
+typedef struct regexp_engine regexp_engine;
+static IV goperl_engine_number(const regexp_engine *e) __attribute__((unused));
+static const regexp_engine *goperl_engine_of_number(IV iv) __attribute__((unused));
 #ifdef __cplusplus
 extern "C++" {
 template <class T> static inline IV goperl_ptr_number(T p) { return (IV)(intptr_t)p; }
 static inline IV goperl_ptr_number(OP *o) { return goperl_op_number(o); }
 static inline IV goperl_ptr_number(const OP *o) { return goperl_op_number(o); }
+static inline IV goperl_ptr_number(regexp_engine *e) { return goperl_engine_number(e); }
+static inline IV goperl_ptr_number(const regexp_engine *e) { return goperl_engine_number(e); }
 template <class T> struct goperl_number_ptr {
     static T of(IV iv) { return (T)(uintptr_t)iv; }
 };
@@ -4406,17 +4416,27 @@ template <> struct goperl_number_ptr<OP *> {
 template <> struct goperl_number_ptr<const OP *> {
     static const OP *of(IV iv) { return goperl_op_of_number(iv); }
 };
+template <> struct goperl_number_ptr<regexp_engine *> {
+    static regexp_engine *of(IV iv) { return (regexp_engine *)goperl_engine_of_number(iv); }
+};
+template <> struct goperl_number_ptr<const regexp_engine *> {
+    static const regexp_engine *of(IV iv) { return goperl_engine_of_number(iv); }
+};
 }
 #define GOPERL_PTR_NUMBER(p) goperl_ptr_number(p)
 #define INT2PTR(type, iv) (goperl_number_ptr<type>::of((IV)(iv)))
 #else
-#define GOPERL_PTR_NUMBER(p)                                        \
-    _Generic((p), OP *: goperl_op_number((const OP *)(uintptr_t)(p)), \
-             const OP *: goperl_op_number((const OP *)(uintptr_t)(p)), \
+#define GOPERL_PTR_NUMBER(p)                                                                   \
+    _Generic((p), OP *: goperl_op_number((const OP *)(uintptr_t)(p)),                            \
+             const OP *: goperl_op_number((const OP *)(uintptr_t)(p)),                           \
+             regexp_engine *: goperl_engine_number((const regexp_engine *)(uintptr_t)(p)),       \
+             const regexp_engine *: goperl_engine_number((const regexp_engine *)(uintptr_t)(p)), \
              default: (IV)(intptr_t)(p))
-#define INT2PTR(type, iv)                                           \
-    _Generic((type)0, OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)), \
-             const OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)), \
+#define INT2PTR(type, iv)                                                               \
+    _Generic((type)0, OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)),             \
+             const OP *: (type)(uintptr_t)goperl_op_of_number((IV)(iv)),                \
+             regexp_engine *: (type)(uintptr_t)goperl_engine_of_number((IV)(iv)),       \
+             const regexp_engine *: (type)(uintptr_t)goperl_engine_of_number((IV)(iv)), \
              default: (type)(uintptr_t)(iv))
 #endif
 #define PTR2IV(p) GOPERL_PTR_NUMBER(p)
@@ -4826,6 +4846,7 @@ static void goperl_flush(goperl_frame_t *f) {
     goperl_parser_push(f);
     goperl_cx_writeback(f);
     goperl_statcache_writeback(f);
+    if (((const goperl_shared_t *)f->inst)->rx_bodies) goperl_rx_writeback_all(f);
     if (goperl_hints_live_v && goperl_hints_slot_v != goperl_hints_base_v) {
         goperl_hints_base_v = goperl_hints_slot_v;
         goperl_xs_op(f, GOPERL_OP_PLVAR_SET, (uint64_t)GOPERL_PL_HINTS,
@@ -11912,6 +11933,63 @@ typedef struct stat Stat_t;
 #define Siglongjmp(buf, retval) siglongjmp((buf), (retval))
 #define my_fork() fork()
 #define PerlDir_mkdir(name, mode) Mkdir((name), (mode))
+/* chdir and fchdir of native code are the program's, as perl's chdir is
+ * the process's: the interpreter changes its working directory (a relative
+ * path is from the program's), and the host process follows it when the
+ * program is the host process (Config.HostProcess), as with the program's
+ * own chdir. A descriptor of native code's is the host's: the directory is
+ * named by the path the host knows it under, which must still lead to it
+ * (it may have been renamed or replaced since). Outside a native call they
+ * are the C library's. */
+#define GOPERL_INT_CHDIR 122
+static __attribute__((unused)) int goperl_chdir(const char *path) {
+    goperl_frame_t *const f = goperl_cur_frame_v;
+    if (!f) return (chdir)(path);
+    if (!path) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (!*path) {
+        errno = ENOENT;
+        return -1;
+    }
+    uint64_t err = 0;
+    const int rc = (int)(int64_t)goperl_do_opx(f, GOPERL_OP_INTERNAL, 0, strlen(path), GOPERL_INT_CHDIR,
+                                               path, strlen(path), &err);
+    if (rc) errno = goperl_errno_host((int)err);
+    return rc;
+}
+static __attribute__((unused)) int goperl_fchdir(int fd) {
+    if (!goperl_cur_frame_v) return (fchdir)(fd);
+    struct stat by_fd, by_name;
+    char path[4096];
+    if (fstat(fd, &by_fd) != 0) return -1;
+    if (!S_ISDIR(by_fd.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+#ifdef F_GETPATH
+    if (sizeof path < MAXPATHLEN || fcntl(fd, F_GETPATH, path) == -1) return -1;
+#else
+    char link[64];
+    snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+    const ssize_t n = readlink(link, path, sizeof path - 1);
+    if (n < 0) return -1;
+    if ((size_t)n >= sizeof path - 1) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    path[n] = '\0';
+#endif
+    if (stat(path, &by_name) != 0) return -1;
+    if (by_name.st_dev != by_fd.st_dev || by_name.st_ino != by_fd.st_ino) {
+        errno = ENOENT;
+        return -1;
+    }
+    return goperl_chdir(path);
+}
+#define chdir(path) goperl_chdir(path)
+#define fchdir(fd) goperl_fchdir(fd)
 #define PerlDir_chdir(name) chdir((name))
 #define PerlDir_rmdir(name) rmdir((name))
 #define PerlDir_close(dir) closedir((dir))
@@ -13755,7 +13833,8 @@ enum {
     GOPERL_HOST_MAGIC = 4,
     GOPERL_HOST_UVAR = 5,
     GOPERL_HOST_INFIX = 9,
-    GOPERL_HOST_NATIVE_OP = 100
+    GOPERL_HOST_NATIVE_OP = 100,
+    GOPERL_HOST_ENGINE = 400
 };
 /* The hooks of GOPERL_HOST_MAGIC (free and local come another way). */
 enum {
@@ -14050,6 +14129,8 @@ static void goperl_plop_refresh(goperl_frame_t *f) {
     if (now != was) f->plop = f->plop_base = 0;
 }
 
+static goperl_gword_t goperl_engine_invoke(goperl_frame_t *f, const goperl_gword_t *req,
+                                           uint32_t nwords);
 /* Loader entry: one call of native code through the host-call channel.
  * req is [kind] and the kind's words; the answer goes to resp, in words,
  * and its length in bytes is returned (reqlen and respcap are in bytes
@@ -14145,6 +14226,14 @@ __goperl_host_invoke(goperl_frame_t *f, const goperl_gword_t *req, uint32_t reql
         rlen = 56;
         break;
     }
+    case GOPERL_HOST_ENGINE:
+        /* [engine][slot] and the function's arguments -> [result]: a
+         * function of a regexp engine of native code the interpreter has
+         * the proxy of (goperl_perlapi.h); what it wrote into a regexp's
+         * body goes to the interpreter with the flush below */
+        resp[0] = goperl_engine_invoke(f, req, reqlen / 8);
+        rlen = 8;
+        break;
     case GOPERL_HOST_CALLCK: {
         const goperl_callcks_t *c = goperl_callcks_v;
         if (reqlen < 40 || !c || req[1] == 0 || (int64_t)req[1] > c->n)
