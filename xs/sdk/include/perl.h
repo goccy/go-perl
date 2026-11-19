@@ -7010,7 +7010,16 @@ static size_t goperl_op_links_of(const OP *o, OP **out) {
  * native call) is described again, which gives what it leads to baselines
  * in turn. A link of a shadow is an entry of the registry (goperl_op_apply
  * makes it, and a write-back takes no op but the interpreter's): one whose
- * op was freed has no token and is not followed. */
+ * op was freed has no token and is not followed.
+ * An op of a finished tree gets a baseline, but what it leads to is not
+ * followed from it: such a tree is the code perl runs, which a module does
+ * not rebuild by walking it (perl's PERL_DEBUG_READONLY_OPS makes it
+ * read-only), and its descriptions last across native calls, so the walk
+ * would go over the whole tree in every call that looks at PL_op, at a
+ * cost that grows with the program. The op handed out and the ops next to
+ * it get baselines (Class::XSAccessor gives the running op a pp function of
+ * its own, Scope::Upper the next op of its op); a tree being compiled is
+ * walked whole (a checker or a peephole hook rebuilds what it reaches). */
 static void goperl_op_activate_links(goperl_frame_t *f, goperl_opreg_t *r, OP *from) {
     OP *inline_v[256];
     OP **stack = inline_v;
@@ -7025,6 +7034,7 @@ static void goperl_op_activate_links(goperl_frame_t *f, goperl_opreg_t *r, OP *f
             continue;
         }
         goperl_op_activate(r, e);
+        if (e->gen == GOPERL_GEN_ALWAYS) continue;
         if (cap - n < GOPERL_OP_LINKS_MAX) {
             const size_t nc = cap * 2;
             OP **ns = (OP **)malloc(nc * sizeof(OP *));
