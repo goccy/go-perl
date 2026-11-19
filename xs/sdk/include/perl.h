@@ -2246,73 +2246,18 @@ typedef struct goperl_shared {
      * all from then on; 0 before. Freed with the instance. */
     goperl_hostsave_t *hostsave_more;
     int32_t hostsave_cap;
-    void *mg_found; /* goperl_calltab_t of goperl_mgfound_t: the copies of the
-                     * interpreter's own magic mg_find made in this call of
-                     * native code, by the MAGIC's address, in the arena */
-    void *hv_arrays; /* goperl_calltab_t of goperl_hvarray_t: the arrays
-                      * HvARRAY gave in this call of native code, by the
-                      * address of the buckets, in the arena
-                      * (goperl_compiler.h) */
+    void *mg_found; /* goperl_mgfound_t: the copies of the interpreter's own
+                     * magic mg_find made in this call of native code, by
+                     * the MAGIC's address, in the arena */
+    void *hv_arrays; /* goperl_hvarray_t: the arrays HvARRAY gave in this call
+                      * of native code, by the address of the buckets, in
+                      * the arena (goperl_compiler.h) */
     void *pio_layers; /* goperl_pio_reg_t (perliol.h): the structs of layers
                        * of native code's, behind goperl_pio_layers_head_t */
     void *mro_metas; /* goperl_mrometa_t: the copies of the interpreter's
                       * mro metas HvMROMETA gave in this call of native code,
                       * in the arena */
 } goperl_shared_t;
-/* Copies made in one call of native code, found by the interpreter's
- * address of what they copy: chains of them, each copy beginning with the
- * link to the next and that address. The table starts small (most calls
- * make a copy or two) and grows four times when it holds more than two
- * copies a chain; the tables it leaves behind are the arena's, freed with
- * it. */
-typedef struct goperl_calltab_ent {
-    struct goperl_calltab_ent *next;
-    uint64_t g;
-} goperl_calltab_ent_t;
-typedef struct goperl_calltab {
-    uint64_t mask;  /* the number of chains less one */
-    uint64_t count; /* the copies in them */
-    goperl_calltab_ent_t *chain[];
-} goperl_calltab_t;
-static void *goperl_arena_alloc(size_t n);
-static goperl_calltab_t *goperl_calltab_make(uint64_t n) {
-    goperl_calltab_t *const t = (goperl_calltab_t *)goperl_arena_alloc(
-        sizeof(goperl_calltab_t) + sizeof(goperl_calltab_ent_t *) * (size_t)n);
-    if (t) t->mask = n - 1;
-    return t;
-}
-/* The interpreter's blocks are 16 bytes aligned. */
-#define GOPERL_CALLTAB_CHAIN(t, g) (&(t)->chain[((g) >> 4) & (t)->mask])
-static inline goperl_calltab_ent_t **goperl_calltab_chain(void **tabp, uint64_t g) {
-    if (!*tabp) *tabp = goperl_calltab_make(16);
-    goperl_calltab_t *const t = (goperl_calltab_t *)*tabp;
-    if (!t) return 0;
-    return GOPERL_CALLTAB_CHAIN(t, g);
-}
-/* Links a new copy at the head of the chain goperl_calltab_chain gave for
- * its address. A table that cannot grow for want of memory stays as it is:
- * slower, still right. */
-static void goperl_calltab_add(void **tabp, goperl_calltab_ent_t **chain,
-                               goperl_calltab_ent_t *e) {
-    goperl_calltab_t *const t = (goperl_calltab_t *)*tabp;
-    e->next = *chain;
-    *chain = e;
-    if (++t->count <= 2 * (t->mask + 1)) return;
-    goperl_calltab_t *const nt = goperl_calltab_make(4 * (t->mask + 1));
-    if (!nt) return;
-    for (uint64_t i = 0; i <= t->mask; i++) {
-        goperl_calltab_ent_t *x = t->chain[i];
-        while (x) {
-            goperl_calltab_ent_t *const nx = x->next;
-            goperl_calltab_ent_t **const c = GOPERL_CALLTAB_CHAIN(nt, x->g);
-            x->next = *c;
-            *c = x;
-            x = nx;
-        }
-    }
-    nt->count = t->count;
-    *tabp = nt;
-}
 #define goperl_hostsave_v \
     (GOPERL_SHARED->hostsave_more ? GOPERL_SHARED->hostsave_more : GOPERL_SHARED->hostsave)
 #define goperl_hostsave_n (GOPERL_SHARED->hostsave_n)
@@ -8528,7 +8473,8 @@ static MAGIC **goperl_svmagic_lv(goperl_frame_t *f, SV *sv) {
  * its mg_ptr is the interpreter's memory, except for the overload table,
  * which is given as the AMT it is (see goperl_amt). */
 typedef struct goperl_mgfound {
-    goperl_calltab_ent_t ent; /* g: the MAGIC's address in the interpreter */
+    struct goperl_mgfound *next;
+    uint64_t g; /* the MAGIC's address in the interpreter */
     MAGIC mg;
 } goperl_mgfound_t;
 static void *goperl_arena_alloc(size_t n);
@@ -8545,17 +8491,14 @@ static MAGIC *goperl_mg_find(goperl_frame_t *f, const SV *sv, int type) {
     if (!w) return 0;
     goperl_gword_t c[7];
     memcpy(c, w, sizeof c);
-    goperl_calltab_ent_t **const chain =
-        goperl_calltab_chain(&((goperl_shared_t *)f->inst)->mg_found, c[6]);
-    if (!chain) goperl_croakf(f, "Out of memory!");
-    goperl_calltab_ent_t *x = *chain;
-    while (x && x->g != c[6]) x = x->next;
-    goperl_mgfound_t *e = (goperl_mgfound_t *)x;
+    goperl_mgfound_t *e = (goperl_mgfound_t *)((goperl_shared_t *)f->inst)->mg_found;
+    while (e && e->g != c[6]) e = e->next;
     if (!e) {
         e = (goperl_mgfound_t *)goperl_arena_alloc(sizeof(goperl_mgfound_t));
         if (!e) goperl_croakf(f, "Out of memory!");
-        e->ent.g = c[6];
-        goperl_calltab_add(&((goperl_shared_t *)f->inst)->mg_found, chain, &e->ent);
+        e->g = c[6];
+        e->next = (goperl_mgfound_t *)((goperl_shared_t *)f->inst)->mg_found;
+        ((goperl_shared_t *)f->inst)->mg_found = e;
     }
     MAGIC *const mg = &e->mg;
     mg->mg_type = (char)c[0];

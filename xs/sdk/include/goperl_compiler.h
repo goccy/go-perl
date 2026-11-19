@@ -1554,8 +1554,9 @@ static __attribute__((unused)) SV *goperl_cophh_fetch(goperl_frame_t *f, const C
  * callback so). It is not an lvalue (a store into it would not reach the
  * hash). */
 typedef struct goperl_hvarray {
-    goperl_calltab_ent_t ent; /* g: the address of the buckets in the interpreter */
-    uint64_t n;               /* their number */
+    struct goperl_hvarray *next;
+    uint64_t arr; /* the address of the buckets in the interpreter */
+    uint64_t n;   /* their number */
     HE *ents[];
 } goperl_hvarray_t;
 static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
@@ -1566,18 +1567,16 @@ static __attribute__((unused)) HE **goperl_hv_array(goperl_frame_t *f, HV *hv) {
     if (!arr) return (HE **)0;
     const uint64_t n = nbuckets;
     goperl_shared_t *const sh = (goperl_shared_t *)f->inst;
-    goperl_calltab_ent_t **const chain = goperl_calltab_chain(&sh->hv_arrays, arr);
-    if (!chain) goperl_croakf(f, "Out of memory!");
-    goperl_calltab_ent_t *x = *chain;
-    while (x && (x->g != arr || ((goperl_hvarray_t *)x)->n != n)) x = x->next;
-    goperl_hvarray_t *a = (goperl_hvarray_t *)x;
+    goperl_hvarray_t *a = (goperl_hvarray_t *)sh->hv_arrays;
+    while (a && (a->arr != arr || a->n != n)) a = a->next;
     if (!a) {
         a = (goperl_hvarray_t *)goperl_arena_alloc(sizeof(goperl_hvarray_t) +
                                                    sizeof(HE *) * (size_t)(n ? n : 1));
         if (!a) goperl_croakf(f, "Out of memory!");
-        a->ent.g = arr;
+        a->arr = arr;
         a->n = n;
-        goperl_calltab_add(&sh->hv_arrays, chain, &a->ent);
+        a->next = (goperl_hvarray_t *)sh->hv_arrays;
+        sh->hv_arrays = a;
     }
     for (uint64_t i = 0; i < n; i++)
         a->ents[i] = goperl_he_at(f, goperl_g64(f, arr + GOPERL_GUEST_PTRSIZE * i));
