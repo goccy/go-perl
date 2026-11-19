@@ -6819,6 +6819,15 @@ struct op_multiparam_aux;
 static void *goperl_multiparam_aux(goperl_frame_t *f, uint64_t g);
 
 /* One record of the interpreter's answer becomes the state of its shadow. */
+/* A described op gets a baseline when it is of a tree being compiled, or
+ * has one already (it is given the description's fields); an op of a
+ * finished tree gets one when it is handed out (goperl_op_handout), with
+ * the ops next to it: a long native call (a run loop of native code) would
+ * otherwise keep every op of a finished tree it described among the
+ * shadows each flush compares. */
+static inline void goperl_op_described(goperl_opreg_t *r, goperl_opreg_ent_t *e) {
+    if (e->gen != GOPERL_GEN_ALWAYS || e->active) goperl_op_activate(r, e);
+}
 static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
                             const goperl_gword_t *w) {
     goperl_opreg_ent_t *e = goperl_op_ent(f, r, w[GOPERL_OPREC_TOK]);
@@ -6856,7 +6865,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         if (links >= 2) o->op_other = goperl_op_link(f, r, w[GOPERL_OPREC_OTHER]);
         o->gop_full = 1;
         e->gen = gen;
-        goperl_op_activate(r, e);
+        goperl_op_described(r, e);
         return;
     }
     o->op_first = goperl_op_link(f, r, w[GOPERL_OPREC_FIRST]);
@@ -6880,7 +6889,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         o->op_code_list = goperl_op_link(f, r, w[GOPERL_OPREC_PMCODELIST]);
         o->gop_full = 1;
         e->gen = gen;
-        goperl_op_activate(r, e);
+        goperl_op_described(r, e);
         return;
     }
     o->op_redoop = goperl_op_link(f, r, w[GOPERL_OPREC_REDOOP]);
@@ -6890,7 +6899,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
         ((bits >> 8) & 0xFF) == 13 /* OPclass_UNOP_AUX */) {
         /* a custom op with auxiliary data: the data is the module's, here */
         e->gen = gen;
-        goperl_op_activate(r, e);
+        goperl_op_described(r, e);
         return;
     }
     if (bits & GOPERL_OPBIT_COP) {
@@ -6965,7 +6974,7 @@ static void goperl_op_apply(goperl_frame_t *f, goperl_opreg_t *r,
     }
     o->gop_full = 1;
     e->gen = gen;
-    goperl_op_activate(r, e);
+    goperl_op_described(r, e);
 }
 
 /* The ops native code can reach from a shadow by its links in its own
@@ -7087,11 +7096,14 @@ static OP *goperl_op_describe(goperl_frame_t *f, uint64_t tok, int mode) {
         described[i] = &goperl_opreg_find(r, w[i * GOPERL_OPREC_WORDS + GOPERL_OPREC_TOK])->op;
     }
     goperl_opreg_ent_t *const e = goperl_opreg_find(r, tok);
-    /* what the described ops lead to has baselines too: the ops this
-     * registry holds already, left out of the answer */
+    /* what the described ops of a tree being compiled lead to has baselines
+     * too: the ops this registry holds already, left out of the answer; an
+     * op of a finished tree asked for is handed out */
     for (uint64_t i = 0; i < n; i++)
-        if (described[i]->gop) goperl_op_activate_links(f, r, described[i]);
+        if (described[i]->gop && GOPERL_OPENT(described[i])->gen != GOPERL_GEN_ALWAYS)
+            goperl_op_activate_links(f, r, described[i]);
     if (described != described_v) free(described);
+    if (e && e->gen == GOPERL_GEN_ALWAYS) goperl_op_handout(f, r, e);
     return e ? &e->op : 0;
 }
 static OP *goperl_op_describe_tok(goperl_frame_t *f, uint64_t tok) {
