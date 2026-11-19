@@ -14745,7 +14745,11 @@ static GOPERL_OP_BUILDER OP *goperl_tree_ops(goperl_frame_t *f, int sel, I32 a, 
         break;
     default: break;
     }
-    return goperl_tree_op(f, goperl_tree(f, sel, n, w));
+    OP *const made = goperl_tree_op(f, goperl_tree(f, sel, n, w));
+    /* the body of an anonymous sub, which the op made does not lead to,
+     * described again as goperl_newattrsub's is */
+    if (sel == GOPERL_TREE_NEWANONATTRSUB) goperl_op_refresh(f, o3);
+    return made;
 }
 #define newFOROP(flags, sv, expr, block, cont)                              \
     goperl_tree_ops(_gof, GOPERL_TREE_NEWFOROP, (flags), 0, (OP *)(sv),     \
@@ -14787,7 +14791,16 @@ static CV *goperl_newattrsub(goperl_frame_t *f, I32 floor, OP *o, OP *proto,
     const goperl_gword_t w[5] = {(uint32_t)floor, goperl_optok(f, o),
                            goperl_optok(f, proto), goperl_optok(f, attrs),
                            goperl_optok(f, block)};
-    return (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWATTRSUB, 5, w));
+    CV *const cv = (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWATTRSUB, 5, w));
+    /* The builder linked the body's ops and finished the tree, which the
+     * sub has. The shadows of those ops native code had, described in this
+     * call while it built the body, have the links of then (newSTATEOP
+     * points a statement's op_next at the statement itself, and
+     * op_linklist moves it on), and are described again: Syntax::Keyword::
+     * MultiSub walks the new sub's ops by op_next from CvSTART in the call
+     * that built it. A body the builder freed is not asked for. */
+    goperl_op_refresh(f, block);
+    return cv;
 }
 static GOPERL_OP_BUILDER OP *goperl_newpvop(goperl_frame_t *f, I32 type, I32 flags, char *pv)
     __attribute__((unused));

@@ -4385,7 +4385,9 @@ static inline __attribute__((unused)) CV *goperl_newmysub(
     const goperl_gword_t w[5] = {(goperl_gword_t)(int64_t)floor, goperl_optok(f, o),
                                  goperl_optok(f, proto), goperl_optok(f, attrs),
                                  goperl_optok(f, block)};
-    return (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWMYSUB, 5, w));
+    CV *const cv = (CV *)GOPERL_SV(goperl_tree(f, GOPERL_TREE_NEWMYSUB, 5, w));
+    goperl_op_refresh(f, block); /* as goperl_newattrsub does */
+    return cv;
 }
 #define newMYSUB(floor, o, proto, attrs, block)                         \
     goperl_newmysub(_gof, (I32)(floor), (OP *)(o), (OP *)(proto),       \
