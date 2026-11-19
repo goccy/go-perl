@@ -118,11 +118,14 @@ XS_EXTERNAL(boot_MyDirv) {
 
 func TestNativeDirectoryStreamOfADirhandle(t *testing.T) {
 	so := buildModuleSource(t, "MyDirv", dirhandleViewSource)
+	// The program removes what it made without File::Temp's cleanup, which
+	// changes directory: the host process, which follows the program's
+	// directory, would be left elsewhere for the tests after this one.
 	got := requireModuleWith(t, perl.Config{FS: goperlfs.NewHostFS(), HostProcess: true}, "MyDirv", so, `use File::Temp qw(tempdir);
-my $d = tempdir(CLEANUP => 1);
+my $d = tempdir();
 for my $f ("a", "b") { open my $fh, ">", "$d/$f" or die; close $fh }
 mkdir "$d/c" or die;
-my $e = tempdir(CLEANUP => 1);
+my $e = tempdir();
 open my $fh, ">", "$e/x" or die; close $fh;
 opendir(my $dh, $d) or die;
 my @r = join ",", sort(MyDirv::names($dh, 0));
@@ -135,8 +138,11 @@ MyDirv::adopt($other, $d);
 push @r, join ",", sort grep { !/^\./ } readdir $other;
 MyDirv::close($dh);
 { no warnings; push @r, defined(readdir $dh) ? "open" : "closed" }
-join "|", @r`)
-	want := "a,b,c|a:f,b:f,c:d|dir,dir|same|a,b,c|closed"
+closedir $other;
+unlink "$d/a", "$d/b", "$e/x";
+rmdir $_ for "$d/c", $d, $e;
+join "|", @r, (-e $d || -e $e ? "left" : "removed")`)
+	want := "a,b,c|a:f,b:f,c:d|dir,dir|same|a,b,c|closed|removed"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
