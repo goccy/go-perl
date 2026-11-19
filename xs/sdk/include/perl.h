@@ -7265,9 +7265,20 @@ static OP *goperl_pp_dispatch(pTHX_ int type) {
     const int given = next_given && !((uintptr_t)next_given & (sizeof(void *) - 1)) &&
                       goperl_memory_there(next_given, sizeof(OP));
     const uint64_t next_tok = given && goperl_op_is_shadow(f, next_given) ? next_given->gop : 0;
+    /* the op's own type when the slot called is that type's pp function too:
+     * types that share a pp function share a slot (PL_ppaddr[OP_DOR] is
+     * OP_DEFINED's, both being pp_defined), and the function tells them
+     * apart by the op's type (pp_defined returns the value for OP_DOR,
+     * whether it is defined for OP_DEFINED: Tie::Hash::Indexed's
+     * dor_assign) */
+    const Perl_ppaddr_t *const base = (goperl_ppaddr_table(), goperl_ppaddr_base_v);
+    const int run_type = cur && cur->op_type < OP_max && cur->op_type != type &&
+                                 base[cur->op_type] == base[type]
+                             ? cur->op_type
+                             : type;
     const uint64_t op = ((uint64_t)(cur ? cur->op_private : 0) << 40) |
                         ((uint64_t)(cur ? cur->op_flags : 0) << 32) |
-                        (uint32_t)type;
+                        (uint32_t)run_type;
     /* -> the next op; second: what it is now */
     uint64_t fields = 0;
     const uint64_t next = goperl_do_opx(f, GOPERL_OP_RUN_PP, op, cur ? (uint64_t)cur->op_targ : 0,
