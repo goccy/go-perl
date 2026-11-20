@@ -24,6 +24,22 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 	return true, xsDirLoader(p, dir)
 }
 
+// xsLinkedLoader is installed by the xs package's init.
+var xsLinkedLoader func(p *Perl) error
+
+// RegisterXSLinkedLoader wires the loader of the native XS modules linked
+// into the binary. Called by the xs package's init; not for application use.
+func RegisterXSLinkedLoader(fn func(p *Perl) error) { xsLinkedLoader = fn }
+
+// XSLoadLinked registers the native XS modules linked into the binary with
+// the instance. Without the xs package there are none.
+func XSLoadLinked(p *Perl) error {
+	if xsLinkedLoader == nil {
+		return nil
+	}
+	return xsLinkedLoader(p)
+}
+
 // XSDynamicLoader is the host half of perl's dynamic loading (DynaLoader's
 // dl_load_file / dl_find_symbol / dl_install_xsub), provided by the xs
 // package. Libraries and symbols are named by tokens that are only

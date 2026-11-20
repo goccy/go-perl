@@ -18,7 +18,7 @@ import (
 // buildDemo compiles the checked-in xsubpp output of Demo.xs against the SDK
 // headers with the host C compiler. This mirrors the intended pipeline:
 // building happens ahead of time with an ordinary cc; the runtime only loads.
-func buildDemo(t *testing.T) string {
+func buildDemo(t *testing.T, extra ...string) string {
 	t.Helper()
 	cc, err := exec.LookPath("cc")
 	if err != nil {
@@ -26,6 +26,7 @@ func buildDemo(t *testing.T) string {
 	}
 	so := filepath.Join(t.TempDir(), "Demo.so")
 	args := []string{"-shared", "-fPIC", "-I", "sdk/include", "-o", so, "testdata/demo/Demo.c"}
+	args = append(args, extra...)
 	// The .so must match the test binary's architecture, not the C
 	// compiler's default (which follows the process tree — an amd64 Go
 	// toolchain under Rosetta spawns an x86_64 clang).

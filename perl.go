@@ -6,6 +6,7 @@ package perl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -114,6 +115,9 @@ func New(cfg Config) (*Perl, error) {
 			p.Close()
 			return nil, err
 		}
+	}
+	if err := internal.XSLoadLinked(raw); err != nil {
+		return nil, errors.Join(err, p.Close())
 	}
 	return p, nil
 }

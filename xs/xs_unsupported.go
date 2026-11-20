@@ -19,6 +19,16 @@ import (
 
 func init() {
 	internal.RegisterXSDirLoader(loadDir)
+	internal.RegisterXSLinkedLoader(loadLinked)
+}
+
+// loadLinked reports the platform gap when the binary links native modules.
+func loadLinked(*internal.Perl) error {
+	if len(linkedModules()) == 0 {
+		return nil
+	}
+	return fmt.Errorf("xs: native XS modules are not supported on %s/%s (supported: darwin, linux)",
+		runtime.GOOS, runtime.GOARCH)
 }
 
 // ArchTag names the per-architecture native-module directory
