@@ -54,7 +54,8 @@ sub bundled {
 
 sub _load_meta {
     my ($dir) = @_;
-    for my $file (qw(MYMETA.json META.json META.yml)) {
+    # gperl/MYMETA.json is what the distribution's configure step produced.
+    for my $file (qw(gperl/MYMETA.json META.json META.yml)) {
         next unless -f "$dir/$file";
         my $meta = eval { CPAN::Meta->load_file("$dir/$file", { lazy_validation => 1 }) };
         return $meta if $meta;

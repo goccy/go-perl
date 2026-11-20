@@ -14,8 +14,77 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+
+	"github.com/goccy/go-perl/internal"
 )
+
+// Target names the platform this process runs on, as the directory its
+// native artifacts live under ("darwin_arm64").
+func Target() string { return runtime.GOOS + "_" + runtime.GOARCH }
+
+// BuildTarget names the platform a build is for: GOOS and GOARCH from the
+// environment, as the go command reads them, and this platform otherwise.
+func BuildTarget() string {
+	goos, goarch := os.Getenv("GOOS"), os.Getenv("GOARCH")
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	return goos + "_" + goarch
+}
+
+// BuildDir is where a distribution tree keeps what gperl derives from it.
+func BuildDir(tree string) string { return filepath.Join(tree, "gperl") }
+
+// ABIDir is the tree's Go package of native modules for the current SDK.
+func ABIDir(tree string) string {
+	return filepath.Join(BuildDir(tree), fmt.Sprintf("abi%d", internal.XSABI))
+}
+
+// TargetDir holds the tree's native artifacts for target, laid out like a
+// perl architecture directory (auto/<Module/Path>/<Name>.a and .so).
+func TargetDir(tree, target string) string { return filepath.Join(ABIDir(tree), target) }
+
+// builtMarker names the file that records a finished build.
+const builtMarker = "built"
+
+// Built reports whether the tree is ready to use on target: it needs no
+// build, or its build has finished.
+func Built(tree, target string) bool {
+	for _, dir := range []string{BuildDir(tree), TargetDir(tree, target)} {
+		if _, err := os.Stat(filepath.Join(dir, builtMarker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkBuilt records that the tree is ready: for target when it carries
+// native modules, for every target when target is empty.
+func MarkBuilt(tree, target string) error {
+	dir := BuildDir(tree)
+	if target != "" {
+		dir = TargetDir(tree, target)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, builtMarker), nil, 0o644)
+}
+
+// LibDir returns the tree's module directory for @INC: the built one when
+// the distribution has a build step, its own lib/ otherwise.
+func LibDir(tree string) string {
+	built := filepath.Join(BuildDir(tree), "lib")
+	if _, err := os.Stat(built); err == nil {
+		return built
+	}
+	return filepath.Join(tree, "lib")
+}
 
 // DefaultMirror is the CPAN mirror distributions are fetched from unless
 // GPERLMIRROR names another.

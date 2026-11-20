@@ -317,5 +317,8 @@ func (m *Manager) Get(ctx context.Context, projectDir string, specs ...string) (
 	return m.Tidy(ctx, projectDir, modules...)
 }
 
+// Meta reads the metadata of the distribution tree at dir.
+func (m *Manager) Meta(dir string) (*Meta, error) { return m.helper.Meta(dir) }
+
 // Clean removes the module directory.
 func (m *Manager) Clean() error { return os.RemoveAll(m.Dir) }
