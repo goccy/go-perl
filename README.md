@@ -200,7 +200,7 @@ gperl run script.pl [args...]   # sync dependencies, then run
 gperl run [switches] [script]   # the perl(1) command line: every perlrun
                                 # switch (-e/-n/-p/-i/-M/-C/-T/...), a
                                 # program on stdin, #! line switches
-gperl test [-v] [-j N] [paths]  # run t/*.t in one process, report like prove
+gperl test [-v] [-j N] [paths]  # run t/*.t, report like prove
 gperl build [-o out] script.pl  # one binary: script + dependencies + interpreter
 
 gperl psgi run [options] app.psgi          # serve a PSGI application
@@ -224,11 +224,11 @@ pipeline being the embedded interpreter, so the only tools required are
 `Config` is the opposite — deny by default). The program runs as perl's
 main program — `(*Perl).RunProgram` with a `perl.Program`, the parsed form
 of a perl command line, which an embedding application can use directly.
-`gperl test` runs every test file as a program of its own inside one
-process: each has its working directory and environment, a pid of its own,
-and may not listen on the network; `--process` runs each file as a perl
-process instead. A built binary
-needs nothing beside it: with cgo the XS modules are linked in statically;
+`gperl test` runs every test file as a perl process of its own;
+`--in-process` runs them inside one process instead, each as an isolated
+program with its own working directory and environment, which is not the
+host process (it may not listen on the network). A built binary needs
+nothing beside it: with cgo the XS modules are linked in statically;
 with `CGO_ENABLED=0` they are embedded and loaded at run time.
 
 **Toolchain.** `gperl run` and `gperl test` need nothing but gperl for

@@ -1,13 +1,12 @@
 package gperl
 
-// gperl test: run a project's test files (t/*.t) the way prove does, in
-// ONE process — every test file gets its own interpreter instance, and
-// the instances run in parallel on goroutines. Starting an instance costs
-// a copy-on-write mapping of an initialized interpreter, not a process, so
-// a suite pays neither perl start-up nor fork per file. A test file is an
-// isolated program there (see perlRunOpts.isolated); --process runs each
-// one as a perl process of its own instead, for tests that need to be the
-// host process (to listen on the network, say).
+// gperl test: run a project's test files (t/*.t) the way prove does. Each
+// file runs as a perl process of its own, several at once. With
+// --in-process they run in ONE process instead — every test file gets its
+// own interpreter instance, and the instances run in parallel on
+// goroutines, so a suite pays no process per file — where a test file is
+// an isolated program (see perlRunOpts.isolated): it is not the host
+// process, and cannot listen on the network, say.
 
 import (
 	"bufio"
@@ -125,15 +124,15 @@ func (o *testOutcome) judge() {
 
 // testConfig is the command line of gperl test.
 type testConfig struct {
-	verbose bool
-	quiet   bool
-	lib     bool
-	recurse bool
-	timer   bool
-	process bool
-	jobs    int
-	inc     multiFlag
-	ext     string
+	verbose   bool
+	quiet     bool
+	lib       bool
+	recurse   bool
+	timer     bool
+	inProcess bool
+	jobs      int
+	inc       multiFlag
+	ext       string
 }
 
 // Test implements `gperl test [options] [files or directories]`: it runs
@@ -159,7 +158,7 @@ func Test(args []string) (int, error) {
 		fl.IntVar(&c.jobs, n, runtime.GOMAXPROCS(0), "number of test files to run at once")
 	}
 	fl.BoolVar(&c.timer, "timer", false, "print each file's elapsed time")
-	fl.BoolVar(&c.process, "process", false, "run each test file in a process of its own, as the perl command")
+	fl.BoolVar(&c.inProcess, "in-process", false, "run the test files in this process, each as an isolated program")
 	fl.Var(&c.inc, "I", "directory to add to @INC (repeatable)")
 	fl.StringVar(&c.ext, "ext", ".t", "extension of test files")
 	if err := fl.Parse(splitShortOptions(args, "vqlr", "jI")); err != nil {
@@ -283,7 +282,7 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 	start := time.Now()
 	var status int
 	var err error
-	if c.process {
+	if !c.inProcess {
 		status, err = runTestProcess(projectDir, env, &stdout, argv)
 	} else {
 		status, err = runPerlCLI(argv, perlRunOpts{

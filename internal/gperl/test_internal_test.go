@@ -138,7 +138,7 @@ Result: FAIL
 	}
 }
 
-// A project's test files run in one process, each on its own interpreter,
+// A project's test files run each as a program of its own,
 // and the report follows prove.
 func TestTestCommand(t *testing.T) {
 	dir := t.TempDir()
@@ -189,11 +189,11 @@ func TestTestCommand(t *testing.T) {
 	if status != 1 {
 		t.Errorf("status = %d, want 1", status)
 	}
-	// Each file as a perl process of its own reports the same.
-	if processOut, processStatus := run("--process"); processStatus != 1 ||
+	// In one process, each file an isolated program, the report is the same.
+	if processOut, processStatus := run("--in-process"); processStatus != 1 ||
 		!strings.Contains(processOut, "t/02-fail.t (Wstat: 256 Tests: 2 Failed: 1)\n") ||
 		!strings.Contains(processOut, "Files=4, Tests=5, ") {
-		t.Errorf("--process run (status %d):\n%s", processStatus, processOut)
+		t.Errorf("--in-process run (status %d):\n%s", processStatus, processOut)
 	}
 
 	out, status = run("-lv", "-j1", "t/01-pass.t")
