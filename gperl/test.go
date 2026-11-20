@@ -4,7 +4,10 @@ package gperl
 // ONE process — every test file gets its own interpreter instance, and
 // the instances run in parallel on goroutines. Starting an instance costs
 // a copy-on-write mapping of an initialized interpreter, not a process, so
-// a suite pays neither perl start-up nor fork per file.
+// a suite pays neither perl start-up nor fork per file. A test file is an
+// isolated program there (see perlRunOpts.isolated); --process runs each
+// one as a perl process of its own instead, for tests that need to be the
+// host process (to listen on the network, say).
 
 import (
 	"bufio"
@@ -16,6 +19,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -126,6 +130,7 @@ type testConfig struct {
 	lib     bool
 	recurse bool
 	timer   bool
+	process bool
 	jobs    int
 	inc     multiFlag
 	ext     string
@@ -154,6 +159,7 @@ func Test(args []string) (int, error) {
 		fl.IntVar(&c.jobs, n, runtime.GOMAXPROCS(0), "number of test files to run at once")
 	}
 	fl.BoolVar(&c.timer, "timer", false, "print each file's elapsed time")
+	fl.BoolVar(&c.process, "process", false, "run each test file in a process of its own, as the perl command")
 	fl.Var(&c.inc, "I", "directory to add to @INC (repeatable)")
 	fl.StringVar(&c.ext, "ext", ".t", "extension of test files")
 	if err := fl.Parse(splitShortOptions(args, "vqlr", "jI")); err != nil {
@@ -273,13 +279,17 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 	}
 	argv = append(argv, file)
 	var stdout bytes.Buffer
+	env := append(os.Environ(), "HARNESS_ACTIVE=1", "HARNESS_VERSION=3.50")
 	start := time.Now()
-	status, err := runPerlCLI(argv, perlRunOpts{
-		dir:    projectDir,
-		env:    append(os.Environ(), "HARNESS_ACTIVE=1", "HARNESS_VERSION=3.50"),
-		stdout: &stdout,
-		stderr: os.Stderr,
-	})
+	var status int
+	var err error
+	if c.process {
+		status, err = runTestProcess(projectDir, env, &stdout, argv)
+	} else {
+		status, err = runPerlCLI(argv, perlRunOpts{
+			dir: projectDir, env: env, stdout: &stdout, stderr: os.Stderr, isolated: true,
+		})
+	}
 	o.duration = time.Since(start)
 	o.status = status
 	o.output = stdout.Bytes()
@@ -296,6 +306,24 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 		o.problem = err.Error()
 	}
 	return o
+}
+
+// runTestProcess runs a test file as a perl process of its own: this
+// executable under its name as the perl command.
+func runTestProcess(dir string, env []string, stdout io.Writer, argv []string) (int, error) {
+	exe := selfPerl()
+	if exe == "" {
+		return 1, errors.New("this executable has no path that runs it as the perl command")
+	}
+	cmd := exec.Command(exe, argv...)
+	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = dir, env, stdout, os.Stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		// The test's own status, which the report judges.
+		return exit.ExitCode(), nil
+	}
+	return 0, err
 }
 
 // splitShortOptions rewrites the single-dash spellings prove and plackup

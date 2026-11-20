@@ -178,7 +178,7 @@ func TestTestCommand(t *testing.T) {
 		"t/02-fail.t ....... Failed 1/2 subtests\n",
 		"t/03-skip.t ....... skipped: elsewhere\n",
 		"t/deep/04-more.t .. ok\n",
-		"t/02-fail.t (Wstat: 0 Tests: 2 Failed: 1)\n  Failed test:  2\n",
+		"t/02-fail.t (Wstat: 256 Tests: 2 Failed: 1)\n  Failed test:  2\n  Non-zero exit status: 1\n",
 		"Files=4, Tests=5, ",
 		"Result: FAIL\n",
 	} {
@@ -188,6 +188,12 @@ func TestTestCommand(t *testing.T) {
 	}
 	if status != 1 {
 		t.Errorf("status = %d, want 1", status)
+	}
+	// Each file as a perl process of its own reports the same.
+	if processOut, processStatus := run("--process"); processStatus != 1 ||
+		!strings.Contains(processOut, "t/02-fail.t (Wstat: 256 Tests: 2 Failed: 1)\n") ||
+		!strings.Contains(processOut, "Files=4, Tests=5, ") {
+		t.Errorf("--process run (status %d):\n%s", processStatus, processOut)
 	}
 
 	out, status = run("-lv", "-j1", "t/01-pass.t")

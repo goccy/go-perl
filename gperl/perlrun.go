@@ -39,6 +39,10 @@ type perlRunOpts struct {
 	// cpanfile dependencies are synced first, and they and the program's
 	// directory join @INC.
 	project bool
+	// isolated runs the program as a process of its own inside this one
+	// (perl.Config.HostProcess unset): its working directory and
+	// environment are the instance's, so several such programs run at once.
+	isolated bool
 }
 
 // startupGlue prepares the interpreter for a run the way the process
@@ -117,7 +121,7 @@ func switchFailure(err error, opts perlRunOpts) (int, error) {
 // is not the process, which is only lent to it: the process gets its own
 // working directory and environment back when the run is over.
 func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) {
-	if opts.dir != "" || opts.env != nil {
+	if !opts.isolated && (opts.dir != "" || opts.env != nil) {
 		giveBack, err := lendProcess(opts.env)
 		if err != nil {
 			return 1, err
@@ -195,6 +199,9 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	cfg.Stdout = stdout
 	cfg.Stderr = stderr
 	cfg.Env = env
+	if opts.isolated {
+		cfg.HostProcess, cfg.InheritDescriptors = false, false
+	}
 	p, err := perl.New(cfg)
 	if err != nil {
 		return 1, err
