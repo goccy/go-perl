@@ -219,7 +219,9 @@ func (a *psgiApp) newServer(c *psgiConfig, accessLog io.Writer) (*psgi.Server, e
 	}); err != nil {
 		return fail(err)
 	}
-	boot := "my $dir = __gperl_psgi_dir(); chdir $dir or die \"chdir $dir: $!\\n\";\n"
+	// The command line is the server's: the application finds no arguments
+	// of its own, as under plackup, which takes its options off @ARGV.
+	boot := "@ARGV = ();\nmy $dir = __gperl_psgi_dir(); chdir $dir or die \"chdir $dir: $!\\n\";\n"
 	for _, module := range c.modules.values {
 		name, args, hasArgs := strings.Cut(module, "=")
 		if !perlModuleName.MatchString(name) {
@@ -446,7 +448,8 @@ func PSGIBuild(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: gperl psgi build [-o out] [options] app.psgi")
 	}
-	var defaults []string
+	// Never nil: no defaults is still a server (buildBinary).
+	defaults := []string{}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "o" {
 			return
