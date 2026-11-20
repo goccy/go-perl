@@ -1,0 +1,199 @@
+package gperl
+
+// The linker of a distribution build.
+//
+// A distribution's own build system (ExtUtils::MakeMaker, Module::Build)
+// compiles the XS sources and then runs $Config{ld} to produce the
+// loadable module. The %Config overlay points ld at a wrapper that
+// re-enters this executable, so the final step is gperl's: the module's
+// objects are merged into ONE relocatable object in which only the
+// module's entry table keeps its name, and both artifacts come from that
+// object —
+//
+//	auto/<Module/Path>/<Name>.a        linked statically into a Go binary
+//	auto/<Module/Path>/<Name>.so       loaded at run time
+//	auto/<Module/Path>/<Name>.ldflags  the libraries either needs
+//
+// With nothing else visible, two modules can carry the same helper names
+// and still link into one binary.
+//
+// The C compiler is $CC (default cc) and the archiver $AR (default ar);
+// for an ELF target nothing else is needed, so a cross compiler such as
+// `zig cc -target x86_64-linux-gnu` builds modules for another platform.
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+// ldEnv marks a process as a linker re-entry; ldArg0 is its first argument.
+const (
+	ldEnv  = "GPERL_INTERNAL_LD"
+	ldArg0 = "gperl-internal-ld"
+	// ldSDKEnv carries the SDK header directory to the linker, and
+	// ldTargetEnv the target the module is built for ("linux_amd64").
+	ldSDKEnv    = "GPERL_INTERNAL_SDK"
+	ldTargetEnv = "GPERL_INTERNAL_TARGET"
+)
+
+func init() {
+	if os.Getenv(ldEnv) == "" || len(os.Args) < 2 || os.Args[1] != ldArg0 {
+		return
+	}
+	if err := linkModule(os.Args[2:], os.Getenv(ldSDKEnv), os.Getenv(ldTargetEnv)); err != nil {
+		fmt.Fprintf(os.Stderr, "gperl ld: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// writeLdShim writes the executable the build system knows as the linker.
+func writeLdShim(work string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	shim := filepath.Join(work, "gperl-ld")
+	script := "#!/bin/sh\n" + ldEnv + "=1\nexport " + ldEnv + "\nexec \"" + exe + "\" " + ldArg0 + " \"$@\"\n"
+	return shim, os.WriteFile(shim, []byte(script), 0o755)
+}
+
+// toolCommand returns the command line of a build tool: the words of the
+// environment variable name, or fallback when it is unset.
+func toolCommand(name, fallback string) []string {
+	if words := strings.Fields(os.Getenv(name)); len(words) > 0 {
+		return words
+	}
+	return []string{fallback}
+}
+
+// ldCommand is a parsed link command line.
+type ldCommand struct {
+	out    string
+	inputs []string // objects and static archives
+	libs   []string // flags naming libraries and where to find them
+	module string   // mangled Perl package ("Cpanel__JSON__XS"), "" when not a module link
+}
+
+// parseLd sorts a link command line into what the module link needs. The
+// module is recognized by its output path, which every build system
+// spells .../auto/<Module/Path>/<Name>.so.
+func parseLd(args []string) ldCommand {
+	var cmd ldCommand
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-o" && i+1 < len(args):
+			i++
+			cmd.out = args[i]
+		case a == "-framework" && i+1 < len(args):
+			cmd.libs = append(cmd.libs, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "-l"), strings.HasPrefix(a, "-L"), strings.HasPrefix(a, "-F"),
+			strings.HasPrefix(a, "-Wl,"), a == "-pthread":
+			cmd.libs = append(cmd.libs, a)
+		case strings.HasSuffix(a, ".o"), strings.HasSuffix(a, ".a"):
+			cmd.inputs = append(cmd.inputs, a)
+		case strings.HasSuffix(a, ".dylib"), strings.HasSuffix(a, ".so"), strings.HasSuffix(a, ".tbd"):
+			cmd.libs = append(cmd.libs, a)
+		}
+	}
+	slash := filepath.ToSlash(cmd.out)
+	if i := strings.LastIndex(slash, "/auto/"); i >= 0 && strings.HasSuffix(slash, ".so") {
+		cmd.module = strings.ReplaceAll(filepath.ToSlash(filepath.Dir(slash[i+len("/auto/"):])), "/", "__")
+	}
+	return cmd
+}
+
+// linkModule performs one link for target. Anything that is not a module
+// link (a configure probe, a helper executable) goes to the C compiler
+// unchanged.
+func linkModule(args []string, sdkDir, target string) error {
+	cmd := parseLd(args)
+	cc := toolCommand("CC", "cc")
+	if cmd.module == "" || len(cmd.inputs) == 0 {
+		return run(append(cc, args...)...)
+	}
+	if sdkDir == "" {
+		return errors.New(ldSDKEnv + " is not set")
+	}
+	if target == "" {
+		target = runtime.GOOS + "_" + runtime.GOARCH
+	}
+	cc = append(cc, archFlags(target)...)
+	base := strings.TrimSuffix(cmd.out, ".so")
+	if err := os.MkdirAll(filepath.Dir(cmd.out), 0o755); err != nil {
+		return err
+	}
+	entry := base + ".entry.o"
+	if err := run(append(cc, "-fPIC", "-w", "-fno-sanitize=undefined", "-I"+sdkDir, "-DGOPERL_ENTRY_MODULE="+cmd.module,
+		"-c", "-o", entry, filepath.Join(sdkDir, "goperl_entry.c"))...); err != nil {
+		return err
+	}
+	merged := base + ".merged.o"
+	inputs := append(append([]string{}, cmd.inputs...), entry)
+	if err := mergeObjects(cc, target, merged, "goperl_entry_"+cmd.module, inputs); err != nil {
+		return err
+	}
+	archive := base + ".a"
+	if err := os.Remove(archive); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := run(append(toolCommand("AR", "ar"), "rcs", archive, merged)...); err != nil {
+		return err
+	}
+	// The loadable module is the link the build system asked for: the
+	// interpreter's loaders find its boot function by name, and a module
+	// that lends its symbols to others (dl_load_flags) keeps them.
+	if err := run(append(cc, args...)...); err != nil {
+		return err
+	}
+	if err := os.WriteFile(base+".ldflags", []byte(strings.Join(cmd.libs, "\n")), 0o644); err != nil {
+		return err
+	}
+	return errors.Join(os.Remove(entry), os.Remove(merged))
+}
+
+// archFlags pins a darwin toolchain to the target's architecture (the
+// compiler's default follows the process tree, not the Go target).
+func archFlags(target string) []string {
+	goos, goarch, _ := strings.Cut(target, "_")
+	if goos != "darwin" {
+		return nil
+	}
+	if arch := map[string]string{"amd64": "x86_64", "arm64": "arm64"}[goarch]; arch != "" {
+		return []string{"-arch", arch}
+	}
+	return nil
+}
+
+// mergeObjects links inputs into one relocatable object in which only
+// symbol keeps its name.
+func mergeObjects(cc []string, target, out, symbol string, inputs []string) error {
+	if strings.HasPrefix(target, "darwin_") {
+		// Mach-O: the linker itself can leave one symbol exported.
+		args := append([]string{"ld", "-r"}, archFlags(target)...)
+		return run(append(append(args, "-exported_symbol", "_"+symbol, "-o", out), inputs...)...)
+	}
+	// ELF: the compiler driver merges, and the symbols are made private
+	// here — no binutils needed, whatever the host.
+	if err := run(append(append(cc, "-r", "-nostdlib", "-o", out), inputs...)...); err != nil {
+		return err
+	}
+	return privatizeELF(out, symbol, "..gperl."+strings.TrimPrefix(symbol, "goperl_entry_"))
+}
+
+// run executes a toolchain command line, passing its output through.
+func run(argv ...string) error {
+	c := exec.Command(argv[0], argv[1:]...)
+	c.Stdout, c.Stderr = os.Stderr, os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+	}
+	return nil
+}

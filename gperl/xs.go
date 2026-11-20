@@ -1,35 +1,22 @@
 package gperl
 
-// gperl xs build: compile an XS distribution against the native XS SDK and
-// place the resulting shared library where gperl run / built binaries load
-// it from.
+// The C toolchain of a distribution build (dist.go).
 //
 // The build rides the dist's OWN build system — `perl Makefile.PL && make`
 // (ExtUtils::MakeMaker) or `perl Build.PL && ./Build` (Module::Build) —
 // exactly the way the CPAN toolchain normally builds XS, with two twists:
-// every perl in the pipeline is the EMBEDDED interpreter (Makefile.PL,
-// Build.PL, and cpanm run IN-PROCESS; the perl children that make rules
-// and $^X re-invocations spawn exec a shim that re-enters this executable
-// as `gperl run`, with a preloaded %Config overlay describing the host C
+// every perl in the pipeline is the EMBEDDED interpreter (Makefile.PL and
+// Build.PL run IN-PROCESS; the perl children that make rules and $^X
+// re-invocations spawn exec a shim that re-enters this executable as
+// `gperl run`, with a preloaded %Config overlay describing the target's C
 // toolchain), and the compiler's perl-header search path is redirected to
 // the SDK (materialized from the copy embedded in the xs package).
 // Generated headers, xsubpp runs, extra C sources, and typemaps all keep
 // working. The only command the pipeline execs is make (cc runs under
-// it) — no perl needs to be installed. The RUNTIME requirement stays
-// zero: gperl run only dlopens the prebuilt artifacts.
-//
-// Layout produced under the project directory:
-//
-//	local/xs/<goos>_<goarch>/<Module-Name>.so   the native module(s)
-//	local/lib/perl5/...                         the dist's pure-Perl half
-//	                                            (blib/lib, same tree cpanm
-//	                                            would install into)
+// it) — no perl needs to be installed.
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -38,157 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-
-	perl "github.com/goccy/go-perl"
-	"github.com/goccy/go-perl/xs"
 )
-
-// xsArchTag names the per-architecture native-module directory
-// (local/xs/<tag>). The tag follows the RUNNING binary — its dlopen must
-// match — which is also the architecture gperl build produces by default.
-func xsArchTag() string { return xs.ArchTag() }
-
-// xsDir returns the project's native-module directory for this
-// architecture (creating nothing).
-func xsDir(projectDir string) string {
-	return filepath.Join(projectDir, "local", "xs", xsArchTag())
-}
-
-// XSBuild builds each XS distribution (a source directory or a .tar.gz)
-// against the SDK and installs the artifacts into projectDir/local. It
-// returns the Perl module names that gained a native library.
-func XSBuild(projectDir string, dists []string) ([]string, error) {
-	projectDir, err := filepath.Abs(projectDir)
-	if err != nil {
-		return nil, err
-	}
-	sdkDir := filepath.Join(projectDir, "local", "xs", ".sdk")
-	if err := xs.WriteSDK(sdkDir); err != nil {
-		return nil, fmt.Errorf("materialize SDK headers: %w", err)
-	}
-	var modules []string
-	for _, dist := range dists {
-		mods, err := xsBuildOne(projectDir, sdkDir, dist)
-		if err != nil {
-			return modules, fmt.Errorf("%s: %w", dist, err)
-		}
-		modules = append(modules, mods...)
-	}
-	return modules, nil
-}
-
-func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
-	work, err := os.MkdirTemp("", "gperl-xs-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(work)
-
-	// Build in a scratch copy: the dist's build system writes Makefile,
-	// objects, and blib into its tree, and the source should stay pristine.
-	srcDir, err := xsStageSource(dist, work)
-	if err != nil {
-		return nil, err
-	}
-
-	// The build is DRIVEN by the embedded interpreter: this process runs
-	// Makefile.PL/Build.PL itself, and the shim (for the children make or
-	// $^X spawns) re-enters this executable. Every run preloads a %Config
-	// overlay describing the host toolchain (the interpreter's own
-	// %Config is guest-true wasm64). No perl needs to be installed.
-	shim, err := xsWritePerlShim(work)
-	if err != nil {
-		return nil, err
-	}
-	stdlibDir, err := perl.ExtractStdlib()
-	if err != nil {
-		return nil, err
-	}
-	fakeArch, err := xsStandInArchlib(work, sdkDir, stdlibDir)
-	if err != nil {
-		return nil, err
-	}
-	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, shim)
-	if err != nil {
-		return nil, err
-	}
-	env := append(os.Environ(), xsArchEnv()...)
-	env = append(env,
-		"GPERL_PERL_PRELOAD="+overlay,
-		"GPERL_PERL_EXE="+shim,
-		"PERL="+shim,
-		"PATH="+filepath.Dir(shim)+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
-	// Resolve the dist's OWN build-time dependencies (configure_requires /
-	// build_requires — Module::Build, Devel::PPPort, ...) into a scratch
-	// lib for the build. Runtime deps of the PROJECT stay a cpanfile
-	// concern.
-	buildLib := filepath.Join(work, "buildlib")
-	if err := xsInstallBuildDeps(srcDir, buildLib); err != nil {
-		return nil, err
-	}
-	if dirExists(filepath.Join(buildLib, "lib", "perl5")) {
-		env = append(env, "PERL5LIB="+filepath.Join(buildLib, "lib", "perl5"))
-	}
-	switch {
-	case fileExists(filepath.Join(srcDir, "Makefile.PL")):
-		if err := runPerlInProcess(srcDir, env, os.Stdout, "Makefile.PL",
-			"PERL="+shim, "FULLPERL="+shim); err != nil {
-			return nil, err
-		}
-		if err := xsRedirectMakefile(filepath.Join(srcDir, "Makefile"), sdkDir); err != nil {
-			return nil, err
-		}
-		if err := runIn(srcDir, env, "make"); err != nil {
-			return nil, err
-		}
-	case fileExists(filepath.Join(srcDir, "Build.PL")):
-		if err := runPerlInProcess(srcDir, env, os.Stdout, "Build.PL"); err != nil {
-			return nil, err
-		}
-		if err := runPerlInProcess(srcDir, env, os.Stdout, "Build"); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("no Makefile.PL or Build.PL found (not an XS distribution?)")
-	}
-
-	return xsInstallBlib(projectDir, filepath.Join(srcDir, "blib"))
-}
-
-// xsStageSource copies a dist directory (or extracts a .tar.gz) into the
-// scratch dir and returns the dist root.
-func xsStageSource(dist, work string) (string, error) {
-	st, err := os.Stat(dist)
-	if err != nil {
-		return "", err
-	}
-	dst := filepath.Join(work, "src")
-	if st.IsDir() {
-		if err := copyTree(dist, dst); err != nil {
-			return "", err
-		}
-		if err := xsNeutralizePPPort(dst); err != nil {
-			return "", err
-		}
-		return dst, nil
-	}
-	if err := extractTarGz(dist, dst); err != nil {
-		return "", err
-	}
-	if err := xsNeutralizePPPort(dst); err != nil {
-		return "", err
-	}
-	// A CPAN tarball unpacks into a single Dist-Name-1.23 directory.
-	entries, err := os.ReadDir(dst)
-	if err != nil {
-		return "", err
-	}
-	if len(entries) == 1 && entries[0].IsDir() {
-		return filepath.Join(dst, entries[0].Name()), nil
-	}
-	return dst, nil
-}
 
 // xsNeutralizePPPort overwrites every bundled ppport.h in the staged tree
 // with an inert stub. ppport.h is a portability shim for REAL perl headers;
@@ -214,18 +51,14 @@ func xsNeutralizePPPort(root string) error {
 	})
 }
 
-// xsArchEnv yields the environment that makes the host toolchain target
-// the running binary's architecture (Apple's perl honors ARCHFLAGS for
-// extension builds).
-func xsArchEnv() []string {
-	if runtime.GOOS != "darwin" {
-		return nil
+// xsArchEnv yields the environment that makes a darwin toolchain build for
+// the target's architecture (Apple's perl honors ARCHFLAGS for extension
+// builds).
+func xsArchEnv(target string) []string {
+	if flags := archFlags(target); len(flags) > 0 {
+		return []string{"ARCHFLAGS=" + strings.Join(flags, " ")}
 	}
-	arch := map[string]string{"amd64": "x86_64", "arm64": "arm64"}[runtime.GOARCH]
-	if arch == "" {
-		return nil
-	}
-	return []string{"ARCHFLAGS=-arch " + arch}
+	return nil
 }
 
 var perlIncLine = regexp.MustCompile(`(?m)^(PERL_INC) = .*$`)
@@ -248,77 +81,15 @@ func xsRedirectMakefile(makefile, sdkDir string) error {
 	return os.WriteFile(makefile, out, 0o644)
 }
 
-// xsInstallBlib copies the built native libraries into local/xs/<arch> and
-// the pure-Perl half into local/lib/perl5, returning the module names.
-func xsInstallBlib(projectDir, blib string) ([]string, error) {
-	autoRoot := filepath.Join(blib, "arch", "auto")
-	var modules []string
-	err := filepath.WalkDir(autoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // a dist without arch objects is legal
-		}
-		switch filepath.Ext(path) {
-		case ".so", ".bundle", ".dylib", ".dll":
-		default:
-			return nil
-		}
-		rel, err := filepath.Rel(autoRoot, path)
-		if err != nil {
-			return err
-		}
-		// auto/Devel/NYTProf/NYTProf.bundle -> Devel::NYTProf
-		module := strings.ReplaceAll(filepath.Dir(rel), string(filepath.Separator), "::")
-		dstDir := xsDir(projectDir)
-		if err := os.MkdirAll(dstDir, 0o755); err != nil {
-			return err
-		}
-		dst := filepath.Join(dstDir, strings.ReplaceAll(module, "::", "-")+".so")
-		if err := copyFile(path, dst); err != nil {
-			return err
-		}
-		modules = append(modules, module)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(modules) == 0 {
-		return nil, fmt.Errorf("build produced no native library under blib/arch/auto")
-	}
-	// The .pm half goes where cpanm would put it, so @INC already covers it.
-	libDst := filepath.Join(projectDir, "local", "lib", "perl5")
-	if dirExists(filepath.Join(blib, "lib")) {
-		if err := copyTree(filepath.Join(blib, "lib"), libDst); err != nil {
-			return nil, err
-		}
-	}
-	return modules, nil
-}
-
-// xsInstallBuildDeps runs `cpanm --installdeps` for the dist into lib on
-// the embedded interpreter. Run from a neutral directory: on a
-// case-insensitive filesystem cpanm resolves bare module names against
-// look-alike local paths.
-func xsInstallBuildDeps(srcDir, lib string) error {
-	neutral, err := os.MkdirTemp("", "gperl-xsdeps-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(neutral)
-	if err := runCpanmArgs(neutral, neutral, []string{"-L", lib, "--notest", "--installdeps", srcDir}); err != nil {
-		return fmt.Errorf("resolve build dependencies (cpanm --installdeps): %w", err)
-	}
-	return nil
-}
-
-// hostToolchain is the %Config overlay describing the HOST C toolchain:
+// targetToolchain is the %Config overlay describing the C toolchain of the
+// target (goos), with cc and ar as its compiler and archiver command lines:
 // the embedded interpreter's own %Config is guest-true (wasm64), and the
-// build must emit host-native compile/link rules. These are the platform
-// conventions a native perl build would have configured, and what the host
-// compiler says of itself.
-func hostToolchain() map[string]string {
-	common := hostToolchainStatic()
-	// Everything else that identifies the C toolchain is the host
+// build must emit compile/link rules for the platform the module runs on.
+// These are the platform conventions a native perl build would have
+// configured, and what the compiler says of itself.
+func targetToolchain(goos, cc, ar string) map[string]string {
+	common := toolchainStatic(goos, cc, ar)
+	// Everything else that identifies the C toolchain is the
 	// compiler's too: build scripts choose flags by the compiler's name and
 	// version (gcc or clang), run its preprocessor, and look for libraries
 	// where it looks. The interpreter's own values describe the compiler
@@ -326,22 +97,26 @@ func hostToolchain() map[string]string {
 	for key, value := range hostCompiler(common["cc"]) {
 		common[key] = value
 	}
+	// No sanitizer instrumentation: a module must not need a runtime
+	// library the Go link that takes it in does not provide (zig cc
+	// instruments undefined behavior by default).
+	common["ccflags"] += " -fno-sanitize=undefined"
 	return common
 }
 
-// hostToolchainStatic is the part of hostToolchain that needs no asking of
+// toolchainStatic is the part of targetToolchain that needs no asking of
 // the compiler: the programs of the toolchain, their flags and the names of
 // what they make, by the platform's conventions.
-func hostToolchainStatic() map[string]string {
+func toolchainStatic(goos, cc, ar string) map[string]string {
 	common := map[string]string{
-		"cc": "cc", "ld": "cc", "ar": "ar", "full_ar": "ar",
+		"cc": cc, "ld": cc, "ar": ar, "full_ar": ar,
 		"ranlib": "ranlib", "make": "make",
 		"ccflags":  "-fno-strict-aliasing -fstack-protector-strong -DPERL_USE_SAFE_PUTENV",
 		"optimize": "-O2", "ldflags": "", "cccdlflags": "-fPIC",
 		"ccdlflags": "", "obj_ext": ".o", "exe_ext": "", "lib_ext": ".a",
 		"usedl": "define", "dlsrc": "dl_dlopen.xs", "useshrplib": "false",
 	}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		common["osname"] = "darwin"
 		common["so"] = "dylib"
@@ -354,14 +129,13 @@ func hostToolchainStatic() map[string]string {
 		// glibc hides its extensions unless asked; perl's own builds
 		// there compile everything with _GNU_SOURCE.
 		common["ccflags"] += " -D_GNU_SOURCE"
-		common["osname"] = runtime.GOOS
+		common["osname"] = goos
 		common["so"] = "so"
 		common["dlext"] = "so"
 		common["lddlflags"] = "-shared"
 	}
 	// the compiler's preprocessor, and the libraries a program is linked
 	// with
-	cc := common["cc"]
 	common["cpp"], common["cpprun"], common["cppstdin"] = cc+" -E", cc+" -E", cc+" -E"
 	common["cppminus"], common["cpplast"], common["cppflags"] = "-", "-", common["ccflags"]
 	common["libs"], common["perllibs"] = "-lm", "-lm"
@@ -377,7 +151,7 @@ func hostToolchainStatic() map[string]string {
 // start; so is osname, which is the host's already ($^O, which the
 // interpreter is told when it starts).
 func runToolchain() map[string]string {
-	tc := hostToolchainStatic()
+	tc := toolchainStatic(runtime.GOOS, "cc", "ar")
 	delete(tc, "osname")
 	return tc
 }
@@ -390,7 +164,7 @@ func runToolchain() map[string]string {
 // describing another compiler.
 func hostCompiler(cc string) map[string]string {
 	keys := map[string]string{
-		"ccname": filepath.Base(cc), "gccversion": "", "ccversion": "", "gccosandvers": "",
+		"ccname": filepath.Base(strings.Fields(cc)[0]), "gccversion": "", "ccversion": "", "gccosandvers": "",
 		"ccsymbols": "", "cppsymbols": "", "cppccsymbols": "",
 		"libc": "", "gnulibc_version": "",
 	}
@@ -408,7 +182,7 @@ func hostCompiler(cc string) map[string]string {
 		keys["gnulibc_version"] = major + "." + minor
 	}
 	if runtime.GOOS != "darwin" {
-		if out, err := exec.Command(cc, "-print-file-name=libc.so.6").Output(); err == nil {
+		if out, err := compilerCommand(cc, "-print-file-name=libc.so.6").Output(); err == nil {
 			// a name without a directory is the compiler's way of saying
 			// that it did not find the file
 			if path := strings.TrimSpace(string(out)); filepath.IsAbs(path) && fileExists(path) {
@@ -423,11 +197,18 @@ func hostCompiler(cc string) map[string]string {
 	return keys
 }
 
+// compilerCommand is the command line cc (which may carry arguments of its
+// own, as a cross compiler's does) with args.
+func compilerCommand(cc string, args ...string) *exec.Cmd {
+	words := strings.Fields(cc)
+	return exec.Command(words[0], append(words[1:], args...)...)
+}
+
 // compilerMacros returns the macros cc predefines for C (with the extra
 // arguments), name to replacement text; none when cc cannot be asked.
 func compilerMacros(cc string, extra ...string) map[string]string {
 	args := append([]string{"-dM", "-E", "-x", "c"}, extra...)
-	out, err := exec.Command(cc, append(args, os.DevNull)...).Output()
+	out, err := compilerCommand(cc, append(args, os.DevNull)...).Output()
 	if err != nil {
 		return nil
 	}
@@ -447,7 +228,7 @@ func compilerMacros(cc string, extra ...string) map[string]string {
 // compilerLibraryDirs returns the directories cc searches for libraries
 // that exist, in its order.
 func compilerLibraryDirs(cc string) []string {
-	out, err := exec.Command(cc, "-print-search-dirs").Output()
+	out, err := compilerCommand(cc, "-print-search-dirs").Output()
 	if err != nil {
 		return nil
 	}
@@ -514,11 +295,11 @@ func xsStandInArchlib(work, sdkDir, stdlibDir string) (string, error) {
 
 // xsWriteConfigOverlay writes the preload every build-driving perl run
 // executes first: it replaces the guest-true toolchain/path keys of
-// %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
-// generate a build for THIS machine while everything else about %Config
-// (version, ivsize, ...) stays guest-true.
-func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
-	tc := hostToolchain()
+// %Config with those of the toolchain tc (targetToolchain), so
+// ExtUtils::MakeMaker and Module::Build generate a build for its target
+// while everything else about %Config (version, ivsize, ...) stays
+// guest-true.
+func xsWriteConfigOverlay(work string, tc map[string]string, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
 	if sdkDir != "" {
 		tc["ccflags"] = tc["ccflags"] + " -I" + sdkDir
 	}
@@ -567,18 +348,6 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (s
 	return path, nil
 }
 
-func runIn(dir string, env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
-	}
-	return nil
-}
-
 func fileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
@@ -587,14 +356,6 @@ func fileExists(path string) bool {
 func dirExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.IsDir()
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o755)
 }
 
 func copyTree(src, dst string) error {
@@ -635,55 +396,4 @@ func copyTree(src, dst string) error {
 		}
 		return os.WriteFile(target, data, mode)
 	})
-}
-
-func extractTarGz(archive, dst string) error {
-	f, err := os.Open(archive)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return fmt.Errorf("open %s: %w (only .tar.gz distributions are supported)", archive, err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if filepath.Clean(hdr.Name) == "." {
-			continue
-		}
-		target := filepath.Join(dst, hdr.Name)
-		// containment: a crafted entry ("..", "../x", absolute) must not
-		// escape the extraction root
-		if !strings.HasPrefix(target, filepath.Clean(dst)+string(os.PathSeparator)) {
-			return fmt.Errorf("archive entry escapes extraction dir: %q", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(hdr.Mode)&0o777)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(out, tr); err != nil { //nolint:gosec // trusted local archive
-				out.Close()
-				return err
-			}
-			out.Close()
-		}
-	}
 }

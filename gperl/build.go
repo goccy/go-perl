@@ -1,7 +1,7 @@
 package gperl
 
 // gperl build: produce a self-contained Go binary that embeds the script,
-// its vendored pure-Perl modules, and the interpreter. The generated program
+// its CPAN dependencies, and the interpreter. The generated program
 // behaves like the perl command (host filesystem, stdio, environment): at
 // startup it unpacks the embedded app tree into a private temp directory,
 // runs the script from there, and cleans up on exit.
@@ -9,6 +9,8 @@ package gperl
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -16,29 +18,33 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/goccy/go-perl/internal/mod"
 )
 
 // Build compiles script into a standalone binary at out (default: the
 // script's basename without its extension, in the current directory). The
-// embedded app tree contains the script itself, the project's lib/ (when
-// present), and the vendored local/lib/perl5 (resolved from the cpanfile
-// first when needed).
+// embedded app tree contains the script itself and the project's lib/ (when
+// present); the project's CPAN dependencies are linked in.
 //
 // The GPERL_DEV_REPLACE environment variable ("module=path,module=path")
 // adds replace directives to the generated module — the way to build against
 // an unreleased go-perl/perlwasm2go checkout.
-func Build(script, out string) error {
-	script, err := filepath.Abs(script)
-	if err != nil {
+func Build(script, out string) error { return buildBinary(script, out, nil) }
+
+// buildBinary builds script into a standalone binary: a program that runs
+// it, or — when psgiDefaults is non-nil — a server for the PSGI application
+// it is, with those settings as defaults. A server carries the whole
+// project directory (an application reads templates and static files next
+// to itself); a program carries the script and lib/.
+func buildBinary(script, out string, psgiDefaults []string) (err error) {
+	if script, err = filepath.Abs(script); err != nil {
 		return err
 	}
 	if _, err := os.Stat(script); err != nil {
 		return err
 	}
 	projectDir := filepath.Dir(script)
-	if err := EnsureDeps(projectDir); err != nil {
-		return err
-	}
 	if out == "" {
 		out = strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
 	}
@@ -50,10 +56,15 @@ func Build(script, out string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work)
+	defer func() { err = errors.Join(err, os.RemoveAll(work)) }()
+	// A workspace names its modules by their real paths, and the temp
+	// directory is reached through a symlink on some systems.
+	if work, err = filepath.EvalSymlinks(work); err != nil {
+		return err
+	}
 
 	scriptName := filepath.Base(script)
-	appZip, incDirs, err := buildAppZip(projectDir, script)
+	appZip, incDirs, err := buildAppZip(projectDir, script, psgiDefaults != nil, out)
 	if err != nil {
 		return err
 	}
@@ -62,8 +73,10 @@ func Build(script, out string) error {
 	}
 	var mainSrc bytes.Buffer
 	if err := mainTemplate.Execute(&mainSrc, map[string]any{
-		"ScriptPath": "app/" + scriptName,
-		"Inc":        incDirs,
+		"ScriptPath":   "app/" + scriptName,
+		"Inc":          incDirs,
+		"PSGI":         psgiDefaults != nil,
+		"PSGIDefaults": psgiDefaults,
 	}); err != nil {
 		return err
 	}
@@ -74,39 +87,59 @@ func Build(script, out string) error {
 		return err
 	}
 
-	for _, argv := range [][]string{
-		{"go", "mod", "tidy"},
-		{"go", "build", "-o", out, "."},
+	// The dependencies enter through a workspace: the generated link set
+	// stands in for the go-perl/cpan package the interpreter imports.
+	gowork := "off"
+	err = withDeps(func(m *mod.Manager) error {
+		deps, err := loadDeps(context.Background(), m, projectDir, mod.BuildTarget())
+		if err != nil || deps.lib == nil {
+			return err
+		}
+		links, err := generateLinkSet(m, deps)
+		if err != nil {
+			return err
+		}
+		gowork = filepath.Join(work, "go.work")
+		return links.writeGoWork(gowork, work)
+	})
+	if err != nil {
+		return err
+	}
+	goBin, err := goCommand()
+	if err != nil {
+		return err
+	}
+	env := os.Environ()
+	// A cgo build compiles and links with the same C toolchain the native
+	// modules were built with.
+	if ccWords, arWords, tcErr := cToolchain(mod.BuildTarget()); tcErr == nil {
+		env = append(env, "CC="+strings.Join(ccWords, " "), "AR="+strings.Join(arWords, " "))
+	}
+	for _, step := range []struct {
+		gowork string
+		argv   []string
+	}{
+		{"off", []string{"go", "mod", "tidy"}},
+		{gowork, []string{"go", "build", "-o", out, "."}},
 	} {
-		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd := exec.Command(goBin, step.argv[1:]...)
 		cmd.Dir = work
+		cmd.Env = append(append([]string{}, env...), "GOWORK="+step.gowork)
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+			return fmt.Errorf("%s: %w", strings.Join(step.argv, " "), err)
 		}
-	}
-	// Native XS modules cannot be embedded (they are dlopen'd host
-	// libraries); ship them next to the binary, where the generated main
-	// looks by default.
-	if srcXS := xsDir(projectDir); dirExists(srcXS) {
-		dstXS := out + ".xs"
-		if err := os.RemoveAll(dstXS); err != nil {
-			return err
-		}
-		if err := copyTree(srcXS, dstXS); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "gperl: native XS modules copied to %s\n", dstXS)
 	}
 	fmt.Fprintf(os.Stderr, "gperl: built %s\n", out)
 	return nil
 }
 
-// buildAppZip assembles the embedded app tree: the script at /app/<name>,
-// the project's lib/ and the vendored local/lib/perl5 when they exist.
+// buildAppZip assembles the embedded app tree: the script at /app/<name>
+// and the project's lib/ — or, with whole, everything in the project
+// directory but hidden entries, the dependency declarations, and out.
 // Returns the zip bytes and the guest @INC additions, most specific first.
-func buildAppZip(projectDir, script string) ([]byte, []string, error) {
+func buildAppZip(projectDir, script string, whole bool, out string) ([]byte, []string, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	addFile := func(name, host string) error {
@@ -134,19 +167,36 @@ func buildAppZip(projectDir, script string) ([]byte, []string, error) {
 		})
 	}
 
-	if err := addFile("app/"+filepath.Base(script), script); err != nil {
-		return nil, nil, err
-	}
 	inc := []string{}
-	if lib := localLib(projectDir); lib != "" {
-		if err := addTree("app/local/lib/perl5", lib); err != nil {
+	if whole {
+		// Everything but what is not the application's: hidden entries,
+		// the dependency declarations, and the binary being built.
+		entries, err := os.ReadDir(projectDir)
+		if err != nil {
 			return nil, nil, err
 		}
-		inc = append(inc, "app/local/lib/perl5")
+		for _, e := range entries {
+			host := filepath.Join(projectDir, e.Name())
+			switch {
+			case strings.HasPrefix(e.Name(), "."), e.Name() == mod.CPANfile, e.Name() == mod.SnapshotFile, host == out:
+				continue
+			case e.IsDir():
+				err = addTree("app/"+e.Name(), host)
+			default:
+				err = addFile("app/"+e.Name(), host)
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	} else if err := addFile("app/"+filepath.Base(script), script); err != nil {
+		return nil, nil, err
 	}
 	if st, err := os.Stat(filepath.Join(projectDir, "lib")); err == nil && st.IsDir() {
-		if err := addTree("app/lib", filepath.Join(projectDir, "lib")); err != nil {
-			return nil, nil, err
+		if !whole {
+			if err := addTree("app/lib", filepath.Join(projectDir, "lib")); err != nil {
+				return nil, nil, err
+			}
 		}
 		inc = append(inc, "app/lib")
 	}
@@ -157,12 +207,17 @@ func buildAppZip(projectDir, script string) ([]byte, []string, error) {
 	return buf.Bytes(), inc, nil
 }
 
+// generatedModulePath is the module path of a program gperl generates.
+const generatedModulePath = "github.com/goccy/go-perl/internal/gperl/app"
+
 // goModSrc renders the generated program's go.mod. Versions resolve through
 // `go mod tidy`; GPERL_DEV_REPLACE injects replace directives for unreleased
 // checkouts.
 func goModSrc() []byte {
 	var b strings.Builder
-	b.WriteString("module gperl.invalid/app\n\ngo 1.25.0\n\nrequire github.com/goccy/go-perl v0.0.0\n")
+	// The generated program imports this package, which is internal to
+	// go-perl: its module path sits below go-perl's so that it may.
+	b.WriteString("module " + generatedModulePath + "\n\ngo 1.25.0\n\nrequire github.com/goccy/go-perl v0.0.0\n")
 	if env := os.Getenv("GPERL_DEV_REPLACE"); env != "" {
 		b.WriteString("\n")
 		for _, pair := range strings.Split(env, ",") {
@@ -188,18 +243,22 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+{{- if not .PSGI}}
 	"context"
+{{- end}}
 	_ "embed"
+{{- if not .PSGI}}
 	"errors"
+{{- end}}
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
+{{if not .PSGI}}
 	perl "github.com/goccy/go-perl"
+{{- end}}
 	"github.com/goccy/go-perl/gperl"
-	"github.com/goccy/go-perl/xs"
 )
 
 //go:embed app.zip
@@ -251,6 +310,12 @@ func main() {
 	for _, rel := range incRel {
 		incDirs = append(incDirs, filepath.Join(appDir, filepath.FromSlash(rel)))
 	}
+{{- if .PSGI}}
+	status := gperl.PSGIMain(scriptPath, incDirs, []string{ {{range .PSGIDefaults}}{{printf "%q" .}}, {{end}} }, os.Args[1:])
+	cleanup()
+	os.Exit(status)
+}
+{{- else}}
 	cfg, err := gperl.HostConfig()
 	if err != nil {
 		fatal(err)
@@ -262,21 +327,6 @@ func main() {
 	p, err := perl.New(cfg)
 	if err != nil {
 		fatal(err)
-	}
-	// Native XS modules built by gperl xs build: GPERL_XS_DIR wins, then
-	// <binary>.xs next to the executable, then the project-layout dir.
-	xsCandidates := []string{os.Getenv("GPERL_XS_DIR")}
-	if exe, exeErr := os.Executable(); exeErr == nil {
-		xsCandidates = append(xsCandidates, exe+".xs")
-	}
-	xsCandidates = append(xsCandidates, filepath.Join("local", "xs", xs.ArchTag()))
-	for _, dir := range xsCandidates {
-		if dir == "" {
-			continue
-		}
-		if err := p.AddXSDir(dir); err != nil {
-			fatal(err)
-		}
 	}
 	status, err := p.RunProgram(context.Background(), perl.Program{
 		File: scriptPath,
@@ -299,6 +349,7 @@ func main() {
 	cleanup()
 	os.Exit(status)
 }
+{{- end}}
 
 // cleanup removes the unpacked app dir; os.Exit skips defers, so every
 // exit path calls it explicitly.

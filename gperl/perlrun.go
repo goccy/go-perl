@@ -24,6 +24,7 @@ import (
 	"syscall"
 
 	perl "github.com/goccy/go-perl"
+	"github.com/goccy/go-perl/internal/mod"
 )
 
 // perlRunOpts parameterizes one perl(1)-style run. Zero values mean the
@@ -35,9 +36,8 @@ type perlRunOpts struct {
 	stdout io.Writer // program stdout
 	stderr io.Writer // program stderr
 	// project runs the program file as a project's entry point: its
-	// cpanfile dependencies resolve into ./local first, the vendored tree
-	// and the program's directory join @INC, and native modules from
-	// local/xs load lazily.
+	// cpanfile dependencies are synced first, and they and the program's
+	// directory join @INC.
 	project bool
 }
 
@@ -153,7 +153,6 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	}
 	env = append(env[:len(env):len(env)], cmd.env...)
 
-	nativeDir := ""
 	if opts.project {
 		script, err := filepath.Abs(prog.File)
 		if err != nil {
@@ -163,15 +162,24 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 			return 1, err
 		}
 		projectDir := filepath.Dir(script)
-		if err := EnsureDeps(projectDir); err != nil {
-			return 1, err
+		// A program without declared dependencies needs no module
+		// directory, and runs where there is none.
+		deps := &projectDeps{}
+		if fileExists(filepath.Join(projectDir, mod.CPANfile)) || fileExists(filepath.Join(projectDir, mod.SnapshotFile)) {
+			err = withDeps(func(m *mod.Manager) error {
+				deps, err = loadDeps(context.Background(), m, projectDir, mod.Target())
+				return err
+			})
+			if err != nil {
+				return 1, err
+			}
 		}
-		if lib := localLib(projectDir); lib != "" {
-			prog.Inc = append(prog.Inc[:len(prog.Inc):len(prog.Inc)], lib)
+		prog.Inc = prog.Inc[:len(prog.Inc):len(prog.Inc)]
+		if lib := filepath.Join(projectDir, "lib"); dirExists(lib) {
+			prog.Inc = append(prog.Inc, lib)
 		}
-		prog.Inc = append(prog.Inc[:len(prog.Inc):len(prog.Inc)], projectDir)
+		prog.Inc = append(append(prog.Inc, projectDir), deps.inc()...)
 		prog.File = script
-		nativeDir = xsDir(projectDir)
 	}
 
 	// gperl behaves like the perl command: the program sees the host
@@ -197,13 +205,6 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 	defer p.Close()
 
 	ctx := context.Background()
-	if nativeDir != "" {
-		// Native XS modules built by `gperl xs build` register lazily; a
-		// stock `use Module;` boots them through the XSLoader contract.
-		if err := p.AddXSDir(nativeDir); err != nil {
-			return 1, err
-		}
-	}
 	// A new instance starts in the root directory; a process starts where
 	// it was launched.
 	dir := opts.dir
@@ -284,20 +285,6 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return v
-}
-
-// runPerlInProcess runs one perl(1)-style invocation of the build
-// pipeline on an in-process interpreter, treating a nonzero exit as an
-// error the way a subprocess wrapper would.
-func runPerlInProcess(dir string, env []string, stdout io.Writer, args ...string) error {
-	status, err := runPerlCLI(args, perlRunOpts{dir: dir, env: env, stdout: stdout})
-	if err != nil {
-		return err
-	}
-	if status != 0 {
-		return fmt.Errorf("perl %s: exit status %d", strings.Join(args, " "), status)
-	}
-	return nil
 }
 
 // lendProcess gives the process the environment env (when it is not nil) and

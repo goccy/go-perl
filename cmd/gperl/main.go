@@ -1,17 +1,24 @@
 // gperl is the perl-meets-go command for go-perl: it runs Perl programs on
 // the embedded (wasm2go-transpiled) interpreter with go-style tooling.
 //
-//	gperl run script.pl [args...]   resolve dependencies, then run the script
+//	gperl run script.pl [args...]   sync dependencies, then run the script
 //	gperl run [switches] [script]   with any perl(1) switch (-e/-I/-M/-n/...),
 //	                                or a program on standard input, run
 //	                                exactly like the perl command instead
 //	gperl build [-o out] script.pl  produce a self-contained Go binary that
-//	                                embeds the script, its vendored modules,
-//	                                and the interpreter
-//	gperl xs build dist...          compile XS distributions (source dir or
-//	                                .tar.gz) against the native XS SDK into
-//	                                ./local/xs; gperl run and built binaries
-//	                                load them automatically
+//	                                embeds the script, its CPAN dependencies
+//	                                (native XS modules linked in), and the
+//	                                interpreter
+//	gperl test [files]              run a project's test files
+//	gperl psgi run app.psgi         serve a PSGI application
+//	gperl psgi build app.psgi       build its server binary
+//	gperl mod tidy                  resolve the cpanfile into
+//	                                cpanfile.snapshot, then fetch and build
+//	gperl mod download              fetch and build what the snapshot names
+//	gperl get module[@version]...   add modules to the cpanfile and resolve
+//	gperl clean -modcache           remove the module directory
+//	gperl install toolchain         install the Go and C toolchains gperl
+//	                                builds with
 //
 // GPERL_MAX_MEMORY limits the interpreter's memory, for gperl run and for
 // the binaries gperl build makes: a size in bytes (with K, M, G or T), or
@@ -43,7 +50,14 @@ func usage() {
   gperl run script.pl [args...]
   gperl run [perl switches] [script] [args...]
   gperl build [-o out] script.pl
-  gperl xs build [-C dir] dist [dist...]
+  gperl test [options] [files or directories]
+  gperl psgi run [options] app.psgi
+  gperl psgi build [-o out] [options] app.psgi
+  gperl mod download
+  gperl mod tidy
+  gperl get module[@version]...
+  gperl clean -modcache
+  gperl install toolchain
 
 environment:
   GPERL_MAX_MEMORY   the interpreter's memory limit: bytes (with K, M, G or T),
@@ -74,25 +88,57 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
 			os.Exit(1)
 		}
-	case "xs":
-		if len(os.Args) < 4 || os.Args[2] != "build" {
+	case "test":
+		status, err := gperl.Test(os.Args[2:])
+		exitOn(err)
+		os.Exit(status)
+	case "psgi":
+		if len(os.Args) < 3 {
 			usage()
 		}
-		fs := flag.NewFlagSet("xs build", flag.ExitOnError)
-		dir := fs.String("C", ".", "project directory (module output goes to its local/xs)")
-		_ = fs.Parse(os.Args[3:])
-		if fs.NArg() == 0 {
+		switch os.Args[2] {
+		case "run":
+			exitOn(gperl.PSGIRun(os.Args[3:]))
+		case "build":
+			exitOn(gperl.PSGIBuild(os.Args[3:]))
+		default:
 			usage()
 		}
-		modules, err := gperl.XSBuild(*dir, fs.Args())
-		for _, m := range modules {
-			fmt.Fprintf(os.Stderr, "gperl: built native module %s\n", m)
+	case "install":
+		if len(os.Args) != 3 || os.Args[2] != "toolchain" {
+			usage()
 		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
-			os.Exit(1)
+		exitOn(gperl.InstallToolchain())
+	case "mod":
+		if len(os.Args) != 3 {
+			usage()
 		}
+		switch os.Args[2] {
+		case "tidy":
+			exitOn(gperl.ModTidy("."))
+		case "download":
+			exitOn(gperl.ModDownload("."))
+		default:
+			usage()
+		}
+	case "get":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		exitOn(gperl.Get(".", os.Args[2:]...))
+	case "clean":
+		if len(os.Args) != 3 || os.Args[2] != "-modcache" {
+			usage()
+		}
+		exitOn(gperl.CleanModCache())
 	default:
 		usage()
+	}
+}
+
+func exitOn(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gperl: %v\n", err)
+		os.Exit(1)
 	}
 }

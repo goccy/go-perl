@@ -14,7 +14,7 @@ import (
 // with the build's %Config overlay as its preload.
 func overlayRun(t *testing.T, argv ...string) string {
 	t.Helper()
-	overlay, err := xsWriteConfigOverlay(t.TempDir(), "/the/sdk", "/the/stdlib", "/the/arch", "/the/perl")
+	overlay, err := xsWriteConfigOverlay(t.TempDir(), targetToolchain(runtime.GOOS, "cc", "ar"), "/the/sdk", "/the/stdlib", "/the/arch", "/the/perl")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,11 +1,14 @@
 package gperl
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/goccy/go-perl/internal/mod"
 )
 
 // hostXSToolchain reports whether the machine can drive an ordinary XS
@@ -16,81 +19,6 @@ func hostXSToolchain(t *testing.T) {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("no %s on PATH; XS build unavailable", tool)
 		}
-	}
-}
-
-// TestXSBuildAndRun drives the whole pipeline on the bundled minimal EUMM
-// distribution: gperl xs build (Makefile.PL + make against the embedded
-// SDK), artifact layout under local/, and gperl run loading the module for
-// a stock `use Demo::XS;`.
-func TestXSBuildAndRun(t *testing.T) {
-	hostXSToolchain(t)
-	project := t.TempDir()
-
-	dist, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	modules, err := XSBuild(project, []string{dist})
-	if err != nil {
-		t.Fatalf("XSBuild: %v", err)
-	}
-	if len(modules) != 1 || modules[0] != "Demo::XS" {
-		t.Fatalf("built modules = %v, want [Demo::XS]", modules)
-	}
-	so := filepath.Join(xsDir(project), "Demo-XS.so")
-	if _, err := os.Stat(so); err != nil {
-		t.Fatalf("native library missing: %v", err)
-	}
-	pm := filepath.Join(project, "local", "lib", "perl5", "Demo", "XS.pm")
-	if _, err := os.Stat(pm); err != nil {
-		t.Fatalf("pure-Perl half missing: %v", err)
-	}
-
-	script := filepath.Join(project, "app.pl")
-	if err := os.WriteFile(script, []byte(`use strict;
-use warnings;
-use Demo::XS;
-print "sum=", Demo::XS::add(40, 2), " ", Demo::XS::greet("gopher"), "\n";
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	stdout := captureStdout(t, func() {
-		status, err := Run(script, nil)
-		if err != nil || status != 0 {
-			t.Fatalf("Run: status=%d err=%v", status, err)
-		}
-	})
-	if want := "sum=42 hello, gopher\n"; stdout != want {
-		t.Fatalf("script output = %q, want %q", stdout, want)
-	}
-}
-
-// TestXSBuildFromTarball covers the .tar.gz input path.
-func TestXSBuildFromTarball(t *testing.T) {
-	hostXSToolchain(t)
-	project := t.TempDir()
-
-	dist, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tarball := filepath.Join(t.TempDir(), "Demo-XS-0.01.tar.gz")
-	cmd := exec.Command("tar", "-czf", tarball, "-C", filepath.Dir(dist), filepath.Base(dist))
-	// darwin's tar stores the extended attributes of a file in a "._" file
-	// beside it, besides the dist's directory, unless told not to.
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("tar: %v\n%s", err, out)
-	}
-
-	modules, err := XSBuild(project, []string{tarball})
-	if err != nil {
-		t.Fatalf("XSBuild(tarball): %v", err)
-	}
-	if len(modules) != 1 || modules[0] != "Demo::XS" {
-		t.Fatalf("built modules = %v, want [Demo::XS]", modules)
 	}
 }
 
@@ -128,13 +56,15 @@ func captureStdout(t *testing.T, fn func()) string {
 // loads through the stock XSLoader, with nothing registered up front.
 func TestNativeModuleLoadsFromInc(t *testing.T) {
 	hostXSToolchain(t)
-	project := t.TempDir()
-	dist, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))
-	if err != nil {
+	t.Setenv("GPERLMODCACHE", t.TempDir())
+	tree := filepath.Join(t.TempDir(), "Demo-XS@0.01")
+	if err := copyTree(filepath.Join("testdata", "Demo-XS-dist"), tree); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := XSBuild(project, []string{dist}); err != nil {
-		t.Fatalf("XSBuild: %v", err)
+	if err := withDeps(func(m *mod.Manager) error {
+		return buildDist(context.Background(), m, tree, mod.Target(), nil)
+	}); err != nil {
+		t.Fatalf("buildDist: %v", err)
 	}
 
 	lib := t.TempDir()
@@ -152,8 +82,8 @@ func TestNativeModuleLoadsFromInc(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	place(filepath.Join(project, "local", "lib", "perl5", "Demo", "XS.pm"), "Demo", "XS.pm")
-	place(filepath.Join(xsDir(project), "Demo-XS.so"), "auto", "Demo", "XS", "XS.so")
+	place(filepath.Join(mod.LibDir(tree), "Demo", "XS.pm"), "Demo", "XS.pm")
+	place(filepath.Join(mod.TargetDir(tree, mod.Target()), "auto", "Demo", "XS", "XS.so"), "auto", "Demo", "XS", "XS.so")
 
 	// A fork child cannot use it (native code is not available there): the
 	// call dies, naming the sub and the module's shared object.

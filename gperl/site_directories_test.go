@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-perl/internal/mod"
+
 	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/internal"
 	"github.com/goccy/go-perl/xs"
@@ -209,12 +211,12 @@ func siteInstallEnv(t *testing.T, native bool) (env []string, shim string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlib, fakeArch, shim)
+		overlay, err := xsWriteConfigOverlay(work, targetToolchain(runtime.GOOS, "cc", "ar"), sdkDir, stdlib, fakeArch, shim)
 		if err != nil {
 			t.Fatal(err)
 		}
 		env = append(env, "GPERL_PERL_PRELOAD="+overlay)
-		env = append(env, xsArchEnv()...)
+		env = append(env, xsArchEnv(mod.Target())...)
 	}
 	return env, shim
 }
