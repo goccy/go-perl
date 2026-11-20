@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sync"
 
+	// The link set of the project's CPAN dependencies.
+	_ "github.com/goccy/go-perl/cpan"
 	"github.com/goccy/go-perl/internal"
 )
 
@@ -59,15 +61,20 @@ func New(cfg Config) (*Perl, error) {
 	// backends pair with ExtractStdlib; NewStdlibMemFS pre-loads a MemFS).
 	// The nil default is a PRIVATE in-memory filesystem pre-loaded with the
 	// stdlib - sandboxed, nothing touches the host disk.
+	var memfs *MemFS
 	if cfg.FS == nil {
-		fsys, err := NewStdlibMemFS()
-		if err != nil {
+		var err error
+		if memfs, err = NewStdlibMemFS(); err != nil {
 			return nil, fmt.Errorf("build in-memory stdlib: %w", err)
 		}
-		cfg.FS = fsys
+		cfg.FS = memfs
 	}
 	if cfg.StdlibDir == "" {
 		cfg.StdlibDir = "/"
+	}
+	cpanInc, err := cpanLibInc(cfg.FS, memfs)
+	if err != nil {
+		return nil, fmt.Errorf("the CPAN module tree: %w", err)
 	}
 
 	// Perl cannot boot without a /dev/null (the -e bootstrap opens the bit
@@ -118,6 +125,11 @@ func New(cfg Config) (*Perl, error) {
 	}
 	if err := internal.XSLoadLinked(raw); err != nil {
 		return nil, errors.Join(err, p.Close())
+	}
+	if cpanInc != "" {
+		if err := p.AddInc(context.Background(), cpanInc); err != nil {
+			return nil, errors.Join(err, p.Close())
+		}
 	}
 	return p, nil
 }
