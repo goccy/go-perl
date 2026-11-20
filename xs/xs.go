@@ -55,8 +55,7 @@ import (
 // debugging aid of last resort when a native module misbehaves.
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
-// abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 42
+const abiVersion = internal.XSABI
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -720,7 +719,7 @@ func (s *state) registerBoot(module, path string, resolve func(string) (uintptr,
 // instance that runs native code.
 func loadLinked(p *internal.Perl) error {
 	modules := linkedModules()
-	if len(modules) == 0 {
+	if len(modules) == 0 && internal.XSNative() == nil {
 		return nil
 	}
 	p.KeepOnOneThread()
@@ -743,8 +742,28 @@ func loadLinked(p *internal.Perl) error {
 				return
 			}
 		}
+		err = loadNative(p)
 	})
 	return err
+}
+
+// loadAutoDir registers the modules of a perl architecture directory's
+// auto tree: auto/<Module/Path>/<Name>.so is the module Module::Path.
+func loadAutoDir(p *internal.Perl, auto string) error {
+	return filepath.WalkDir(auto, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".so" {
+			return err
+		}
+		rel, err := filepath.Rel(auto, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		module := strings.ReplaceAll(filepath.ToSlash(rel), "/", "::")
+		if err := load(p, module, path); err != nil {
+			return fmt.Errorf("load native module %s: %w", module, err)
+		}
+		return nil
+	})
 }
 
 // nativeBootPrefix is the package prefix under which the boot function of a
