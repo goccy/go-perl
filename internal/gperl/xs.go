@@ -40,7 +40,7 @@ func xsNeutralizePPPort(root string) error {
 		if err != nil || d.IsDir() || d.Name() != "ppport.h" {
 			return err
 		}
-		stub := "/* ppport.h neutralized by gperl xs build: the goperl XS SDK\n" +
+		stub := "/* ppport.h neutralized by gperl: the goperl XS SDK\n" +
 			" * presents a current perl API, so the portability backfills\n" +
 			" * must not activate. */\n" +
 			"#ifndef _P_P_PORTABILITY_H_\n" +

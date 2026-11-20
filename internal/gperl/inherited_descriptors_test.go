@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // asPerlEnv makes the test binary behave as the perl command (TestMain):

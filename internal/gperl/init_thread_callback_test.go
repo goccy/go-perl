@@ -64,7 +64,7 @@ func TestNativeThreadCallingPerlInsideInitializationIsTold(t *testing.T) {
 	if err != nil {
 		t.Skip("no host C compiler available")
 	}
-	sdk, err := filepath.Abs(filepath.Join("..", "xs", "sdk", "include"))
+	sdk, err := filepath.Abs(filepath.Join("..", "..", "xs", "sdk", "include"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,8 +24,8 @@
 // the binaries gperl build makes: a size in bytes (with K, M, G or T), or
 // "host" for the memory the host gives the process; 8 GiB when unset.
 //
-// Every subcommand is a thin wrapper over the github.com/goccy/go-perl/gperl
-// library, so applications can drive the same functionality programmatically.
+// Every subcommand is a thin wrapper over the go-perl/internal/gperl
+// package.
 
 // A program gperl runs is the process and has its descriptor numbers, the
 // lowest free one first: its first file is descriptor 3. On Linux the Go
@@ -42,7 +42,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 func usage() {

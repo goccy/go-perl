@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	perl "github.com/goccy/go-perl"
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // shadowLib creates a library directory holding its own copy of the core

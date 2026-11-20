@@ -3,7 +3,7 @@ package gperl_test
 import (
 	"testing"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // runInThisProcess runs a program on gperl's interpreter in this process,

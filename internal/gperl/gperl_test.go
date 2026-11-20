@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // writeScript writes a program for a test to run. A program that runs in
@@ -78,7 +78,7 @@ func TestRunUncaughtDie(t *testing.T) {
 // carries (the unreleased perlwasm2go bundle during development).
 func devReplaces(t *testing.T) string {
 	t.Helper()
-	root, err := filepath.Abs("..")
+	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}

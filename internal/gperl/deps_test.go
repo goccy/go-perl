@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // mirrorDist is one distribution on the test mirror.

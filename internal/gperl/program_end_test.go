@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 // When the program ends, the pseudo-processes it forked that are still

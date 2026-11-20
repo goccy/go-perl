@@ -1,16 +1,10 @@
-// Package gperl is the library behind the gperl command: the perl-meets-go
-// toolchain for go-perl. It resolves CPAN dependencies (cpanm/carton
-// conventions: cpanfile + ./local), runs Perl programs on the embedded
-// interpreter, and builds self-contained Go binaries that embed a script,
-// its vendored modules, and the interpreter.
-//
-// Everything the CLI does is callable programmatically: EnsureDeps for
-// dependency vendoring, Run for execution, Build for binary production, and
-// XSBuild (with the xs package's LoadDir) for native XS modules — an XS
-// distribution is compiled
-// once against the bundled XS SDK (its own Makefile.PL/Build.PL drives the
-// build) and the resulting shared library loads at runtime with no
-// compiler present.
+// Package gperl is the implementation of the gperl command: the
+// perl-meets-go toolchain for go-perl. It resolves a project's CPAN
+// dependencies (cpanfile and cpanfile.snapshot) into the module directory
+// shared by every project, runs Perl programs and test files on the
+// embedded interpreter, serves PSGI applications, and builds self-contained
+// Go binaries that embed a script, its dependencies — native XS modules
+// linked in — and the interpreter.
 package gperl
 
 import (
@@ -65,8 +59,8 @@ func HostConfig() (perl.Config, error) {
 }
 
 // Run executes the Perl script on the embedded interpreter with the host's
-// stdio, os.Environ(), and the project's vendored modules (./local next to
-// the script) on @INC, resolving cpanfile dependencies first when needed.
+// stdio, os.Environ(), and the dependencies of the project (the cpanfile
+// next to the script) on @INC, fetching and building what is missing.
 //
 // The returned status is the process exit status the run maps to: 0 on
 // success, the code of a Perl-level exit(), and perl's own status for an
@@ -104,9 +98,8 @@ func endOfProcess(status int, err error) (int, error) {
 // the program's arguments). Two modes share the entry point:
 //
 //   - `gperl run script.pl [args...]` (no perl switches) is the project
-//     runner: cpanfile dependencies resolve into ./local, the vendored
-//     tree and the script's directory join @INC, and native modules
-//     from local/xs load lazily.
+//     runner: the project's dependencies are synced, and they and the
+//     script's directory join @INC.
 //   - Any perl(1) switch (-e, -I, -M, -n, ...), a program on standard
 //     input — or running as a child of the XS build pipeline
 //     (GPERL_PERL_PRELOAD set: the shim that make rules and $^X

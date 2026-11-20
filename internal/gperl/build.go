@@ -258,7 +258,7 @@ import (
 {{if not .PSGI}}
 	perl "github.com/goccy/go-perl"
 {{- end}}
-	"github.com/goccy/go-perl/gperl"
+	"github.com/goccy/go-perl/internal/gperl"
 )
 
 //go:embed app.zip
