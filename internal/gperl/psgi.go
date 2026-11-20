@@ -201,6 +201,10 @@ func (a *psgiApp) newServer(c *psgiConfig, accessLog io.Writer) (*psgi.Server, e
 	if err != nil {
 		return nil, err
 	}
+	// A worker is not the host process: its working directory and
+	// environment are its own, and what one request changes of them reaches
+	// no other worker.
+	cfg.HostProcess, cfg.InheritDescriptors = false, false
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cfg.Env = append(os.Environ(), "PLACK_ENV="+c.env)
 	p, err := perl.New(cfg)

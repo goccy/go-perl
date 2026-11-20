@@ -1,7 +1,10 @@
 package gperl
 
 import (
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -164,5 +167,61 @@ func TestSourceStamp(t *testing.T) {
 	}
 	if removed := sourceStamp([]string{app, lib}); removed == added {
 		t.Fatal("a removed source file did not change the stamp")
+	}
+}
+
+// What a request changes of its worker's working directory and environment
+// stays in that worker: the other workers and the process keep theirs.
+func TestPSGIWorkersAreIsolated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(dir, "app.psgi")
+	if err := os.WriteFile(appPath, []byte(`use Cwd ();
+sub {
+    my $env = shift;
+    if ($env->{PATH_INFO} eq '/change') {
+        chdir 'sub' or die "chdir: $!";
+        $ENV{GPERL_TEST_MARK} = 'set';
+    }
+    [200, [], [join('|', (Cwd::getcwd() =~ m{/sub$} ? 'sub' : 'top'), $ENV{GPERL_TEST_MARK} // 'unset')]];
+};
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := parsePSGI("test", nil, []string{"--workers", "2"}, envOf(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := (&psgiApp{path: appPath, dir: dir}).newServer(c, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	get := func(path string) string {
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Body.String()
+	}
+	// The two workers take requests in turn.
+	for i, want := range []string{"sub|set", "top|unset", "sub|set", "top|unset"} {
+		path := "/"
+		if i == 0 {
+			path = "/change"
+		}
+		if got := get(path); got != want {
+			t.Errorf("request %d (%s) = %q, want %q", i+1, path, got, want)
+		}
+	}
+	if now, err := os.Getwd(); err != nil || now != wd {
+		t.Errorf("the process's working directory = %q (%v), want %q", now, err, wd)
+	}
+	if mark, set := os.LookupEnv("GPERL_TEST_MARK"); set {
+		t.Errorf("the process's environment has GPERL_TEST_MARK=%q", mark)
 	}
 }
