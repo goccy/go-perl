@@ -212,7 +212,7 @@ func (p *Perl) RegisterNativeXS(name string, fnID int32) error {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendString(buf, 2, name)
 	buf = pbAppendInt32(buf, 3, fnID)
-	resp, err := p.invoke(0, midRegisterNativeXS, buf, wasm2go.Inv_0_20)
+	resp, err := p.invoke(0, midRegisterNativeXS, buf, wasm2go.Inv_0_19)
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 	// undone.
 	parked := false
 	resp, err := p.opInvoke(midXSHelper, buf, func(g *base.Module, req, n wptr) (int64, error) {
-		r, err := wasm2go.Inv_0_24(g, req, n)
+		r, err := wasm2go.Inv_0_23(g, req, n)
 		parked = p.parkGuestJump()
 		return r, err
 	})
@@ -263,7 +263,7 @@ func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 // nothing encoded or allocated on the way.
 func (p *Perl) XSOpBox() (uint64, error) {
 	buf := pbAppendUint64(nil, 1, p.h)
-	resp, err := p.invoke(0, midXSOpBox, buf, wasm2go.Inv_0_26)
+	resp, err := p.invoke(0, midXSOpBox, buf, wasm2go.Inv_0_25)
 	if err != nil {
 		return 0, err
 	}
@@ -278,7 +278,7 @@ func (p *Perl) XSOpBox() (uint64, error) {
 func (p *Perl) XSOpRun() error {
 	if p.xsOpCall == nil {
 		p.xsOpCall = func(g *base.Module, req, n wptr) (int64, error) {
-			r, err := wasm2go.Inv_0_25(g, req, n)
+			r, err := wasm2go.Inv_0_24(g, req, n)
 			p.xsOpParked = p.parkGuestJump()
 			return r, err
 		}
@@ -386,7 +386,7 @@ func (p *Perl) EnsureDispatcher() error {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendInt32(buf, 2, cbID)
-	resp, err := p.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_23)
+	resp, err := p.invoke(0, midSetGoDispatcher, buf, wasm2go.Inv_0_22)
 	if err != nil {
 		return fmt.Errorf("set Go dispatcher: %w", err)
 	}

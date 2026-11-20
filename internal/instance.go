@@ -41,24 +41,23 @@ const (
 	midClose            = 6
 	midDeref            = 7
 	midEval             = 8
-	midForkChild        = 9
-	midHashDelete       = 10
-	midHashGet          = 11
-	midHashKeys         = 12
-	midHashSet          = 13
-	midInterruptAddr    = 14
-	midInvoke           = 15
-	midMethodCall       = 16
-	midNew              = 17
-	midNewArray         = 18
-	midNewHash          = 19
-	midRegisterNativeXS = 20
-	midRelease          = 21
-	midRunProgram       = 22
-	midSetGoDispatcher  = 23
-	midXSHelper         = 24
-	midXSOp             = 25
-	midXSOpBox          = 26
+	midHashDelete       = 9
+	midHashGet          = 10
+	midHashKeys         = 11
+	midHashSet          = 12
+	midInterruptAddr    = 13
+	midInvoke           = 14
+	midMethodCall       = 15
+	midNew              = 16
+	midNewArray         = 17
+	midNewHash          = 18
+	midRegisterNativeXS = 19
+	midRelease          = 20
+	midRunProgram       = 21
+	midSetGoDispatcher  = 22
+	midXSHelper         = 23
+	midXSOp             = 24
+	midXSOpBox          = 25
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package
@@ -234,10 +233,9 @@ type forkFamily struct {
 	over bool
 }
 
-// start runs child's program as the pseudo-process pid, on a goroutine of
-// its own; exited is told the status it ends with. It reports false, and
-// starts nothing, when the family is over.
-func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bool {
+// start records child as the running pseudo-process pid. It reports false,
+// and records nothing, when the family is over.
+func (f *forkFamily) start(child *Perl, pid int32) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.over {
@@ -247,14 +245,14 @@ func (f *forkFamily) start(child *Perl, pid int32, exited func(status int32)) bo
 		f.running = map[*Perl]int32{}
 	}
 	f.running[child] = pid
-	go func() {
-		status := child.runForkChild(pid)
-		f.mu.Lock()
-		delete(f.running, child)
-		f.mu.Unlock()
-		exited(status)
-	}()
 	return true
+}
+
+// ended takes child, whose program has ended, off the running ones.
+func (f *forkFamily) ended(child *Perl) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.running, child)
 }
 
 // isOver reports whether the first process of the family has ended.
@@ -351,7 +349,7 @@ func (p *Perl) drainReleases() {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, packed)
 	buf = pbAppendUint64(buf, 3, uint64(len(packed)))
-	_, _ = p.invoke(0, midRelease, buf, wasm2go.Inv_0_21)
+	_, _ = p.invoke(0, midRelease, buf, wasm2go.Inv_0_20)
 }
 
 // New boots a fresh instance from opts, mapping the process-wide
@@ -714,7 +712,7 @@ func (p *Perl) InvokeOp(ctx context.Context, code uint64, scalarCtx bool, args [
 	}
 	buf = pbAppendBytes(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(len(args)))
-	return p.valueOp(ctx, midInvoke, wasm2go.Inv_0_15, buf)
+	return p.valueOp(ctx, midInvoke, wasm2go.Inv_0_14, buf)
 }
 
 // MethodCallOp invokes $obj->method(args...) on the reference behind obj.
@@ -725,7 +723,7 @@ func (p *Perl) MethodCallOp(ctx context.Context, obj uint64, method string, args
 	buf = pbAppendString(buf, 3, method)
 	buf = pbAppendBytes(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(len(args)))
-	return p.valueOp(ctx, midMethodCall, wasm2go.Inv_0_16, buf)
+	return p.valueOp(ctx, midMethodCall, wasm2go.Inv_0_15, buf)
 }
 
 // DerefOp dereferences the SCALAR/REF reference behind ref ($$ref).
@@ -790,7 +788,7 @@ func (p *Perl) HashGetOp(ctx context.Context, hv uint64, key []byte) ([]byte, bo
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendBytes(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
-	return p.valueOp(ctx, midHashGet, wasm2go.Inv_0_11, buf)
+	return p.valueOp(ctx, midHashGet, wasm2go.Inv_0_10, buf)
 }
 
 // HashSetOp performs $hv->{key} = val.
@@ -802,7 +800,7 @@ func (p *Perl) HashSetOp(ctx context.Context, hv uint64, key, val []byte) ([]byt
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
 	buf = pbAppendBytes(buf, 5, val)
 	buf = pbAppendUint64(buf, 6, uint64(len(val)))
-	return p.valueOp(ctx, midHashSet, wasm2go.Inv_0_13, buf)
+	return p.valueOp(ctx, midHashSet, wasm2go.Inv_0_12, buf)
 }
 
 // HashDeleteOp performs delete $hv->{key}.
@@ -812,7 +810,7 @@ func (p *Perl) HashDeleteOp(ctx context.Context, hv uint64, key []byte) ([]byte,
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendBytes(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(len(key)))
-	return p.valueOp(ctx, midHashDelete, wasm2go.Inv_0_10, buf)
+	return p.valueOp(ctx, midHashDelete, wasm2go.Inv_0_9, buf)
 }
 
 // HashKeysOp returns the envelope carrying keys %{$hv} as a node list.
@@ -820,7 +818,7 @@ func (p *Perl) HashKeysOp(ctx context.Context, hv uint64) ([]byte, bool, error) 
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendUint64(buf, 2, hv)
-	return p.valueOp(ctx, midHashKeys, wasm2go.Inv_0_12, buf)
+	return p.valueOp(ctx, midHashKeys, wasm2go.Inv_0_11, buf)
 }
 
 // NewArrayOp materialises a fresh guest array from the node list and returns
@@ -830,7 +828,7 @@ func (p *Perl) NewArrayOp(ctx context.Context, vals []byte) ([]byte, bool, error
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, vals)
 	buf = pbAppendUint64(buf, 3, uint64(len(vals)))
-	return p.valueOp(ctx, midNewArray, wasm2go.Inv_0_18, buf)
+	return p.valueOp(ctx, midNewArray, wasm2go.Inv_0_17, buf)
 }
 
 // NewHashOp materialises a fresh guest hash from the alternating key/value
@@ -840,7 +838,7 @@ func (p *Perl) NewHashOp(ctx context.Context, pairs []byte) ([]byte, bool, error
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, pairs)
 	buf = pbAppendUint64(buf, 3, uint64(len(pairs)))
-	return p.valueOp(ctx, midNewHash, wasm2go.Inv_0_19, buf)
+	return p.valueOp(ctx, midNewHash, wasm2go.Inv_0_18, buf)
 }
 
 // armInterrupt starts the cancellation watchdog for ctx: on ctx cancellation
@@ -981,7 +979,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	buf = pbAppendString(buf, 2, siteDir)
 	buf = pbAppendString(buf, 3, ArchName())
 	buf = pbAppendString(buf, 4, OSName())
-	resp, err := p.invoke(0, midNew, buf, wasm2go.Inv_0_17)
+	resp, err := p.invoke(0, midNew, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
 	}
@@ -996,7 +994,7 @@ func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 func (p *Perl) interruptAddr() (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_14)
+	resp, err := p.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}

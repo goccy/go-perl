@@ -18,16 +18,16 @@ package internal
 // that image was made, not everything it holds.
 //
 // The child has the parent's memory but none of its native call stack, so
-// it is entered through one bridge call (perl_fork_child) that resumes the
-// program right after the forking op and returns when the child's program
-// ends. Its exit status is published to the parent's process table, where
-// waitpid finds it like any spawned process's.
+// the runtime enters it through the function the guest gave its fork
+// (perl-wasm's perl_fork_child_entry), which resumes the program right after
+// the forking op and returns when the child's program ends. The runtime
+// publishes its exit status to the parent's process table, where waitpid
+// finds it like any spawned process's.
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 
 	wasm2go "github.com/goccy/perlwasm2go"
 	"github.com/goccy/perlwasm2go/base"
@@ -53,11 +53,12 @@ func (p *Perl) installForkHook() {
 }
 
 // forkGuest is the fork hook: it builds the child instance from p's current
-// state and starts it. It runs on the guest's goroutine, inside the
-// proc_fork import.
-func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, exited func(status int32)) (kill func(sig int32) error, err error) {
+// state, for the runtime to run. It runs on the guest's goroutine, inside
+// the proc_fork import. ended is called when the child's program has ended,
+// before its status is there for a wait to take.
+func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32) (child *base.Module, ended func(status int32), err error) {
 	if p.closed.Load() {
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	}
 	var from *base.SharedImage
 	if p.image != nil {
@@ -65,7 +66,7 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 	}
 	dup, err := base.ForkMemory(p.m.g, from, memoryCeiling(p.opts, p.m.g.MemSize.Load()))
 	if err != nil {
-		return nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
+		return nil, nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
 	}
 	image := p.image
 	if dup.Image != from {
@@ -91,29 +92,21 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32, e
 	}
 	if err := p.handOver(c); err != nil {
 		c.discard()
-		return nil, err
+		return nil, nil, err
 	}
-
-	if p.opts.HostProcess && !p.ForkChild() {
-		// The child is a child of the host process to the program, which
-		// the kernel does not know: the host process is told of its end
-		// as of any child's, with a SIGCHLD of its own, once the status is
-		// there for a wait to take. Native code's handler of the signal
-		// runs (an event loop's child watcher then reaps the child with
-		// waitpid). The program's own handler is told by the runtime
-		// (exited), which never passes the host's SIGCHLD on to it, so it
-		// runs once.
-		reported := exited
-		exited = func(status int32) {
-			reported(status)
-			hostChildEnded()
-		}
-	}
-	if !p.family.start(c, pid, exited) {
+	if !p.family.start(c, pid) {
 		c.discard()
-		return nil, errFamilyOver
+		return nil, nil, errFamilyOver
 	}
-	return c.signalForkChild, nil
+	// The runtime's run of the child is the one entry into its module.
+	m.mu.Lock()
+	return m.g, func(int32) {
+		m.mu.Unlock()
+		// Whichever way the program ended, no interpreter is left to
+		// finalize: only the host's side of the instance remains.
+		c.discard()
+		p.family.ended(c)
+	}, nil
 }
 
 // ForkChild reports whether the instance is a pseudo-process: one that a
@@ -123,53 +116,8 @@ func (p *Perl) ForkChild() bool {
 	return p.family != nil && p.family.origin != p
 }
 
-// runForkChild runs the child's program to its end, tears the instance
-// down, and returns the POSIX wait status to report to the parent.
-//
-// The bridge call covers the child's whole life as a process: its END
-// blocks, the flush of PerlIO and global destruction run inside it, and its
-// result is the status all of that leaves. A destructor that exits, calls
-// _exit or is killed during global destruction therefore ends the call the
-// way the same thing does anywhere else in the program.
-func (c *Perl) runForkChild(pid int32) (status int32) {
-	var buf []byte
-	buf = pbAppendUint64(buf, 1, c.h)
-	buf = pbAppendInt32(buf, 2, pid)
-	resp, err := c.invoke(0, midForkChild, buf, wasm2go.Inv_0_9)
-	if err == nil {
-		err = pbExtractError(resp)
-	}
-
-	exitCode := 255
-	var raw *base.WasiExitError
-	var killed *base.WasiSignalError
-	switch {
-	case errors.As(err, &killed):
-		// The default action of a signal the child neither handles nor
-		// ignores.
-		c.killed.CompareAndSwap(0, killed.Signal)
-	case errors.As(err, &raw):
-		exitCode = int(raw.Code)
-	case err != nil:
-		fmt.Fprintf(c.stderr(), "perl: fork child %d: %v\n", pid, err)
-	default:
-		if code := readScalarAtField(resp, 1, (*pbReader).readUint32); code != math.MaxUint32 {
-			exitCode = int(code)
-		} else {
-			fmt.Fprintf(c.stderr(), "perl: fork child %d: the instance holds no pending fork\n", pid)
-		}
-	}
-	// Whichever way the call ended, no interpreter is left to finalize:
-	// only the host's side of the instance remains.
-	c.discard()
-	if sig := c.killed.Load(); sig != 0 {
-		return sig & 0x7f
-	}
-	return int32(exitCode&0xff) << 8
-}
-
-// signalForkChild delivers sig to a running fork child: the proc_kill path
-// for a pseudo-process. A signal is posted to the child's guest, which
+// signalForkChild delivers sig to a running fork child, for the end of the
+// family. A signal is posted to the child's guest, which
 // handles it like any process does: its %SIG handler runs, or the signal is
 // ignored, or its default action ends the child. SIGKILL is not the guest's
 // to act on: it stops the child at its next op, even one in a busy loop

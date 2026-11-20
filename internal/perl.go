@@ -993,40 +993,13 @@ func PerlEval(h uint64, src string) (string, error) {
 	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
-// Run a forked child to its end.
-//
-// fork is emulated the way perl emulates it on Windows: when the guest
-// forks, the host duplicates the whole instance (the proc_fork host import)
-// and the duplicate becomes the child. The host calls this once on the NEW
-// instance, before any other entry point, with the pid it registered the
-// child under. The call resumes the program right after the forking op,
-// with fork's result being 0, and returns when the child's program ends.
-//
-// The child's program ends like a process: its END blocks run, PerlIO is
-// flushed, and the interpreter is destroyed (global destruction), all inside
-// this call. Returns the exit status (0..255) that leaves — a destructor
-// may still assign $? during global destruction — or UINT32_MAX when the
-// instance is not a freshly forked child. A destructor that calls exit or
-// _exit there ends the instance through proc_exit, as it ends a perl
-// process. Afterwards there is no interpreter: perl_close is a no-op.
-func PerlForkChild(h uint64, pid int32) (uint32, error) {
-	buf := pbNewBuf()
-	buf = pbAppendUint64(buf, 1, h)
-	buf = pbAppendInt32(buf, 2, pid)
-	resp, err := invokeMethod(0, 9, buf, wasm2go.Inv_0_9)
-	if err != nil {
-		return 0, err
-	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
-}
-
 func PerlHashDelete(h uint64, hv uint64, key string, keyLen uint32) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendString(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
-	resp, err := invokeMethod(0, 10, buf, wasm2go.Inv_0_10)
+	resp, err := invokeMethod(0, 9, buf, wasm2go.Inv_0_9)
 	if err != nil {
 		return "", err
 	}
@@ -1042,7 +1015,7 @@ func PerlHashGet(h uint64, hv uint64, key string, keyLen uint32) (string, error)
 	buf = pbAppendUint64(buf, 2, hv)
 	buf = pbAppendString(buf, 3, key)
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
-	resp, err := invokeMethod(0, 11, buf, wasm2go.Inv_0_11)
+	resp, err := invokeMethod(0, 10, buf, wasm2go.Inv_0_10)
 	if err != nil {
 		return "", err
 	}
@@ -1053,7 +1026,7 @@ func PerlHashKeys(h uint64, hv uint64) (string, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendUint64(buf, 2, hv)
-	resp, err := invokeMethod(0, 12, buf, wasm2go.Inv_0_12)
+	resp, err := invokeMethod(0, 11, buf, wasm2go.Inv_0_11)
 	if err != nil {
 		return "", err
 	}
@@ -1068,7 +1041,7 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 	buf = pbAppendUint64(buf, 4, uint64(keyLen))
 	buf = pbAppendString(buf, 5, val)
 	buf = pbAppendUint64(buf, 6, uint64(valLen))
-	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
+	resp, err := invokeMethod(0, 12, buf, wasm2go.Inv_0_12)
 	if err != nil {
 		return "", err
 	}
@@ -1103,7 +1076,7 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 func PerlInterruptAddr(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
+	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}
@@ -1120,7 +1093,7 @@ func PerlInvoke(h uint64, code uint64, wantScalar uint32, args string, argsLen u
 	buf = pbAppendUint64(buf, 3, uint64(wantScalar))
 	buf = pbAppendString(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(argsLen))
-	resp, err := invokeMethod(0, 15, buf, wasm2go.Inv_0_15)
+	resp, err := invokeMethod(0, 14, buf, wasm2go.Inv_0_14)
 	if err != nil {
 		return "", err
 	}
@@ -1137,7 +1110,7 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 	buf = pbAppendString(buf, 3, method)
 	buf = pbAppendString(buf, 4, args)
 	buf = pbAppendUint64(buf, 5, uint64(argsLen))
-	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
+	resp, err := invokeMethod(0, 15, buf, wasm2go.Inv_0_15)
 	if err != nil {
 		return "", err
 	}
@@ -1205,7 +1178,7 @@ func PerlNew(libDir string, siteDir string, archname string, osname string) (uin
 	buf = pbAppendString(buf, 2, siteDir)
 	buf = pbAppendString(buf, 3, archname)
 	buf = pbAppendString(buf, 4, osname)
-	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
+	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
 	}
@@ -1220,7 +1193,7 @@ func PerlNewArray(h uint64, vals string, valsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, vals)
 	buf = pbAppendUint64(buf, 3, uint64(valsLen))
-	resp, err := invokeMethod(0, 18, buf, wasm2go.Inv_0_18)
+	resp, err := invokeMethod(0, 17, buf, wasm2go.Inv_0_17)
 	if err != nil {
 		return "", err
 	}
@@ -1232,7 +1205,7 @@ func PerlNewHash(h uint64, pairs string, pairsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, pairs)
 	buf = pbAppendUint64(buf, 3, uint64(pairsLen))
-	resp, err := invokeMethod(0, 19, buf, wasm2go.Inv_0_19)
+	resp, err := invokeMethod(0, 18, buf, wasm2go.Inv_0_18)
 	if err != nil {
 		return "", err
 	}
@@ -1246,7 +1219,7 @@ func PerlRegisterNativeXs(h uint64, name string, fnId int32) error {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, name)
 	buf = pbAppendInt32(buf, 3, fnId)
-	_, err := invokeMethod(0, 20, buf, wasm2go.Inv_0_20)
+	_, err := invokeMethod(0, 19, buf, wasm2go.Inv_0_19)
 	return err
 }
 
@@ -1257,7 +1230,7 @@ func PerlRelease(h uint64, ids string, idsLen uint32) (string, error) {
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, ids)
 	buf = pbAppendUint64(buf, 3, uint64(idsLen))
-	resp, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
+	resp, err := invokeMethod(0, 20, buf, wasm2go.Inv_0_20)
 	if err != nil {
 		return "", err
 	}
@@ -1321,7 +1294,7 @@ func PerlRunProgram(h uint64, program string, programLen uint32) (uint32, error)
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendString(buf, 2, program)
 	buf = pbAppendUint64(buf, 3, uint64(programLen))
-	resp, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
+	resp, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
 	if err != nil {
 		return 0, err
 	}
@@ -1339,7 +1312,7 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, callbackId)
-	_, err := invokeMethod(0, 23, buf, wasm2go.Inv_0_23)
+	_, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
 	return err
 }
 
@@ -1404,7 +1377,7 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (u
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendUint64(buf, 5, c)
 	buf = pbAppendString(buf, 6, s)
-	resp, err := invokeMethod(0, 24, buf, wasm2go.Inv_0_24)
+	resp, err := invokeMethod(0, 23, buf, wasm2go.Inv_0_23)
 	if err != nil {
 		return 0, err
 	}
@@ -1413,7 +1386,7 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (u
 
 func PerlXsOp() (uint32, error) {
 	buf := pbNewBuf()
-	resp, err := invokeMethod(0, 25, buf, wasm2go.Inv_0_25)
+	resp, err := invokeMethod(0, 24, buf, wasm2go.Inv_0_24)
 	if err != nil {
 		return 0, err
 	}
@@ -1437,7 +1410,7 @@ func PerlXsOp() (uint32, error) {
 func PerlXsOpbox(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
-	resp, err := invokeMethod(0, 26, buf, wasm2go.Inv_0_26)
+	resp, err := invokeMethod(0, 25, buf, wasm2go.Inv_0_25)
 	if err != nil {
 		return 0, err
 	}

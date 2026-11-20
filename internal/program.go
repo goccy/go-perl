@@ -37,7 +37,7 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 	buf = pbAppendBytes(buf, 2, desc)
 	buf = pbAppendUint64(buf, 3, uint64(len(desc)))
 	disarm := p.armInterrupt(ctx)
-	resp, err := p.invoke(0, midRunProgram, buf, wasm2go.Inv_0_22)
+	resp, err := p.invoke(0, midRunProgram, buf, wasm2go.Inv_0_21)
 	interrupted := disarm()
 
 	var killed *base.WasiSignalError
