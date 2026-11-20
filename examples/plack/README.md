@@ -1,39 +1,34 @@
 # Plack / PSGI on go-perl
 
 Serve a real Perl web application — [Mojolicious](https://mojolicious.org/)
-running as a [PSGI](https://metacpan.org/pod/PSGI) app under
-[Plack](https://metacpan.org/pod/Plack) — from Go's `net/http`, with no
-external `perl` at runtime.
+running as a [PSGI](https://metacpan.org/pod/PSGI) app — from Go's
+`net/http`, with no `perl` installed, as one binary.
 
 ```
-net/http ──goroutine per request──► pool of warm *perl.Perl instances
-                                        │  psgi.Handle(ctx, p, w, r)
-                                        ▼
-                       go-perl/psgi (env/response conversion + adapter)
-                                        │
+net/http ──goroutine per request──► warm *perl.Perl workers
+                                        │  go-perl/psgi
                                         ▼
                                  app.psgi (Mojolicious)
 ```
 
-- A fixed pool of Perl instances boots at startup, each with Plack and the
-  Mojolicious app compiled. Instances are cheap: go-perl maps every
-  interpreter copy-on-write from a process-wide snapshot.
-- The request/response conversion (http.Request -> PSGI env, PSGI triple ->
-  ResponseWriter) and the Plack::Util adapter live in the reusable
-  `github.com/goccy/go-perl/psgi` package; this example only owns the pool.
-  Cancelling the request context stops the Perl code mid-run.
-- The dependencies are ordinary CPAN modules from the `cpanfile`, vendored
-  with carton into `./local`; the pool puts `local/lib/perl5` on `@INC`.
-- XS distributions in the `cpanfile` (Cpanel::JSON::XS here) are compiled
-  against go-perl's native XS SDK with `gperl xs build` and loaded into every
-  pool instance — see `/fast-json`.
+- `main.go` is ordinary go-perl embedding code: nothing in it names a CPAN
+  module, a module directory, or XS.
+- The application's dependencies are the `cpanfile`: Plack, Mojolicious, and
+  the XS distribution Cpanel::JSON::XS. `cpanfile.snapshot` pins the
+  releases.
+- `gperl mod download` fetches those releases into the module directory
+  (`~/gperl/pkg/mod`, shared by every project), builds each once — the XS
+  module against go-perl's native XS SDK — and writes `go.work`.
+- With that workspace, `go build` links everything in: the pure-Perl modules
+  embedded, the XS module statically. The interpreter runs on its default
+  sandboxed filesystem; only `app.psgi` is read from disk.
+- Every worker is a copy-on-write clone of one interpreter that loaded the
+  application, so loading runs once and the workers share memory.
 
 ## Run it
 
 ```sh
-make setup   # carton install + carton bundle (host perl; carton is
-             # bootstrapped into ./.tools if missing), then `gperl xs build`
-             # compiles the cpanfile's XS distributions into ./local/xs
+make setup   # gperl mod download: fetch, build, write go.work
 make run     # serves on http://localhost:8091
 ```
 
@@ -41,14 +36,19 @@ make run     # serves on http://localhost:8091
 curl http://localhost:8091/
 curl http://localhost:8091/json
 curl -d 'shout this' http://localhost:8091/echo
+curl http://localhost:8091/fast-json   # encoded by the XS module
 ```
 
-`make test` runs the same routes through httptest.
+`make test` runs the same routes through httptest. `go.work` holds paths of
+this machine and is not committed; `go mod tidy` and the other go commands
+work with or without it — without it the binary simply carries no CPAN
+modules.
 
-## Limitations
+## Without writing Go
 
-- `psgi.streaming` is off: delayed/streaming PSGI responses are buffered
-  guest-side and rejected if the app returns a code ref.
-- Response and request bodies cross the bridge base64-encoded (the bridge
-  speaks JSON, which cannot carry arbitrary bytes), so very large bodies pay
-  an encoding tax.
+The same application as a server binary, built by gperl alone:
+
+```sh
+make server                      # gperl psgi build -o plack-server app.psgi
+./plack-server --port 8091 --workers 8
+```

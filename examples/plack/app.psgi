@@ -1,6 +1,5 @@
-# app.psgi - a Mojolicious::Lite application served as a PSGI app.
-# Loaded by psgi.pl via Plack::Util::load_psgi; app->start('psgi') returns
-# the PSGI code ref.
+# app.psgi - a Mojolicious::Lite application served as a PSGI app:
+# app->start('psgi') returns the PSGI code ref.
 use Mojolicious::Lite -signatures;
 
 get '/' => sub ($c) {
@@ -29,7 +28,8 @@ get '/psgi-flags' => sub ($c) {
 };
 
 # Served through a real XS module: Cpanel::JSON::XS here is the stock CPAN
-# distribution compiled against go-perl's native XS SDK (`gperl xs build`).
+# distribution, compiled against go-perl's native XS SDK and linked into
+# the binary.
 use Cpanel::JSON::XS ();
 my $xs_json = Cpanel::JSON::XS->new->canonical->utf8;
 get '/fast-json' => sub ($c) {
