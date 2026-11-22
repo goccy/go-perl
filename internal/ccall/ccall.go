@@ -6,6 +6,15 @@
 // either way takes integer arguments (C integers and pointers) and returns
 // one integer.
 //
+// The functions are those whose signature the caller fixes: the entry
+// points of go-perl's XS SDK (a native module's own functions — its XSUBs,
+// pp, magic, PerlIO, keyword and destructor functions — are reached through
+// one of them), functions of the C library, and the SDK's calls back into
+// Go, with at most MaxCallArgs arguments into C and MaxArgs back. A native
+// module's own C functions, whose signatures the package cannot know, are
+// not called through it; a function with more arguments, floating-point
+// arguments, or a struct argument or result is out of its scope.
+//
 // A call into C runs the function on the thread's system stack through
 // runtime.cgocall, with its arguments in a Call that lives in memory the
 // caller keeps, so that on amd64 and arm64 nothing is allocated for it. A
