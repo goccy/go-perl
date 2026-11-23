@@ -141,7 +141,7 @@ func TestNativeParserOfItsOwn(t *testing.T) {
 	}
 	// line 3; no parser before the call (the program is compiled), none
 	// after its scope
-	if s := sv.String(); s != "3,,," && s != "3,,"  {
+	if s := sv.String(); s != "3,,," && s != "3,," {
 		t.Fatalf("got %q, want the line 3 and no parser before or after", s)
 	}
 }
@@ -201,4 +201,3 @@ func TestNativeCustomOpDescription(t *testing.T) {
 		{"not registered", `PerlAPI::custom_op_description(0)`, "custom|unknown custom operator|0"},
 	})
 }
-

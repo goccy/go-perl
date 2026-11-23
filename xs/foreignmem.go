@@ -23,18 +23,21 @@ func foreignPtr(p uintptr) unsafe.Pointer { return *(*unsafe.Pointer)(unsafe.Poi
 // type.
 
 // foreignRead copies len(dst) bytes at src into dst.
+//
 //go:noinline
 func foreignRead(dst []byte, src uintptr) {
 	copy(dst, unsafe.Slice((*byte)(foreignPtr(src)), len(dst)))
 }
 
 // foreignWrite copies b to dst.
+//
 //go:noinline
 func foreignWrite(dst uintptr, b []byte) {
 	copy(unsafe.Slice((*byte)(foreignPtr(dst)), len(b)), b)
 }
 
 // foreignMove copies n bytes from src to dst, both foreign.
+//
 //go:noinline
 func foreignMove(dst, src uintptr, n int) {
 	copy(unsafe.Slice((*byte)(foreignPtr(dst)), n), unsafe.Slice((*byte)(foreignPtr(src)), n))
