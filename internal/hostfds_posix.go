@@ -188,15 +188,21 @@ func closeFiles(files map[int32]*os.File) error {
 // process that are open, and the one the listing itself was read through,
 // which is closed when it returns.
 func openDescriptors() ([]int, error) {
-	entries, err := os.ReadDir("/dev/fd")
+	// Readdirnames, not os.ReadDir: on darwin os.ReadDir lstat's each
+	// entry, which fails for the descriptor the listing is read through.
+	dir, err := os.Open("/dev/fd")
 	if err != nil {
 		return nil, fmt.Errorf("list the descriptors of the process: %w", err)
 	}
-	fds := make([]int, 0, len(entries))
-	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
+	names, err := dir.Readdirnames(-1)
+	if err := errors.Join(err, dir.Close()); err != nil {
+		return nil, fmt.Errorf("list the descriptors of the process: %w", err)
+	}
+	fds := make([]int, 0, len(names))
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil {
-			return nil, fmt.Errorf("list the descriptors of the process: %q in /dev/fd: %w", entry.Name(), err)
+			return nil, fmt.Errorf("list the descriptors of the process: %q in /dev/fd: %w", name, err)
 		}
 		fds = append(fds, fd)
 	}
