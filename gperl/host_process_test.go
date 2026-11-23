@@ -86,6 +86,11 @@ func TestProcessIsTheHostProcess(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	// The interpreter's C library has Linux's sizes: the nodename of uname
+	// holds 64 bytes of the name, and Sys::Hostname reads gethostname into a
+	// buffer of MAXHOSTNAMELEN (64) bytes, which holds 63 and the NUL. A
+	// longer name of the host (darwin's may be up to 255 bytes) is cut there.
+	nodename, hostname := host[:min(len(host), 64)], host[:min(len(host), 63)]
 	dir := t.TempDir()
 	got := runForkScriptArgs(t, `
 use POSIX ();
@@ -138,8 +143,8 @@ report("getpriority=", (getpriority(0, 0) == getpriority(0, $$) ? "one value" : 
 		"times: user=spent system=spent",
 		"times: of the children=spent",
 		"pid of a command=the command's own",
-		"uname: nodename="+host,
-		"hostname="+host,
+		"uname: nodename="+nodename,
+		"hostname="+hostname,
 		"mkfifo=1 is a FIFO=1",
 		"read: through the FIFO",
 		"chown to the owner=1 fchown=1",
