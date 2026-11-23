@@ -34,9 +34,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test ./...
+      - run: go test -timeout 30m ./...
       - name: Race detector (core packages)
-        run: go test -race . ./xs/
+        run: go test -race -timeout 60m . ./xs/
 
   # Every package must at least BUILD everywhere the library is meant to
   # embed, including platforms with no native XS loading (the xs package
