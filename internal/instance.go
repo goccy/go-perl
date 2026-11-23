@@ -7,12 +7,14 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/netip"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -118,16 +120,14 @@ type Perl struct {
 	// word, resolved once at New so a context cancellation can fire without
 	// taking the instance lock a running Eval holds.
 	intrAddr uint64
-	// mapped is the copy-on-write mapping this instance lives in when it was
-	// built from the process snapshot; unmapped on Close. nil for instances
-	// that booted privately.
+	// mapped is the mapping of the runtime's the instance's memory is
+	// (base.MapMemory, a SharedImage's Memory, base.ForkMemory); unmapped on
+	// Close. nil for memory of the Go heap (bootPrivate).
 	mapped []byte
-	// image is the image mapped is a private mapping of, when a fork can
-	// start from it: the copy made for a fork child is then limited to the
-	// pages this instance changed since the image was made (see fork.go).
-	// It cannot be found from the mapping, hence the field. nil when the
-	// memory is no such mapping.
-	image *memoryImage
+	// onHeap is why the memory is of the Go heap when it was to be a
+	// mapping (onGoHeap), until native code holds addresses of it; nil
+	// for none.
+	onHeap error
 
 	// callbackDepth counts the callbacks of the guest that are running (one
 	// inside the other), and jump is a non-local exit of the guest that
@@ -231,6 +231,70 @@ type forkFamily struct {
 	// started from then on. A child that forks while the others are being
 	// ended would otherwise outlive them.
 	over bool
+	// errs are failures of the family's that no caller takes, by where they
+	// come from, which end returns to the first process's Close.
+	errs map[failureKind]*firstError
+}
+
+// failureKind is where a failure the family records (fail) comes from: the
+// first of each kind is kept, so that one that repeats does not hide one of
+// another kind.
+type failureKind string
+
+const (
+	failHostSIGCHLD failureKind = "the host process's SIGCHLD for a fork child"
+	failAdoption    failureKind = "signals the host process ignores after a library loaded"
+	failChildEnd    failureKind = "the release of a fork child"
+	failGoHeap      failureKind = "the instance's memory is of the Go heap, where native code holds addresses of it"
+)
+
+// firstError keeps the first of the failures it is given and counts the
+// others: a failure that repeats (at every fork, at every report of the
+// guest's) holds no more than one.
+type firstError struct {
+	err  error
+	more int
+}
+
+// add records err.
+func (e *firstError) add(err error) {
+	if e.err == nil {
+		e.err = err
+		return
+	}
+	e.more++
+}
+
+// take returns the failures recorded, and forgets them.
+func (e *firstError) take() error {
+	err := e.err
+	if e.more > 0 {
+		err = fmt.Errorf("%w (and %d more failures)", err, e.more)
+	}
+	*e = firstError{}
+	return err
+}
+
+// fail records err, of kind, for end to return. One that comes once the
+// family is over has no Close left to go to: it is said on the first
+// process's standard error.
+func (f *forkFamily) fail(kind failureKind, err error) {
+	f.mu.Lock()
+	over := f.over
+	if !over {
+		if f.errs == nil {
+			f.errs = map[failureKind]*firstError{}
+		}
+		if f.errs[kind] == nil {
+			f.errs[kind] = &firstError{}
+		}
+		f.errs[kind].add(err)
+	}
+	f.mu.Unlock()
+	if over {
+		// A failure to write it has nowhere further to go.
+		_, _ = fmt.Fprintf(f.origin.stderr(), "perl: %s: %v\n", kind, err)
+	}
 }
 
 // start records child as the running pseudo-process pid. It reports false,
@@ -246,6 +310,22 @@ func (f *forkFamily) start(child *Perl, pid int32) bool {
 	}
 	f.running[child] = pid
 	return true
+}
+
+// member returns the instance of the family whose module is m: the first
+// process or a running pseudo-process; nil for none.
+func (f *forkFamily) member(m *base.Module) *Perl {
+	if f.origin.m.g == m {
+		return f.origin
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for child := range f.running {
+		if child.m.g == m {
+			return child
+		}
+	}
+	return nil
 }
 
 // ended takes child, whose program has ended, off the running ones.
@@ -280,7 +360,7 @@ func (f *forkFamily) isOver() bool {
 // it kills. Every blocking call of the host's own is ended by the signal,
 // so the goroutine is normally gone a moment later; it gives back the
 // child's memory itself.
-func (f *forkFamily) end() {
+func (f *forkFamily) end() error {
 	f.mu.Lock()
 	f.over = true
 	children := make([]*Perl, 0, len(f.running))
@@ -289,6 +369,12 @@ func (f *forkFamily) end() {
 		children = append(children, child)
 		pids = append(pids, pid)
 	}
+	var errs []error
+	for _, kind := range slices.Sorted(maps.Keys(f.errs)) {
+		errs = append(errs, fmt.Errorf("%s: %w", kind, f.errs[kind].take()))
+	}
+	f.errs = nil
+	err := errors.Join(errs...)
 	f.mu.Unlock()
 	if len(pids) > 0 {
 		slices.Sort(pids)
@@ -303,16 +389,17 @@ func (f *forkFamily) end() {
 	// child that sees a command die, or a descriptor close, must not get
 	// to act on it.
 	for _, child := range children {
-		_ = child.signalForkChild(sigKILL)
+		err = errors.Join(err, child.signalForkChild(sigKILL))
 	}
 	// A child that has noticed by now has killed its commands itself
 	// (releaseHostState); this is for the ones that have not.
 	for _, child := range children {
-		child.wasi.KillCommands()
+		err = errors.Join(err, child.wasi.KillCommands())
 	}
 	for _, child := range children {
-		_ = child.wasi.CloseDescriptors()
+		err = errors.Join(err, child.wasi.CloseDescriptors())
 	}
+	return err
 }
 
 // Closed reports whether Close has run.
@@ -354,22 +441,38 @@ func (p *Perl) drainReleases() {
 
 // New boots a fresh instance from opts, mapping the process-wide
 // copy-on-write snapshot when possible (see snapshot.go).
-func New(opts InstanceOptions) (p *Perl, err error) {
+func New(opts InstanceOptions) (_ *Perl, err error) {
 	m := &Module{}
-	wasi := buildWASI(opts)
-	p = &Perl{m: m, wasi: wasi, opts: opts}
+	// A local, not the result: the cleanup below needs the instance on
+	// every failure, which returns no instance.
+	p := &Perl{m: m, opts: opts}
 	p.family = &forkFamily{origin: p}
+	wasi, err := buildWASI(opts, p.family)
+	if err != nil {
+		return nil, err
+	}
+	p.wasi = wasi
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, unbindHostSignals(wasi), wasi.CloseAll(), p.releaseMapping(), p.family.end())
+		}
+	}()
 
 	if err := p.boot(opts, wasi); err != nil {
 		return nil, err
 	}
-	p.installForkHook()
+	// The guest asks the dispatcher for the host's socket addresses
+	// (sockaddrMethodID) whenever it is shown the host's numbers.
+	if opts.HostProcess {
+		if err := p.EnsureDispatcher(); err != nil {
+			return nil, err
+		}
+	}
 
 	// Resolve the interrupt-flag address up front so Eval's context watchdog
 	// can fire without calling into a busy instance.
 	addr, err := p.interruptAddr()
 	if err != nil {
-		p.releaseMapping()
 		return nil, fmt.Errorf("resolve interrupt address: %w", err)
 	}
 	var addrErr error
@@ -379,7 +482,6 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 		}
 	})
 	if addrErr != nil {
-		p.releaseMapping()
 		return nil, addrErr
 	}
 	p.intrAddr = addr
@@ -415,9 +517,12 @@ func (p *Perl) writeHostABI() {
 // MarkMemoryBase gives an instance that runs native code its base, before
 // any code runs in it: the configuration decides it once, for the life of
 // the instance (a pointer pack 'p' made before a base appeared would be
-// taken for an address of the process afterwards). The memory does not
-// move (it is a reservation as large as it can grow).
+// taken for an address of the process afterwards). Memory that is a
+// mapping of the runtime's does not move: it is as long as the memory can
+// grow. Memory of the Go heap (bootPrivate) moves when it grows past its
+// room (MemoryReserveBytes), and the base is then out of date.
 func (p *Perl) MarkMemoryBase() {
+	p.nativeHoldsAddresses()
 	p.writeMemoryBase(false)
 }
 
@@ -438,119 +543,148 @@ func (p *Perl) writeMemoryBase(ifSet bool) {
 	})
 }
 
-// KeepRuntimeDescriptorsHigh has the Go runtime make the descriptors it
-// needs for itself now, above the numbers a program's descriptors get. A
-// program that is the host process (InstanceOptions.HostProcess) has the
-// host's descriptor numbers, lowest free first, and expects the first file
-// it opens to be descriptor 3. A command built around such a program calls
-// this while its packages are initialized: the earlier, the fewer
-// descriptors the runtime has made already.
-func KeepRuntimeDescriptorsHigh() { base.KeepRuntimeDescriptorsHigh() }
-
-// hostIDs is how a program that is the host process changes the process's
-// user and group ids when a package linked into the binary knows a way the
-// runtime does not have; see RegisterHostIDs. nil is the runtime's own way.
-var hostIDs base.HostIDs
-
-// RegisterHostIDs sets the way the ids of the host process are changed for
-// every instance made afterwards whose program is the host process. The
-// native module loader registers the C library's: a process that loads
-// native code is linked with a C runtime, and has to change its ids through
-// it. It is called from package initialization.
-func RegisterHostIDs(ids base.HostIDs) { hostIDs = ids }
-
 // buildWASI assembles the per-instance WASI host from the options. Sandbox
-// by default: no host environment, no host stdio.
-func buildWASI(opts InstanceOptions) *base.WasiStubs {
-	wasi := base.DefaultWASI()
-	wasi.SetEnv(opts.Env)
-	if opts.FS != nil {
-		wasi.SetFS(opts.FS)
+// by default: no host environment, no host stdio (a nil Stdin reads as
+// empty, a nil Stdout or Stderr discards; Perl-level print output is still
+// captured into the eval envelope by the bridge, these back the raw guest
+// fds 0/1/2), and a nil Dial, Resolve or Exec denies every connection,
+// lookup or spawn. Sockets the guest holds may accept, receive and send:
+// what it may reach is decided by Dial, and taking a local address to
+// accept connections on (Listen) makes the program a server on the host's
+// network, which only a program that is the host process may; its
+// descriptors are the host's. Any other program's datagram socket is bound
+// at a port the host picks when it first sends without having been bound
+// (sendsFromAPickedPort). fork is the fork family's (forker).
+func buildWASI(opts InstanceOptions, family *forkFamily) (*base.WasiStubs, error) {
+	cfg := base.WASIConfig{
+		Env:       opts.Env,
+		Stdin:     opts.Stdin,
+		Stdout:    opts.Stdout,
+		Stderr:    opts.Stderr,
+		FS:        opts.FS,
+		NetAccess: base.AllowAllNetAccess,
+		Dial:      opts.Dial,
+		Resolve:   opts.Resolve,
+		Listen:    sendsFromAPickedPort,
 	}
-	// The capability hooks are FAIL-CLOSED: the runtime allows when a hook
-	// is unset, so a nil hook installs an explicit deny-all here — the zero
-	// configuration grants nothing.
-	dial := opts.Dial
-	if dial == nil {
-		dial = func(string, string, string, int) bool { return false }
+	if opts.Exec != nil {
+		cfg.Exec = func(r base.ExecRequest) bool { return opts.Exec(r.Path, r.Argv) }
 	}
-	wasi.SetDialHook(dial)
-	resolve := opts.Resolve
-	if resolve == nil {
-		resolve = func(string) bool { return false }
-	}
-	wasi.SetResolveHook(resolve)
-	exec := opts.Exec
-	if exec == nil {
-		exec = func(string, []string) bool { return false }
-	}
-	wasi.SetExecHook(exec)
-	wasi.SetHostProcess(opts.HostProcess)
-	if opts.HostProcess && hostIDs != nil {
-		wasi.SetHostIDs(hostIDs)
-	}
-	// A program that is the host process is where the host is: when it
-	// names no time zone (TZ), its local time is the host's. An isolated
-	// program is in UTC.
 	if opts.HostProcess {
-		wasi.SetLocalZone(time.Local)
-	}
-	if opts.InheritDescriptors {
-		wasi.AdoptInheritedDescriptors()
+		if err := keepRuntimeHigh(); err != nil {
+			return nil, fmt.Errorf("perl: keep the Go runtime's descriptors high: %w", err)
+		}
+		proc, err := hostProcess()
+		if err != nil {
+			return nil, fmt.Errorf("perl: the host process: %w", err)
+		}
+		cfg.HostDescriptors = true
+		cfg.Process = proc
+		cfg.ProcessChanges = newHostChanges()
+		cfg.Users = base.HostUsers(nil)
+		cfg.System = base.HostSystem()
+		cfg.IPC = base.HostIPC()
+		cfg.Services = base.HostServices(nil)
+		cfg.Syscalls = base.HostSyscalls()
+		cfg.Signals = hostSignalsConfig()
+		cfg.TakeSignal = hostSignalTaker()
+		cfg.Numbering = base.HostNumbering()
+		cfg.MonotonicClock = hostMonotonicClock()
+		cfg.Listen = base.AllowAllListen
+		// A program that is the host process is where the host is: when it
+		// names no time zone (TZ), its local time is the host's, its working
+		// directory and environment are the host process's. An isolated
+		// program is in UTC.
+		cfg.LocalZone = time.Local
+		cfg.Chdir = hostChdir
+		cfg.Setenv = hostSetenv
 	}
 	if opts.Syslog {
-		wasi.SetSyslogger(NewSyslogger())
+		cfg.Syslog = NewSyslogger()
 	}
-	// Taking a local address to accept connections on makes the program a
-	// server on the host's network: only a program that is the host process
-	// may. Traffic on sockets it already has is not gated here (outbound
-	// connections have the Dial hook).
-	mayListen := opts.HostProcess
-	wasi.SetNetAccessHook(func(op string) bool { return op != "listen" || mayListen })
-	// Sandbox stdio by default: an unset stream does NOT fall through to the
-	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
-	// stderr to discard. (Perl-level print output is still captured into the
-	// eval envelope by the bridge; these back the raw guest fds 0/1/2.)
-	if opts.Stdin != nil {
-		wasi.SetStdin(opts.Stdin)
-	} else {
-		wasi.SetStdin(bytes.NewReader(nil))
+	if opts.Fork {
+		cfg.Fork = forker{family: family}
 	}
-	if opts.Stdout != nil {
-		wasi.SetStdout(opts.Stdout)
-	} else {
-		wasi.SetStdout(io.Discard)
+	// Last: the instance takes the files over from here on, and closes them.
+	if opts.InheritDescriptors {
+		files, err := inheritedFiles(opts)
+		if err != nil {
+			return nil, fmt.Errorf("perl: the descriptors the process was started with: %w", err)
+		}
+		cfg.Files = files
 	}
-	if opts.Stderr != nil {
-		wasi.SetStderr(opts.Stderr)
-	} else {
-		wasi.SetStderr(io.Discard)
+	wasi := base.NewWASI(cfg)
+	if opts.HostProcess {
+		if err := bindHostSignals(wasi); err != nil {
+			return nil, errors.Join(fmt.Errorf("perl: signals of the host process: %w", err), unbindHostSignals(wasi), wasi.CloseAll())
+		}
 	}
-	return wasi
+	return wasi, nil
+}
+
+// sendsFromAPickedPort is the Listen policy of a program that is not the
+// host process: of the local addresses a socket may take, only the one the
+// host binds a datagram socket at when it first sends to an address
+// without having been bound, the unspecified address at a port the host
+// picks, which the send needs. An address the runtime gives that is not an
+// IP and a port is denied.
+func sendsFromAPickedPort(network, address string) bool {
+	if network != "udp" {
+		return false
+	}
+	addr, err := netip.ParseAddrPort(address)
+	return err == nil && addr.Addr().IsUnspecified() && addr.Port() == 0
 }
 
 // boot brings the instance's wasm module up and obtains the interpreter
 // handle — via the copy-on-write snapshot when possible, privately otherwise.
 // The first instance of a process starts on memory of its own (see
-// sharedSnapshot).
+// sharedSnapshot). GO_PERL_NO_SHARED_IMAGE asks for memory of the Go heap
+// for every instance.
 func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
+	if os.Getenv("GO_PERL_NO_SHARED_IMAGE") != "" {
+		return p.bootPrivate(opts, wasi)
+	}
 	snap := sharedSnapshot(opts.StdlibDir, opts.SiteDir, opts.Env)
 	if snap == nil {
 		return p.bootOwn(opts, wasi)
 	}
 	if snap.err == nil {
-		ceiling := memoryCeiling(opts, snap.img.Size())
-		mem, err := snap.img.Memory(ceiling)
+		mem, err := snap.img.Memory(memoryCeiling(opts, snap.img.Size()))
 		if err == nil {
 			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
 			p.h = snap.handle
 			p.mapped = mem
-			p.image = snap.image.retain()
 			return nil
 		}
-		// Mapping failed (exotic platform / fd exhaustion): boot privately.
+		p.onGoHeap(err)
+	} else {
+		p.onGoHeap(snap.err)
 	}
 	return p.bootPrivate(opts, wasi)
+}
+
+// onGoHeap keeps why the memory of an instance that was to be a mapping of
+// the runtime's is of the Go heap instead (bootPrivate). It moves when it
+// grows past its room, which matters to native code that holds addresses
+// of it only: the reason is a failure once there is such code
+// (nativeHoldsAddresses). A system without such mappings
+// (errors.ErrUnsupported) is no failure.
+func (p *Perl) onGoHeap(err error) {
+	if !errors.Is(err, errors.ErrUnsupported) {
+		p.onHeap = err
+	}
+}
+
+// nativeHoldsAddresses is told that native code holds addresses of the
+// instance's memory from now on. Memory of the Go heap that the instance
+// has for a failure (onGoHeap) moves under them: the failure is the
+// instance's Close's. The instance runs all the same.
+func (p *Perl) nativeHoldsAddresses() {
+	if p.onHeap != nil {
+		p.family.fail(failGoHeap, p.onHeap)
+		p.onHeap = nil
+	}
 }
 
 // memoryCeiling is the limit of an instance's linear memory: the memory
@@ -559,56 +693,45 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 // one (or with one below least, the memory the instance starts with). It
 // is the length of the mapping the instance's memory is, and its growth
 // cap, however the instance gets its memory.
-func memoryCeiling(opts InstanceOptions, least uint64) uint64 {
+func memoryCeiling(opts InstanceOptions, least uint64) int {
 	switch {
 	case opts.MaxMemoryBytes == HostMemoryLimit:
 		if size, ok := hostMemory(); ok && size/wasmPage*wasmPage >= least {
-			return size / wasmPage * wasmPage
+			return int(size / wasmPage * wasmPage)
 		}
 	case opts.MaxMemoryBytes > 0:
-		if max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage; max >= least {
+		if max := opts.MaxMemoryBytes / wasmPage * wasmPage; uint64(max) >= least {
 			return max
 		}
 	}
 	return defaultMemoryCeiling
 }
 
-// bootOwn starts the instance on memory of its own: a private mapping that
-// keeps one address for the instance's life (native code holds pointers
-// into it), into which the data segments are installed before the module
-// is constructed on it. Nothing is imaged or copied first; the instance's
-// first fork images its memory (base.ForkMemory with the image
-// AnonymousMemoryInPlace returned).
+// bootOwn starts the instance on memory of its own: a mapping of the
+// runtime's that keeps one address for the instance's life (native code
+// holds pointers into it), into which the data segments are installed
+// before the module is constructed on it. Nothing is imaged or copied
+// first; what a fork does with the memory is base.ForkMemory's (see
+// fork.go: copy-on-write on Linux, a copy elsewhere). Without such a
+// mapping the memory is of the Go heap (bootPrivate, onGoHeap).
 func (p *Perl) bootOwn(opts InstanceOptions, wasi *base.WasiStubs) error {
-	img, g, mem, err := base.AnonymousMemoryInPlace(memoryCeiling(opts, wasm2go.InitialMemoryBytes), func(mem []byte) (*base.Module, error) {
-		wasm2go.InstallDataSegments(mem)
-		return wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes), nil
-	})
+	mem, err := base.MapMemory(memoryCeiling(opts, wasm2go.InitialMemoryBytes))
 	if err != nil {
-		// No mapping to be had: memory of the Go heap, which moves when
-		// it grows past what was reserved.
+		p.onGoHeap(err)
 		return p.bootPrivate(opts, wasi)
 	}
-	p.m.g = g
+	wasm2go.InstallDataSegments(mem)
+	p.m.g = wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes)
 	p.mapped = mem
-	p.image = (&memoryImage{img: img}).retain()
 	return p.start(opts)
 }
 
 // bootPrivate is the no-snapshot path: run the reactor initializer and
-// perl_new on a private linear memory. Where linear memory is a
-// reservation (base.MemReserved), the reservation holds the memory's whole
-// ceiling, as the mapping of an instance on memory of its own does: a
-// memory that outgrows its reservation moves to a larger one, and native
-// code holds the address it had. A memory of the Go heap gets the room
+// perl_new on a private linear memory of the Go heap, which gets the room
 // MemoryReserveBytes asks for, and moves when it grows past it.
 func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err error) {
 	ceiling := memoryCeiling(opts, wasm2go.InitialMemoryBytes)
-	reserve := opts.MemoryReserveBytes
-	if base.MemReserved && uint64(reserve) < ceiling {
-		reserve = int(ceiling)
-	}
-	if reserve > 0 {
+	if reserve := opts.MemoryReserveBytes; reserve > 0 {
 		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, reserve)
 	} else {
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
@@ -616,7 +739,7 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 	// Cap linear-memory growth so a runaway allocation fails in the guest
 	// instead of growing the host process unbounded: the same limit as an
 	// instance on a mapping has.
-	wasm2go.SetMaxMemory(p.m.g, ceiling)
+	wasm2go.SetMaxMemory(p.m.g, uint64(ceiling))
 	return p.start(opts)
 }
 
@@ -902,19 +1025,19 @@ func (p *Perl) releaseHostState() error {
 	if xsDynamicLoader != nil && xsDynamicLoader.Release != nil {
 		xsDynamicLoader.Release(p)
 	}
+	var err error
 	first := !p.ForkChild()
 	if !first && p.family.isOver() {
 		// A pseudo-process that goes because the family is over takes its
 		// commands with it. It does that itself, here, before its process
 		// table goes: whoever ended it may find the table gone already.
-		p.wasi.KillCommands()
+		err = p.wasi.KillCommands()
 	}
-	err := p.wasi.CloseAll()
+	err = errors.Join(err, unbindHostSignals(p.wasi), p.wasi.CloseAll())
 	if first && p.family != nil {
-		p.family.end()
+		err = errors.Join(err, p.family.end())
 	}
-	p.releaseMapping()
-	return err
+	return errors.Join(err, p.releaseMapping())
 }
 
 // stderr is where the host reports failures of a pseudo-process that has no
@@ -926,41 +1049,22 @@ func (p *Perl) stderr() io.Writer {
 	return io.Discard
 }
 
-// releaseMapping returns the instance's copy-on-write mapping to the OS. Must
-// only run when the module will never be entered again.
-func (p *Perl) releaseMapping() {
-	if p.mapped != nil {
-		// Under the lock of base.AccessMemory: another goroutine that is
-		// setting a flag in this memory (a signal for a fork child) is
-		// done first, and one that comes later finds the instance closed.
-		base.AccessMemory(p.m.g, func([]byte) { base.UnmapMemory(p.mapped) })
-		p.mapped = nil
+// releaseMapping returns the instance's mapping to the OS. Must only run
+// when the module will never be entered again.
+func (p *Perl) releaseMapping() error {
+	if p.mapped == nil {
+		return nil
 	}
-	p.image.release()
-	p.image = nil
-}
-
-// memoryImage is a memory image that instances map privately, counted by
-// the instances that may still fork from it: the image is closed, and its
-// pages go once the mappings have gone, when the last of them is done.
-type memoryImage struct {
-	img  *base.SharedImage
-	refs atomic.Int32
-}
-
-// retain counts one more instance that maps the image, and returns it.
-func (i *memoryImage) retain() *memoryImage {
-	if i != nil {
-		i.refs.Add(1)
+	// Under the lock of base.AccessMemory: another goroutine that is
+	// setting a flag in this memory (a signal for a fork child) is done
+	// first, and one that comes later finds the instance closed.
+	var err error
+	base.AccessMemory(p.m.g, func([]byte) { err = base.UnmapMemory(p.mapped) })
+	p.mapped = nil
+	if err != nil {
+		return fmt.Errorf("unmap the instance's memory: %w", err)
 	}
-	return i
-}
-
-// release counts an instance out.
-func (i *memoryImage) release() {
-	if i != nil && i.refs.Add(-1) == 0 {
-		i.img.Close()
-	}
+	return nil
 }
 
 // ArchTag names the kind of machine this process runs on, the way the

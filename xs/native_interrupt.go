@@ -21,22 +21,22 @@ package xs
 // locked, before native code runs for the guest; leaveNative is called
 // with what it returned once that code has returned. Calls nest (native
 // code can call back into the program, which can call native code again).
-func (s *state) enterNative() (prevThread uint64, prevInterrupt func(), entered bool) {
+func (s *state) enterNative() (prevThread uint64, end func(), entered bool) {
 	thread, ok := s.nativeThreadSelf()
 	if !ok {
 		return 0, nil, false
 	}
 	prevThread = s.nativeThread.Swap(thread)
-	return prevThread, s.p.SetOutsideInterrupt(s.interrupt), true
+	return prevThread, s.p.BeginOutside(s.interrupt), true
 }
 
-func (s *state) leaveNative(prevThread uint64, prevInterrupt func(), entered bool) {
+func (s *state) leaveNative(prevThread uint64, end func(), entered bool) {
 	if !entered {
 		return
 	}
-	// Taken back before the thread is forgotten: once SetOutsideInterrupt
-	// has returned, no signal can be sent to the thread for this call.
-	s.p.SetOutsideInterrupt(prevInterrupt)
+	// Ended before the thread is forgotten: once End has returned, no
+	// signal can be sent to the thread for this call.
+	end()
 	s.nativeThread.Store(prevThread)
 }
 

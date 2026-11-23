@@ -6,7 +6,8 @@ package perl
 // backends themselves live in the go-perl/fs package (fs.NewMemFS,
 // fs.NewHostFS, fs.DirFS). This file re-exports the types Config needs,
 // provides NewStdlibMemFS (the library default's filesystem), and wraps
-// every backend with a working /dev/null (perl requires one to boot).
+// every backend that has no /dev/null with a working one (perl requires one
+// to boot).
 
 import (
 	"archive/zip"
@@ -17,9 +18,11 @@ import (
 	iofs "io/fs"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
+	"github.com/goccy/perlwasm2go/base"
 )
 
 // FS is the read/write filesystem backend a Perl instance is given via
@@ -33,23 +36,41 @@ type File = goperlfs.File
 // MemFS is an in-memory read/write FS (see the go-perl/fs package).
 type MemFS = goperlfs.MemFS
 
-// withDevNull wraps a custom FS backend so the guest always sees a working
-// /dev/null. Perl itself requires one: a `-e` bootstrap (which perl_new uses)
-// opens the bit bucket as its script filehandle, so booting on an FS without
-// it fails outright. Reads hit EOF, writes are discarded, and everything
-// else passes through to the wrapped backend (whose own dev/null, if any, is
-// shadowed for consistency).
-func withDevNull(fsys FS) FS { return devNullFS{FS: fsys} }
+// withDevNull returns fsys as it is when it has a /dev/null of its own (the
+// host's filesystem has), and otherwise fsys wrapped so the guest sees a
+// working one. Perl itself requires one: a `-e` bootstrap (which perl_new
+// uses) opens the bit bucket as its script filehandle, so booting on an FS
+// without it fails outright. The wrapper's reads hit EOF, its writes are
+// discarded, and everything else passes through to the wrapped backend.
+// The host's filesystem is not wrapped, so that the runtime, which tells it
+// by its type, treats it as the host's (in how the instance's umask is
+// applied, access checks, locks and Unix-domain sockets).
+func withDevNull(fsys FS) (FS, error) {
+	fi, err := fsys.Stat(devNullName)
+	switch {
+	case err == nil && fi.Mode()&iofs.ModeCharDevice != 0:
+		return fsys, nil
+	case err == nil || errors.Is(err, iofs.ErrNotExist):
+		return devNullFS{FS: fsys}, nil
+	}
+	return nil, fmt.Errorf("look up /dev/null: %w", err)
+}
 
 type devNullFS struct{ FS }
 
 // Flock grants every lock on the bit bucket — it has no content for a lock
 // to protect — and leaves the files of the wrapped backend to that backend.
-func (d devNullFS) Flock(f File, lock goperlfs.FileLock, wait bool) error {
+// A backend that takes no locks (not a LockFS) fails the lock with ENOSYS,
+// as the runtime does for it unwrapped.
+func (d devNullFS) Flock(f File, how int) error {
 	if _, ok := f.(nullFile); ok {
 		return nil
 	}
-	return d.FS.Flock(f, lock, wait)
+	locks, can := d.FS.(base.LockFS)
+	if !can {
+		return syscall.ENOSYS
+	}
+	return locks.Flock(f, how)
 }
 
 // Mkfifo and Chown pass what the host filesystem can do beyond FS — make a
@@ -64,61 +85,6 @@ func (d devNullFS) Mkfifo(name string, perm iofs.FileMode) error {
 		return errors.ErrUnsupported
 	}
 	return maker.Mkfifo(name, perm)
-}
-
-func (d devNullFS) Chown(name string, uid, gid int, follow bool) error {
-	owner, can := d.FS.(interface {
-		Chown(name string, uid, gid int, follow bool) error
-	})
-	if !can {
-		return errors.ErrUnsupported
-	}
-	return owner.Chown(name, uid, gid, follow)
-}
-
-// HostPath and HostName pass on where the files of the wrapped backend are
-// in the host's filesystem, which is where a Unix-domain socket bound to
-// one of its names lives. A backend whose files are nowhere there (an
-// in-memory one) reports errors.ErrUnsupported and knows no host path: the
-// guest sees a filesystem that holds no sockets.
-func (d devNullFS) HostPath(name string) (string, error) {
-	located, can := d.FS.(interface {
-		HostPath(name string) (string, error)
-	})
-	if !can {
-		return "", errors.ErrUnsupported
-	}
-	return located.HostPath(name)
-}
-
-func (d devNullFS) HostName(path string) (string, bool) {
-	named, can := d.FS.(interface {
-		HostName(path string) (string, bool)
-	})
-	if !can {
-		return "", false
-	}
-	return named.HostName(path)
-}
-
-// OpenDescriptor passes on how the wrapped backend opens a file as a
-// descriptor of the host process, which is how a program that is the host
-// process (Config.HostProcess) has its files. A backend without files of
-// the host (an in-memory one) reports errors.ErrUnsupported, and so does
-// this one for the bit bucket when the wrapped backend has none of its own:
-// the file is then opened the usual way.
-func (d devNullFS) OpenDescriptor(name string, flag int, perm iofs.FileMode) (File, error) {
-	opener, can := d.FS.(interface {
-		OpenDescriptor(name string, flag int, perm iofs.FileMode) (File, error)
-	})
-	if !can {
-		return nil, errors.ErrUnsupported
-	}
-	f, err := opener.OpenDescriptor(name, flag, perm)
-	if err != nil && name == devNullName {
-		return nil, errors.ErrUnsupported
-	}
-	return f, err
 }
 
 const devNullName = "dev/null"
@@ -166,7 +132,8 @@ func (nullFile) WriteAt(p []byte, off int64) (int, error) { return len(p), nil }
 func (nullFile) Seek(offset int64, whence int) (int64, error) {
 	return 0, nil
 }
-func (nullFile) Close() error { return nil }
+func (nullFile) Close() error             { return nil }
+func (nullFile) Chown(uid, gid int) error { return nil }
 func (nullFile) Stat() (os.FileInfo, error) {
 	return nullFileInfo{name: "null", mode: devNullMode}, nil
 }

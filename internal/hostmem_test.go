@@ -106,9 +106,9 @@ func TestMemoryCeiling(t *testing.T) {
 	if got := memoryCeiling(InstanceOptions{MaxMemoryBytes: 1 << 20}, least); got != 8<<30 {
 		t.Errorf("below the memory the instance starts with: %d, want the default", got)
 	}
-	want := uint64(8 << 30)
+	want := 8 << 30
 	if size, ok := hostMemory(); ok {
-		want = size / wasmPage * wasmPage
+		want = int(size / wasmPage * wasmPage)
 	}
 	if got := memoryCeiling(InstanceOptions{MaxMemoryBytes: HostMemoryLimit}, least); got != want {
 		t.Errorf("the host's memory: %d, want %d", got, want)

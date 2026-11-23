@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	goperlfs "github.com/goccy/go-perl/fs"
 	"github.com/goccy/perlwasm2go/base"
 )
 
@@ -15,7 +16,8 @@ import (
 // release the flag was written into memory that was gone, or that the next
 // instance had been given.
 func TestMemoryIsReleasedUnderTheMemoryLock(t *testing.T) {
-	p, err := New(InstanceOptions{})
+	// The host's filesystem has the /dev/null perl needs.
+	p, err := New(InstanceOptions{FS: goperlfs.NewHostFS()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -68,6 +68,11 @@ const processMemoryMethodID = -10
 // GOPERL_KEYWORD_METHOD_ID).
 const keywordMethodID = -7
 
+// sockaddrMethodID is the reserved callback method id for turning a socket
+// address of the guest's C library into the host's and back (perl.cc
+// GOPERL_SOCKADDR_METHOD_ID; hostsockaddr.go).
+const sockaddrMethodID = -11
+
 // SetNativeXSHandler installs the dispatcher for native XSUB calls. req is
 // the thunk's raw request ([fn_id][cv][items][svs...]) and the returned
 // bytes are the raw response ([1][nret][svs...] on success, [0]+message on
@@ -234,6 +239,7 @@ func (p *Perl) XSHelperOp(op int32, a, b, c uint64, s string) (uint64, error) {
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendUint64(buf, 5, c)
 	buf = pbAppendString(buf, 6, s)
+	buf = pbAppendUint64(buf, 7, uint64(len(s)))
 	// The jump is taken off the module as soon as the operation returns,
 	// inside the call: invoke frees the request in the guest after it,
 	// which is guest code, and guest code run with the exception pending
@@ -320,14 +326,11 @@ func (p *Perl) HostDescriptor(fd int32) (uintptr, bool) {
 	return p.wasi.HostDescriptor(fd)
 }
 
-// SetOutsideInterrupt registers interrupt as what a signal for the program
-// does while the instance runs native code: it is called, from another
-// goroutine, for each signal that arrives meanwhile and would interrupt a
-// blocking call of the program's (see the runtime's
-// WasiStubs.SetOutsideInterrupt). It returns what was registered before,
-// for the caller to put back when the native code returns.
-func (p *Perl) SetOutsideInterrupt(interrupt func()) (previous func()) {
-	return p.wasi.SetOutsideInterrupt(interrupt)
+// BeginOutside registers interrupt as what a signal for the program does
+// while the instance runs native code (the runtime's
+// WasiStubs.BeginOutside); the returned function ends the call.
+func (p *Perl) BeginOutside(interrupt func()) (end func()) {
+	return p.wasi.BeginOutside(p.m.g, interrupt).End
 }
 
 func (p *Perl) RawMemory() []byte {
@@ -345,7 +348,7 @@ func (p *Perl) MemorySize() uint64 {
 // MemoryCeiling returns how far the instance's memory may grow (see
 // memoryCeiling): every address of the memory is below it.
 func (p *Perl) MemoryCeiling() uint64 {
-	return memoryCeiling(p.opts, p.m.g.MemSize.Load())
+	return uint64(memoryCeiling(p.opts, p.m.g.MemSize.Load()))
 }
 
 // MemorySizeWord returns where the instance keeps MemorySize: the word
@@ -581,6 +584,9 @@ func (d dispatcher) handle(methodID int32, req []byte) ([]byte, error) {
 			return append([]byte{0}, "no host call handler installed"...), nil
 		}
 		return call(req), nil
+	}
+	if methodID == sockaddrMethodID {
+		return hostSockaddrAnswer(req), nil
 	}
 	if methodID == destructorMethodID {
 		d.p.hookMu.RLock()

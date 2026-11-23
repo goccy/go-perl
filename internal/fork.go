@@ -12,10 +12,14 @@ package internal
 // and suspended inside the import while the duplicate is made, so it is
 // consistent.
 //
-// The duplicate is copy-on-write where the host can tell which pages an
-// instance changed (see base.ForkMemory): parent and child are private
-// mappings of one image, and a fork copies what the parent changed since
-// that image was made, not everything it holds.
+// Memory that is a mapping of the runtime's is duplicated by
+// base.ForkMemory. It is copy-on-write where the runtime can tell which
+// pages a process wrote (Linux): the first fork of an instance writes the
+// pages it has written to a memfd, which parent and child then map
+// privately, and a later fork copies the pages written since. Everywhere
+// else it is a copy: on darwin and mips, under vm.overcommit_memory=2,
+// with an RLIMIT_FSIZE below the memory, and with a System V segment
+// attached over the memory. Memory of the Go heap is copied (heapFork).
 //
 // The child has the parent's memory but none of its native call stack, so
 // the runtime enters it through the function the guest gave its fork
@@ -44,59 +48,50 @@ const sigKILL = 9
 // being ended because the first process of its family has ended.
 var errFamilyOver = errors.New("perl: fork: the program has ended")
 
-// installForkHook lets the guest fork when the configuration allows it.
-// Without the hook the import reports ENOSYS and fork returns undef.
-func (p *Perl) installForkHook() {
-	if p.opts.Fork {
-		p.wasi.SetForkHook(p.forkGuest)
+// forker is the Forker of a fork family (WASIConfig.Fork; without one the
+// import reports ENOSYS and fork returns undef). Every instance of the
+// family has it, the children too (a forked instance has its parent's
+// configuration): a fork is made by the instance that forks (forkGuest).
+type forker struct{ family *forkFamily }
+
+func (f forker) Fork(parent *base.Module, child *base.WasiStubs, pid int32) (*base.Module, func(status int32), error) {
+	p := f.family.member(parent)
+	if p == nil {
+		return nil, nil, errors.New("perl: fork of an instance that is not of the fork family")
 	}
+	return p.forkGuest(parent, child, pid)
 }
 
-// forkGuest is the fork hook: it builds the child instance from p's current
-// state, for the runtime to run. It runs on the guest's goroutine, inside
-// the proc_fork import. ended is called when the child's program has ended,
-// before its status is there for a wait to take.
+// forkGuest builds the child instance from p's current state, for the
+// runtime to run. It runs on the guest's goroutine, inside the proc_fork
+// import. ended is called when the child's program has ended, before its
+// status is there for a wait to take.
 func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32) (child *base.Module, ended func(status int32), err error) {
 	if p.closed.Load() {
 		return nil, nil, ErrClosed
 	}
-	var from *base.SharedImage
-	if p.image != nil {
-		from = p.image.img
-	}
-	dup, err := base.ForkMemory(p.m.g, from, memoryCeiling(p.opts, p.m.g.MemSize.Load()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
-	}
-	image := p.image
-	if dup.Image != from {
-		image = &memoryImage{img: dup.Image}
-		if dup.Image == nil {
-			image = nil
-		}
-		if dup.Rebased {
-			p.image.release()
-			p.image = image.retain()
-		}
-	}
-
 	m := &Module{}
-	c := &Perl{m: m, wasi: childWASI, opts: p.opts, mapped: dup.Memory, image: image.retain(), h: p.h, intrAddr: p.intrAddr, family: p.family}
-	m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, dup.Memory, dup.Size, dup.Globals)
+	c := &Perl{m: m, wasi: childWASI, opts: p.opts, h: p.h, intrAddr: p.intrAddr, family: p.family}
+	if p.mapped != nil {
+		mem, size, globals, err := base.ForkMemory(p.m.g)
+		if err != nil {
+			return nil, nil, fmt.Errorf("perl: duplicate the forking instance's memory: %w", err)
+		}
+		c.mapped = mem
+		m.g = wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, mem, size, globals)
+	} else {
+		m.g = heapFork(p.m.g, childWASI, m, memoryCeiling(p.opts, p.m.g.MemSize.Load()))
+		c.onHeap = p.onHeap
+	}
 	c.writeMemoryBase(true)
-	// The copied fd table came with the parent's hook; the child's forks
-	// must snapshot the child.
-	c.installForkHook()
 	if p.OnFork != nil {
 		p.OnFork(c)
 	}
 	if err := p.handOver(c); err != nil {
-		c.discard()
-		return nil, nil, err
+		return nil, nil, errors.Join(err, c.discard())
 	}
 	if !p.family.start(c, pid) {
-		c.discard()
-		return nil, nil, errFamilyOver
+		return nil, nil, errors.Join(errFamilyOver, c.discard())
 	}
 	// The runtime's run of the child is the one entry into its module.
 	m.mu.Lock()
@@ -104,9 +99,27 @@ func (p *Perl) forkGuest(_ *base.Module, childWASI *base.WasiStubs, pid int32) (
 		m.mu.Unlock()
 		// Whichever way the program ended, no interpreter is left to
 		// finalize: only the host's side of the instance remains.
-		c.discard()
+		if err := c.discard(); err != nil {
+			p.family.fail(failChildEnd, fmt.Errorf("pid %d: %w", pid, err))
+		}
 		p.family.ended(c)
 	}, nil
+}
+
+// heapFork returns the child's module of a fork of parent, whose memory is
+// of the Go heap (bootPrivate): a copy of the memory, as far as its size,
+// and of the globals, made while parent is stopped in its fork; the child's
+// memory is of the Go heap too, with the parent's room (it grows in place
+// as far as the parent's does) and the parent's ceiling.
+func heapFork(parent *base.Module, childWASI *base.WasiStubs, m *Module, ceiling int) *base.Module {
+	var memory []byte
+	base.AccessMemory(parent, func(mem []byte) {
+		memory = make([]byte, parent.MemSize.Load(), cap(mem))
+		copy(memory, mem)
+	})
+	g := wasm2go.NewFromSnapshot(childWASI, envStubs{m: m}, wasmifyStubs{m: m}, memory, uint64(len(memory)), base.SaveGlobals(parent))
+	wasm2go.SetMaxMemory(g, uint64(ceiling))
+	return g
 }
 
 // ForkChild reports whether the instance is a pseudo-process: one that a
@@ -152,9 +165,9 @@ func (c *Perl) signalForkChild(sig int32) error {
 
 // discard drops an instance without running the interpreter's teardown:
 // the end of a child that was killed, left through _exit, or never started.
-func (c *Perl) discard() {
+func (c *Perl) discard() error {
 	if !c.closed.CompareAndSwap(false, true) {
-		return
+		return nil
 	}
-	c.releaseHostState()
+	return c.releaseHostState()
 }

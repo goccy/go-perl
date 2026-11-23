@@ -25,15 +25,13 @@ package internal
 // with gperl build), and for that one building the snapshot first — start an
 // interpreter, write its memory into an image, map the image again — costs
 // as much as starting it. The first instance starts on memory of its own
-// that keeps one address (base.AnonymousMemoryInPlace); its first fork
-// images its memory as any fork does.
+// that keeps one address (base.MapMemory), which its forks duplicate as
+// any fork does (see fork.go: copy-on-write on Linux, a copy elsewhere).
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"os"
 	"sync"
 
 	wasm2go "github.com/goccy/perlwasm2go"
@@ -58,10 +56,7 @@ const defaultMemoryCeiling = 8 << 30
 const wasmPage = 65536
 
 type perlSnapshot struct {
-	img *base.SharedImage
-	// image is img as the instances built on the snapshot hold it. The
-	// snapshot holds it too, for the life of the process.
-	image  *memoryImage
+	img    *base.SharedImage
 	handle uint64
 	err    error
 }
@@ -80,9 +75,6 @@ var (
 // own. A failure is remembered, not retried: New then initializes each
 // instance privately, which is correct, only larger.
 func sharedSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
-	if os.Getenv("GO_PERL_NO_SHARED_IMAGE") != "" {
-		return &perlSnapshot{err: fmt.Errorf("disabled by GO_PERL_NO_SHARED_IMAGE")}
-	}
 	key := snapshotKey(stdlibDir, siteDir, env)
 	snapMu.Lock()
 	defer snapMu.Unlock()
@@ -111,11 +103,20 @@ func buildSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 				g, err = nil, fmt.Errorf("starting the interpreter to snapshot panicked: %v", r)
 			}
 		}()
-		wasi := base.DefaultWASI()
-		wasi.SetEnv(env)
-		wasi.SetStdin(bytes.NewReader(nil))
-		wasi.SetStdout(io.Discard)
-		wasi.SetStderr(io.Discard)
+		// The interpreter is started on the host filesystem, which has the
+		// /dev/null perl_new opens; its stdio is empty and discarded.
+		hostFS, err := base.HostFS("/")
+		if err != nil {
+			return nil, err
+		}
+		wasi := base.NewWASI(base.WASIConfig{Env: env, FS: hostFS})
+		// The image is the guest's memory alone: the instance's host state
+		// goes once it is started.
+		defer func() {
+			if cerr := wasi.CloseAll(); cerr != nil {
+				g, err = nil, errors.Join(err, fmt.Errorf("close the snapshotted instance: %w", cerr))
+			}
+		}()
 
 		mod := &Module{}
 		mod.g = wasm2go.NewWithWASI(wasi, envStubs{m: mod}, wasmifyStubs{m: mod})
@@ -152,5 +153,5 @@ func buildSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	if e := img.Err(); e != nil {
 		return &perlSnapshot{err: e}
 	}
-	return &perlSnapshot{img: img, image: (&memoryImage{img: img}).retain(), handle: handle}
+	return &perlSnapshot{img: img, handle: handle}
 }

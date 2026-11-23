@@ -4,6 +4,8 @@ package internal
 // loader to the public AddXSDir entry, without the public package importing
 // the loader (which would drag purego/dlopen into every embedder).
 
+import "fmt"
+
 // xsDirLoader is installed by the xs package's init.
 var xsDirLoader func(p *Perl, dir string) error
 
@@ -18,6 +20,7 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 	if xsDirLoader == nil {
 		return false, nil
 	}
+	p.nativeHoldsAddresses()
 	return true, xsDirLoader(p, dir)
 }
 
@@ -45,8 +48,25 @@ type XSDynamicLoader struct {
 var xsDynamicLoader *XSDynamicLoader
 
 // RegisterXSDynamicLoader wires the loader behind XSDynamic. Called by the
-// xs package's init; not for application use.
-func RegisterXSDynamicLoader(l XSDynamicLoader) { xsDynamicLoader = &l }
+// xs package's init; not for application use. A library that loads may
+// change the host process's signal actions as it initializes (ignore
+// SIGPIPE, say): the signals the process then ignores are recorded
+// (adoptIgnoredSignals).
+func RegisterXSDynamicLoader(l XSDynamicLoader) {
+	open := l.Open
+	l.Open = func(p *Perl, path string, flags int) (uint64, error) {
+		lib, err := open(p, path, flags)
+		if err != nil || !p.opts.HostProcess {
+			return lib, err
+		}
+		if err := adoptIgnoredSignals(); err != nil {
+			// The library is loaded: the failure is the program's Close's.
+			p.family.fail(failAdoption, fmt.Errorf("after loading %s: %w", path, err))
+		}
+		return lib, nil
+	}
+	xsDynamicLoader = &l
+}
 
 // XSDynamic returns the dynamic loader the xs package registered; linked
 // is false when the package is not part of the binary.

@@ -547,14 +547,14 @@ type CallbackHandler interface {
 }
 
 // Options configure the module the generated API runs on. The zero
-// value is what Init uses: the default WASI implementation (the host
-// filesystem, environment and stdio), the engine's own initial memory
+// value is what Init uses: the WASI implementation of the host process,
+// base.NewWASI(base.HostWASIConfig()), the engine's own initial memory
 // reservation, and its wasm32 4 GiB ceiling.
 type Options struct {
 	// WASI replaces the wasi_snapshot_preview1 implementation the guest
-	// runs against. base.DefaultWASI() returns the default one, whose
-	// setters scope the filesystem to a directory (or an arbitrary
-	// base.FS), replace the environment and redirect stdio; any
+	// runs against. base.NewWASI builds one from a base.WASIConfig (its
+	// filesystem, environment, stdio and the policies of what the guest
+	// may do; base.HostWASIConfig() is the host process's); any
 	// implementation of the interface will do. nil keeps the default.
 	WASI base.Wasi_snapshot_preview1Imports
 
@@ -620,7 +620,7 @@ func initModule(opts Options) (retErr error) {
 	wm := wasmifyStubs{m: m}
 	wasi := opts.WASI
 	if wasi == nil {
-		wasi = base.DefaultWASI()
+		wasi = base.NewWASI(base.HostWASIConfig())
 	}
 	if opts.MemoryReserveBytes > 0 {
 		m.g = wasm2go.NewWithWASIReserve(wasi, env, wm, opts.MemoryReserveBytes)
@@ -830,7 +830,10 @@ func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr)
 var errCallbackJumped = errors.New("the callback ended with an exception of the guest pending")
 
 // callbackJumped is what callback_invoke returns to the guest for a
-// callback whose handler returned errCallbackJumped.
+// callback whose handler returned errCallbackJumped. It is the bridge's
+// contract for a callback that unwound: no answer was written, and the
+// guest's caller of callback_invoke returns at once without reading one.
+// No encoded answer is -1.
 const callbackJumped int64 = -1
 
 // wasmifyStubs implements wasm2go/base.WasmifyImports: the single
@@ -1319,7 +1322,7 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 // SV micro-operations the host-side SDK vtable is built from. The full op
 // table lives in perl.cc (and mirrors the GOPERL_OP_* enum in the go-perl
 // native SDK header). An operation takes three u64 operands a, b and c and
-// a string s; a token (an address of the linear memory) is always an
+// a string s of slen bytes, which may hold NULs; a token (an address of the linear memory) is always an
 // operand of its own, whole. It answers a u64; an operation that answers
 // two values leaves the second in the operation box (result2, see
 // perl_xs_opbox), where the host reads it right after the operation.
@@ -1369,7 +1372,7 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 //	               behavioral (tie) magic
 //
 // Unknown ops return 0.
-func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (uint64, error) {
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string, slen uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, op)
@@ -1377,6 +1380,7 @@ func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string) (u
 	buf = pbAppendUint64(buf, 4, b)
 	buf = pbAppendUint64(buf, 5, c)
 	buf = pbAppendString(buf, 6, s)
+	buf = pbAppendUint64(buf, 7, slen)
 	resp, err := invokeMethod(0, 23, buf, wasm2go.Inv_0_23)
 	if err != nil {
 		return 0, err
@@ -1399,7 +1403,7 @@ func PerlXsOp() (uint32, error) {
 // ([a][b][c][result][result2] as u64, [op] as i32, [slen] as u32, then the
 // slen bytes of s: 48 bytes before s, GOPERL_OPBOX_STR bytes of room for
 // s). The host writes an operation's arguments there and calls perl_xs_op,
-// which runs it as perl_xs_helper does (s NUL-terminated) and leaves its
+// which runs it as perl_xs_helper does and leaves its
 // result in the box; it answers 0, so that the bridge sends nothing back. A
 // string longer than the box holds goes through perl_xs_helper. Either way
 // the second value of an operation that answers two is in result2 when the

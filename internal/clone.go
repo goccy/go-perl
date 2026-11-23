@@ -9,6 +9,7 @@ package internal
 // work per worker.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -67,22 +68,24 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	}
 
 	m := &Module{}
-	wasi := buildWASI(p.opts)
-	c := &Perl{m: m, wasi: wasi, opts: p.opts, UserHandler: userHandler}
+	c := &Perl{m: m, opts: p.opts, UserHandler: userHandler}
+	c.family = &forkFamily{origin: c}
+	wasi, err := buildWASI(p.opts, c.family)
+	if err != nil {
+		return nil, errors.Join(err, base.UnmapMemory(mem))
+	}
+	c.wasi = wasi
 	m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: m}, wasmifyStubs{m: m}, mem, img.Size(), img.Globals())
 	c.mapped = mem
 	c.h = p.h
 	c.intrAddr = p.intrAddr
 	c.writeMemoryBase(true)
-	c.family = &forkFamily{origin: c}
-	c.installForkHook()
 	if p.HasThread() {
 		c.KeepOnOneThread() // a thread of its own: see instanceThread
 	}
 
 	if err := p.handOver(c); err != nil {
-		c.Close()
-		return nil, err
+		return nil, errors.Join(err, c.Close())
 	}
 	return c, nil
 }

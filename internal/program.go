@@ -44,16 +44,18 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 	if errors.As(err, &killed) {
 		// A signal ended the program where it stood: like a process killed
 		// by a signal, it gets no orderly end.
-		p.discard()
-		return 0, &SignalError{Signal: int(killed.Signal)}
+		ended := &SignalError{Signal: int(killed.Signal)}
+		if err := p.discard(); err != nil {
+			return 0, errors.Join(ended, err)
+		}
+		return 0, ended
 	}
 	var raw *base.WasiExitError
 	if errors.As(err, &raw) {
 		// The program left through the raw _exit (POSIX::_exit, the end of
 		// an exec, or an exit from a destructor during global destruction):
 		// nothing of the interpreter may run again.
-		p.discard()
-		return int(raw.Code), nil
+		return int(raw.Code), p.discard()
 	}
 	if err != nil {
 		// The call did not return: the guest trapped (a wild pointer, an
@@ -61,8 +63,7 @@ func (p *Perl) RunProgram(ctx context.Context, desc []byte) (status int, err err
 		// it was doing, so nothing of the interpreter may run again — no
 		// END blocks, no destructors on half-updated structures — and the
 		// program has not ended well, whatever it had done until then.
-		p.discard()
-		return crashStatus, fmt.Errorf("perl: the interpreter crashed: %w", err)
+		return crashStatus, errors.Join(fmt.Errorf("perl: the interpreter crashed: %w", err), p.discard())
 	}
 	if err = pbExtractError(resp); err != nil {
 		return 0, err

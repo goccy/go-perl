@@ -69,15 +69,20 @@ func New(cfg Config) (*Perl, error) {
 		cfg.StdlibDir = "/"
 	}
 
+	// Perl cannot boot without a /dev/null (the -e bootstrap opens the bit
+	// bucket as its script filehandle); synthesize one over a backend that
+	// has none.
+	fsys, err := withDevNull(cfg.FS)
+	if err != nil {
+		return nil, err
+	}
+
 	p := &Perl{}
 	raw, err := internal.New(internal.InstanceOptions{
-		StdlibDir: cfg.StdlibDir,
-		SiteDir:   cfg.SiteDir,
-		Env:       cfg.Env,
-		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
-		// bit bucket as its script filehandle); synthesize one over any
-		// backend.
-		FS:                 withDevNull(cfg.FS),
+		StdlibDir:          cfg.StdlibDir,
+		SiteDir:            cfg.SiteDir,
+		Env:                cfg.Env,
+		FS:                 fsys,
 		Dial:               cfg.Dial,
 		Resolve:            cfg.Resolve,
 		Exec:               cfg.Exec,
