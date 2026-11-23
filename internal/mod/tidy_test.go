@@ -585,6 +585,26 @@ func TestExtractArchiveFormats(t *testing.T) {
 			t.Errorf("%s: left a tree behind", name)
 		}
 	}
+	// A link to an absolute path, and a file written through it, write
+	// nothing outside the tree.
+	outside := t.TempDir()
+	through := tarWith("through.tar.gz",
+		&tar.Header{Name: "D-1/abs", Typeflag: tar.TypeSymlink, Linkname: outside},
+		&tar.Header{Name: "D-1/abs/pwned", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1})
+	if err := extract(through, filepath.Join(dir, "Through@1")); err == nil {
+		t.Error("absolute link: extracted")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "pwned")); !os.IsNotExist(err) {
+		t.Errorf("a file was written outside the tree: %v", err)
+	}
+	// Links that each name a path inside, but lead outside one through the
+	// other, are refused.
+	chain := tarWith("chain.tar.gz",
+		&tar.Header{Name: "D-1/x", Typeflag: tar.TypeSymlink, Linkname: "."},
+		&tar.Header{Name: "D-1/y", Typeflag: tar.TypeSymlink, Linkname: "x/../.."})
+	if err := extract(chain, filepath.Join(dir, "Chain@1")); err == nil {
+		t.Error("chained links: extracted")
+	}
 	if err := extract(filepath.Join(dir, "missing.tar.gz"), filepath.Join(dir, "Missing@1")); err == nil {
 		t.Error("extracted a missing archive")
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/goccy/go-perl/internal/gperl"
@@ -96,6 +97,17 @@ func TestCrossBuild(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			inspectCrossBinary(t, out, c)
+			// A C library's native modules have a directory of their own.
+			if c.triple != "" {
+				native := "linux_" + c.goarch
+				if strings.HasSuffix(c.triple, "-musl") {
+					native += "_musl"
+				}
+				archives, err := filepath.Glob(filepath.Join(os.Getenv("GPERLMODCACHE"), "Demo-XS@0.01", "gperl", "abi*", native, "auto", "Demo", "XS", "XS.a"))
+				if err != nil || len(archives) != 1 {
+					t.Errorf("Demo::XS built for %s: %v (%v)", native, archives, err)
+				}
+			}
 			if runtime.GOOS != "linux" || runtime.GOARCH != c.goarch {
 				return
 			}

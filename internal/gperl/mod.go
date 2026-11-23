@@ -26,13 +26,13 @@ func withDeps(fn func(*mod.Manager) error) error {
 
 // finishSync reports a finished sync and, when the project directory is a
 // Go module, wires the dependencies into its builds.
-func finishSync(m *mod.Manager, projectDir string) error {
-	deps, err := loadDeps(context.Background(), m, projectDir, mod.BuildTarget())
+func finishSync(m *mod.Manager, projectDir, target string) error {
+	deps, err := loadDeps(context.Background(), m, projectDir, target)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "gperl: %d distributions ready in %s\n", len(deps.trees), m.Dir)
-	return writeProjectGoWork(m, projectDir, deps)
+	return writeProjectGoWork(m, projectDir, target, deps)
 }
 
 // ModTidy resolves the project's cpanfile, writes cpanfile.snapshot, and
@@ -41,10 +41,11 @@ func finishSync(m *mod.Manager, projectDir string) error {
 // dependencies.
 func ModTidy(projectDir string) error {
 	return withDeps(func(m *mod.Manager) error {
-		if _, err := syncDeps(context.Background(), m, projectDir, mod.BuildTarget(), true); err != nil {
+		target := buildTarget()
+		if _, err := syncDeps(context.Background(), m, projectDir, target, true); err != nil {
 			return err
 		}
-		return finishSync(m, projectDir)
+		return finishSync(m, projectDir, target)
 	})
 }
 
@@ -52,7 +53,7 @@ func ModTidy(projectDir string) error {
 // names; a project without a snapshot is resolved first. In a Go module it
 // also writes go.work.
 func ModDownload(projectDir string) error {
-	return withDeps(func(m *mod.Manager) error { return finishSync(m, projectDir) })
+	return withDeps(func(m *mod.Manager) error { return finishSync(m, projectDir, buildTarget()) })
 }
 
 // Get adds modules to the project's cpanfile — "Module::Name" for the
@@ -64,10 +65,11 @@ func Get(projectDir string, modules ...string) error {
 		if _, err := m.Get(context.Background(), projectDir, modules...); err != nil {
 			return err
 		}
-		if _, err := syncDeps(context.Background(), m, projectDir, mod.BuildTarget(), true); err != nil {
+		target := buildTarget()
+		if _, err := syncDeps(context.Background(), m, projectDir, target, true); err != nil {
 			return err
 		}
-		return finishSync(m, projectDir)
+		return finishSync(m, projectDir, target)
 	})
 }
 
@@ -75,3 +77,7 @@ func Get(projectDir string, modules ...string) error {
 func CleanModCache() error {
 	return withDeps(func(m *mod.Manager) error { return m.Clean() })
 }
+
+// buildTarget is the platform a build is for (mod.BuildTarget), as its
+// native modules are built (nativeTarget).
+func buildTarget() string { return nativeTarget(mod.BuildTarget()) }

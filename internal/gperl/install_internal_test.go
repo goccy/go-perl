@@ -53,6 +53,11 @@ func TestCToolchainPrecedence(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(cc, []string{filepath.Join(binDir, "cc")}) || !reflect.DeepEqual(ar, []string{"ar"}) {
 		t.Fatalf("PATH compiler: %v %v %v", cc, ar, err)
 	}
+	// This platform's musl variant is still this platform: the compiler on
+	// PATH builds for it.
+	if cc, _, err := cToolchain(host + muslSuffix); err != nil || !reflect.DeepEqual(cc, []string{filepath.Join(binDir, "cc")}) {
+		t.Fatalf("PATH compiler for musl: %v %v", cc, err)
+	}
 	if _, _, err := cToolchain("linux_riscv64"); err == nil || !strings.Contains(err.Error(), "gperl install toolchain") {
 		t.Fatalf("cross target without a cross compiler: %v", err)
 	}
@@ -74,6 +79,11 @@ func TestCToolchainPrecedence(t *testing.T) {
 	}
 	if cc, _, err = cToolchain(other); err != nil || !reflect.DeepEqual(cc, want) {
 		t.Fatalf("managed cross compiler: %v %v", cc, err)
+	}
+	// and told musl for a musl target.
+	want[len(want)-1] = strings.TrimSuffix(want[len(want)-1], "-gnu") + "-musl"
+	if cc, _, err = cToolchain(other + muslSuffix); err != nil || !reflect.DeepEqual(cc, want) {
+		t.Fatalf("managed cross compiler for musl: %v %v", cc, err)
 	}
 
 	// What the environment names wins over both.

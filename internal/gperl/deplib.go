@@ -110,3 +110,25 @@ func writeLib(lib map[string]string, dir string) error {
 	}
 	return nil
 }
+
+// declaresDeps reports whether the project in dir declares dependencies: a
+// cpanfile or cpanfile.snapshot.
+func declaresDeps(dir string) bool {
+	return fileExists(filepath.Join(dir, mod.CPANfile)) || fileExists(filepath.Join(dir, mod.SnapshotFile))
+}
+
+// hostDeps loads the dependencies of the project in dir for this platform.
+// A project that declares none has none, and needs neither the module
+// directory nor a C compiler.
+func hostDeps(dir string) (*projectDeps, error) {
+	if !declaresDeps(dir) {
+		return &projectDeps{}, nil
+	}
+	var deps *projectDeps
+	err := withDeps(func(m *mod.Manager) error {
+		var err error
+		deps, err = loadDeps(context.Background(), m, dir, nativeTarget(mod.Target()))
+		return err
+	})
+	return deps, err
+}

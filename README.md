@@ -244,7 +244,10 @@ Distributions that build with `Makefile.PL` also need `make`.
 XS dependencies nothing else is needed. With them, the native modules are
 built for the target by the C compiler in `CC` — for example
 `CC="zig cc -target aarch64-linux-musl"`, which with cgo yields a fully
-static binary — or by the installed Zig when `CC` is unset.
+static binary — or by the installed Zig when `CC` is unset. Native modules
+built for musl are kept apart from glibc's, and a build for musl carries
+the build tag `musl`: `gperl build` adds it, and a Go application built
+with `go build` on the generated `go.work` passes `-tags musl`.
 
 **`gperl psgi`** is the application server and the front end in one
 process: one interpreter per worker goroutine, TLS with HTTP/2, graceful

@@ -24,7 +24,6 @@ import (
 	"syscall"
 
 	perl "github.com/goccy/go-perl"
-	"github.com/goccy/go-perl/internal/mod"
 )
 
 // perlRunOpts parameterizes one perl(1)-style run. Zero values mean the
@@ -166,17 +165,9 @@ func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) 
 			return 1, err
 		}
 		projectDir := filepath.Dir(script)
-		// A program without declared dependencies needs no module
-		// directory, and runs where there is none.
-		deps := &projectDeps{}
-		if fileExists(filepath.Join(projectDir, mod.CPANfile)) || fileExists(filepath.Join(projectDir, mod.SnapshotFile)) {
-			err = withDeps(func(m *mod.Manager) error {
-				deps, err = loadDeps(context.Background(), m, projectDir, mod.Target())
-				return err
-			})
-			if err != nil {
-				return 1, err
-			}
+		deps, err := hostDeps(projectDir)
+		if err != nil {
+			return 1, err
 		}
 		prog.Inc = prog.Inc[:len(prog.Inc):len(prog.Inc)]
 		if lib := filepath.Join(projectDir, "lib"); dirExists(lib) {

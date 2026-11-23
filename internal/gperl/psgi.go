@@ -31,7 +31,6 @@ import (
 	_ "unsafe" // go:linkname
 
 	perl "github.com/goccy/go-perl"
-	"github.com/goccy/go-perl/internal/mod"
 	"github.com/goccy/go-perl/internal/psgi"
 )
 
@@ -444,14 +443,10 @@ func projectApp(file string) (*psgiApp, error) {
 		return nil, err
 	}
 	app := &psgiApp{path: path, dir: filepath.Dir(path)}
-	err = withDeps(func(m *mod.Manager) error {
-		deps, err := loadDeps(context.Background(), m, app.dir, mod.Target())
-		if err != nil {
-			return err
-		}
+	deps, err := hostDeps(app.dir)
+	if err == nil {
 		app.depInc = deps.inc()
-		return nil
-	})
+	}
 	if lib := filepath.Join(app.dir, "lib"); dirExists(lib) {
 		app.inc = append(app.inc, lib)
 	}

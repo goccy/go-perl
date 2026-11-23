@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -138,7 +139,7 @@ func extract(archive, dst string) (err error) {
 	if strings.HasSuffix(archive, ".zip") {
 		err = extractZip(archive, tmp)
 	} else {
-		err = extractTar(archive, tmp)
+		err = ExtractTar(archive, tmp)
 	}
 	if err != nil {
 		return err
@@ -158,21 +159,28 @@ func extract(archive, dst string) (err error) {
 	return nil
 }
 
-// target resolves an archive member name below root, refusing names that
-// escape it.
-func target(root, name string) (string, error) {
-	p := filepath.Join(root, filepath.FromSlash(name))
-	if p != root && !strings.HasPrefix(p, root+string(os.PathSeparator)) {
+// member is an archive member's name as a path below the tree; a name that
+// leaves the tree is an error.
+func member(name string) (string, error) {
+	p := filepath.FromSlash(name)
+	if !filepath.IsLocal(p) {
 		return "", fmt.Errorf("archive member escapes the tree: %s", name)
 	}
 	return p, nil
 }
 
-func writeMember(p string, mode os.FileMode, r io.Reader) error {
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+// writeMember writes the file name of the tree rooted at root, with r's
+// content. The root keeps every step inside the tree, symbolic links
+// included.
+func writeMember(root *os.Root, name string, mode os.FileMode, r io.Reader) error {
+	p, err := member(name)
+	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm()|0o600)
+	if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	f, err := root.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm()|0o600)
 	if err != nil {
 		return err
 	}
@@ -180,7 +188,39 @@ func writeMember(p string, mode os.FileMode, r io.Reader) error {
 	return errors.Join(err, f.Close())
 }
 
-func extractTar(archive, root string) (err error) {
+// writeSymlink makes name a symbolic link to link, which must name a path
+// inside the tree as it is written (linksInside checks where the links lead
+// once all are in place).
+func writeSymlink(root *os.Root, name, link string) error {
+	p, err := member(name)
+	if err != nil {
+		return err
+	}
+	if path.IsAbs(link) || !filepath.IsLocal(filepath.FromSlash(path.Join(path.Dir(name), link))) {
+		return fmt.Errorf("archive member %s links outside the tree: %s", name, link)
+	}
+	if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return root.Symlink(link, p)
+}
+
+// linksInside fails for a symbolic link of the tree at root that cannot be
+// followed inside the tree: one that leads outside it through other links,
+// a loop of links, or a link below a file. A link to nothing is no error.
+func linksInside(root *os.Root, links []string) error {
+	for _, name := range links {
+		if _, err := root.Stat(filepath.FromSlash(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("archive member %s: a link that cannot be followed inside the tree: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// ExtractTar unpacks the tar archive at archive (gzip-compressed, or bzip2
+// for a name ending in .bz2) into the directory dir. A member, or the
+// target of a symbolic link, that leaves dir is an error.
+func ExtractTar(archive, dir string) (err error) {
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
@@ -192,31 +232,32 @@ func extractTar(archive, root string) (err error) {
 	} else if r, err = gzip.NewReader(f); err != nil {
 		return err
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
 	tr := tar.NewReader(r)
+	var links []string
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			return linksInside(root, links)
 		}
-		if err != nil {
-			return err
-		}
-		p, err := target(root, hdr.Name)
 		if err != nil {
 			return err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			err = os.MkdirAll(p, 0o755)
-		case tar.TypeReg:
-			err = writeMember(p, hdr.FileInfo().Mode(), tr)
-		case tar.TypeSymlink:
-			// A link may only point inside the tree.
-			if _, err = target(root, path.Join(path.Dir(hdr.Name), hdr.Linkname)); err == nil {
-				if err = os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
-					err = os.Symlink(hdr.Linkname, p)
-				}
+			var p string
+			if p, err = member(hdr.Name); err == nil {
+				err = root.MkdirAll(p, 0o755)
 			}
+		case tar.TypeReg:
+			err = writeMember(root, hdr.Name, hdr.FileInfo().Mode(), tr)
+		case tar.TypeSymlink:
+			err = writeSymlink(root, hdr.Name, hdr.Linkname)
+			links = append(links, hdr.Name)
 		}
 		if err != nil {
 			return err
@@ -224,19 +265,24 @@ func extractTar(archive, root string) (err error) {
 	}
 }
 
-func extractZip(archive, root string) (err error) {
+func extractZip(archive, dir string) (err error) {
 	zr, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, zr.Close()) }()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
 	for _, zf := range zr.File {
-		p, err := target(root, zf.Name)
-		if err != nil {
-			return err
-		}
 		if zf.FileInfo().IsDir() {
-			if err := os.MkdirAll(p, 0o755); err != nil {
+			p, err := member(zf.Name)
+			if err != nil {
+				return err
+			}
+			if err := root.MkdirAll(p, 0o755); err != nil {
 				return err
 			}
 			continue
@@ -245,7 +291,7 @@ func extractZip(archive, root string) (err error) {
 		if err != nil {
 			return err
 		}
-		if err := errors.Join(writeMember(p, zf.Mode(), rc), rc.Close()); err != nil {
+		if err := errors.Join(writeMember(root, zf.Name, zf.Mode(), rc), rc.Close()); err != nil {
 			return err
 		}
 	}

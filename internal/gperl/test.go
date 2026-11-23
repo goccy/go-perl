@@ -11,7 +11,6 @@ package gperl
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,8 +26,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/goccy/go-perl/internal/mod"
 )
 
 // tapResult is what one test file's TAP stream amounted to.
@@ -183,11 +180,7 @@ func Test(args []string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
-	var deps *projectDeps
-	err = withDeps(func(m *mod.Manager) error {
-		deps, err = loadDeps(context.Background(), m, projectDir, mod.Target())
-		return err
-	})
+	deps, err := hostDeps(projectDir)
 	if err != nil {
 		return 2, err
 	}

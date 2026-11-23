@@ -90,8 +90,12 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	// The dependencies enter through a workspace: the generated link set
 	// stands in for the go-perl/cpan package the interpreter imports.
 	gowork := "off"
+	target := mod.BuildTarget()
+	if declaresDeps(projectDir) {
+		target = buildTarget()
+	}
 	err = withDeps(func(m *mod.Manager) error {
-		deps, err := loadDeps(context.Background(), m, projectDir, mod.BuildTarget())
+		deps, err := loadDeps(context.Background(), m, projectDir, target)
 		if err != nil || len(deps.lib) == 0 {
 			return err
 		}
@@ -112,7 +116,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	env := os.Environ()
 	// A cgo build compiles and links with the same C toolchain the native
 	// modules were built with.
-	if ccWords, arWords, tcErr := cToolchain(mod.BuildTarget()); tcErr == nil {
+	if ccWords, arWords, tcErr := cToolchain(target); tcErr == nil {
 		env = append(env, "CC="+strings.Join(ccWords, " "), "AR="+strings.Join(arWords, " "))
 	}
 	for _, step := range []struct {
@@ -120,7 +124,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 		argv   []string
 	}{
 		{"off", []string{"go", "mod", "tidy"}},
-		{gowork, []string{"go", "build", "-o", out, "."}},
+		{gowork, append(buildFlags(target), "-o", out, ".")},
 	} {
 		cmd := exec.Command(goBin, step.argv[1:]...)
 		cmd.Dir = work

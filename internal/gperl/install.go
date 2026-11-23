@@ -12,8 +12,6 @@ package gperl
 // wins, then the managed one when installed, then the one on PATH.
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +24,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/goccy/go-perl/internal/mod"
 )
 
 // managedTool is one pinned tool release.
@@ -179,7 +179,7 @@ func installTool(dir, dst, url, want string) (err error) {
 	}
 	defer func() { err = errors.Join(err, os.RemoveAll(tmp)) }()
 	if strings.HasSuffix(url, ".tar.gz") {
-		err = untarGz(archive.Name(), tmp)
+		err = mod.ExtractTar(archive.Name(), tmp)
 	} else {
 		// The standard library has no xz decoder; tar on every supported
 		// platform reads .tar.xz.
@@ -198,52 +198,6 @@ func installTool(dir, dst, url, want string) (err error) {
 	return os.Rename(filepath.Join(tmp, entries[0].Name()), dst)
 }
 
-// untarGz unpacks a .tar.gz archive into root.
-func untarGz(archive, root string) (err error) {
-	f, err := os.Open(archive)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-	zr, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	tr := tar.NewReader(zr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		p := filepath.Join(root, filepath.FromSlash(hdr.Name))
-		if p != root && !strings.HasPrefix(p, root+string(os.PathSeparator)) {
-			return fmt.Errorf("archive member escapes the directory: %s", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			err = os.MkdirAll(p, 0o755)
-		case tar.TypeReg:
-			if err = os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
-				var out *os.File
-				if out, err = os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, hdr.FileInfo().Mode().Perm()|0o600); err == nil {
-					_, err = io.Copy(out, tr)
-					err = errors.Join(err, out.Close())
-				}
-			}
-		case tar.TypeSymlink:
-			if err = os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
-				err = os.Symlink(hdr.Linkname, p)
-			}
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
 // goCommand returns the go command to run: the managed one when
 // installed, the one on PATH otherwise.
 func goCommand() (string, error) {
@@ -256,26 +210,90 @@ func goCommand() (string, error) {
 	return "", errors.New("building a binary needs the Go toolchain, and none was found; run `gperl install toolchain`")
 }
 
+// muslSuffix ends the name of a Linux target whose C library is not glibc
+// (nativeTarget), and muslTag is the build tag a Go build for it carries:
+// Go's build constraints tell no C library from another, and a binary for
+// one cannot load or link the native modules built for the other.
+const (
+	muslSuffix = "_musl"
+	muslTag    = "musl"
+)
+
+// nativeTarget names the platform the native modules for target are built
+// for: target, with muslSuffix on Linux when target's C compiler
+// (cToolchain) does not use glibc. A target whose compiler cannot be had or
+// asked keeps its name: without one only pure-Perl distributions build, and
+// a native module's build reports what its compiler lacks.
+func nativeTarget(target string) string {
+	if goos, _, _ := strings.Cut(target, "_"); goos != "linux" {
+		return target
+	}
+	cc, _, err := cToolchain(target)
+	if err != nil {
+		return target
+	}
+	out, err := compilerCommand(strings.Join(cc, " "), "-dM", "-E", "-x", "c", "-include", "features.h", os.DevNull).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gperl: ask the C compiler %s for its C library: %v; native modules are built as for %s\n", strings.Join(cc, " "), err, target)
+		return target
+	}
+	// glibc's features.h defines __GLIBC__ ("#define NAME value" is -dM's
+	// format).
+	if strings.Contains("\n"+string(out), "\n#define __GLIBC__ ") {
+		return target
+	}
+	return target + muslSuffix
+}
+
+// buildFlags is the go build command line for target, up to its output.
+func buildFlags(target string) []string {
+	if strings.HasSuffix(target, muslSuffix) {
+		return []string{"go", "build", "-tags", muslTag}
+	}
+	return []string{"go", "build"}
+}
+
+// targetTags returns the build constraint terms that select target's
+// native modules: its GOOS and GOARCH, and on Linux whether muslTag is set.
+func targetTags(target string) []string {
+	goos, rest, _ := strings.Cut(target, "_")
+	goarch, _, _ := strings.Cut(rest, "_")
+	tags := []string{goos, goarch}
+	switch {
+	case goos != "linux":
+	case strings.HasSuffix(target, muslSuffix):
+		tags = append(tags, muslTag)
+	default:
+		tags = append(tags, "!"+muslTag)
+	}
+	return tags
+}
+
 // cToolchain returns the C compiler and archiver command lines for
-// building native modules for target ("linux_amd64"): what CC and AR name
-// when set; else the managed Zig, told the target when that is another
-// platform; else cc and ar from PATH.
+// building native modules for target ("linux_amd64", or with muslSuffix
+// for musl): what CC and AR name when set; else the managed Zig, told the
+// target when that is another platform; else cc and ar from PATH, for this
+// platform.
 func cToolchain(target string) (cc, ar []string, err error) {
+	platform := strings.TrimSuffix(target, muslSuffix)
 	cc, ar = strings.Fields(os.Getenv("CC")), strings.Fields(os.Getenv("AR"))
 	zig := managedBin("zig")
 	if len(cc) == 0 && zig != "" {
 		cc = []string{zig, "cc"}
 		if target != hostPlatform() {
-			goos, _, _ := strings.Cut(target, "_")
+			goos, _, _ := strings.Cut(platform, "_")
 			abi := map[string]string{"linux": "-gnu"}[goos]
-			cc = append(cc, "-target", zigTriple(target)+abi)
+			if platform != target {
+				abi = "-musl"
+			}
+			cc = append(cc, "-target", zigTriple(platform)+abi)
 		}
 		if len(ar) == 0 {
 			ar = []string{zig, "ar"}
 		}
 	}
 	if len(cc) == 0 {
-		if target != hostPlatform() {
+		if platform != hostPlatform() {
 			return nil, nil, fmt.Errorf("building native modules for %s needs a C cross compiler: set CC, or run `gperl install toolchain`", target)
 		}
 		bin, lookErr := exec.LookPath("cc")
