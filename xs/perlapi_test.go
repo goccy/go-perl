@@ -8,12 +8,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
+
+// builtPerlAPI holds the PerlAPI.so the first buildPerlAPI of the process
+// compiled: its inputs do not change while the tests run.
+var builtPerlAPI struct {
+	sync.Mutex
+	so []byte
+}
 
 // buildPerlAPI compiles testdata/perlapi/PerlAPI.c against the SDK headers.
 // Undefined symbols are refused at link time, so a function the headers
 // declare without providing fails here and not when the module is loaded.
+// The library is compiled once per process; every caller gets a file of its
+// own, which dlopen loads as a library of its own.
 func buildPerlAPI(t testing.TB) string {
 	t.Helper()
 	cc, err := exec.LookPath("cc")
@@ -21,6 +31,14 @@ func buildPerlAPI(t testing.TB) string {
 		t.Skip("no host C compiler available")
 	}
 	so := filepath.Join(t.TempDir(), "PerlAPI.so")
+	builtPerlAPI.Lock()
+	defer builtPerlAPI.Unlock()
+	if builtPerlAPI.so != nil {
+		if err := os.WriteFile(so, builtPerlAPI.so, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return so
+	}
 	args := []string{"-shared", "-fPIC", "-Wall", "-Werror=implicit-function-declaration",
 		"-I", "sdk/include", "-o", so, "testdata/perlapi/PerlAPI.c", "-lm"}
 	if runtime.GOOS == "darwin" {
@@ -40,6 +58,11 @@ func buildPerlAPI(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("compile PerlAPI.so: %v\n%s", err, out)
 	}
+	built, err := os.ReadFile(so)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builtPerlAPI.so = built
 	return so
 }
 
