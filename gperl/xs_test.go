@@ -78,6 +78,9 @@ func TestXSBuildFromTarball(t *testing.T) {
 	}
 	tarball := filepath.Join(t.TempDir(), "Demo-XS-0.01.tar.gz")
 	cmd := exec.Command("tar", "-czf", tarball, "-C", filepath.Dir(dist), filepath.Base(dist))
+	// darwin's tar stores the extended attributes of a file in a "._" file
+	// beside it, besides the dist's directory, unless told not to.
+	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tar: %v\n%s", err, out)
 	}

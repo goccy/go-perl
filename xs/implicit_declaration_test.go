@@ -46,10 +46,11 @@ func compileModuleSource(t *testing.T, name, code string, flags ...string) (stri
 		t.Fatal(err)
 	}
 	so := filepath.Join(dir, name+".so")
-	args := append([]string{"-shared", "-fPIC", "-std=gnu99", `-DXS_VERSION="1.00"`, "-I", sdk, "-o", so}, flags...)
+	// Clang, and GCC from 14 on, make an implicit declaration an error.
+	args := append([]string{"-shared", "-fPIC", "-std=gnu99", `-DXS_VERSION="1.00"`, "-Wno-error=implicit-function-declaration", "-I", sdk, "-o", so}, flags...)
 	args = append(args, src)
 	if runtime.GOOS == "darwin" {
-		args = append(args, "-undefined", "dynamic_lookup", "-Wno-error=implicit-function-declaration")
+		args = append(args, "-undefined", "dynamic_lookup")
 		switch runtime.GOARCH {
 		case "arm64":
 			args = append([]string{"-arch", "arm64"}, args...)

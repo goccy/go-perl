@@ -390,12 +390,13 @@ func TestBaseTimeIsTheStartOfTheProgram(t *testing.T) {
 }
 
 // times reports seconds: what the C library returns is scaled by the same
-// clock tick perl divides by. The time is the process's, so it lies between
-// what the process had used before the program ran and what it has used
-// after (where the test can ask; elsewhere it is at least not in ticks).
+// clock tick perl divides by. The time of a program that is the host
+// process is the process's (Config.HostProcess), so it lies between what
+// the process had used before the program ran and what it has used after
+// (where the test can ask; elsewhere it is at least not in ticks).
 func TestTimesReportsSeconds(t *testing.T) {
 	before, known := processUserSeconds()
-	r := runProgram(t, perl.Config{}, perl.Program{Code: code(
+	r := runProgram(t, perl.Config{HostProcess: true}, perl.Program{Code: code(
 		`my $n = 0; $n++ for 1 .. 200000;`,
 		`my ($user) = times;`,
 		`print "$user\n";`,

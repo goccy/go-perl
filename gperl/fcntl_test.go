@@ -12,7 +12,8 @@ import (
 // given (F_DUPFD), and takes POSIX record locks of a file (F_SETLK,
 // F_GETLK), which another process is refused while they are held, as on
 // Linux: Run redirects through F_DUPFD, Mail::Box locks a folder with
-// F_SETLK.
+// F_SETLK. The parent's lock is a lock of its open file description,
+// which Linux's F_GETLK in another process reports with the pid -1.
 func TestFcntlDuplicatesAndLocks(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "folder")
@@ -38,7 +39,7 @@ my $other = q{
     my $probe = pack('s s x4 q q i x4', F_RDLCK, SEEK_SET, 0, 0, 0);
     fcntl($lk, F_GETLK, $probe) or die "F_GETLK: $!";
     my ($type, undef, undef, undef, $pid) = unpack('s s x4 q q i x4', $probe);
-    print "in the way: ", ($type == F_WRLCK ? "a write lock" : "type $type"), " of ", ($pid == getppid() ? "the parent" : "pid $pid"), "\n";
+    print "in the way: ", ($type == F_WRLCK ? "a write lock" : "type $type"), " of ", ($pid == getppid() || $pid == -1 ? "the parent" : "pid $pid"), "\n";
 };
 system($^X, '-e', $other, $file) == 0 or die "the other process: $?";
 my $unlock = pack('s s x4 q q i x4', F_UNLCK, SEEK_SET, 0, 0, 0);

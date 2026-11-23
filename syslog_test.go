@@ -89,7 +89,8 @@ func (l *recordedLog) Close() error {
 
 // With Config.Syslog the native mechanism delivers to the host's logger:
 // each message arrives with its level, facility, ident and text as the
-// program gave them.
+// program gave them, and with the program's process id (42, an isolated
+// program's).
 func TestSysSyslogDeliversToTheHostLogger(t *testing.T) {
 	log := &recordedLog{}
 	hostLogger := internal.NewSyslogger
@@ -110,10 +111,11 @@ func TestSysSyslogDeliversToTheHostLogger(t *testing.T) {
 	r.want(t, 0, "logged\nlogged\ndone\n")
 
 	const pid, ndelay = 0x01, 0x08
+	const guestPID = 42
 	want := []base.SyslogMessage{
-		{Severity: 6, Facility: 3, Options: pid | ndelay, Ident: "go-perl-test", Message: "started pool with 4 workers"},
-		{Severity: 3, Facility: 19, Options: pid | ndelay, Ident: "go-perl-test", Message: "disk 93% full"},
-		{Severity: 4, Facility: 3, Options: pid | ndelay, Ident: "go-perl-test", Message: "by name"},
+		{Severity: 6, Facility: 3, Options: pid | ndelay, Ident: "go-perl-test", PID: guestPID, Message: "started pool with 4 workers"},
+		{Severity: 3, Facility: 19, Options: pid | ndelay, Ident: "go-perl-test", PID: guestPID, Message: "disk 93% full"},
+		{Severity: 4, Facility: 3, Options: pid | ndelay, Ident: "go-perl-test", PID: guestPID, Message: "by name"},
 	}
 	if len(log.opened) == 0 || log.opened[0] != "go-perl-test" || log.closed == 0 {
 		t.Errorf("opened=%q closed=%d, want the ident opened and the log closed", log.opened, log.closed)

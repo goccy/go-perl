@@ -104,10 +104,10 @@ report("after closing 20: ", (defined POSIX::dup2(20, 21) ? "still open" : "clos
 // another, the next file it opens has the number it closed, whether or not
 // the parent still has its own there, as a child process's does: a forked
 // process runs no native code (it dies there), which would be handed the
-// number for the descriptor of the host. The first process's new
-// descriptor is always the host's under its number, which is what a native
-// library is handed: the parent that closed a connection its child still
-// serves accepts the next one under another number.
+// number for the descriptor of the host. The parent that closed a
+// connection its child still serves opens the next file under the lowest
+// free number, the one the child serves, as a process does, and the child's
+// stays what it was.
 func TestForkedProcessDescriptors(t *testing.T) {
 	hostDescriptorsHere(t)
 	dir := t.TempDir()
@@ -185,7 +185,7 @@ for my $name ("child-out.txt", "child-own.txt", "child-again.txt") {
 		"child status: 0",
 		"the shared file: child,parent",
 		"still the parent's standard output",
-		"the parent's next file is another number, the process's",
+		"the parent's next file is the number its child serves, the process's",
 		"the child: serves under the same number, the process's",
 		"child-out.txt: from the child|from its command",
 		"child-own.txt: the child's own",

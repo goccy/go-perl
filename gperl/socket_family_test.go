@@ -164,16 +164,18 @@ report("pair of raw sockets: ", (socketpair(my $c, my $d, AF_UNIX, SOCK_RAW, 0) 
 
 // IPv6 sockets: a stream server and client with their names, datagrams,
 // and IPV6_V6ONLY deciding whether a socket bound to every address takes
-// IPv4 connections as well.
+// IPv4 connections as well. An IPv4 address given to bind is the host's
+// error: EINVAL on Linux, whose bind takes it as an address too short for
+// the socket's family, EAFNOSUPPORT elsewhere.
 func TestIPv6Sockets(t *testing.T) {
 	skipWithoutIPv6(t)
 	got := runForkScript(t, `
 use Socket qw(AF_INET AF_INET6 SOCK_STREAM SOCK_DGRAM IPPROTO_IPV6 IPV6_V6ONLY
               pack_sockaddr_in6 unpack_sockaddr_in6 pack_sockaddr_in inet_pton inet_ntop inet_aton);
-use Errno qw(ECONNREFUSED EAFNOSUPPORT);
+use Errno qw(ECONNREFUSED EAFNOSUPPORT EINVAL);
 my $loop = inet_pton(AF_INET6, "::1");
 socket(my $server, AF_INET6, SOCK_STREAM, 0) or die "socket: $!";
-report("bind to an IPv4 address: ", (bind($server, pack_sockaddr_in(0, inet_aton("127.0.0.1"))) ? "bound" : $! == EAFNOSUPPORT ? "EAFNOSUPPORT" : "$!"));
+report("bind to an IPv4 address: ", (bind($server, pack_sockaddr_in(0, inet_aton("127.0.0.1"))) ? "bound" : $! == EAFNOSUPPORT ? "EAFNOSUPPORT" : $! == EINVAL ? "EINVAL" : "$!"));
 bind($server, pack_sockaddr_in6(0, $loop)) or die "bind: $!";
 listen($server, 5) or die "listen: $!";
 my ($port, $addr) = unpack_sockaddr_in6(getsockname($server));
@@ -213,8 +215,12 @@ for my $only (1, 0) {
         ($ok ? "taken" : $! == ECONNREFUSED ? "refused" : "$!"));
 }
 `)
+	bindError := "EAFNOSUPPORT"
+	if runtime.GOOS == "linux" {
+		bindError = "EINVAL"
+	}
 	wantLines(t, got,
-		"bind to an IPv4 address: EAFNOSUPPORT",
+		"bind to an IPv4 address: "+bindError,
 		"listening at ::1 on a port",
 		"server got 'over IPv6 to ::1' from ::1",
 		"received 'datagram' from ::1 at the sender's port",

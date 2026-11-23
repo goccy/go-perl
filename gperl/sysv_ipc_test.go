@@ -29,20 +29,25 @@ func TestSystemVIPCIsTheHosts(t *testing.T) {
 	}
 }
 
-// A segment cannot be attached to the interpreter's memory: IPC::SysV's
-// shmat, and shmdt, memread and memwrite, which take what shmat gives, die
-// saying so (perl's own shmread and shmwrite copy instead).
-func TestSystemVIPCSegmentsAreNotAttached(t *testing.T) {
-	program := `use IPC::SysV qw(IPC_PRIVATE IPC_CREAT IPC_RMID shmat);
+// A segment is attached to the interpreter's memory: what IPC::SysV's
+// memwrite writes at the address shmat gives, shmread reads from the
+// segment, what shmwrite writes to the segment, memread reads there, and
+// shmdt detaches it. What is expected is what perl on Linux prints.
+func TestSystemVIPCSegmentsAreAttached(t *testing.T) {
+	program := `use IPC::SysV qw(IPC_PRIVATE IPC_CREAT IPC_RMID shmat shmdt memread memwrite);
 my $shm = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600) // die "shmget: $!";
-my $addr = eval { shmat($shm, undef, 0) };
-print $@;
+my $addr = shmat($shm, undef, 0) // die "shmat: $!";
+memwrite($addr, "hello", 10, 5) or die "memwrite: $!";
+shmread($shm, my $read, 10, 5) or die "shmread: $!";
+shmwrite($shm, "world", 20, 5) or die "shmwrite: $!";
+memread($addr, my $mem, 20, 5) or die "memread: $!";
+defined shmdt($addr) or die "shmdt: $!";
+print "$read $mem\n";
 shmctl($shm, IPC_RMID, 0) or die "IPC_RMID: $!";`
 	cmd := exec.Command(os.Args[0], "-e", program)
 	cmd.Env = append(os.Environ(), asPerlEnv+"=1")
 	out, err := cmd.CombinedOutput()
-	want := "shmat: a shared memory segment cannot be attached to the interpreter's memory under gperl; " +
-		"use shmread and shmwrite at -e line 3.\n"
+	want := "hello world\n"
 	if err != nil || string(out) != want {
 		t.Fatalf("err %v, output:\n%s\nwant:\n%s", err, out, want)
 	}

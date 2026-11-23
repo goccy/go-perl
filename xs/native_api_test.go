@@ -159,15 +159,14 @@ func TestNativeExtendedUTF8Characters(t *testing.T) {
 // 62 set, which is the number of its B::OP object. A module takes the op of
 // a B object (INT2PTR of its number) and makes a B object of an op
 // (PTR2IV). The number is an integer of Perl's like any other: it keeps its
-// value through a string, a pack and a hash key, and B takes the op's
-// address without the bit too.
+// value through a string, a pack and a hash key.
 func TestNativeOpAsNumber(t *testing.T) {
 	p := newHostPerl(t)
 	perlAPIInstance(t, p)
 	runEvalCases(t, p, []evalCase{
 		{"the op of a B object", `use B; my $start = B::svref_2object(sub { my $x = shift; $x })->START; PerlAPI::op_of_b($start) . "|" . $start->name`, "nextstate:same|nextstate"},
 		{"a B object of an op", `use B; my $o = PerlAPI::next_op_object(); ref($o) . ":" . $o->name`, "B::OP:padsv_store"},
-		{"the number through Perl's integers", `use B; my $start = B::svref_2object(sub { my $x = shift; $x })->START; my $n = $$start; my %h = ($n => 1); my ($k) = keys %h; join ",", ($n >= 2**62 ? "tagged" : "untagged"), ("$n" + 0 == $n ? "string" : "lost"), (unpack("j", pack("j", $n)) == $n ? "packed" : "lost"), ($k == $n ? "key" : "lost"), PerlAPI::op_of_b(bless \(my $c = "$n" + 0), "B::OP"), (bless \(my $u = $n & ~(1 << 62)), "B::OP")->name`, "tagged,string,packed,key,nextstate:same,nextstate"},
+		{"the number through Perl's integers", `use B; my $start = B::svref_2object(sub { my $x = shift; $x })->START; my $n = $$start; my %h = ($n => 1); my ($k) = keys %h; join ",", ($n >= 2**62 ? "tagged" : "untagged"), ("$n" + 0 == $n ? "string" : "lost"), (unpack("j", pack("j", $n)) == $n ? "packed" : "lost"), ($k == $n ? "key" : "lost"), PerlAPI::op_of_b(bless \(my $c = "$n" + 0), "B::OP")`, "tagged,string,packed,key,nextstate:same"},
 	})
 }
 

@@ -3,6 +3,7 @@
 package xs_test
 
 import (
+	"runtime"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
@@ -84,16 +85,24 @@ XS_EXTERNAL(boot_SysVNative) {
 }
 `
 
+// On darwin a segment is not attached to the interpreter's memory: perl's
+// shmwrite, which attaches it, fails with ENOSYS.
 func TestNativeSystemVIPCIsTheHosts(t *testing.T) {
 	so := buildModuleSource(t, "SysVNative", sysvNativeModule)
+	shm := `shmwrite($shm, "native", 0, 6) or die "shmwrite: $!";
+my $read = SysVNative::shm_read($shm, 6);`
+	wantShm := "native"
+	if runtime.GOOS == "darwin" {
+		shm = `my $read = shmwrite($shm, "native", 0, 6) ? "written" : $!{ENOSYS} ? "ENOSYS" : "$!";`
+		wantShm = "ENOSYS"
+	}
 	program := `use IPC::SysV qw(IPC_PRIVATE IPC_RMID GETVAL S_IRUSR S_IWUSR);
 my $sem = semget(IPC_PRIVATE, 2, S_IRUSR | S_IWUSR) // die "semget: $!";
 my $set = SysVNative::sem_set($sem, 1, 7);
 my $val = semctl($sem, 1, GETVAL, 0);
 semctl($sem, 0, IPC_RMID, 0);
 my $shm = shmget(IPC_PRIVATE, 4096, S_IRUSR | S_IWUSR) // die "shmget: $!";
-shmwrite($shm, "native", 0, 6) or die "shmwrite: $!";
-my $read = SysVNative::shm_read($shm, 6);
+` + shm + `
 shmctl($shm, IPC_RMID, 0);
 my $msg = msgget(IPC_PRIVATE, S_IRUSR | S_IWUSR) // die "msgget: $!";
 my $sent = SysVNative::msg_send($msg, 3, "hi");
@@ -101,7 +110,7 @@ msgrcv($msg, my $buf, 64, 0, 0) or die "msgrcv: $!";
 my ($type, $text) = unpack "l! a*", $buf;
 msgctl($msg, IPC_RMID, 0);
 "has " . SysVNative::has() . "; sem $set $val; shm $read; msg $sent $type $text"`
-	if got, want := requireModuleWith(t, perl.Config{HostProcess: true}, "SysVNative", so, program), "has sem msg shm; sem 0 7; shm native; msg 0 3 hi"; got != want {
+	if got, want := requireModuleWith(t, perl.Config{HostProcess: true}, "SysVNative", so, program), "has sem msg shm; sem 0 7; shm "+wantShm+"; msg 0 3 hi"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
