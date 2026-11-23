@@ -23,7 +23,7 @@ func init() {
 
 // ArchTag names the per-architecture native-module directory
 // (local/xs/<tag>), following the running binary.
-func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
+func ArchTag() string { return internal.ArchTag() }
 
 // loadDir keeps the real implementation's contract — a missing dir means
 // the project simply has no native modules and is not an error — and

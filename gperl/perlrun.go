@@ -1,6 +1,6 @@
 package gperl
 
-// A perl-compatible command line over the embedded interpreter.
+// The perl command over the embedded interpreter.
 //
 // The XS build pipeline is driven entirely by Perl programs — Makefile.PL,
 // Build.PL, xsubpp, ExtUtils::Command one-liners from the generated
@@ -11,9 +11,7 @@ package gperl
 // (cc runs under it); the perl children that make itself (or guest code)
 // spawns come back as `gperl run` through the shim.
 //
-// The flag surface is the subset those build tools use: -e, -I, -M/-m, -w,
-// `--`, and script execution. Anything else is rejected loudly rather than
-// half-interpreted.
+// perlswitch.go reads the command line; this file runs what it describes.
 
 import (
 	"context"
@@ -21,7 +19,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 
 	perl "github.com/goccy/go-perl"
 )
@@ -31,9 +31,42 @@ import (
 type perlRunOpts struct {
 	dir    string    // the program's working directory
 	env    []string  // the instance environment
+	stdin  io.Reader // program stdin
 	stdout io.Writer // program stdout
 	stderr io.Writer // program stderr
+	// project runs the program file as a project's entry point: its
+	// cpanfile dependencies resolve into ./local first, the vendored tree
+	// and the program's directory join @INC, and native modules from
+	// local/xs load lazily.
+	project bool
 }
+
+// startupGlue prepares the interpreter for a run the way the process
+// around a perl command would have: its working directory, the path it
+// knows itself by ($^X), the host's C toolchain in %Config (runToolchain)
+// and the build pipeline's %Config overlay.
+const startupGlue = `sub {
+    my ($dir, $exe, $preload, %toolchain) = @_;
+    # the directory the process was started in, which it may not search
+    Internals::start_directory($dir) or die "chdir $dir: $!\n";
+    $^X = $exe if defined $exe;
+    # Config.pm reports %Config::Override in place of its own values once it
+    # is loaded; nothing is loaded here
+    @Config::Override{keys %toolchain} = values %toolchain;
+    if (defined $preload) {
+        # do FILE returns undef for an unreadable file and for a file whose
+        # last statement is undef alike; establish readability first.
+        open(my $fh, '<', $preload) or die "preload $preload: $!\n";
+        close $fh;
+        do $preload;
+        die $@ if $@;
+        # The preload belongs to how the interpreter was started, not to
+        # the program: a program that lists what it loaded (a dependency
+        # scanner reading %INC) must not find it.
+        delete $INC{$preload};
+    }
+    return;
+}`
 
 // runPerlCLI executes a perl(1)-style command line on an in-process
 // interpreter and returns the would-be process exit status. The build
@@ -45,225 +78,200 @@ type perlRunOpts struct {
 //
 //   - GPERL_PERL_EXE: the value for $^X (the perl shim path, so build
 //     systems that re-invoke $^X — Module::Build's ./Build — come back
-//     into the embedded interpreter);
+//     into the embedded interpreter); without it $^X is the executable's
+//     own name as the perl command (selfperl.go);
 //   - GPERL_PERL_PRELOAD: a Perl file `do`ne before anything else (the XS
 //     build's %Config toolchain overlay).
 func runPerlCLI(argv []string, opts perlRunOpts) (status int, err error) {
-	pa, perr := parsePerlArgv(argv)
-	if perr != nil {
-		return 2, perr
+	env := opts.env
+	if env == nil {
+		env = os.Environ()
 	}
-	inc, preUse, eChunks := pa.inc, pa.preUse, pa.eChunks
-	script, args, autoLine := pa.script, pa.args, pa.autoLine
-	if script == "" && len(eChunks) == 0 {
-		return 2, fmt.Errorf("no -e code and no script given")
+	cmd, err := parsePerlCommand(argv, env)
+	if err != nil {
+		return switchFailure(err, opts)
 	}
+	return runPerlCommand(cmd, opts)
+}
 
-	// The launcher runs as a synthesized program file so the ordinary
-	// run-file conventions (die, exit, @ARGV, $0) apply unchanged.
-	dir := opts.dir
-	if dir == "" {
-		if dir, err = os.Getwd(); err != nil {
+// switchFailure reports a command line perl would have refused, the way
+// perl does: the message on stderr, a failure status.
+func switchFailure(err error, opts perlRunOpts) (int, error) {
+	stderr := opts.stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	msg := err.Error()
+	if !strings.HasSuffix(msg, ".") {
+		msg += "."
+	}
+	fmt.Fprintln(stderr, msg)
+	return 255, nil
+}
+
+// runPerlCommand runs a parsed command line.
+//
+// The interpreter is the host process while it runs: the process follows
+// its working directory and its environment, so that native code it loads
+// finds them. A run that is given a directory or an environment of its own
+// is not the process, which is only lent to it: the process gets its own
+// working directory and environment back when the run is over.
+func runPerlCommand(cmd *perlCommand, opts perlRunOpts) (status int, err error) {
+	if opts.dir != "" || opts.env != nil {
+		giveBack, err := lendProcess(opts.env)
+		if err != nil {
 			return 1, err
 		}
+		defer giveBack()
 	}
 	env := opts.env
 	if env == nil {
 		env = os.Environ()
 	}
-	var prog strings.Builder
-	// perl resolves '.'-relative requires and files against ITS cwd; make
-	// the guest's match the run's working directory.
-	prog.WriteString("BEGIN { chdir '" + perlQuote(dir) + "' or die \"chdir: $!\\n\"; }\n")
-	if pre := envValue(env, "GPERL_PERL_PRELOAD"); pre != "" {
-		fmt.Fprintf(&prog, "BEGIN { my $p = $ENV{GPERL_PERL_PRELOAD}; my $r = do $p; die $@ if $@; die \"preload $p: $!\\n\" if !defined $r && $!; }\n")
+	stdout, stderr := opts.stdout, opts.stderr
+	if stdout == nil {
+		stdout = os.Stdout
 	}
-	if exe := envValue(env, "GPERL_PERL_EXE"); exe != "" {
-		prog.WriteString("BEGIN { $^X = $ENV{GPERL_PERL_EXE}; }\n")
+	if stderr == nil {
+		stderr = os.Stderr
 	}
-	if autoLine {
-		prog.WriteString("$\\ = \"\\n\";\n")
-	}
-	for _, u := range preUse {
-		prog.WriteString(u + "\n")
-	}
-	switch {
-	case len(eChunks) > 0:
-		prog.WriteString("#line 1 \"-e\"\n")
-		prog.WriteString(strings.Join(eChunks, "\n"))
-		prog.WriteString("\n;1;\n")
-	default:
-		// Concatenate the script body after the preamble so it runs as
-		// the MAIN program: caller() is empty at its top level (modulino
-		// programs like cpanm guard their entry point with
-		// `unless (caller)`), and __END__/__DATA__ stay attached.
-		abs := script
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(dir, script)
-		}
-		body, rerr := os.ReadFile(abs)
-		if rerr != nil {
-			return 1, rerr
-		}
-		// BEGIN: the script body's own compile-time code (a
-		// `use inc::Module::Install` reads $0 through FindBin) must
-		// already see the script's identity.
-		prog.WriteString("BEGIN { $0 = '" + perlQuote(abs) + "'; }\n")
-		prog.WriteString("#line 1 \"" + strings.ReplaceAll(abs, `"`, ``) + "\"\n")
-		prog.Write(body)
-		prog.WriteString("\n")
-	}
-	tmp, err := os.CreateTemp("", "gperl-perl-*.pl")
-	if err != nil {
-		return 1, err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.WriteString(prog.String()); err != nil {
-		tmp.Close()
-		return 1, err
-	}
-	tmp.Close()
 
+	prog := cmd.prog
+	switch cmd.action {
+	case actionUsage:
+		name := envValue(env, "GPERL_PERL_EXE")
+		if name == "" {
+			name = "gperl run"
+		}
+		fmt.Fprintf(stdout, perlUsage, name)
+		return 0, nil
+	case actionVersion:
+		prog = perl.Program{Code: perlVersionProgram}
+	}
+	for _, note := range cmd.notes {
+		fmt.Fprintln(stderr, note)
+	}
+	env = append(env[:len(env):len(env)], cmd.env...)
+
+	nativeDir := ""
+	if opts.project {
+		script, err := filepath.Abs(prog.File)
+		if err != nil {
+			return 1, err
+		}
+		if _, err := os.Stat(script); err != nil {
+			return 1, err
+		}
+		projectDir := filepath.Dir(script)
+		if err := EnsureDeps(projectDir); err != nil {
+			return 1, err
+		}
+		if lib := localLib(projectDir); lib != "" {
+			prog.Inc = append(prog.Inc[:len(prog.Inc):len(prog.Inc)], lib)
+		}
+		prog.Inc = append(prog.Inc[:len(prog.Inc):len(prog.Inc)], projectDir)
+		prog.File = script
+		nativeDir = xsDir(projectDir)
+	}
+
+	// gperl behaves like the perl command: the program sees the host
+	// filesystem, stdio, and environment.
 	cfg, err := HostConfig()
 	if err != nil {
 		return 1, err
 	}
-	cfg.Stdin = os.Stdin
-	cfg.Stdout = opts.stdout
-	if cfg.Stdout == nil {
-		cfg.Stdout = os.Stdout
+	cfg.Stdin = opts.stdin
+	if cfg.Stdin == nil {
+		cfg.Stdin = os.Stdin
 	}
-	cfg.Stderr = opts.stderr
-	if cfg.Stderr == nil {
-		cfg.Stderr = os.Stderr
-	}
+	cfg.Stdout = stdout
+	cfg.Stderr = stderr
 	cfg.Env = env
 	p, err := perl.New(cfg)
 	if err != nil {
 		return 1, err
 	}
-	runErr := p.RunFile(context.Background(), tmpPath, inc, args)
-	p.Close()
-	return statusFromRun(runErr)
-}
+	// The program's run includes the tail of a perl process — the flush of
+	// its buffered output and global destruction — so its status is final;
+	// Close gives back what the host holds for the instance.
+	defer p.Close()
 
-// perlArgs is one parsed perl(1)-style command line.
-type perlArgs struct {
-	inc      []string // -I
-	preUse   []string // -M/-m, as ready `use` statements
-	eChunks  []string // -e, in order
-	script   string   // the script path ("" with -e)
-	args     []string // @ARGV
-	autoLine bool     // -l (output half)
-	sawFlag  bool     // any perl switch appeared (mode selection)
-}
-
-// parsePerlArgv parses argv the way perl(1) reads its command line for
-// the flag subset the CPAN build toolchain uses: -e, -I, -M/-m, -l, the
-// warning/taint toggles, clustered single-letter groups (-wle), `--`,
-// and script execution. Anything else is rejected loudly rather than
-// half-interpreted.
-func parsePerlArgv(argv []string) (perlArgs, error) {
-	var pa perlArgs
-	i := 0
-	for ; i < len(argv); i++ {
-		a := argv[i]
-		if a == "--" {
-			pa.sawFlag = true
-			i++
-			goto rest
+	ctx := context.Background()
+	if nativeDir != "" {
+		// Native XS modules built by `gperl xs build` register lazily; a
+		// stock `use Module;` boots them through the XSLoader contract.
+		if err := p.AddXSDir(nativeDir); err != nil {
+			return 1, err
 		}
-		if len(a) < 2 || a[0] != '-' {
-			// first non-option: the script
-			if len(pa.eChunks) == 0 {
-				pa.script = a
-				i++
+	}
+	// A new instance starts in the root directory; a process starts where
+	// it was launched.
+	dir := opts.dir
+	if dir == "" {
+		if dir, err = os.Getwd(); err != nil {
+			// os.Getwd looks at "." when PWD is set, which a directory
+			// the user may not search refuses; getcwd(2) names it (on
+			// Linux), and perl runs there.
+			wd, werr := syscall.Getwd()
+			if werr != nil {
+				return 1, fmt.Errorf("the working directory: %w", err)
 			}
-			goto rest
-		}
-		pa.sawFlag = true
-		// A perl option group: single-letter switches cluster (-wle);
-		// -e/-I/-M/-m end the cluster and take the rest (or the next
-		// argument) as their value.
-		for j := 1; j < len(a); j++ {
-			switch a[j] {
-			case 'e':
-				v := a[j+1:]
-				if v == "" {
-					i++
-					if i >= len(argv) {
-						return pa, fmt.Errorf("-e requires an argument")
-					}
-					v = argv[i]
-				}
-				pa.eChunks = append(pa.eChunks, v)
-				j = len(a)
-			case 'I':
-				v := a[j+1:]
-				if v == "" {
-					i++
-					if i >= len(argv) {
-						return pa, fmt.Errorf("-I requires an argument")
-					}
-					v = argv[i]
-				}
-				pa.inc = append(pa.inc, v)
-				j = len(a)
-			case 'M', 'm':
-				v := a[j+1:]
-				if v == "" {
-					i++
-					if i >= len(argv) {
-						return pa, fmt.Errorf("-%c requires an argument", a[j])
-					}
-					v = argv[i]
-				}
-				pa.preUse = append(pa.preUse, useStatement("-"+string(a[j])+v))
-				j = len(a)
-			case 'l':
-				// output half of -l (input auto-chomp belongs to the
-				// unsupported -n/-p loops)
-				pa.autoLine = true
-			case 'w', 'W', 'X', 'T', 't':
-				// warning/taint toggles: accepted for compatibility; the
-				// embedded build has no taint support and warnings stay
-				// as the program sets them
-			default:
-				return pa, fmt.Errorf("unsupported perl option %q", a)
-			}
+			dir = wd
 		}
 	}
-rest:
-	if i < len(argv) {
-		pa.args = append(pa.args, argv[i:]...)
+	// The path the program can run its own perl by: the one the
+	// environment names (the build pipeline's), or this executable's name
+	// as the perl command.
+	exe := envValue(env, "GPERL_PERL_EXE")
+	if exe == "" {
+		exe = selfPerl()
 	}
-	return pa, nil
+	if err := startInterpreter(ctx, p, dir, exe, envValue(env, "GPERL_PERL_PRELOAD")); err != nil {
+		return 1, err
+	}
+	return p.RunProgram(ctx, prog)
 }
 
-// useStatement turns a -M/-m option into the `use` line perl would run:
-// -MFoo → use Foo; -MFoo=a,b → use Foo split-list; -mFoo → use Foo ().
-func useStatement(opt string) string {
-	kind, rest := opt[1], opt[2:]
-	name, arglist, hasArgs := strings.Cut(rest, "=")
-	switch {
-	case hasArgs:
-		parts := strings.Split(arglist, ",")
-		q := make([]string, len(parts))
-		for i, s := range parts {
-			q[i] = "'" + strings.ReplaceAll(s, "'", "\\'") + "'"
-		}
-		return "use " + name + " (" + strings.Join(q, ",") + ");"
-	case kind == 'm':
-		return "use " + name + " ();"
-	default:
-		return "use " + name + ";"
+// startInterpreter applies startupGlue; an empty exe or preload leaves that
+// part of the interpreter as it is.
+func startInterpreter(ctx context.Context, p *perl.Perl, dir, exe, preload string) error {
+	r, err := p.Eval(ctx, startupGlue)
+	if err != nil {
+		return err
 	}
-}
-
-// perlQuote escapes s for a single-quoted Perl string literal.
-func perlQuote(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s)
+	if r.Error != nil {
+		return fmt.Errorf("install the startup routine: %w", r.Error)
+	}
+	ref, err := perl.As[perl.RefValue](r.Value)
+	if err != nil {
+		return fmt.Errorf("install the startup routine: %w", err)
+	}
+	routine, err := ref.Deref(ctx)
+	if err != nil {
+		return fmt.Errorf("install the startup routine: %w", err)
+	}
+	start, err := perl.As[perl.CodeValue](routine)
+	if err != nil {
+		return fmt.Errorf("install the startup routine: %w", err)
+	}
+	optional := func(s string) perl.Value {
+		if s == "" {
+			return perl.Undef()
+		}
+		return perl.ValueOf(s)
+	}
+	args := []perl.Value{perl.ValueOf(dir), optional(exe), optional(preload)}
+	tc := runToolchain()
+	keys := make([]string, 0, len(tc))
+	for k := range tc {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, perl.ValueOf(k), perl.ValueOf(tc[k]))
+	}
+	_, err = start.CallScalar(ctx, args...)
+	return err
 }
 
 // envValue reads key from an environ-shaped slice (last assignment wins,
@@ -290,4 +298,32 @@ func runPerlInProcess(dir string, env []string, stdout io.Writer, args ...string
 		return fmt.Errorf("perl %s: exit status %d", strings.Join(args, " "), status)
 	}
 	return nil
+}
+
+// lendProcess gives the process the environment env (when it is not nil) and
+// returns the function that restores the working directory and the
+// environment the process has now.
+func lendProcess(env []string) (giveBack func(), err error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	own := os.Environ()
+	// An environment is a list of name=value entries: the form the
+	// operating system defines for it.
+	setEnviron := func(vars []string) {
+		os.Clearenv()
+		for _, kv := range vars {
+			if name, value, ok := strings.Cut(kv, "="); ok {
+				os.Setenv(name, value)
+			}
+		}
+	}
+	if env != nil {
+		setEnviron(env)
+	}
+	return func() {
+		setEnviron(own)
+		os.Chdir(dir)
+	}, nil
 }

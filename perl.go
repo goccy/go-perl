@@ -21,6 +21,11 @@ type Perl struct {
 	funcsMu    sync.RWMutex
 	funcs      map[int32]GoFunc
 	nextFuncID int32
+	// dynaLoaderIDs are the function ids of DynaLoader's host functions
+	// (dynaloader.go), zero without Config.NativeModules. They are kept
+	// because those functions act on the instance that calls them: a clone
+	// or fork child shares the ids but must get functions of its own.
+	dynaLoaderIDs [3]int32
 }
 
 // Result is the outcome of one Eval: the expression's value and the
@@ -64,17 +69,27 @@ func New(cfg Config) (*Perl, error) {
 		cfg.StdlibDir = "/"
 	}
 
+	// Perl cannot boot without a /dev/null (the -e bootstrap opens the bit
+	// bucket as its script filehandle); synthesize one over a backend that
+	// has none.
+	fsys, err := withDevNull(cfg.FS)
+	if err != nil {
+		return nil, err
+	}
+
 	p := &Perl{}
 	raw, err := internal.New(internal.InstanceOptions{
-		StdlibDir: cfg.StdlibDir,
-		Env:       cfg.Env,
-		// Perl cannot boot without a /dev/null (the -e bootstrap opens the
-		// bit bucket as its script filehandle); synthesize one over any
-		// backend.
-		FS:                 withDevNull(cfg.FS),
+		StdlibDir:          cfg.StdlibDir,
+		SiteDir:            cfg.SiteDir,
+		Env:                cfg.Env,
+		FS:                 fsys,
 		Dial:               cfg.Dial,
 		Resolve:            cfg.Resolve,
 		Exec:               cfg.Exec,
+		Fork:               cfg.Fork,
+		HostProcess:        cfg.HostProcess,
+		InheritDescriptors: cfg.InheritDescriptors,
+		Syslog:             cfg.Syslog,
 		Stdin:              cfg.Stdin,
 		Stdout:             cfg.Stdout,
 		Stderr:             cfg.Stderr,
@@ -85,8 +100,40 @@ func New(cfg Config) (*Perl, error) {
 		return nil, err
 	}
 	raw.UserHandler = p.handleUserCallback
+	raw.OnFork = p.adoptForkChild
 	p.raw = raw
+	if cfg.NativeModules {
+		// native code runs here: the interpreter runs on one thread for
+		// its life, whatever goroutines call it (native modules keep state
+		// per thread, see internal.Perl.KeepOnOneThread), and pointers pack
+		// 'p' makes are addresses of the process from the start (see
+		// internal.Perl.MarkMemoryBase)
+		raw.KeepOnOneThread()
+		raw.MarkMemoryBase()
+		if err := p.installDynaLoader(); err != nil {
+			p.Close()
+			return nil, err
+		}
+	}
 	return p, nil
+}
+
+// adoptForkChild gives a pseudo-process forked from p its own host side of
+// the Go bridge: the child's memory holds the function ids of every sub p
+// bound, so the child resolves them through a copy of p's table.
+func (p *Perl) adoptForkChild(raw *internal.Perl) {
+	c := &Perl{raw: raw}
+	p.funcsMu.RLock()
+	c.funcs = make(map[int32]GoFunc, len(p.funcs))
+	for id, fn := range p.funcs {
+		c.funcs[id] = fn
+	}
+	c.nextFuncID = p.nextFuncID
+	c.dynaLoaderIDs = p.dynaLoaderIDs
+	p.funcsMu.RUnlock()
+	c.bindDynaLoader()
+	raw.UserHandler = c.handleUserCallback
+	raw.OnFork = c.adoptForkChild
 }
 
 // Eval compiles and runs src in this instance's persistent package (its
@@ -131,19 +178,25 @@ func (p *Perl) Clone() (*Perl, error) {
 		c.funcs[id] = fn
 	}
 	c.nextFuncID = p.nextFuncID
+	c.dynaLoaderIDs = p.dynaLoaderIDs
 	p.funcsMu.RUnlock()
 
 	raw, err := p.raw.Clone(c.handleUserCallback)
 	if err != nil {
 		return nil, err
 	}
+	raw.OnFork = c.adoptForkChild
 	c.raw = raw
+	c.bindDynaLoader()
 	return c, nil
 }
 
 // Close finalizes the instance. The Perl must not be used afterward: every
 // later Eval/Call errors, and outstanding *Ref handles become inert (their
 // finalizers only touch host-side state). Idempotent.
+//
+// Pseudo-processes forked from the instance (Config.Fork) that are still
+// running are ended with it.
 func (p *Perl) Close() error {
 	return p.raw.Close()
 }

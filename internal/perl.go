@@ -530,7 +530,7 @@ type Module struct {
 // the bridge boundary is a wptr; the transpiled wasm2go package's
 // export/import signatures use the same width, so the two packages
 // stay in lock-step from the one substitution the generator makes.
-type wptr = int32
+type wptr = int64
 
 var (
 	globalModule *Module
@@ -547,14 +547,14 @@ type CallbackHandler interface {
 }
 
 // Options configure the module the generated API runs on. The zero
-// value is what Init uses: the default WASI implementation (the host
-// filesystem, environment and stdio), the engine's own initial memory
+// value is what Init uses: the WASI implementation of the host process,
+// base.NewWASI(base.HostWASIConfig()), the engine's own initial memory
 // reservation, and its wasm32 4 GiB ceiling.
 type Options struct {
 	// WASI replaces the wasi_snapshot_preview1 implementation the guest
-	// runs against. base.DefaultWASI() returns the default one, whose
-	// setters scope the filesystem to a directory (or an arbitrary
-	// base.FS), replace the environment and redirect stdio; any
+	// runs against. base.NewWASI builds one from a base.WASIConfig (its
+	// filesystem, environment, stdio and the policies of what the guest
+	// may do; base.HostWASIConfig() is the host process's); any
 	// implementation of the interface will do. nil keeps the default.
 	WASI base.Wasi_snapshot_preview1Imports
 
@@ -620,7 +620,7 @@ func initModule(opts Options) (retErr error) {
 	wm := wasmifyStubs{m: m}
 	wasi := opts.WASI
 	if wasi == nil {
-		wasi = base.DefaultWASI()
+		wasi = base.NewWASI(base.HostWASIConfig())
 	}
 	if opts.MemoryReserveBytes > 0 {
 		m.g = wasm2go.NewWithWASIReserve(wasi, env, wm, opts.MemoryReserveBytes)
@@ -724,21 +724,30 @@ func invokeMethod(svc, mid int32, req []byte, call func(*base.Module, wptr, wptr
 	return resp, nil
 }
 
-// wptrOff widens a guest pointer to an unsigned slice offset. wasm32
-// pointers are UNSIGNED i32s: past the 2 GiB line the bit pattern is
-// negative in Go, so a signed slice index would panic.
+// wptrOff widens a guest pointer to an unsigned slice offset.
 func wptrOff(p wptr) uint64 {
-	return uint64(uint32(p))
+	return uint64(p)
 }
 
-func decodeResult(_ *base.Module, packed int64) (uint64, uint64) {
-	return uint64(packed) >> 32, uint64(packed) & 0xFFFFFFFF
+func decodeResult(g *base.Module, packed int64) (uint64, uint64) {
+	if packed == 0 {
+		return 0, 0
+	}
+	mem := wasm2go.Memory(g)
+	d := uint64(packed)
+	return binary.LittleEndian.Uint64(mem[d:]), binary.LittleEndian.Uint64(mem[d+8:])
 }
 
 func encodeCallbackResult(m *Module, resp []byte) int64 {
 	ptr := wasm2go.WasmAlloc(m.g, wptr(len(resp)))
 	copy(wasm2go.Memory(m.g)[wptrOff(ptr):], resp)
-	return int64(ptr)<<32 | int64(len(resp))
+	if m.cbDesc == 0 {
+		m.cbDesc = wasm2go.WasmAlloc(m.g, 16)
+	}
+	mem := wasm2go.Memory(m.g)
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc):], uint64(ptr))
+	binary.LittleEndian.PutUint64(mem[wptrOff(m.cbDesc)+8:], uint64(len(resp)))
+	return int64(m.cbDesc)
 }
 
 // envStubs implements wasm2go/base.EnvImports — the host side of the
@@ -798,6 +807,9 @@ func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr)
 		defer m.mu.Lock()
 		resp, err = handler.HandleCallback(methodID, req)
 	}()
+	if errors.Is(err, errCallbackJumped) {
+		return callbackJumped
+	}
 	if err != nil {
 		resp = pbAppendString(nil, 15, err.Error())
 	}
@@ -807,116 +819,29 @@ func (m *Module) handleCallback(callbackID, methodID int32, reqPtr, reqLen wptr)
 	return encodeCallbackResult(m, resp)
 }
 
+// errCallbackJumped is what a callback handler returns when the callback
+// ends with an exception of the guest pending: one the host held while it
+// left frames of its own (a non-local exit of the guest that passed
+// through host code) and has put back on the module. The guest sees it
+// only where a function that may raise one returns to its caller, and the
+// guest code after the import runs until then; so no answer is allocated
+// in the guest (that would be guest code, run with the exception pending),
+// and the guest is answered callbackJumped, which it returns on at once.
+var errCallbackJumped = errors.New("the callback ended with an exception of the guest pending")
+
+// callbackJumped is what callback_invoke returns to the guest for a
+// callback whose handler returned errCallbackJumped. It is the bridge's
+// contract for a callback that unwound: no answer was written, and the
+// guest's caller of callback_invoke returns at once without reading one.
+// No encoded answer is -1.
+const callbackJumped int64 = -1
+
 // wasmifyStubs implements wasm2go/base.WasmifyImports: the single
 // callback_invoke entry point that the C++ bridge calls back into.
 type wasmifyStubs struct{ m *Module }
 
 func (h wasmifyStubs) Callback_invoke(_ *base.Module, callbackID, methodID int32, reqPtr, reqLen wptr) int64 {
 	return h.m.handleCallback(callbackID, methodID, reqPtr, reqLen)
-}
-
-func (h envStubs) Alarm(m *base.Module, l0 int32) int32                             { return 0 }
-func (h envStubs) Bind(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
-func (h envStubs) Chown(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
-func (h envStubs) Chroot(m *base.Module, l0 int32) int32                            { return 0 }
-func (h envStubs) Cuserid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Endgrent(m *base.Module)                                          {}
-func (h envStubs) Endhostent(m *base.Module)                                        {}
-func (h envStubs) Endnetent(m *base.Module)                                         {}
-func (h envStubs) Endprotoent(m *base.Module)                                       {}
-func (h envStubs) Endpwent(m *base.Module)                                          {}
-func (h envStubs) Endservent(m *base.Module)                                        {}
-func (h envStubs) Execl(m *base.Module, l0 int32, l1 int32, l2 int32) int32         { return 0 }
-func (h envStubs) Execv(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
-func (h envStubs) Execvp(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Fchdir(m *base.Module, l0 int32) int32                            { return 0 }
-func (h envStubs) Fchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Flock(m *base.Module, l0 int32, l1 int32) int32                   { return 0 }
-func (h envStubs) Fork(m *base.Module) int32                                        { return 0 }
-func (h envStubs) Getegid(m *base.Module) int32                                     { return 0 }
-func (h envStubs) Geteuid(m *base.Module) int32                                     { return 0 }
-func (h envStubs) Getgid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Getgrent(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Getgrgid(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getgrnam(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getgroups(m *base.Module, l0 int32, l1 int32) int32               { return 0 }
-func (h envStubs) Gethostbyaddr(m *base.Module, l0 int32, l1 int32, l2 int32) int32 { return 0 }
-func (h envStubs) Gethostbyname(m *base.Module, l0 int32) int32                     { return 0 }
-func (h envStubs) Gethostent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getlogin(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Getnetbyaddr(m *base.Module, l0 int32, l1 int32) int32            { return 0 }
-func (h envStubs) Getnetbyname(m *base.Module, l0 int32) int32                      { return 0 }
-func (h envStubs) Getnetent(m *base.Module) int32                                   { return 0 }
-func (h envStubs) Getpgid(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Getpid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Getppid(m *base.Module) int32                                     { return 0 }
-func (h envStubs) Getpriority(m *base.Module, l0 int32, l1 int32) int32             { return 0 }
-func (h envStubs) Getprotobyname(m *base.Module, l0 int32) int32                    { return 0 }
-func (h envStubs) Getprotobynumber(m *base.Module, l0 int32) int32                  { return 0 }
-func (h envStubs) Getprotoent(m *base.Module) int32                                 { return 0 }
-func (h envStubs) Getpwent(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Getpwnam(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getpwuid(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Getservbyname(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
-func (h envStubs) Getservbyport(m *base.Module, l0 int32, l1 int32) int32           { return 0 }
-func (h envStubs) Getservent(m *base.Module) int32                                  { return 0 }
-func (h envStubs) Getuid(m *base.Module) int32                                      { return 0 }
-func (h envStubs) Kill(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
-func (h envStubs) Killpg(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Lchown(m *base.Module, l0 int32, l1 int32, l2 int32) int32        { return 0 }
-func (h envStubs) Listen(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Mkfifo(m *base.Module, l0 int32, l1 int32) int32                  { return 0 }
-func (h envStubs) Mkstemp(m *base.Module, l0 int32) int32                           { return 0 }
-func (h envStubs) Nice(m *base.Module, l0 int32) int32                              { return 0 }
-func (h envStubs) Pause(m *base.Module) int32                                       { return 0 }
-func (h envStubs) Recvfrom(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32, l5 int32) int32 {
-	return 0
-}
-func (h envStubs) Sendto(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32, l5 int32) int32 {
-	return 0
-}
-func (h envStubs) Setegid(m *base.Module, l0 int32) int32                         { return 0 }
-func (h envStubs) Seteuid(m *base.Module, l0 int32) int32                         { return 0 }
-func (h envStubs) Setgid(m *base.Module, l0 int32) int32                          { return 0 }
-func (h envStubs) Setgrent(m *base.Module)                                        {}
-func (h envStubs) Setgroups(m *base.Module, l0 int32, l1 int32) int32             { return 0 }
-func (h envStubs) Sethostent(m *base.Module, l0 int32)                            {}
-func (h envStubs) Setnetent(m *base.Module, l0 int32)                             {}
-func (h envStubs) Setpgid(m *base.Module, l0 int32, l1 int32) int32               { return 0 }
-func (h envStubs) Setpriority(m *base.Module, l0 int32, l1 int32, l2 int32) int32 { return 0 }
-func (h envStubs) Setprotoent(m *base.Module, l0 int32)                           {}
-func (h envStubs) Setpwent(m *base.Module)                                        {}
-func (h envStubs) Setregid(m *base.Module, l0 int32, l1 int32) int32              { return 0 }
-func (h envStubs) Setresgid(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
-func (h envStubs) Setresuid(m *base.Module, l0 int32, l1 int32, l2 int32) int32   { return 0 }
-func (h envStubs) Setreuid(m *base.Module, l0 int32, l1 int32) int32              { return 0 }
-func (h envStubs) Setservent(m *base.Module, l0 int32)                            {}
-func (h envStubs) Setsid(m *base.Module) int32                                    { return 0 }
-func (h envStubs) Setsockopt(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32, l4 int32) int32 {
-	return 0
-}
-func (h envStubs) Setuid(m *base.Module, l0 int32) int32                                   { return 0 }
-func (h envStubs) Sigaction(m *base.Module, l0 int32, l1 int32, l2 int32) int32            { return 0 }
-func (h envStubs) Sigaddset(m *base.Module, l0 int32, l1 int32) int32                      { return 0 }
-func (h envStubs) Sigdelset(m *base.Module, l0 int32, l1 int32) int32                      { return 0 }
-func (h envStubs) Sigemptyset(m *base.Module, l0 int32) int32                              { return 0 }
-func (h envStubs) Sigfillset(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Sigismember(m *base.Module, l0 int32, l1 int32) int32                    { return 0 }
-func (h envStubs) Sigpending(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Sigprocmask(m *base.Module, l0 int32, l1 int32, l2 int32) int32          { return 0 }
-func (h envStubs) Sigsuspend(m *base.Module, l0 int32) int32                               { return 0 }
-func (h envStubs) Socketpair(m *base.Module, l0 int32, l1 int32, l2 int32, l3 int32) int32 { return 0 }
-func (h envStubs) Ttyname(m *base.Module, l0 int32) int32                                  { return 0 }
-func (h envStubs) Tzset(m *base.Module)                                                    {}
-func (h envStubs) Umask(m *base.Module, l0 int32) int32                                    { return 0 }
-func (h envStubs) X__cxa_allocate_exception(m *base.Module, l0 int32) int32 {
-	if l0 == 0 {
-		l0 = 64
-	}
-	return wasm2go.WasmAlloc(m, l0)
-}
-func (h envStubs) X__cxa_throw(m *base.Module, l0 int32, l1 int32, l2 int32) {
-	panic("wasm: C++ exception thrown")
 }
 
 var _ = fmt.Errorf
@@ -1142,18 +1067,23 @@ func PerlHashSet(h uint64, hv uint64, key string, keyLen uint32, val string, val
 //
 //	*(uint32_t *)perl_interrupt_addr(h) = 1;
 //
-// The guest clears the flag when it fires. Addresses are 32-bit linear-memory
-// offsets (wasm32). Like CPython's eval-breaker, this only fires at opcode
+// The guest clears the flag when it fires. The address is a linear-memory
+// offset. Like CPython's eval-breaker, this only fires at opcode
 // boundaries: a single long-running op (a pathological regex, a big sort) is
 // not preempted until it returns to the run loop.
-func PerlInterruptAddr(h uint64) (uint32, error) {
+//
+// Storing 0x100 | signal instead delivers a terminating signal to the
+// (pseudo-)process: no eval can catch it, and the process ends by that
+// signal at the next opcode boundary, where it stands (no END block, no
+// destructor).
+func PerlInterruptAddr(h uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	resp, err := invokeMethod(0, 13, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // Call the CODE reference behind `code` (a ref handle). want_scalar selects
@@ -1201,9 +1131,56 @@ func PerlMethodCall(h uint64, obj uint64, method string, args string, argsLen ui
 // modules can be found on the runtime's WASI filesystem mount; pass NULL/empty
 // to run with only the built-in
 // .
-func PerlNew(libDir string) (uint64, error) {
+//
+// `site_dir`, when non-empty, is the directory the site directories are
+// under: where modules installed for this interpreter go and are found.
+//
+// <site
+// _dir>/site_perl/
+// <version
+// >              sitelib
+//
+// <site
+// _dir>/site_perl/
+// <version
+// >/
+// <archname
+// >   sitearch
+//
+// <site
+// _dir>/bin                              sitebin, sitescript
+//
+// <site
+// _dir>/man/man1,
+// <site
+// _dir>/man/man3    siteman1dir, siteman3dir
+//
+// <version
+// > is this interpreter's. `archname` is the name of the
+// architecture: the host's, which the one interpreter takes from whatever
+// host it runs on (native modules are built for the host). It is
+// $Config{archname} and myarchname, the name of the architecture
+// subdirectories perl adds to
+// with a directory (PERL5LIB, -I) and of
+// the site's architecture directory, and what `perl -v` says perl was
+// built for; empty stands for the name the build was configured with.
+// `osname` is the name of the system the interpreter runs on, as perl's
+// Configure names it there: $^O and $Config{osname}; empty stands for the
+// name the build was configured with (wasi).
+// %Config reports the directories
+// under every key that names one of them, and sitearch and sitelib are in
+//
+// where perl has them: after the PERL5LIB directories and before the
+// standard library. None of them is created. Without a site_dir %Config
+// keeps the values of the build's configuration and
+// has no site
+// directory.
+func PerlNew(libDir string, siteDir string, archname string, osname string) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendString(buf, 1, libDir)
+	buf = pbAppendString(buf, 2, siteDir)
+	buf = pbAppendString(buf, 3, archname)
+	buf = pbAppendString(buf, 4, osname)
 	resp, err := invokeMethod(0, 16, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
@@ -1263,6 +1240,70 @@ func PerlRelease(h uint64, ids string, idsLen uint32) (string, error) {
 	return readScalarAtField(resp, 1, (*pbReader).readString), nil
 }
 
+// Run a whole program, the way the perl command runs the one its command
+// line names: compiled as the MAIN program (no caller at its top level,
+// __END__/__DATA__ attached, the switches of its #! line honoured), then
+// BEGIN/CHECK/INIT, the run, END blocks, the flush of PerlIO and the
+// destruction of the interpreter (global destruction). The program is the
+// interpreter's whole life, as it is a perl process's: afterwards there is
+// no interpreter, and perl_close is a no-op.
+//
+// The host parses the command line; `program` carries what it means. All
+// integers little-endian, str := u32 len + bytes, strlist := u32 count +
+// str*:
+//
+//	flags:u32        bit 0  loop over input lines (-n)
+//	                 bit 1  ... printing each (-p)
+//	                 bit 2  split each line into
+//
+// (-a)
+//
+//	bit 3  ... on `split` (-F)
+//	bit 4  line-ending processing (-l): chomp input, $
+//
+// \
+// = ors
+//
+//	                 bit 5  $/ = rs        bit 6  $/ = undef
+//	                 bit 7  rs is UTF-8
+//	                 bit 8  edit files in place (-i), backup suffix `inplace`
+//	                 bit 9  compile only (-c)
+//	                 bit 10 enable the current feature bundle (-E)
+//	                 bit 11 skip to the #!perl line (-x), then chdir to
+//	                        extract_dir when non-empty
+//	                 bit 12 allow unsafe operations (-U)
+//	                 bit 13 run under the debugger (-d)
+//	                 bit 14 `unicode` is set (-C)
+//	warnings:u8      0 as the program sets them, 1 -w, 2 -W, 3 -X
+//	taint:u8         0 off, 1 taint warnings (-t), 2 taint checks (-T)
+//	unicode:u32      the ${^UNICODE} flag word
+//	source:u8        0 the file `path`, 1 the text `code` (-e), 2 standard
+//	                 input
+//	path:str code:str extract_dir:str rs:str ors:str split:str inplace:str
+//	preamble:strlist statements compiled ahead of the program (-M/-m)
+//	inc:strlist      directories put in front of
+//
+// , in order (-I)
+//
+//	defines:u32 count + (name:str has_value:u8 value:str)*
+//	                 main:: scalars set before the program (-s)
+//	args:strlist
+//
+// Returns the process exit status (0..255) — an uncaught die has already
+// been reported on STDERR, as perl does — or UINT32_MAX when `program` is
+// malformed or there is no interpreter.
+func PerlRunProgram(h uint64, program string, programLen uint32) (uint32, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	buf = pbAppendString(buf, 2, program)
+	buf = pbAppendUint64(buf, 3, uint64(programLen))
+	resp, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
 // Register the Go-side dispatcher for this instance. `callback_id` is the id
 // the host returned when registering its callback handler; every Perl->Go
 // call from this interpreter is routed to it. Perl code reaches Go through
@@ -1274,51 +1315,43 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, callbackId)
-	_, err := invokeMethod(0, 21, buf, wasm2go.Inv_0_21)
+	_, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
 	return err
 }
 
 // SV micro-operations the host-side SDK vtable is built from. The full op
 // table lives in perl.cc (and mirrors the GOPERL_OP_* enum in the go-perl
-// native SDK header); representative entries:
+// native SDK header). An operation takes three u64 operands a, b and c and
+// a string s of slen bytes, which may hold NULs; a token (an address of the linear memory) is always an
+// operand of its own, whole. It answers a u64; an operation that answers
+// two values leaves the second in the operation box (result2, see
+// perl_xs_opbox), where the host reads it right after the operation.
+// Representative entries:
 //
 //	1  SV_IV       a=sv                  -> IV (as u64)
-//	2  SV_PV       a=sv                  -> (ptr
-//
-// <
-// <
-// 32)|len into linear memory
-//
+//	2  SV_PV       a=sv                  -> ptr into linear memory; second: len
 //	3  NEW_IV      a=iv                  -> new SV token
 //	4  NEW_PVN     s=bytes b=len         -> new SV token
 //	5  SV_MORTAL   a=sv                  -> sv (now mortal)
 //	...
 //	23-64          sv_setsv/setiv/setnv/catsv families, NV ops, AV/HV entry
 //	               and iterator ops, ENTER/LEAVE/SAVETMPS/FREETMPS
-//	65 CALL_SV     a=flags
-//
-// <
-// <
-// 32|sv, s+b=packed u32 arg tokens
-//
-//	-> died
+//	65 CALL_SV     a=sv, c=flags, s+b=the arguments, a u64 word each
+//	               -> mortal-AV token of results; second: died
 //
 // <
 // <
 // 63 | count
-// <
-// <
-// 32 | mortal-AV token of results
 //
-//	66 CALL_METHOD like CALL_SV but s = "name\0" + packed tokens
+//	66 CALL_METHOD like CALL_SV but s = "name\0" + the arguments
 //	68 SAVE_OP     scope-save PL_op (the SAVEOP() macro)
 //	69 RUN_PP_SCRATCH a=op_flags
 //
 // <
 // <
-// 32|op_type, s+b=arg tokens: run one pp
+// 32|op_type, s+b=the arguments as words:
 //
-//	               function on a scratch OP in list context
+//	               run one pp function on a scratch OP in list context
 //	70-72          host-side MAGIC anchor attach / id lookup / unattach
 //	73-74,80       PL_* interpreter-variable get/set and local'ised hooks
 //	98-100         pp-hook table, RUN_ORIGINAL, save-stack destructors
@@ -1339,14 +1372,49 @@ func PerlSetGoDispatcher(h uint64, callbackId int32) error {
 //	               behavioral (tie) magic
 //
 // Unknown ops return 0.
-func PerlXsHelper(h uint64, op int32, a uint64, b uint64, s string) (uint64, error) {
+func PerlXsHelper(h uint64, op int32, a uint64, b uint64, c uint64, s string, slen uint64) (uint64, error) {
 	buf := pbNewBuf()
 	buf = pbAppendUint64(buf, 1, h)
 	buf = pbAppendInt32(buf, 2, op)
 	buf = pbAppendUint64(buf, 3, a)
 	buf = pbAppendUint64(buf, 4, b)
-	buf = pbAppendString(buf, 5, s)
-	resp, err := invokeMethod(0, 22, buf, wasm2go.Inv_0_22)
+	buf = pbAppendUint64(buf, 5, c)
+	buf = pbAppendString(buf, 6, s)
+	buf = pbAppendUint64(buf, 7, slen)
+	resp, err := invokeMethod(0, 23, buf, wasm2go.Inv_0_23)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
+}
+
+func PerlXsOp() (uint32, error) {
+	buf := pbNewBuf()
+	resp, err := invokeMethod(0, 24, buf, wasm2go.Inv_0_24)
+	if err != nil {
+		return 0, err
+	}
+	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+}
+
+// perl_xs_helper without the bridge's encoding, for the operations native
+// code makes by the million: perl_xs_opbox answers the address of the
+// instance's operation box, a struct goperl_opbox in linear memory
+// ([a][b][c][result][result2] as u64, [op] as i32, [slen] as u32, then the
+// slen bytes of s: 48 bytes before s, GOPERL_OPBOX_STR bytes of room for
+// s). The host writes an operation's arguments there and calls perl_xs_op,
+// which runs it as perl_xs_helper does and leaves its
+// result in the box; it answers 0, so that the bridge sends nothing back. A
+// string longer than the box holds goes through perl_xs_helper. Either way
+// the second value of an operation that answers two is in result2 when the
+// operation has returned. The box is free again once the operation has
+// returned: an operation that leads to native code (magic, a callback) has
+// the operations of that code use it meanwhile, after this one has taken
+// its arguments out.
+func PerlXsOpbox(h uint64) (uint64, error) {
+	buf := pbNewBuf()
+	buf = pbAppendUint64(buf, 1, h)
+	resp, err := invokeMethod(0, 25, buf, wasm2go.Inv_0_25)
 	if err != nil {
 		return 0, err
 	}

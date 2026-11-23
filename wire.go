@@ -25,6 +25,7 @@ const (
 	wireRef      = 5
 	wireHostFunc = 6
 	wireFlatten  = 7
+	wireUint     = 8
 )
 
 // Reference kinds (what the reference's referent is).
@@ -64,7 +65,7 @@ func encodeKey(key string) []byte {
 // lists, Push, NewArray) an ArrayValue/HashValue flattens into its contents,
 // Perl's own calling convention; in single-value positions it is an error —
 // pass Ref() to mean the reference.
-func (p *Perl) encodeValue(b []byte, v Value, listPos bool) ([]byte, error) {
+func (p *Perl) encodeValue(b []byte, pins *opPins, v Value, listPos bool) ([]byte, error) {
 	switch x := v.(type) {
 	case nil:
 		return append(b, wireUndef), nil
@@ -81,6 +82,9 @@ func (p *Perl) encodeValue(b []byte, v Value, listPos bool) ([]byte, error) {
 		case KindInt:
 			b = append(b, wireInt)
 			return appendU64(b, uint64(x.i)), nil
+		case KindUint:
+			b = append(b, wireUint)
+			return appendU64(b, uint64(x.i)), nil
 		case KindFloat:
 			b = append(b, wireFloat)
 			return appendU64(b, math.Float64bits(x.f)), nil
@@ -95,36 +99,38 @@ func (p *Perl) encodeValue(b []byte, v Value, listPos bool) ([]byte, error) {
 			return append(b, x.s...), nil
 		}
 	case RefValue:
-		return p.encodeHandle(b, x.h, wireRef)
+		return p.encodeHandle(b, pins, x.h, wireRef)
 	case CodeValue:
-		return p.encodeHandle(b, x.h, wireRef)
+		return p.encodeHandle(b, pins, x.h, wireRef)
 	case GlobValue:
-		return p.encodeHandle(b, x.h, wireRef)
+		return p.encodeHandle(b, pins, x.h, wireRef)
 	case IOValue:
-		return p.encodeHandle(b, x.h, wireRef)
+		return p.encodeHandle(b, pins, x.h, wireRef)
 	case ArrayValue:
 		if !listPos {
 			return nil, fmt.Errorf("perl: an array cannot fill a single-value slot; pass Ref() for the reference")
 		}
-		return p.encodeHandle(b, x.h, wireFlatten)
+		return p.encodeHandle(b, pins, x.h, wireFlatten)
 	case HashValue:
 		if !listPos {
 			return nil, fmt.Errorf("perl: a hash cannot fill a single-value slot; pass Ref() for the reference")
 		}
-		return p.encodeHandle(b, x.h, wireFlatten)
+		return p.encodeHandle(b, pins, x.h, wireFlatten)
 	default:
 		return nil, fmt.Errorf("perl: cannot encode %T", v)
 	}
 }
 
-// encodeHandle appends a handle-bearing node (a ref node or a flatten node).
-func (p *Perl) encodeHandle(b []byte, h *refHandle, tag byte) ([]byte, error) {
+// encodeHandle appends a handle-bearing node (a ref node or a flatten node)
+// and adds the handle to the pins of the operation that sends it.
+func (p *Perl) encodeHandle(b []byte, pins *opPins, h *refHandle, tag byte) ([]byte, error) {
 	if h == nil || h.released.Load() {
 		return nil, fmt.Errorf("perl: value's reference has been released")
 	}
 	if h.p != p {
 		return nil, fmt.Errorf("perl: value belongs to a different Perl instance")
 	}
+	*pins = append(*pins, h)
 	b = append(b, tag)
 	b = appendU64(b, h.id)
 	if tag == wireRef {
@@ -136,22 +142,26 @@ func (p *Perl) encodeHandle(b []byte, h *refHandle, tag byte) ([]byte, error) {
 
 func appendU16(b []byte, v uint16) []byte { return binary.LittleEndian.AppendUint16(b, v) }
 
-// encodeArgs encodes a list-position node list ([u32 count] nodes).
-func (p *Perl) encodeArgs(args []Value) ([]byte, error) {
+// encodeArgs encodes a list-position node list ([u32 count] nodes) and
+// returns the handles the nodes name, which the operation that sends them
+// must pin (see guestOp).
+func (p *Perl) encodeArgs(args []Value) ([]byte, opPins, error) {
 	b := appendU32(nil, uint32(len(args)))
+	var pins opPins
 	var err error
 	for i, a := range args {
-		b, err = p.encodeValue(b, a, true)
+		b, err = p.encodeValue(b, &pins, a, true)
 		if err != nil {
-			return nil, fmt.Errorf("argument %d: %w", i, err)
+			return nil, nil, fmt.Errorf("argument %d: %w", i, err)
 		}
 	}
-	return b, nil
+	return b, pins, nil
 }
 
-// encodeSingle encodes one single-position node.
-func (p *Perl) encodeSingle(v Value) ([]byte, error) {
-	return p.encodeValue(nil, v, false)
+// encodeSingle encodes one single-position node, adding the handle it names
+// (if any) to pins.
+func (p *Perl) encodeSingle(pins *opPins, v Value) ([]byte, error) {
+	return p.encodeValue(nil, pins, v, false)
 }
 
 // nodeReader walks a response buffer with bounds checking; any overrun
@@ -235,6 +245,8 @@ func (p *Perl) decodeNode(r *nodeReader) (Value, error) {
 		return ScalarValue{kind: KindBool, b: r.u8() != 0}, nil
 	case wireInt:
 		return ScalarValue{kind: KindInt, i: int64(r.u64())}, nil
+	case wireUint:
+		return unsignedScalar(r.u64()), nil
 	case wireFloat:
 		return ScalarValue{kind: KindFloat, f: math.Float64frombits(r.u64())}, nil
 	case wireString:

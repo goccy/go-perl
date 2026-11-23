@@ -21,22 +21,74 @@ jobs:
   # linux/amd64, linux/arm64, and darwin/arm64. The runners ship perl,
   # make, and a C compiler, so the XS build pipeline tests run for real
   # (they self-skip only where the toolchain is missing).
+  #
+  # The xs package's tests are split into shards, with and without the race
+  # detector, each a job of its own: shard k of n runs every n-th test,
+  # starting at the k-th. The other packages, and the core package with the
+  # race detector, are one more job.
   test:
-    name: Go test (${{ matrix.os }})
+    name: Go test (${{ matrix.os }}, ${{ matrix.part.name }})
     runs-on: ${{ matrix.os }}
     needs: verify
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        part:
+          - { name: packages, cache: packages }
+          - { name: xs 1/2, cache: xs, shard: 0, shards: 2 }
+          - { name: xs 2/2, cache: xs, shard: 1, shards: 2 }
+          - { name: xs race 1/2, cache: xs-race, race: true, shard: 0, shards: 2 }
+          - { name: xs race 2/2, cache: xs-race, race: true, shard: 1, shards: 2 }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test ./...
-      - name: Race detector (core packages)
-        run: go test -race . ./xs/
+          cache: false
+      # The build and module caches are saved under each commit, failed runs
+      # included, and restored from the newest one. -count=1 keeps test
+      # results out of them: the tests compile C sources go test does not
+      # know are their inputs.
+      - name: Locate the Go caches
+        id: go-env
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.cache }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.cache }}-${{ hashFiles('go.sum') }}-
+            go-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.cache }}-
+      - name: Every package but xs, and the core package with the race detector
+        if: ${{ matrix.part.cache == 'packages' }}
+        shell: bash
+        run: |
+          pkgs=$(go list ./... | grep -vxF github.com/goccy/go-perl/xs)
+          go test -count=1 -timeout 10m $pkgs
+          go test -race -count=1 -timeout 10m .
+      - name: The shard of the xs package
+        if: ${{ matrix.part.cache != 'packages' }}
+        shell: bash
+        env:
+          RACE: ${{ matrix.part.race && '-race' || '' }}
+          SHARD: ${{ matrix.part.shard }}
+          SHARDS: ${{ matrix.part.shards }}
+        run: |
+          tests=$(go test $RACE -list '^(Test|Fuzz|Example)' ./xs/ | grep -E '^(Test|Fuzz|Example)')
+          pattern=$(awk -v k="$SHARD" -v n="$SHARDS" '(NR - 1) % n == k' <<<"$tests" | paste -sd '|' -)
+          go test $RACE -count=1 -timeout 10m -run "^($pattern)\$" ./xs/
+      - if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.cache }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   # Every package must at least BUILD everywhere the library is meant to
   # embed, including platforms with no native XS loading (the xs package

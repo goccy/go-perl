@@ -47,7 +47,7 @@ func buildDemo(t *testing.T) string {
 
 // newHostPerl builds an instance on the host filesystem (acceptance dists,
 // their vendored trees, and test files live on disk).
-func newHostPerl(t *testing.T) *perl.Perl {
+func newHostPerl(t testing.TB) *perl.Perl {
 	t.Helper()
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -209,5 +209,165 @@ func TestNativeCppObjectModule(t *testing.T) {
 	}
 	if want := "42|Obj::Demo::Stats|hits|42"; r.Error != nil || resultStr(r) != want {
 		t.Fatalf("ObjDemo = ok=%v result=%q error=%v, want %q", (r.Error == nil), resultStr(r), r.Error, want)
+	}
+
+	// dXSARGS in a function that was given no interpreter context.
+	r, err = p.Eval(ctx, `join ",", Obj::Demo::count_args(7, 8, 9), Obj::Demo::count_args()`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if want := "3,0"; r.Error != nil || resultStr(r) != want {
+		t.Fatalf("count_args = result=%q error=%v, want %q", resultStr(r), r.Error, want)
+	}
+}
+
+// buildCxxPlain compiles testdata/cxxplain into a module: its C++ unit
+// alone, or with mixed also its C unit (helper.c).
+func buildCxxPlain(t *testing.T, mixed bool) string {
+	t.Helper()
+	cxx := findCXX(t)
+	dir := t.TempDir()
+	var arch []string
+	if runtime.GOOS == "darwin" {
+		switch runtime.GOARCH {
+		case "arm64":
+			arch = []string{"-arch", "arm64"}
+		case "amd64":
+			arch = []string{"-arch", "x86_64"}
+		}
+	}
+	run := func(name string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+	}
+	objs := []string{filepath.Join(dir, "CxxPlain.o")}
+	args := append(append(append([]string{}, arch...), cxx[1:]...),
+		"-c", "-fPIC", "-x", "c++", "-std=c++11", "-I", "sdk/include", "-o", objs[0], "testdata/cxxplain/CxxPlain.cc")
+	if mixed {
+		args = append(args, "-DCXXPLAIN_MIXED")
+	}
+	run(cxx[0], args...)
+	if mixed {
+		cc, err := exec.LookPath("cc")
+		if err != nil {
+			t.Skip("no host C compiler available")
+		}
+		objs = append(objs, filepath.Join(dir, "helper.o"))
+		run(cc, append(append([]string{}, arch...),
+			"-c", "-fPIC", "-I", "sdk/include", "-o", objs[1], "testdata/cxxplain/helper.c")...)
+	}
+	so := filepath.Join(dir, "CxxPlain.so")
+	run(cxx[0], append(append(append(append([]string{}, arch...), cxx[1:]...), "-shared", "-o", so), objs...)...)
+	return so
+}
+
+// A C++ module that includes the perl headers outside extern "C", after
+// C++ headers of its own (Algorithm::LibLinear), loads and runs: the
+// loader's entry points it defines have their C names. They had mangled
+// ones then, the loader did not initialize the module, and its boot
+// function faulted on the missing vtable. A module of a C++ unit and a C
+// unit shares one vtable between them: with mangled names each language's
+// units had their own, and the C++ unit's was never set.
+func TestNativeCxxModuleWithoutExternC(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		so := buildCxxPlain(t, mixed)
+		p := newHostPerl(t)
+		loadXSModule(t, p, "CxxPlain", so)
+		libdir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(libdir, "CxxPlain.pm"),
+			[]byte("package CxxPlain;\nuse XSLoader;\nXSLoader::load(__PACKAGE__);\n1;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code := `unshift @INC, '` + libdir + `'; require CxxPlain; CxxPlain::greet("perl")`
+		want := "hello, perl"
+		if mixed {
+			code += ` . "|" . CxxPlain::twice(21)`
+			want += "|42"
+		}
+		r, err := p.Eval(context.Background(), code)
+		if err != nil {
+			t.Fatalf("mixed=%v: Eval: %v", mixed, err)
+		}
+		if r.Error != nil || resultStr(r) != want {
+			t.Errorf("mixed=%v: got %q (error %v), want %q", mixed, resultStr(r), r.Error, want)
+		}
+	}
+}
+
+// The SDK headers compile as C++ with every C++ compiler of the host: a
+// module includes perl.h and XSUB.h inside extern "C" and says dXSARGS in
+// functions with and without an interpreter context. (g++ refuses what
+// clang++ lets pass, overloads with C linkage among them.) Under C++17 an
+// exception specification is part of a function's type: the C library's
+// functions the SDK defines for a module (signal, sigaction) have to have
+// the C library's.
+// The SDK leaves MY_CXT_KEY to the module, as perl's perl.h does: a
+// module defines it where it keeps state in MY_CXT and tests it to know
+// whether it does (Time::HiRes runs MY_CXT_INIT `#ifdef MY_CXT_KEY`, and
+// declares my_cxt only on Windows). Before, the SDK defined it, and
+// Time::HiRes did not build ('my_cxt' undeclared).
+func TestSDKLeavesMyCxtKeyToTheModule(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("no host C compiler available")
+	}
+	src := filepath.Join(t.TempDir(), "cxt.c")
+	if err := os.WriteFile(src, []byte(`#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+XS(boot_Cxt) {
+    dXSARGS;
+    PERL_UNUSED_VAR(items);
+#ifdef MY_CXT_KEY
+    MY_CXT_INIT;
+#endif
+    XSRETURN_YES;
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-fsyntax-only", "-D_GNU_SOURCE", "-I", "sdk/include", src}
+	if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+		t.Fatalf("a module that uses MY_CXT only where it defines MY_CXT_KEY does not compile: %v\n%s", err, out)
+	}
+}
+
+func TestSDKCompilesAsCxx(t *testing.T) {
+	tried := 0
+	for _, cxx := range []string{"c++", "g++", "clang++"} {
+		path, err := exec.LookPath(cxx)
+		if err != nil {
+			continue
+		}
+		var sysroot []string
+		if runtime.GOOS == "darwin" {
+			if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
+				sysroot = []string{"-isysroot", strings.TrimSpace(string(out))}
+			}
+		}
+		// Some hosts have a C++ compiler whose standard library headers
+		// are not installed: one that cannot compile a program of its own
+		// says nothing about the SDK's.
+		probe := filepath.Join(t.TempDir(), "probe.cpp")
+		if err := os.WriteFile(probe, []byte("#include <string>\nint main(){return 0;}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		probeArgs := append(append([]string{}, sysroot...), "-fsyntax-only", "-x", "c++", probe)
+		if exec.Command(path, probeArgs...).Run() != nil {
+			continue
+		}
+		tried++
+		for _, std := range []string{"-std=c++11", "-std=c++17"} {
+			args := append(append([]string{}, sysroot...), "-fsyntax-only", "-x", "c++", std, "-D_GNU_SOURCE",
+				"-I", "sdk/include", "testdata/objdemo/ObjDemo.c")
+			if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+				t.Errorf("%s %s: %v\n%s", cxx, std, err, out)
+			}
+		}
+	}
+	if tried == 0 {
+		t.Skip("no working C++ compiler found")
 	}
 }

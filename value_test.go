@@ -351,3 +351,67 @@ func TestAdoptEveryKind(t *testing.T) {
 		t.Fatalf("Adopt ref: %v", err)
 	}
 }
+
+// An integer crosses the bridge with its value whatever the width of the
+// interpreter's own integers: unsigned values above the signed range and
+// values beyond 32 bits arrive as they are, in both directions.
+func TestIntegersBeyondTheSignedRange(t *testing.T) {
+	p := newPerl(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		src  string
+		want int64
+	}{
+		{`4000000000`, 4000000000},
+		{`4294967295 + 0`, 4294967295},
+		{`2147483647 + 1`, 2147483648},
+		{`-2147483648`, -2147483648},
+		{`2 ** 40`, 1 << 40},
+		{`-(2 ** 40)`, -(1 << 40)},
+		{`unpack("N", "\xff\xff\xff\xfe")`, 4294967294},
+	} {
+		r, err := p.Eval(ctx, c.src)
+		if err != nil || r.Error != nil {
+			t.Fatalf("%s: err=%v error=%v", c.src, err, r.Error)
+		}
+		sv, err := perl.As[perl.ScalarValue](r.Value)
+		if err != nil {
+			t.Fatalf("%s: %v", c.src, err)
+		}
+		if sv.Int() != c.want {
+			t.Errorf("%s: Int() = %d, want %d", c.src, sv.Int(), c.want)
+		}
+	}
+
+	r, err := p.Eval(ctx, `sub { join ",", map { sprintf("%.0f", $_) } @_ }`)
+	if err != nil || r.Error != nil {
+		t.Fatalf("define: err=%v error=%v", err, r.Error)
+	}
+	ref, err := perl.As[perl.RefValue](r.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := ref.Deref(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	show, err := perl.As[perl.CodeValue](target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := show.Call(ctx, perl.ValueOf(int64(4000000000)), perl.ValueOf(int64(4294967295)),
+		perl.ValueOf(int64(1)<<40), perl.ValueOf(-(int64(1) << 40)), perl.ValueOf(int64(-2147483648)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("Call returned %d values", len(out))
+	}
+	got, err := perl.As[perl.ScalarValue](out[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "4000000000,4294967295,1099511627776,-1099511627776,-2147483648"; got.String() != want {
+		t.Errorf("Go integers in Perl = %q, want %q", got.String(), want)
+	}
+}

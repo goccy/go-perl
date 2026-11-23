@@ -78,6 +78,9 @@ func TestXSBuildFromTarball(t *testing.T) {
 	}
 	tarball := filepath.Join(t.TempDir(), "Demo-XS-0.01.tar.gz")
 	cmd := exec.Command("tar", "-czf", tarball, "-C", filepath.Dir(dist), filepath.Base(dist))
+	// darwin's tar stores the extended attributes of a file in a "._" file
+	// beside it, besides the dist's directory, unless told not to.
+	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tar: %v\n%s", err, out)
 	}
@@ -118,4 +121,67 @@ func captureStdout(t *testing.T, fn func()) string {
 	w.Close()
 	os.Stdout = old
 	return <-done
+}
+
+// A native module laid out the way perl installs one — Module.pm next to
+// auto/Module/Module.so on @INC, as in a dist's blib or an install tree —
+// loads through the stock XSLoader, with nothing registered up front.
+func TestNativeModuleLoadsFromInc(t *testing.T) {
+	hostXSToolchain(t)
+	project := t.TempDir()
+	dist, err := filepath.Abs(filepath.Join("testdata", "Demo-XS-dist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := XSBuild(project, []string{dist}); err != nil {
+		t.Fatalf("XSBuild: %v", err)
+	}
+
+	lib := t.TempDir()
+	place := func(src string, dst ...string) {
+		t.Helper()
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(append([]string{lib}, dst...)...)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place(filepath.Join(project, "local", "lib", "perl5", "Demo", "XS.pm"), "Demo", "XS.pm")
+	place(filepath.Join(xsDir(project), "Demo-XS.so"), "auto", "Demo", "XS", "XS.so")
+
+	// A fork child cannot use it (native code is not available there): the
+	// call dies, naming the sub and the module's shared object.
+	status, stdout, stderr := runCLI(t, t.TempDir(), "", "-I"+lib, "-MDemo::XS", "-e",
+		`print "sum=", Demo::XS::add(40, 2), "\n";`,
+		`-e`, `my $pid = fork // die "fork: $!"; if (!$pid) { my $r = eval { Demo::XS::add(1, 2) }; print "child=", $r // ($@ =~ m{^Demo::XS::add: native modules cannot be used in a forked child \(\S*/XS\.so\) at } ? "refused" : "other: $@"), "\n"; exit 0 } waitpid($pid, 0);`)
+	if status != 0 || stdout != "sum=42\nchild=refused\n" {
+		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
+	}
+
+	// A module whose shared object is not there fails the way it does on
+	// any perl.
+	if err := os.Remove(filepath.Join(lib, "auto", "Demo", "XS", "XS.so")); err != nil {
+		t.Fatal(err)
+	}
+	status, _, stderr = runCLI(t, t.TempDir(), "", "-I"+lib, "-MDemo::XS", "-e", "1")
+	if status == 0 || !strings.Contains(stderr, "Can't locate loadable object for module Demo::XS in @INC") {
+		t.Fatalf("status=%d stderr=%q, want DynaLoader's own failure", status, stderr)
+	}
+}
+
+// DynaLoader has its whole set of entry points. A loaded library stays
+// loaded, so dl_unload_file reports that it unloaded nothing.
+func TestDynaLoaderUnloadFileReportsFailure(t *testing.T) {
+	status, stdout, stderr := runCLI(t, t.TempDir(), "", "-MDynaLoader", "-e",
+		`print defined(&DynaLoader::dl_unload_file) ? "defined" : "undefined", "\n";`,
+		"-e", `print DynaLoader::dl_unload_file(1) ? "unloaded" : "kept: " . DynaLoader::dl_error(), "\n";`)
+	if status != 0 || stdout != "defined\nkept: dl_unload_file: a loaded library is never unloaded\n" {
+		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout, stderr)
+	}
 }

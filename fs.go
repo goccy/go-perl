@@ -6,11 +6,13 @@ package perl
 // backends themselves live in the go-perl/fs package (fs.NewMemFS,
 // fs.NewHostFS, fs.DirFS). This file re-exports the types Config needs,
 // provides NewStdlibMemFS (the library default's filesystem), and wraps
-// every backend with a working /dev/null (perl requires one to boot).
+// every backend that has no /dev/null with a working one (perl requires one
+// to boot).
 
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
+	"github.com/goccy/perlwasm2go/base"
 )
 
 // FS is the read/write filesystem backend a Perl instance is given via
@@ -33,26 +36,55 @@ type File = goperlfs.File
 // MemFS is an in-memory read/write FS (see the go-perl/fs package).
 type MemFS = goperlfs.MemFS
 
-// withDevNull wraps a custom FS backend so the guest always sees a working
-// /dev/null. Perl itself requires one: a `-e` bootstrap (which perl_new uses)
-// opens the bit bucket as its script filehandle, so booting on an FS without
-// it fails outright. Reads hit EOF, writes are discarded, and everything
-// else passes through to the wrapped backend (whose own dev/null, if any, is
-// shadowed for consistency).
-func withDevNull(fsys FS) FS { return devNullFS{FS: fsys} }
+// withDevNull returns fsys as it is when it has a /dev/null of its own (the
+// host's filesystem has), and otherwise fsys wrapped so the guest sees a
+// working one. Perl itself requires one: a `-e` bootstrap (which perl_new
+// uses) opens the bit bucket as its script filehandle, so booting on an FS
+// without it fails outright. The wrapper's reads hit EOF, its writes are
+// discarded, and everything else passes through to the wrapped backend.
+// The host's filesystem is not wrapped, so that the runtime, which tells it
+// by its type, treats it as the host's (in how the instance's umask is
+// applied, access checks, locks and Unix-domain sockets).
+func withDevNull(fsys FS) (FS, error) {
+	fi, err := fsys.Stat(devNullName)
+	switch {
+	case err == nil && fi.Mode()&iofs.ModeCharDevice != 0:
+		return fsys, nil
+	case err == nil || errors.Is(err, iofs.ErrNotExist):
+		return devNullFS{FS: fsys}, nil
+	}
+	return nil, fmt.Errorf("look up /dev/null: %w", err)
+}
 
 type devNullFS struct{ FS }
 
-// Chmod forwards to the wrapped backend when it supports changing modes
-// (the runtime discovers the capability by interface assertion, which an
-// embedded interface field would otherwise hide).
-func (d devNullFS) Chmod(name string, mode iofs.FileMode) error {
-	if ch, ok := d.FS.(interface {
-		Chmod(string, iofs.FileMode) error
-	}); ok {
-		return ch.Chmod(name, mode)
+// Flock grants every lock on the bit bucket — it has no content for a lock
+// to protect — and leaves the files of the wrapped backend to that backend.
+// A backend that takes no locks (not a LockFS) fails the lock with ENOSYS,
+// as the runtime does for it unwrapped.
+func (d devNullFS) Flock(f File, how int) error {
+	if _, ok := f.(nullFile); ok {
+		return nil
 	}
-	return &iofs.PathError{Op: "chmod", Path: name, Err: syscall.ENOSYS}
+	locks, can := d.FS.(base.LockFS)
+	if !can {
+		return syscall.ENOSYS
+	}
+	return locks.Flock(f, how)
+}
+
+// Mkfifo and Chown pass what the host filesystem can do beyond FS — make a
+// FIFO, change a file's owner — on to the wrapped backend. A backend
+// without them (an in-memory one) reports errors.ErrUnsupported, which the
+// guest sees as a filesystem that has no FIFOs and keeps no owners.
+func (d devNullFS) Mkfifo(name string, perm iofs.FileMode) error {
+	maker, can := d.FS.(interface {
+		Mkfifo(name string, perm iofs.FileMode) error
+	})
+	if !can {
+		return errors.ErrUnsupported
+	}
+	return maker.Mkfifo(name, perm)
 }
 
 const devNullName = "dev/null"
@@ -67,7 +99,7 @@ func (d devNullFS) OpenFile(name string, flag int, perm iofs.FileMode) (File, er
 func (d devNullFS) Stat(name string) (os.FileInfo, error) {
 	switch name {
 	case devNullName:
-		return nullFileInfo{name: "null", mode: 0o666}, nil
+		return nullFileInfo{name: "null", mode: devNullMode}, nil
 	case "dev":
 		// The synthetic parent directory, so path resolution can traverse it
 		// even when the wrapped FS has no dev/ entry.
@@ -86,6 +118,10 @@ func (d devNullFS) Lstat(name string) (os.FileInfo, error) {
 	return d.FS.Lstat(name)
 }
 
+// devNullMode is the mode of the guest's /dev/null: a character device
+// anyone may read and write, as on a real system.
+const devNullMode = iofs.ModeDevice | iofs.ModeCharDevice | 0o666
+
 // nullFile is the guest's /dev/null: an always-empty sink.
 type nullFile struct{}
 
@@ -96,14 +132,18 @@ func (nullFile) WriteAt(p []byte, off int64) (int, error) { return len(p), nil }
 func (nullFile) Seek(offset int64, whence int) (int64, error) {
 	return 0, nil
 }
-func (nullFile) Close() error               { return nil }
-func (nullFile) Stat() (os.FileInfo, error) { return nullFileInfo{name: "null", mode: 0o666}, nil }
+func (nullFile) Close() error             { return nil }
+func (nullFile) Chown(uid, gid int) error { return nil }
+func (nullFile) Stat() (os.FileInfo, error) {
+	return nullFileInfo{name: "null", mode: devNullMode}, nil
+}
 func (nullFile) ReadDir(n int) ([]os.DirEntry, error) {
 	return nil, fmt.Errorf("dev/null is not a directory")
 }
-func (nullFile) Sync() error               { return nil }
-func (nullFile) Truncate(size int64) error { return nil }
-func (nullFile) Name() string              { return "null" }
+func (nullFile) Sync() error                    { return nil }
+func (nullFile) Truncate(size int64) error      { return nil }
+func (nullFile) Chmod(mode iofs.FileMode) error { return nil }
+func (nullFile) Name() string                   { return "null" }
 
 type nullFileInfo struct {
 	name string
@@ -115,7 +155,21 @@ func (fi nullFileInfo) Size() int64         { return 0 }
 func (fi nullFileInfo) Mode() iofs.FileMode { return fi.mode }
 func (fi nullFileInfo) ModTime() time.Time  { return time.Time{} }
 func (fi nullFileInfo) IsDir() bool         { return fi.mode.IsDir() }
-func (fi nullFileInfo) Sys() any            { return nil }
+
+// Sys describes the null device as the host does where the host has one:
+// its device numbers and owner are what a program reads to tell a special
+// file from an ordinary one (the st_rdev of stat). The synthetic directory
+// above it has nothing of the host's.
+func (fi nullFileInfo) Sys() any {
+	if fi.mode&iofs.ModeCharDevice == 0 {
+		return nil
+	}
+	host, err := os.Stat(os.DevNull)
+	if err != nil || host.Mode()&iofs.ModeCharDevice == 0 {
+		return nil
+	}
+	return host.Sys()
+}
 
 // stdlibEntries caches the DECOMPRESSED embedded stdlib once per process:
 // building a MemFS per instance then only pays for copying bytes in
