@@ -58,9 +58,29 @@ sub from_master {
 }
 `
 
-// The names POSIX has for the settings of a terminal have the system's
-// numbers: the bits of the flag words, the places of the control
-// characters, the speeds, the selectors of tcsetattr, tcflow and tcflush.
+// linuxTermios is what Linux's termios.h defines the names of
+// TestTerminalNumbersAreTheSystems as.
+var linuxTermios = map[string]int64{
+	"VINTR": 0, "VQUIT": 1, "VERASE": 2, "VKILL": 3, "VEOF": 4, "VTIME": 5,
+	"VMIN": 6, "VSTART": 8, "VSTOP": 9, "VSUSP": 10, "VEOL": 11, "NCCS": 32,
+	"IGNBRK": 1, "BRKINT": 2, "IGNPAR": 4, "PARMRK": 8, "INPCK": 16, "ISTRIP": 32,
+	"INLCR": 64, "IGNCR": 128, "ICRNL": 256, "IXON": 1024, "IXOFF": 4096, "OPOST": 1,
+	"B0": 0, "B50": 1, "B75": 2, "B110": 3, "B134": 4, "B150": 5,
+	"B200": 6, "B300": 7, "B600": 8, "B1200": 9, "B1800": 10, "B2400": 11,
+	"B4800": 12, "B9600": 13, "B19200": 14, "B38400": 15, "CSIZE": 48, "CS5": 0,
+	"CS6": 16, "CS7": 32, "CS8": 48, "CSTOPB": 64, "CREAD": 128, "PARENB": 256,
+	"PARODD": 512, "HUPCL": 1024, "CLOCAL": 2048, "ISIG": 1, "ICANON": 2, "ECHO": 8,
+	"ECHOE": 16, "ECHOK": 32, "ECHONL": 64, "NOFLSH": 128, "TOSTOP": 256, "IEXTEN": 32768,
+	"TCOOFF": 0, "TCOON": 1, "TCIOFF": 2, "TCION": 3, "TCIFLUSH": 0, "TCOFLUSH": 1,
+	"TCIOFLUSH": 2, "TCSANOW": 0, "TCSADRAIN": 1, "TCSAFLUSH": 2,
+}
+
+// The names POSIX has for the settings of a terminal (the bits of the flag
+// words, the places of the control characters, the speeds, the selectors of
+// tcsetattr, tcflow and tcflush) have Linux's numbers, the numbers of the
+// interpreter's C library, on every system: a POSIX::Termios holds them,
+// and the C library turns them into the host's for the host's terminal. On
+// Linux they are the system's.
 func TestTerminalNumbersAreTheSystems(t *testing.T) {
 	got := perlNumbers(t, `use POSIX (); for (qw(VINTR VQUIT VERASE VKILL VEOF VTIME VMIN VSTART VSTOP VSUSP VEOL NCCS
 IGNBRK BRKINT IGNPAR PARMRK INPCK ISTRIP INLCR IGNCR ICRNL IXON IXOFF OPOST
@@ -71,7 +91,15 @@ TCOOFF TCOON TCIOFF TCION TCIFLUSH TCOFLUSH TCIOFLUSH TCSANOW TCSADRAIN TCSAFLUS
 	if len(got) != 70 {
 		t.Fatalf("POSIX has %d of the 70 names", len(got))
 	}
-	compareWithHeaders(t, "termios", []string{"termios.h"}, got, 70)
+	if runtime.GOOS == "linux" {
+		compareWithHeaders(t, "termios", []string{"termios.h"}, got, 70)
+		return
+	}
+	for name, want := range linuxTermios {
+		if got[name] != want {
+			t.Errorf("termios %s = %d, Linux's is %d", name, got[name], want)
+		}
+	}
 }
 
 // A program makes the requests of a terminal with ioctl, the host's

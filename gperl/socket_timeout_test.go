@@ -2,10 +2,15 @@
 
 package gperl_test
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // A listening socket says that it is one, and a socket's receive timeout
-// ends a receive or an accept that waited that long.
+// ends a receive or an accept that waited that long. darwin has no
+// SO_ACCEPTCONN for getsockopt: it fails with ENOPROTOOPT, as with perl
+// there.
 func TestListeningStateAndSocketTimeouts(t *testing.T) {
 	got := runForkScript(t, `
 use Socket qw(SOL_SOCKET SO_ACCEPTCONN SO_RCVTIMEO SO_SNDTIMEO);
@@ -14,8 +19,11 @@ use Time::HiRes qw(time);
 my $listener = IO::Socket::INET->new(Listen => 5, LocalAddr => "127.0.0.1", LocalPort => 0) or die "listen: $!";
 my $client = IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $listener->sockport) or die "connect: $!";
 my $server = $listener->accept or die "accept: $!";
-report("accepting: listener=", unpack("i", getsockopt($listener, SOL_SOCKET, SO_ACCEPTCONN)),
-       " connection=", unpack("i", getsockopt($client, SOL_SOCKET, SO_ACCEPTCONN)));
+sub accepting {
+    my $v = getsockopt($_[0], SOL_SOCKET, SO_ACCEPTCONN);
+    return defined $v ? unpack("i", $v) : $!{ENOPROTOOPT} ? "ENOPROTOOPT" : "error $!";
+}
+report("accepting: listener=", accepting($listener), " connection=", accepting($client));
 
 # the way programs build a timeout: two native longs
 setsockopt($server, SOL_SOCKET, SO_RCVTIMEO, pack("l!l!", 0, 300_000)) or die "SO_RCVTIMEO: $!";
@@ -37,8 +45,12 @@ report("accept with nobody connecting: ", ($accepted ? "accepted" : ($!{EAGAIN} 
        " after about ", ($waited > 0.2 && $waited < 5 ? "0.3s" : sprintf("%.2fs", $waited)));
 report("a timeout of the wrong size: ", (setsockopt($server, SOL_SOCKET, SO_RCVTIMEO, pack("C", 1)) ? "set" : ($!{EINVAL} ? "EINVAL" : "error $!")));
 `)
+	accepting := "accepting: listener=1 connection=0"
+	if runtime.GOOS == "darwin" {
+		accepting = "accepting: listener=ENOPROTOOPT connection=ENOPROTOOPT"
+	}
 	wantLines(t, got,
-		"accepting: listener=1 connection=0",
+		accepting,
 		"read on an idle socket: EAGAIN after about 0.3s",
 		"input that arrives is read: in time",
 		"a send within its timeout: 2",

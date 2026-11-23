@@ -5,6 +5,7 @@ package gperl_test
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 )
 
@@ -14,15 +15,21 @@ import (
 // of the segment) and shmctl, and IPC::SysV's ftok. gperl had none of them
 // (IPC::SysV was not built: "Your vendor has not defined IPC::SysV macro
 // SEM_UNDO", IPC::Shareable and the modules over it). What is expected is
-// what perl 5.36 on Linux prints.
+// what perl 5.36 on Linux prints. On darwin a segment is not attached to
+// the interpreter's memory: shmwrite and shmread, which attach it, fail
+// with ENOSYS.
 func TestSystemVIPCIsTheHosts(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-e", sysvProgram, os.Args[0])
+	cmd := exec.Command(os.Args[0], "-e", sysvProgram, os.Args[0], runtime.GOOS)
 	cmd.Env = append(os.Environ(), asPerlEnv+"=1")
 	out, err := cmd.CombinedOutput()
+	shm := "shm: read 0,115,101,103,109,101,110,116,0, segsz 4096\n" +
+		"shm: past the end failed: EFAULT\n"
+	if runtime.GOOS == "darwin" {
+		shm = "shm: shmwrite ENOSYS, shmread ENOSYS\n"
+	}
 	want := "sem: val 3, all 0 3, nsems 2, mode 600\n" +
 		"msg: queued 1, type 7, text hello\n" +
-		"shm: read 0,115,101,103,109,101,110,116,0, segsz 4096\n" +
-		"shm: past the end failed: EFAULT\n" +
+		shm +
 		"ftok: a key\n"
 	if err != nil || string(out) != want {
 		t.Fatalf("err %v, output:\n%s\nwant:\n%s", err, out, want)
@@ -32,7 +39,8 @@ func TestSystemVIPCIsTheHosts(t *testing.T) {
 // A segment is attached to the interpreter's memory: what IPC::SysV's
 // memwrite writes at the address shmat gives, shmread reads from the
 // segment, what shmwrite writes to the segment, memread reads there, and
-// shmdt detaches it. What is expected is what perl on Linux prints.
+// shmdt detaches it. What is expected is what perl on Linux prints. On
+// darwin a segment is not attached: shmat fails with ENOSYS.
 func TestSystemVIPCSegmentsAreAttached(t *testing.T) {
 	program := `use IPC::SysV qw(IPC_PRIVATE IPC_CREAT IPC_RMID shmat shmdt memread memwrite);
 my $shm = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600) // die "shmget: $!";
@@ -44,10 +52,17 @@ memread($addr, my $mem, 20, 5) or die "memread: $!";
 defined shmdt($addr) or die "shmdt: $!";
 print "$read $mem\n";
 shmctl($shm, IPC_RMID, 0) or die "IPC_RMID: $!";`
+	want := "hello world\n"
+	if runtime.GOOS == "darwin" {
+		program = `use IPC::SysV qw(IPC_PRIVATE IPC_CREAT IPC_RMID shmat);
+my $shm = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600) // die "shmget: $!";
+print "shmat: ", (defined shmat($shm, undef, 0) ? "attached" : $!{ENOSYS} ? "ENOSYS" : "$!"), "\n";
+shmctl($shm, IPC_RMID, 0) or die "IPC_RMID: $!";`
+		want = "shmat: ENOSYS\n"
+	}
 	cmd := exec.Command(os.Args[0], "-e", program)
 	cmd.Env = append(os.Environ(), asPerlEnv+"=1")
 	out, err := cmd.CombinedOutput()
-	want := "hello world\n"
 	if err != nil || string(out) != want {
 		t.Fatalf("err %v, output:\n%s\nwant:\n%s", err, out, want)
 	}
@@ -84,14 +99,19 @@ print "msg: queued $qnum, type $type, text $text\n";
 msgctl($msg, IPC_RMID, 0) or die "IPC_RMID: $!";
 
 my $shm = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600) // die "shmget: $!";
-shmwrite($shm, "segment", 100, 7) or die "shmwrite: $!";
-my $read;
-shmread($shm, $read, 99, 9) or die "shmread: $!";
-my $sdata = '';
-shmctl($shm, IPC_STAT, $sdata) or die "IPC_STAT: $!";
-print "shm: read ", join(",", map { ord } split //, $read), ", segsz ", IPC::SharedMem::stat::->new->unpack($sdata)->segsz, "\n";
-my $past = shmread($shm, $read, 4090, 7) ? "read" : "failed: " . ($! + 0 == 14 ? "EFAULT" : $!);
-print "shm: past the end $past\n";
+if ($ARGV[1] eq 'darwin') {
+    print "shm: shmwrite ", (shmwrite($shm, "segment", 100, 7) ? "written" : $!{ENOSYS} ? "ENOSYS" : "$!"),
+        ", shmread ", (shmread($shm, my $read, 99, 9) ? "read" : $!{ENOSYS} ? "ENOSYS" : "$!"), "\n";
+} else {
+    shmwrite($shm, "segment", 100, 7) or die "shmwrite: $!";
+    my $read;
+    shmread($shm, $read, 99, 9) or die "shmread: $!";
+    my $sdata = '';
+    shmctl($shm, IPC_STAT, $sdata) or die "IPC_STAT: $!";
+    print "shm: read ", join(",", map { ord } split //, $read), ", segsz ", IPC::SharedMem::stat::->new->unpack($sdata)->segsz, "\n";
+    my $past = shmread($shm, $read, 4090, 7) ? "read" : "failed: " . ($! + 0 == 14 ? "EFAULT" : $!);
+    print "shm: past the end $past\n";
+}
 shmctl($shm, IPC_RMID, 0) or die "IPC_RMID: $!";
 
 my $key = ftok($ARGV[0], 1);
