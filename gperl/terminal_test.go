@@ -3,7 +3,9 @@
 package gperl_test
 
 import (
+	"maps"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -80,7 +82,9 @@ var linuxTermios = map[string]int64{
 // tcsetattr, tcflow and tcflush) have Linux's numbers, the numbers of the
 // interpreter's C library, on every system: a POSIX::Termios holds them,
 // and the C library turns them into the host's for the host's terminal. On
-// Linux they are the system's.
+// Linux they are the system's, except the speeds: those are the kernel's
+// encoding, which a C library may define the speed names differently from
+// (glibc 2.42 and later defines them as the speeds themselves).
 func TestTerminalNumbersAreTheSystems(t *testing.T) {
 	got := perlNumbers(t, `use POSIX (); for (qw(VINTR VQUIT VERASE VKILL VEOF VTIME VMIN VSTART VSTOP VSUSP VEOL NCCS
 IGNBRK BRKINT IGNPAR PARMRK INPCK ISTRIP INLCR IGNCR ICRNL IXON IXOFF OPOST
@@ -91,11 +95,16 @@ TCOOFF TCOON TCIOFF TCION TCIFLUSH TCOFLUSH TCIOFLUSH TCSANOW TCSADRAIN TCSAFLUS
 	if len(got) != 70 {
 		t.Fatalf("POSIX has %d of the 70 names", len(got))
 	}
+	isSpeed := regexp.MustCompile(`\AB[0-9]+\z`).MatchString
 	if runtime.GOOS == "linux" {
-		compareWithHeaders(t, "termios", []string{"termios.h"}, got, 70)
-		return
+		others := maps.Clone(got)
+		maps.DeleteFunc(others, func(name string, _ int64) bool { return isSpeed(name) })
+		compareWithHeaders(t, "termios", []string{"termios.h"}, others, 54)
 	}
 	for name, want := range linuxTermios {
+		if runtime.GOOS == "linux" && !isSpeed(name) {
+			continue
+		}
 		if got[name] != want {
 			t.Errorf("termios %s = %d, Linux's is %d", name, got[name], want)
 		}
