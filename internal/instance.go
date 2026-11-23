@@ -82,6 +82,12 @@ type InstanceOptions struct {
 	// HostProcess makes the program the host process: its ids, user
 	// database and signals are the process's own.
 	HostProcess bool
+	// OwnState keeps a program that is the host process (HostProcess) a
+	// process of its own inside it: the host process does not follow its
+	// working directory or environment, a command it starts runs in its
+	// working directory, its pid is its own (ownPIDProcess), and the
+	// signals the host process receives are not relayed to it.
+	OwnState bool
 	// InheritDescriptors gives the program the descriptors above 2 that
 	// the host process was started with (the first instance that asks).
 	InheritDescriptors bool
@@ -598,9 +604,13 @@ func buildWASI(opts InstanceOptions, family *forkFamily) (*base.WasiStubs, error
 		// directory and environment are the host process's. An isolated
 		// program is in UTC.
 		cfg.LocalZone = time.Local
-		cfg.Chdir = hostChdir
-		cfg.CommandDir = hostCommandDir
-		cfg.Setenv = hostSetenv
+		if opts.OwnState {
+			cfg.Process = newOwnPIDProcess(proc)
+		} else {
+			cfg.Chdir = hostChdir
+			cfg.CommandDir = hostCommandDir
+			cfg.Setenv = hostSetenv
+		}
 	}
 	if opts.Syslog {
 		cfg.Syslog = NewSyslogger()
@@ -617,7 +627,9 @@ func buildWASI(opts InstanceOptions, family *forkFamily) (*base.WasiStubs, error
 		cfg.Files = files
 	}
 	wasi := base.NewWASI(cfg)
-	if opts.HostProcess {
+	// A program with OwnState receives no signal of the host process: the
+	// host's are the embedder's.
+	if opts.HostProcess && !opts.OwnState {
 		if err := bindHostSignals(wasi); err != nil {
 			return nil, errors.Join(fmt.Errorf("perl: signals of the host process: %w", err), unbindHostSignals(wasi), wasi.CloseAll())
 		}

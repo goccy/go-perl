@@ -1,6 +1,7 @@
 package gperl
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -8,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func envOf(pairs map[string]string) func(string) string {
@@ -181,6 +184,16 @@ func TestPSGIWorkersAreIsolated(t *testing.T) {
 	if err := os.WriteFile(appPath, []byte(`use Cwd ();
 sub {
     my $env = shift;
+    if ($env->{PATH_INFO} eq '/signal') {
+        my $got = 'none';
+        local $SIG{USR1} = sub { $got = 'USR1' };
+        kill USR1 => $$;
+        return [200, [], [$got]];
+    }
+    if ($env->{PATH_INFO} eq '/ids') {
+        require POSIX;
+        return [200, [], [join('|', $$, getppid(), $<, POSIX::strftime('%z', localtime(0)))]];
+    }
     if ($env->{PATH_INFO} eq '/change') {
         chdir 'sub' or die "chdir: $!";
         $ENV{GPERL_TEST_MARK} = 'set';
@@ -223,5 +236,24 @@ sub {
 	}
 	if mark, set := os.LookupEnv("GPERL_TEST_MARK"); set {
 		t.Errorf("the process's environment has GPERL_TEST_MARK=%q", mark)
+	}
+	// Each worker has a pid of its own, the process as its parent, and the
+	// process's user and local time.
+	rest := fmt.Sprintf("|%d|%d|%s", os.Getpid(), os.Getuid(), time.Unix(0, 0).Format("-0700"))
+	first, second := get("/ids"), get("/ids")
+	for _, ids := range []string{first, second} {
+		pid, tail, ok := strings.Cut(ids, "|")
+		if !ok || "|"+tail != rest || pid == strconv.Itoa(os.Getpid()) {
+			t.Errorf("a worker's ids = %q, want its own pid then %q", ids, rest)
+		}
+	}
+	if first == second {
+		t.Errorf("both workers have the ids %q", first)
+	}
+	// A signal a worker sends itself reaches its own handler.
+	for range 2 {
+		if got := get("/signal"); got != "USR1" {
+			t.Errorf("a worker's own signal: %q, want its handler to run", got)
+		}
 	}
 }

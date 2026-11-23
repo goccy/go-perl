@@ -23,10 +23,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+	_ "unsafe" // go:linkname
 
 	perl "github.com/goccy/go-perl"
 	"github.com/goccy/go-perl/internal/mod"
@@ -68,6 +70,10 @@ type psgiConfig struct {
 	keepaliveTimeout int // seconds
 	accessLog        string
 	reload           bool
+	// starterPorts is SERVER_STARTER_PORT: the sockets a supervisor
+	// (Server::Starter's start_server) has opened for the server, as
+	// "address=descriptor" entries separated by ';'.
+	starterPorts string
 }
 
 // flags declares the options on a flag set. plackup's -o (host) is left
@@ -153,6 +159,7 @@ func parsePSGI(name string, defaults, args []string, getenv func(string) string)
 	if c.workers < 1 {
 		return nil, nil, fmt.Errorf("--workers must be at least 1")
 	}
+	c.starterPorts = getenv("SERVER_STARTER_PORT")
 	if c.enableSSL && (c.sslCert == "" || c.sslKey == "") {
 		return nil, nil, fmt.Errorf("--enable-ssl needs --ssl-cert and --ssl-key")
 	}
@@ -161,6 +168,9 @@ func parsePSGI(name string, defaults, args []string, getenv func(string) string)
 
 // listeners opens what the settings ask to listen on.
 func (c *psgiConfig) listeners() ([]net.Listener, error) {
+	if c.starterPorts != "" {
+		return starterListeners(c.starterPorts)
+	}
 	addrs := c.listen.values
 	if len(addrs) == 0 {
 		addrs = []string{net.JoinHostPort(c.host, fmt.Sprint(c.port))}
@@ -186,6 +196,38 @@ func (c *psgiConfig) listeners() ([]net.Listener, error) {
 	return out, nil
 }
 
+// starterListeners takes over the listening sockets SERVER_STARTER_PORT
+// names, as Starman and Starlet do under Server::Starter.
+func starterListeners(ports string) ([]net.Listener, error) {
+	var out []net.Listener
+	fail := func(err error) ([]net.Listener, error) {
+		for _, ln := range out {
+			err = errors.Join(err, ln.Close())
+		}
+		return nil, err
+	}
+	for _, entry := range strings.Split(ports, ";") {
+		addr, fdText, ok := strings.Cut(entry, "=")
+		if !ok {
+			return fail(fmt.Errorf("SERVER_STARTER_PORT: %q is not address=descriptor", entry))
+		}
+		fd, err := strconv.Atoi(fdText)
+		if err != nil {
+			return fail(fmt.Errorf("SERVER_STARTER_PORT: %q: %w", entry, err))
+		}
+		f := os.NewFile(uintptr(fd), addr)
+		ln, err := net.FileListener(f)
+		if ln != nil {
+			out = append(out, ln)
+		}
+		// FileListener has a descriptor of its own.
+		if err = errors.Join(err, f.Close()); err != nil {
+			return fail(fmt.Errorf("SERVER_STARTER_PORT: %s: %w", entry, err))
+		}
+	}
+	return out, nil
+}
+
 // psgiApp is where a PSGI application lives and what it loads from.
 type psgiApp struct {
 	path   string   // the application file
@@ -201,13 +243,11 @@ func (a *psgiApp) newServer(c *psgiConfig, accessLog io.Writer) (*psgi.Server, e
 	if err != nil {
 		return nil, err
 	}
-	// A worker is not the host process: its working directory and
-	// environment are its own, and what one request changes of them reaches
-	// no other worker.
-	cfg.HostProcess, cfg.InheritDescriptors = false, false
+	// The descriptors the process was started with are the server's.
+	cfg.InheritDescriptors = false
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cfg.Env = append(os.Environ(), "PLACK_ENV="+c.env)
-	p, err := perl.New(cfg)
+	p, err := newWorkerPerl(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -495,3 +535,11 @@ func PSGIMain(appPath string, incDirs, defaults, args []string) int {
 	}
 	return 0
 }
+
+// newWorkerPerl creates the prototype of the workers: a program with the
+// host process's identity and numbers whose working directory, environment
+// and pid are its own, so that what one request changes of them reaches no
+// other worker (its clones are the same).
+//
+//go:linkname newWorkerPerl github.com/goccy/go-perl.newOwnState
+func newWorkerPerl(cfg perl.Config) (*perl.Perl, error)

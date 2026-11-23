@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "unsafe" // go:linkname
 
 	perl "github.com/goccy/go-perl"
 )
@@ -40,10 +41,10 @@ type Options struct {
 
 // helperProgram is the Perl half of the server. Its value is a sub that
 // takes the application and returns the request handler: the handler
-// completes the environment, runs the application, and reports the
-// response to Go in one call — respond for a complete response, start
-// followed by the writer's methods for a streaming one. Everything that
-// crosses is a scalar, so no call nests back into Perl.
+// completes the environment, runs the application, and returns a complete
+// response as (status, body, header pairs...); a streaming one it reports
+// through start followed by the writer's methods, and returns nothing.
+// Everything that crosses is a scalar, so no call nests back into Perl.
 const helperProgram = `
 package GoPerl::PSGI;
 use strict;
@@ -70,11 +71,16 @@ sub {
         do { local $@; eval { close $body } } unless $can_getline;
         return $out;
     };
+    my $complete = sub {
+        my ($res) = @_;
+        die "PSGI response must be an array reference\n" unless ref $res eq 'ARRAY';
+        return ($res->[0], $flatten->($res->[2]), @{ $res->[1] });
+    };
     my $responder = sub {
         my ($res) = @_;
         die "PSGI response must be an array reference\n" unless ref $res eq 'ARRAY';
         if (@$res >= 3) {
-            GoPerl::PSGI::respond($res->[0], $flatten->($res->[2]), @{ $res->[1] });
+            GoPerl::PSGI::respond($complete->($res));
             return;
         }
         GoPerl::PSGI::start($res->[0], @{ $res->[1] });
@@ -88,7 +94,8 @@ sub {
         $env->{'psgi.errors'}  = \*STDERR;
         $env->{'psgi.version'} = [1, 1];
         my $res = $app->($env);
-        if (ref $res eq 'CODE') { $res->($responder) } else { $responder->($res) }
+        return $complete->($res) unless ref $res eq 'CODE';
+        $res->($responder);
         return;
     };
 };
@@ -413,14 +420,25 @@ func (ws *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// run calls the application for one request on wk.
-func (ws *Server) run(r *http.Request, wk *worker, body []byte) error {
+// run calls the application for one request on wk, on the thread of wk's
+// interpreter, where the request's entries into it then run in place.
+func (ws *Server) run(r *http.Request, wk *worker, body []byte) (err error) {
+	onThread(wk.p, func() { err = ws.call(r, wk, body) })
+	return err
+}
+
+// call is the body of run.
+func (ws *Server) call(r *http.Request, wk *worker, body []byte) error {
 	ctx := r.Context()
 	env, err := wk.p.NewHash(ctx, requestEnv(r, len(body), ws.multi)...)
 	if err != nil {
 		return fmt.Errorf("build environment: %w", err)
 	}
-	_, err = wk.handle.Call(ctx, env.Ref(), perl.ValueOf(body))
+	res, err := wk.handle.Call(ctx, env.Ref(), perl.ValueOf(body))
+	if err != nil || len(res) == 0 {
+		return err
+	}
+	_, err = wk.respond(res)
 	return err
 }
 
@@ -534,3 +552,9 @@ func (ws *Server) Close() {
 		log.Printf("psgi: close prototype: %v", err)
 	}
 }
+
+// onThread runs fn on the thread p's guest code runs on (go-perl's
+// onThread).
+//
+//go:linkname onThread github.com/goccy/go-perl.onThread
+func onThread(p *perl.Perl, fn func())
