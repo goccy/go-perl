@@ -111,3 +111,28 @@ func TestSyntaxKeywordMatch(t *testing.T) {
 		$err;
 	`, "boom\n")
 }
+
+// A keyword of a native module declares a lexical: its assignment is an op
+// tree built with newASSIGNOP, and the value of a pad slot is reached
+// through PAD_SVl.
+func TestNativeKeywordDeclaresALexical(t *testing.T) {
+	p := newHostPerl(t)
+	perlAPIInstance(t, p)
+	runEvalCases(t, p, []evalCase{
+		{"the keywords are installed", `PerlAPI::lexical_keywords(); "installed"`, "installed"},
+		{"an assignment built by the module", `eval q{ one_into_x; $x + 41 } // "died: $@"`, "42"},
+		{"twice in one block, each its own", `eval q{ my @seen; for my $i (1 .. 3) { one_into_x; push @seen, $x; $x += $i } "@seen" } // "died: $@"`, "1 1 1"},
+		{"a value put into the pad at compile time", `eval q{ hello_into_y; "$y, world" } // "died: $@"`, "Hello, world"},
+		{"a block parsed by the module", `eval q{ my $r = 0; in_block { $r = 5 } $r } // "died: $@"`, "5"},
+		{"a block that does not parse is a syntax error", `eval q{ my $r = 0; in_block { $r = } $r } // ($@ =~ /syntax error/ ? "syntax error" : "died: $@")`, "syntax error"},
+		{"and the next compilation is not affected", `eval q{ my $r = 0; in_block { $r = 6 } $r } // "died: $@"`, "6"},
+		{"the module does not go on after a block that does not parse", `PerlAPI::native_went_on(); my $r = eval q{ counted_block { 1 + } 1 }; join ",", defined $r ? "compiled" : "syntax error", PerlAPI::native_went_on()`, "syntax error,0"},
+		{"and goes on after one that does", `my $r = eval q{ my $v = 0; counted_block { $v = 7 } $v }; join ",", $r // "died: $@", PerlAPI::native_went_on()`, "7,1"},
+		{"a plugin that dies with an object", `my $r = eval q{ throw_hash; 1 }; join ",", defined $r ? "compiled" : "died", ref $@, ref $@ ? $@->{code} : $@`, "died,HASH,9"},
+		{"a plugin that dies with characters beyond Latin-1", `my $r = eval q{ throw_wide; 1 }; join ",", (utf8::is_utf8($@) ? "characters" : "bytes"), ($@ =~ /^In p\x{155}\x{f6}\x{e7}: refused at / ? "the text" : "other: $@")`, "characters,the text"},
+		{"a field of the parser the module set is the interpreter's at once", `my @w; local $SIG{__WARN__} = sub { push @w, $_[0] }; eval q{ use warnings; twice_z; 1 } // die $@; join "|", map { /^("\w+" variable \$z masks earlier declaration)/ ? $1 : $_ } @w`, `"my" variable $z masks earlier declaration`},
+		// The op has no kids: what follows BASEOP in its struct is the
+		// module's, not links of the op.
+		{"an op of the module's own struct keeps its fields", `my $f = eval q{ sub { my $v = tag_op; $v } } // die $@; join ",", $f->(), $f->()`, "4242,4242"},
+	})
+}

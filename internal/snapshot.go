@@ -10,13 +10,23 @@ package internal
 // of it. Instances re-run nothing and inherit a perl that is already
 // initialized; they pay only for the pages they actually write.
 //
-// Built on the bundle's base.NewSharedSnapshot. Two values are baked into
+// Built on the bundle's base.NewSharedSnapshot. Three values are baked into
 // the image and so key the snapshot cache:
 //   - the stdlib dir: perl_new(stdlibDir) writes it into @INC;
+//   - the site dir: perl_new lays the site directories out below it, in
+//     @INC and for %Config;
 //   - the environment: wasi libc caches environ at startup, so %ENV reflects
 //     what the snapshotted instance was booted with.
 // Everything else in Options (FS backend, hooks, stdio, memory caps) lives on
 // the host side of the WASI boundary and is freely per-instance.
+//
+// The snapshot is built for the SECOND instance of a key, not the first.
+// Most processes start one interpreter (the gperl command, a program built
+// with gperl build), and for that one building the snapshot first — start an
+// interpreter, write its memory into an image, map the image again — costs
+// as much as starting it. The first instance starts on memory of its own
+// that keeps one address (base.AnonymousMemoryInPlace); its first fork
+// images its memory as any fork does.
 
 import (
 	"bytes"
@@ -30,15 +40,28 @@ import (
 	"github.com/goccy/perlwasm2go/base"
 )
 
-// snapshotCeiling is the linear-memory ceiling an instance built on the
-// snapshot is mapped at, in bytes — the growth cap too (NewFromSnapshot sets
-// MaxMem to the mapping length, and MemoryGrow refuses to grow past it before
-// it could reallocate, which keeps the mmap and its sharing intact for the
-// instance's whole life). Virtual, sparse: unused pages never become resident.
-const snapshotCeiling = 512 << 20
+// defaultMemoryCeiling is the limit of an instance's linear memory when
+// the embedder sets none (InstanceOptions.MaxMemoryBytes), in bytes: the
+// length of the mapping the instance's memory is, which is its growth cap
+// too (NewFromSnapshot and NewWithMemory set MaxMem to the mapping length,
+// and MemoryGrow refuses to grow past it before it could reallocate, which
+// keeps the mapping, its address and its sharing intact for the instance's
+// whole life). Virtual and sparse: pages never written are never resident,
+// and the runtime maps them without charging them against the commit limit
+// until they are written (under Linux's strict overcommit policy, until
+// the memory grows to them: the mapping is accessible only as far as the
+// memory's size), so a machine with less memory maps it as well.
+// 8 GiB, as llama-wasm declares for its memory64 module.
+const defaultMemoryCeiling = 8 << 30
+
+// wasmPage is the size of a page of linear memory.
+const wasmPage = 65536
 
 type perlSnapshot struct {
-	img    *base.SharedImage
+	img *base.SharedImage
+	// image is img as the instances built on the snapshot hold it. The
+	// snapshot holds it too, for the life of the process.
+	image  *memoryImage
 	handle uint64
 	err    error
 }
@@ -46,27 +69,41 @@ type perlSnapshot struct {
 var (
 	snapMu    sync.Mutex
 	snapshots = map[string]*perlSnapshot{}
+	// started holds the keys an instance has been made for without a
+	// snapshot: the first instance of a key starts on its own memory.
+	started = map[string]bool{}
 )
 
-// sharedSnapshot returns the process-wide snapshot for (stdlibDir, env),
-// building and caching it on first use. A failure is remembered, not retried:
-// New then initializes each instance privately, which is correct, only larger.
-func sharedSnapshot(stdlibDir string, env []string) *perlSnapshot {
+// sharedSnapshot returns the process-wide snapshot for (stdlibDir, siteDir,
+// env), building and caching it — from the second instance of the key on:
+// for the first it returns nil, and that instance starts on memory of its
+// own. A failure is remembered, not retried: New then initializes each
+// instance privately, which is correct, only larger.
+func sharedSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	if os.Getenv("GO_PERL_NO_SHARED_IMAGE") != "" {
 		return &perlSnapshot{err: fmt.Errorf("disabled by GO_PERL_NO_SHARED_IMAGE")}
 	}
-	key := fmt.Sprintf("lib=%q env=%q", stdlibDir, env)
+	key := snapshotKey(stdlibDir, siteDir, env)
 	snapMu.Lock()
 	defer snapMu.Unlock()
 	if s, ok := snapshots[key]; ok {
 		return s
 	}
-	s := buildSnapshot(stdlibDir, env)
+	if !started[key] {
+		started[key] = true
+		return nil
+	}
+	s := buildSnapshot(stdlibDir, siteDir, env)
 	snapshots[key] = s
 	return s
 }
 
-func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
+// snapshotKey names what a snapshot bakes in (see the top of this file).
+func snapshotKey(stdlibDir, siteDir string, env []string) string {
+	return fmt.Sprintf("lib=%q site=%q env=%q", stdlibDir, siteDir, env)
+}
+
+func buildSnapshot(stdlibDir, siteDir string, env []string) *perlSnapshot {
 	var handle uint64
 	img := base.NewSharedSnapshot(func() (g *base.Module, err error) {
 		defer func() {
@@ -86,7 +123,7 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 		_ = wasm2go.WasmInit(mod.g)
 
 		tmp := &Perl{m: mod, wasi: wasi}
-		h, err := tmp.perlNew(stdlibDir)
+		h, err := tmp.perlNew(stdlibDir, siteDir)
 		if err != nil {
 			return nil, fmt.Errorf("perl_new: %w", err)
 		}
@@ -115,5 +152,5 @@ func buildSnapshot(stdlibDir string, env []string) *perlSnapshot {
 	if e := img.Err(); e != nil {
 		return &perlSnapshot{err: e}
 	}
-	return &perlSnapshot{img: img, handle: handle}
+	return &perlSnapshot{img: img, image: (&memoryImage{img: img}).retain(), handle: handle}
 }

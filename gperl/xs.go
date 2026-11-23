@@ -95,26 +95,20 @@ func xsBuildOne(projectDir, sdkDir, dist string) ([]string, error) {
 	// Makefile.PL/Build.PL itself, and the shim (for the children make or
 	// $^X spawns) re-enters this executable. Every run preloads a %Config
 	// overlay describing the host toolchain (the interpreter's own
-	// %Config is guest-true wasm32). No perl needs to be installed.
+	// %Config is guest-true wasm64). No perl needs to be installed.
 	shim, err := xsWritePerlShim(work)
 	if err != nil {
-		return nil, err
-	}
-	// The compiler's CORE include directory is the SDK, via a fake
-	// archlib whose CORE symlinks to it (both ExtUtils::MakeMaker and
-	// Module::Build spell it $Config{archlibexp}/CORE).
-	fakeArch := filepath.Join(work, "fakearchlib")
-	if err := os.MkdirAll(fakeArch, 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Symlink(sdkDir, filepath.Join(fakeArch, "CORE")); err != nil {
 		return nil, err
 	}
 	stdlibDir, err := perl.ExtractStdlib()
 	if err != nil {
 		return nil, err
 	}
-	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch)
+	fakeArch, err := xsStandInArchlib(work, sdkDir, stdlibDir)
+	if err != nil {
+		return nil, err
+	}
+	overlay, err := xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, shim)
 	if err != nil {
 		return nil, err
 	}
@@ -318,10 +312,27 @@ func xsInstallBuildDeps(srcDir, lib string) error {
 }
 
 // hostToolchain is the %Config overlay describing the HOST C toolchain:
-// the embedded interpreter's own %Config is guest-true (wasm32), and the
+// the embedded interpreter's own %Config is guest-true (wasm64), and the
 // build must emit host-native compile/link rules. These are the platform
-// conventions a native perl build would have configured.
+// conventions a native perl build would have configured, and what the host
+// compiler says of itself.
 func hostToolchain() map[string]string {
+	common := hostToolchainStatic()
+	// Everything else that identifies the C toolchain is the host
+	// compiler's too: build scripts choose flags by the compiler's name and
+	// version (gcc or clang), run its preprocessor, and look for libraries
+	// where it looks. The interpreter's own values describe the compiler
+	// the interpreter was built with, on the machine it was built on.
+	for key, value := range hostCompiler(common["cc"]) {
+		common[key] = value
+	}
+	return common
+}
+
+// hostToolchainStatic is the part of hostToolchain that needs no asking of
+// the compiler: the programs of the toolchain, their flags and the names of
+// what they make, by the platform's conventions.
+func hostToolchainStatic() map[string]string {
 	common := map[string]string{
 		"cc": "cc", "ld": "cc", "ar": "ar", "full_ar": "ar",
 		"ranlib": "ranlib", "make": "make",
@@ -334,16 +345,132 @@ func hostToolchain() map[string]string {
 	case "darwin":
 		common["osname"] = "darwin"
 		common["so"] = "dylib"
-		common["dlext"] = "bundle"
+		// The embedded XSLoader looks for auto/Module/Module.so on every
+		// platform; a bundle under that name loads the same.
+		common["dlext"] = "so"
 		common["lddlflags"] = "-bundle -undefined dynamic_lookup -fstack-protector-strong"
 		common["cccdlflags"] = "" // PIC is the darwin default
 	default: // linux and friends
+		// glibc hides its extensions unless asked; perl's own builds
+		// there compile everything with _GNU_SOURCE.
+		common["ccflags"] += " -D_GNU_SOURCE"
 		common["osname"] = runtime.GOOS
 		common["so"] = "so"
 		common["dlext"] = "so"
 		common["lddlflags"] = "-shared"
 	}
+	// the compiler's preprocessor, and the libraries a program is linked
+	// with
+	cc := common["cc"]
+	common["cpp"], common["cpprun"], common["cppstdin"] = cc+" -E", cc+" -E", cc+" -E"
+	common["cppminus"], common["cpplast"], common["cppflags"] = "-", "-", common["ccflags"]
+	common["libs"], common["perllibs"] = "-lm", "-lm"
 	return common
+}
+
+// runToolchain is the part of %Config every program gperl runs is given in
+// place of the interpreter's: the host's C toolchain, which code that runs
+// it at run time (Filter::cpp's preprocessor, Inline::C, Affix::Build)
+// needs, where the interpreter's values name the compiler it was built
+// with on the machine it was built on. The keys that need the compiler
+// asked (hostCompiler) are left out, as asking costs processes at every
+// start; so is osname, which is the host's already ($^O, which the
+// interpreter is told when it starts).
+func runToolchain() map[string]string {
+	tc := hostToolchainStatic()
+	delete(tc, "osname")
+	return tc
+}
+
+// hostCompiler returns the %Config keys that describe the C compiler cc of
+// this machine, as the compiler itself reports them: the macros it
+// predefines say what it is (-dM -E), and it names the directories it
+// searches for libraries and the C library it links (-print-search-dirs,
+// -print-file-name). What it does not say stays empty rather than
+// describing another compiler.
+func hostCompiler(cc string) map[string]string {
+	keys := map[string]string{
+		"ccname": filepath.Base(cc), "gccversion": "", "ccversion": "", "gccosandvers": "",
+		"ccsymbols": "", "cppsymbols": "", "cppccsymbols": "",
+		"libc": "", "gnulibc_version": "",
+	}
+	macros := compilerMacros(cc)
+	if _, gnu := macros["__GNUC__"]; gnu {
+		// perl's Configure takes __VERSION__ of a compiler that says it is
+		// GNU C, which clang says too.
+		keys["gccversion"] = strings.Trim(macros["__VERSION__"], `"`)
+		keys["ccname"] = "gcc"
+	}
+	if _, clang := macros["__clang__"]; clang {
+		keys["ccname"] = "clang"
+	}
+	if major, minor := compilerMacros(cc, "-include", "features.h")["__GLIBC__"], compilerMacros(cc, "-include", "features.h")["__GLIBC_MINOR__"]; major != "" && minor != "" {
+		keys["gnulibc_version"] = major + "." + minor
+	}
+	if runtime.GOOS != "darwin" {
+		if out, err := exec.Command(cc, "-print-file-name=libc.so.6").Output(); err == nil {
+			// a name without a directory is the compiler's way of saying
+			// that it did not find the file
+			if path := strings.TrimSpace(string(out)); filepath.IsAbs(path) && fileExists(path) {
+				keys["libc"] = filepath.Clean(path)
+			}
+		}
+	}
+	if dirs := compilerLibraryDirs(cc); len(dirs) > 0 {
+		list := strings.Join(dirs, " ")
+		keys["libpth"], keys["glibpth"], keys["libspath"] = list, list, list
+	}
+	return keys
+}
+
+// compilerMacros returns the macros cc predefines for C (with the extra
+// arguments), name to replacement text; none when cc cannot be asked.
+func compilerMacros(cc string, extra ...string) map[string]string {
+	args := append([]string{"-dM", "-E", "-x", "c"}, extra...)
+	out, err := exec.Command(cc, append(args, os.DevNull)...).Output()
+	if err != nil {
+		return nil
+	}
+	macros := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "#define NAME replacement": the format of -dM
+		rest, isDefine := strings.CutPrefix(line, "#define ")
+		if !isDefine {
+			continue
+		}
+		name, value, _ := strings.Cut(rest, " ")
+		macros[name] = value
+	}
+	return macros
+}
+
+// compilerLibraryDirs returns the directories cc searches for libraries
+// that exist, in its order.
+func compilerLibraryDirs(cc string) []string {
+	out, err := exec.Command(cc, "-print-search-dirs").Output()
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		// "libraries: =dir:dir:...": the format of -print-search-dirs
+		list, isLibraries := strings.CutPrefix(line, "libraries: =")
+		if !isLibraries {
+			continue
+		}
+		for _, dir := range filepath.SplitList(list) {
+			if dir == "" {
+				continue
+			}
+			dir = filepath.Clean(dir)
+			if !seen[dir] && dirExists(dir) {
+				seen[dir] = true
+				dirs = append(dirs, dir)
+			}
+		}
+	}
+	return dirs
 }
 
 // xsWritePerlShim writes the executable the build system knows as "perl":
@@ -364,12 +491,33 @@ func xsWritePerlShim(work string) (string, error) {
 	return shim, nil
 }
 
+// xsStandInArchlib makes the directory an XS build is told is the
+// interpreter's architecture library. The compiler's CORE include
+// directory is the SDK, via a CORE in it that links to the SDK (both
+// ExtUtils::MakeMaker and Module::Build spell it $Config{archlibexp}/CORE);
+// and since the SDK has a config.h, as a perl's headers do, the Makefile
+// MakeMaker writes depends on <archlib>/Config.pm, which is the standard
+// library's.
+func xsStandInArchlib(work, sdkDir, stdlibDir string) (string, error) {
+	dir := filepath.Join(work, "fakearchlib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Symlink(sdkDir, filepath.Join(dir, "CORE")); err != nil {
+		return "", err
+	}
+	if err := os.Symlink(filepath.Join(stdlibDir, "Config.pm"), filepath.Join(dir, "Config.pm")); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // xsWriteConfigOverlay writes the preload every build-driving perl run
 // executes first: it replaces the guest-true toolchain/path keys of
 // %Config with the host ones, so ExtUtils::MakeMaker and Module::Build
 // generate a build for THIS machine while everything else about %Config
 // (version, ivsize, ...) stays guest-true.
-func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, error) {
+func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch, perlPath string) (string, error) {
 	tc := hostToolchain()
 	if sdkDir != "" {
 		tc["ccflags"] = tc["ccflags"] + " -I" + sdkDir
@@ -380,16 +528,24 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, err
 	tc["privlib"] = stdlibDir
 	tc["archlibexp"] = fakeArch
 	tc["archlib"] = fakeArch
-	tc["sitelibexp"] = ""
-	tc["sitearchexp"] = ""
 	tc["vendorlibexp"] = ""
 	tc["vendorarchexp"] = ""
-	tc["installprivlib"] = stdlibDir
-	tc["installarchlib"] = fakeArch
+	// The perl that programs written during the build must name on their
+	// #! line (ExtUtils::MakeMaker's and ExtUtils::Helpers' script fixing)
+	// is the one running the build.
+	tc["perlpath"] = perlPath
+	tc["startperl"] = "#!" + perlPath
 
+	// The values go into %Config::Override, which the standard library's
+	// Config.pm reports in place of its own in every view of %Config (the
+	// hash, config_sh, perl -V) once it is loaded. The preload loads no
+	// module itself: the program finds %INC and %Config as perl leaves them
+	// before it runs (a test that assigns to %Config::Config before loading
+	// Config, a -I directory that holds strict.pm, a debugger module that
+	// looks at what is loaded), and Config is loaded when the program loads
+	// it.
 	var b strings.Builder
-	b.WriteString("use Config ();\n")
-	b.WriteString("my %over = (\n")
+	b.WriteString("%Config::Override = (\n")
 	keys := make([]string, 0, len(tc))
 	for k := range tc {
 		keys = append(keys, k)
@@ -400,11 +556,6 @@ func xsWriteConfigOverlay(work, sdkDir, stdlibDir, fakeArch string) (string, err
 		b.WriteString("    '" + k + "' => '" + v + "',\n")
 	}
 	b.WriteString(");\n")
-	// %Config is a tied read-only view; replace it with a writable copy
-	// carrying the overlay.
-	b.WriteString("my %full = %Config::Config;\n")
-	b.WriteString("untie %Config::Config;\n")
-	b.WriteString("%Config::Config = (%full, %over);\n")
 	// Build tools branch on $^O, not just $Config{osname}: the build must
 	// look like the host it targets.
 	b.WriteString("$^O = '" + tc["osname"] + "';\n1;\n")

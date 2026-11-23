@@ -61,7 +61,7 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	if err := img.Err(); err != nil {
 		return nil, fmt.Errorf("perl: snapshot instance: %w", err)
 	}
-	mem, err := img.Memory(snapshotCeiling)
+	mem, err := img.Memory(memoryCeiling(p.opts, img.Size()))
 	if err != nil {
 		return nil, fmt.Errorf("perl: map clone memory: %w", err)
 	}
@@ -73,7 +73,24 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	c.mapped = mem
 	c.h = p.h
 	c.intrAddr = p.intrAddr
+	c.writeMemoryBase(true)
+	c.family = &forkFamily{origin: c}
+	c.installForkHook()
+	if p.HasThread() {
+		c.KeepOnOneThread() // a thread of its own: see instanceThread
+	}
 
+	if err := p.handOver(c); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// handOver wires the host-side state a copy of p's memory needs before it
+// runs: c holds p's guest state (a Clone, or a fork child), and what the
+// guest refers to on the host side must exist for c as well.
+func (p *Perl) handOver(c *Perl) error {
 	p.hookMu.RLock()
 	hadDispatcher := p.dispatcherSet
 	hooks := append([]func(*Perl) error(nil), p.cloneHooks...)
@@ -84,16 +101,14 @@ func (p *Perl) Clone(userHandler func(methodID int32, req []byte) ([]byte, error
 	// own dispatcher so the handle the guest uses resolves here.
 	if hadDispatcher {
 		if err := c.EnsureDispatcher(); err != nil {
-			c.Close()
-			return nil, fmt.Errorf("perl: clone dispatcher: %w", err)
+			return fmt.Errorf("perl: clone dispatcher: %w", err)
 		}
 	}
 
 	for _, hook := range hooks {
 		if err := hook(c); err != nil {
-			c.Close()
-			return nil, fmt.Errorf("perl: clone hook: %w", err)
+			return fmt.Errorf("perl: clone hook: %w", err)
 		}
 	}
-	return c, nil
+	return nil
 }

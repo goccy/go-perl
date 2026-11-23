@@ -302,6 +302,35 @@ XS_EUPXS(XS_Obj__Demo_stats)
     XSRETURN(1);
 }
 
+/* The argument stack read by a function that was given no interpreter
+ * context (dXSARGS without pTHX), next to the XSUBs, which were given one:
+ * the two kinds of function a C++ module has. */
+static void objdemo_count_args(void) {
+    dXSARGS;
+    sp = mark;
+    XPUSHs(sv_2mortal(newSViv(items)));
+    PUTBACK;
+    XSRETURN(1);
+}
+
+XS_EUPXS(XS_Obj__Demo_count_args); /* prototype to pass -Wmissing-prototypes */
+XS_EUPXS(XS_Obj__Demo_count_args)
+{
+    dVAR; dXSARGS;
+    PERL_UNUSED_VAR(cv);
+    PERL_UNUSED_VAR(ax);
+    SP -= items;
+    {
+        I32 *temp = PL_markstack_ptr++;
+        objdemo_count_args();
+        if (PL_markstack_ptr != temp) {
+            PL_markstack_ptr = temp;
+            XSRETURN_EMPTY;
+        }
+        return;
+    }
+}
+
 #ifdef __cplusplus
 extern "C"
 #endif
@@ -334,6 +363,7 @@ XS_EXTERNAL(boot_Obj__Demo)
         newXS_deffile("Obj::Demo::DESTROY", XS_Obj__Demo_DESTROY);
         newXS_deffile("Obj::Demo::incr", XS_Obj__Demo_incr);
         newXS_deffile("Obj::Demo::stats", XS_Obj__Demo_stats);
+        newXS_deffile("Obj::Demo::count_args", XS_Obj__Demo_count_args);
 #if PERL_VERSION_LE(5, 21, 5)
 #  if PERL_VERSION_GE(5, 9, 0)
     if (PL_unitcheckav)

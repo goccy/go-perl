@@ -16,3 +16,13 @@ import (
 func ExitCode(err error) (int, bool) {
 	return internal.WasiExitCode(err)
 }
+
+// SignalError is the error of a run that a signal ended: the program
+// received a signal it neither handles nor ignores, whose default action is
+// to end the process. As with a real signal death, nothing of the program
+// ran afterwards — no END blocks, no destructors, no flush of its buffered
+// output — and the instance must only be Closed.
+//
+// Signal is the signal's number as the program knows it, which is Linux's
+// numbering on every host (SIGTERM is 15, SIGUSR1 is 10).
+type SignalError = internal.SignalError

@@ -20,3 +20,39 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 	}
 	return true, xsDirLoader(p, dir)
 }
+
+// XSDynamicLoader is the host half of perl's dynamic loading (DynaLoader's
+// dl_load_file / dl_find_symbol / dl_install_xsub), provided by the xs
+// package. Libraries and symbols are named by tokens that are only
+// meaningful to the instance that obtained them.
+type XSDynamicLoader struct {
+	// Open loads the library at path (a native XS module, or any shared
+	// library, as dlopen loads it) and returns its token. flags are
+	// DynaLoader's dl_load_file flags (a module's dl_load_flags): 0x01 makes
+	// the library's symbols global, available to the libraries loaded
+	// after it.
+	Open func(p *Perl, path string, flags int) (lib uint64, err error)
+	// Symbol resolves name in a loaded module.
+	Symbol func(p *Perl, lib uint64, name string) (sym uint64, err error)
+	// Install binds the function behind sym as the Perl sub name.
+	Install func(p *Perl, name string, sym uint64) error
+	// Release gives up what the loader keeps for an instance that closes:
+	// its interpreter is destroyed and it is never entered again.
+	Release func(p *Perl)
+}
+
+// xsDynamicLoader is installed by the xs package's init.
+var xsDynamicLoader *XSDynamicLoader
+
+// RegisterXSDynamicLoader wires the loader behind XSDynamic. Called by the
+// xs package's init; not for application use.
+func RegisterXSDynamicLoader(l XSDynamicLoader) { xsDynamicLoader = &l }
+
+// XSDynamic returns the dynamic loader the xs package registered; linked
+// is false when the package is not part of the binary.
+func XSDynamic() (l XSDynamicLoader, linked bool) {
+	if xsDynamicLoader == nil {
+		return XSDynamicLoader{}, false
+	}
+	return *xsDynamicLoader, true
+}

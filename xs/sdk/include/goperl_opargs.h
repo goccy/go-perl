@@ -5,6 +5,7 @@
  * Regenerate by re-copying from perl5/opcode.h when the guest perl moves. */
 #ifndef GOPERL_OPARGS_H
 #define GOPERL_OPARGS_H
+#pragma GCC system_header
 
 static const U32 goperl_opargs_v[] = {
     0x00000000, 0x00000000, 0x00001b04, 0x00000004, 0x00000004, 0x00000604, 0x00000644, 0x00000644,

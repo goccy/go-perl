@@ -13,8 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unsafe"
 
 	goperlfs "github.com/goccy/go-perl/fs"
 	wasm2go "github.com/goccy/perlwasm2go"
@@ -47,8 +53,11 @@ const (
 	midNewHash          = 18
 	midRegisterNativeXS = 19
 	midRelease          = 20
-	midSetGoDispatcher  = 21
-	midXSHelper         = 22
+	midRunProgram       = 21
+	midSetGoDispatcher  = 22
+	midXSHelper         = 23
+	midXSOp             = 24
+	midXSOpBox          = 25
 )
 
 // InstanceOptions is the resolved per-instance configuration. The public package
@@ -61,13 +70,35 @@ type InstanceOptions struct {
 	Dial      func(network, host, ip string, port int) bool
 	Resolve   func(host string) bool
 	Exec      func(path string, argv []string) bool
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
+	// SiteDir is the directory the interpreter's site directories are
+	// under (perl-wasm's perl_new lays them out below it); empty for an
+	// interpreter without any.
+	SiteDir string
+	// Fork lets the guest fork: each fork runs a copy of the instance as a
+	// pseudo-process inside this host process (see fork.go).
+	Fork bool
+	// HostProcess makes the program the host process: its ids, user
+	// database and signals are the process's own.
+	HostProcess bool
+	// InheritDescriptors gives the program the descriptors above 2 that
+	// the host process was started with (the first instance that asks).
+	InheritDescriptors bool
+	// Syslog gives the program the host's system logger (see syslog.go).
+	Syslog bool
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 
 	MaxMemoryBytes     int
 	MemoryReserveBytes int
 }
+
+// SignalError is a guest that ended by a signal: one it neither handles nor
+// ignores, whose default action ends the process. Signal is the guest's
+// number for it (Linux numbering).
+type SignalError struct{ Signal int }
+
+func (e *SignalError) Error() string { return fmt.Sprintf("perl: terminated by signal %d", e.Signal) }
 
 // ExitError is a guest exit() the bridge caught cleanly: the guest unwound
 // back to the call frame, so the interpreter is still flushable and
@@ -86,11 +117,29 @@ type Perl struct {
 	// intrAddr is the linear-memory offset of the interpreter's interrupt-flag
 	// word, resolved once at New so a context cancellation can fire without
 	// taking the instance lock a running Eval holds.
-	intrAddr uint32
+	intrAddr uint64
 	// mapped is the copy-on-write mapping this instance lives in when it was
 	// built from the process snapshot; unmapped on Close. nil for instances
 	// that booted privately.
 	mapped []byte
+	// image is the image mapped is a private mapping of, when a fork can
+	// start from it: the copy made for a fork child is then limited to the
+	// pages this instance changed since the image was made (see fork.go).
+	// It cannot be found from the mapping, hence the field. nil when the
+	// memory is no such mapping.
+	image *memoryImage
+
+	// callbackDepth counts the callbacks of the guest that are running (one
+	// inside the other), and jump is a non-local exit of the guest that
+	// one of them has to let through when it returns: see guestJump. Both
+	// belong to the goroutine that runs the interpreter.
+	callbackDepth int
+	jump          guestJump
+	// xsOpCall is XSOpRun's call of the guest, made once (a closure made
+	// for every operation native code runs was allocated each time), and
+	// xsOpParked whether the operation it ran last parked a jump.
+	xsOpCall   invoker
+	xsOpParked bool
 
 	// UserHandler receives every callback whose method id is not one of the
 	// reserved hook ids: the Perl->Go function bridge. The public package
@@ -105,22 +154,29 @@ type Perl struct {
 	nativeXS func(req []byte) []byte
 	// magicFree handles teardown of host-side MAGIC mirrors when the guest
 	// frees an anchored SV (reserved callback method id -2).
-	magicFree func(id uint32)
+	magicFree func(id uint32) []byte
 	// ppHook handles pp-hook dispatch for op types a native module claimed
 	// (reserved callback method id -3).
 	ppHook func(req []byte) []byte
-	// magicSet runs mirror svt_set hooks when the guest reports an
-	// assignment to an SV whose anchor magic was upgraded to fire them.
-	magicSet func(id uint32)
+	// magicLocal gives the SV `local` puts in a variable's place the
+	// host-side magic of the variable (reserved callback method id -8).
+	magicLocal func(id uint32, sv uint64) []byte
 	// dtorFire handles save-stack destructors registered by native modules
-	// (reserved callback method id -4).
-	dtorFire func(id uint32)
+	// (reserved callback method id -4); its result is the response.
+	dtorFire func(id uint32) []byte
 	// perlioHook handles PerlIO layer-slot dispatch for layers a native
 	// module registered (reserved callback method id -6).
 	perlioHook func(req []byte) []byte
 	// keywordHook handles keyword/infix plugin forwarding while the guest
 	// parser compiles (reserved callback method id -7).
 	keywordHook func(req []byte) []byte
+	// hostCall handles the calls of native code that share one channel
+	// (reserved callback method id -9).
+	hostCall func(req []byte) []byte
+	// processMemory reads memory of the process outside the guest's
+	// (reserved callback method id -10): unpack 'p' and 'P' of such an
+	// address.
+	processMemory func(addr uint64, n int64) ([]byte, error)
 
 	// closed flips when Close runs; every entry point checks it so a
 	// straggler — including a handle release racing a Close — errors out
@@ -142,10 +198,129 @@ type Perl struct {
 	cloneImg cloneImage
 	// cloneHooks run on every Clone (AddCloneHook).
 	cloneHooks []func(clone *Perl) error
+
+	// OnFork runs on every fork child of this instance before it starts,
+	// so the public package can give the child its own callback routing
+	// (UserHandler) and OnFork.
+	OnFork func(child *Perl)
+	// family is shared by an instance and every pseudo-process forked from
+	// it, directly or not. The instance that was not itself forked is the
+	// family's first process: when it has ended, the pseudo-processes that
+	// are still running are ended with it (see forkFamily.end).
+	family *forkFamily
+	// killed is the signal this fork child died of (0 = none).
+	killed atomic.Int32
+	// thread is the thread the instance runs its guest code on, when it
+	// runs native code (see instanceThread); nil runs it on the callers'
+	// goroutines.
+	thread atomic.Pointer[instanceThread]
+}
+
+// forkFamily knows the running pseudo-processes forked from one instance,
+// directly or not.
+type forkFamily struct {
+	origin *Perl
+
+	mu sync.Mutex
+	// running holds the fork children whose program has not ended, with
+	// the pid each is known by. Which ones those are can be learnt nowhere
+	// else: the process table of the host state knows a child only once
+	// the fork that made it is over.
+	running map[*Perl]int32
+	// over records that the first process has ended: no pseudo-process is
+	// started from then on. A child that forks while the others are being
+	// ended would otherwise outlive them.
+	over bool
+}
+
+// start records child as the running pseudo-process pid. It reports false,
+// and records nothing, when the family is over.
+func (f *forkFamily) start(child *Perl, pid int32) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.over {
+		return false
+	}
+	if f.running == nil {
+		f.running = map[*Perl]int32{}
+	}
+	f.running[child] = pid
+	return true
+}
+
+// ended takes child, whose program has ended, off the running ones.
+func (f *forkFamily) ended(child *Perl) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.running, child)
+}
+
+// isOver reports whether the first process of the family has ended.
+func (f *forkFamily) isOver() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.over
+}
+
+// end ends the pseudo-processes that are still running, when the first
+// process of the family has ended. To the program it is what the end of a
+// process group is: every one of them is killed as by SIGKILL — it runs no
+// Perl code from its next opcode on, no END block and no destructor — the
+// commands it started and has not waited for are killed and reaped, and its
+// descriptors are closed. Unlike the end of a process group, it is said on
+// the first process's standard error, with the pids: a process that a
+// program forks and leaves running (a daemon, a child that writes after
+// its parent exited) outlives its parent elsewhere, and here it runs in
+// the program's own process, which cannot go on without the program.
+//
+// end does not wait for the goroutine of a pseudo-process to notice. One
+// that is in a call the host cannot interrupt (native code of an XS module,
+// a Go function the embedder registered) would hold the first process's end
+// up for as long as that call takes, and a process does not wait for what
+// it kills. Every blocking call of the host's own is ended by the signal,
+// so the goroutine is normally gone a moment later; it gives back the
+// child's memory itself.
+func (f *forkFamily) end() {
+	f.mu.Lock()
+	f.over = true
+	children := make([]*Perl, 0, len(f.running))
+	pids := make([]int32, 0, len(f.running))
+	for child, pid := range f.running {
+		children = append(children, child)
+		pids = append(pids, pid)
+	}
+	f.mu.Unlock()
+	if len(pids) > 0 {
+		slices.Sort(pids)
+		names := make([]string, len(pids))
+		for i, pid := range pids {
+			names[i] = strconv.Itoa(int(pid))
+		}
+		fmt.Fprintf(f.origin.stderr(), "perl: the program exited while processes it forked were still running;"+
+			" they run inside its process and end with it: %s\n", strings.Join(names, ", "))
+	}
+	// Every one is killed before anything of any of them is taken away: a
+	// child that sees a command die, or a descriptor close, must not get
+	// to act on it.
+	for _, child := range children {
+		_ = child.signalForkChild(sigKILL)
+	}
+	// A child that has noticed by now has killed its commands itself
+	// (releaseHostState); this is for the ones that have not.
+	for _, child := range children {
+		child.wasi.KillCommands()
+	}
+	for _, child := range children {
+		_ = child.wasi.CloseDescriptors()
+	}
 }
 
 // Closed reports whether Close has run.
 func (p *Perl) Closed() bool { return p.closed.Load() }
+
+// Environment is the environment the instance was made with: the program's
+// as it starts, before the program changes %ENV.
+func (p *Perl) Environment() []string { return p.opts.Env }
 
 // QueueRelease records a handle whose host wrapper is gone. Safe from any
 // goroutine, including the runtime's finalizer goroutine.
@@ -174,7 +349,7 @@ func (p *Perl) drainReleases() {
 	buf = pbAppendUint64(buf, 1, p.h)
 	buf = pbAppendBytes(buf, 2, packed)
 	buf = pbAppendUint64(buf, 3, uint64(len(packed)))
-	_, _ = p.m.invoke(0, midRelease, buf, wasm2go.Inv_0_20)
+	_, _ = p.invoke(0, midRelease, buf, wasm2go.Inv_0_20)
 }
 
 // New boots a fresh instance from opts, mapping the process-wide
@@ -183,10 +358,12 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	m := &Module{}
 	wasi := buildWASI(opts)
 	p = &Perl{m: m, wasi: wasi, opts: opts}
+	p.family = &forkFamily{origin: p}
 
 	if err := p.boot(opts, wasi); err != nil {
 		return nil, err
 	}
+	p.installForkHook()
 
 	// Resolve the interrupt-flag address up front so Eval's context watchdog
 	// can fire without calling into a busy instance.
@@ -197,7 +374,7 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 	}
 	var addrErr error
 	base.AccessMemory(m.g, func(mem []byte) {
-		if uint64(addr)+4 > uint64(len(mem)) {
+		if addr+4 > uint64(len(mem)) {
 			addrErr = fmt.Errorf("interrupt address %#x out of range (memory is %d bytes)", addr, len(mem))
 		}
 	})
@@ -206,8 +383,81 @@ func New(opts InstanceOptions) (p *Perl, err error) {
 		return nil, addrErr
 	}
 	p.intrAddr = addr
+	p.writeHostABI()
 	return p, nil
 }
+
+// hostWordsBaseOffset is where, after the interpreter's interrupt flag
+// (perl-wasm's g_hostwords), the word lies that says where this process has
+// the instance's memory: pack 'p' and 'P' add it to an address of the
+// memory and unpack 'p' and 'P' take it away again (the pointers are for
+// native code, which reads the process's memory). 0 means no base: the
+// addresses are the memory's own.
+const hostWordsBaseOffset = 8
+
+// hostWordsABIOffset is where, after the interpreter's interrupt flag
+// (perl-wasm's g_hostwords), the word lies of the facts of the host's C ABI
+// (HostABI), which the interpreter is told before any code runs in it: a
+// copy of an instance (a Clone, a fork child) has the word with the memory.
+const hostWordsABIOffset = 4
+
+// writeHostABI writes the facts of the host's C ABI into the word.
+func (p *Perl) writeHostABI() {
+	base.AccessMemory(p.m.g, func(mem []byte) {
+		at := p.intrAddr
+		if at+hostWordsABIOffset+4 > uint64(len(mem)) {
+			return
+		}
+		binary.LittleEndian.PutUint32(mem[at+hostWordsABIOffset:], HostABI())
+	})
+}
+
+// MarkMemoryBase gives an instance that runs native code its base, before
+// any code runs in it: the configuration decides it once, for the life of
+// the instance (a pointer pack 'p' made before a base appeared would be
+// taken for an address of the process afterwards). The memory does not
+// move (it is a reservation as large as it can grow).
+func (p *Perl) MarkMemoryBase() {
+	p.writeMemoryBase(false)
+}
+
+// writeMemoryBase writes the base of the instance's memory into the word;
+// with ifSet, only when the word has a base already: a copy of an instance
+// (a Clone, a fork child) has its memory in a place of its own, and its word
+// came with the original's memory.
+func (p *Perl) writeMemoryBase(ifSet bool) {
+	base.AccessMemory(p.m.g, func(mem []byte) {
+		at := p.intrAddr
+		if len(mem) == 0 || at+hostWordsBaseOffset+8 > uint64(len(mem)) {
+			return
+		}
+		if ifSet && binary.LittleEndian.Uint64(mem[at+hostWordsBaseOffset:]) == 0 {
+			return
+		}
+		binary.LittleEndian.PutUint64(mem[at+hostWordsBaseOffset:], uint64(uintptr(unsafe.Pointer(&mem[0]))))
+	})
+}
+
+// KeepRuntimeDescriptorsHigh has the Go runtime make the descriptors it
+// needs for itself now, above the numbers a program's descriptors get. A
+// program that is the host process (InstanceOptions.HostProcess) has the
+// host's descriptor numbers, lowest free first, and expects the first file
+// it opens to be descriptor 3. A command built around such a program calls
+// this while its packages are initialized: the earlier, the fewer
+// descriptors the runtime has made already.
+func KeepRuntimeDescriptorsHigh() { base.KeepRuntimeDescriptorsHigh() }
+
+// hostIDs is how a program that is the host process changes the process's
+// user and group ids when a package linked into the binary knows a way the
+// runtime does not have; see RegisterHostIDs. nil is the runtime's own way.
+var hostIDs base.HostIDs
+
+// RegisterHostIDs sets the way the ids of the host process are changed for
+// every instance made afterwards whose program is the host process. The
+// native module loader registers the C library's: a process that loads
+// native code is linked with a C runtime, and has to change its ids through
+// it. It is called from package initialization.
+func RegisterHostIDs(ids base.HostIDs) { hostIDs = ids }
 
 // buildWASI assembles the per-instance WASI host from the options. Sandbox
 // by default: no host environment, no host stdio.
@@ -235,6 +485,28 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 		exec = func(string, []string) bool { return false }
 	}
 	wasi.SetExecHook(exec)
+	wasi.SetHostProcess(opts.HostProcess)
+	if opts.HostProcess && hostIDs != nil {
+		wasi.SetHostIDs(hostIDs)
+	}
+	// A program that is the host process is where the host is: when it
+	// names no time zone (TZ), its local time is the host's. An isolated
+	// program is in UTC.
+	if opts.HostProcess {
+		wasi.SetLocalZone(time.Local)
+	}
+	if opts.InheritDescriptors {
+		wasi.AdoptInheritedDescriptors()
+	}
+	if opts.Syslog {
+		wasi.SetSyslogger(NewSyslogger())
+	}
+	// Taking a local address to accept connections on makes the program a
+	// server on the host's network: only a program that is the host process
+	// may. Traffic on sockets it already has is not gated here (outbound
+	// connections have the Dial hook).
+	mayListen := opts.HostProcess
+	wasi.SetNetAccessHook(func(op string) bool { return op != "listen" || mayListen })
 	// Sandbox stdio by default: an unset stream does NOT fall through to the
 	// host process stdio. Stdin defaults to empty (immediate EOF), stdout and
 	// stderr to discard. (Perl-level print output is still captured into the
@@ -259,21 +531,21 @@ func buildWASI(opts InstanceOptions) *base.WasiStubs {
 
 // boot brings the instance's wasm module up and obtains the interpreter
 // handle — via the copy-on-write snapshot when possible, privately otherwise.
+// The first instance of a process starts on memory of its own (see
+// sharedSnapshot).
 func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
-	if snap := sharedSnapshot(opts.StdlibDir, opts.Env); snap.err == nil {
-		ceiling := snapshotCeiling
-		if opts.MaxMemoryBytes > 0 {
-			const wasmPage = 65536
-			max := opts.MaxMemoryBytes / wasmPage * wasmPage
-			if max < ceiling && uint64(max) >= snap.img.Size() {
-				ceiling = max
-			}
-		}
+	snap := sharedSnapshot(opts.StdlibDir, opts.SiteDir, opts.Env)
+	if snap == nil {
+		return p.bootOwn(opts, wasi)
+	}
+	if snap.err == nil {
+		ceiling := memoryCeiling(opts, snap.img.Size())
 		mem, err := snap.img.Memory(ceiling)
 		if err == nil {
 			p.m.g = wasm2go.NewFromSnapshot(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, snap.img.Size(), snap.img.Globals())
 			p.h = snap.handle
 			p.mapped = mem
+			p.image = snap.image.retain()
 			return nil
 		}
 		// Mapping failed (exotic platform / fd exhaustion): boot privately.
@@ -281,25 +553,76 @@ func (p *Perl) boot(opts InstanceOptions, wasi *base.WasiStubs) error {
 	return p.bootPrivate(opts, wasi)
 }
 
+// memoryCeiling is the limit of an instance's linear memory: the memory
+// cap of opts rounded down to a wasm page, the host's memory for
+// HostMemoryLimit (when it can be told), or defaultMemoryCeiling without
+// one (or with one below least, the memory the instance starts with). It
+// is the length of the mapping the instance's memory is, and its growth
+// cap, however the instance gets its memory.
+func memoryCeiling(opts InstanceOptions, least uint64) uint64 {
+	switch {
+	case opts.MaxMemoryBytes == HostMemoryLimit:
+		if size, ok := hostMemory(); ok && size/wasmPage*wasmPage >= least {
+			return size / wasmPage * wasmPage
+		}
+	case opts.MaxMemoryBytes > 0:
+		if max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage; max >= least {
+			return max
+		}
+	}
+	return defaultMemoryCeiling
+}
+
+// bootOwn starts the instance on memory of its own: a private mapping that
+// keeps one address for the instance's life (native code holds pointers
+// into it), into which the data segments are installed before the module
+// is constructed on it. Nothing is imaged or copied first; the instance's
+// first fork images its memory (base.ForkMemory with the image
+// AnonymousMemoryInPlace returned).
+func (p *Perl) bootOwn(opts InstanceOptions, wasi *base.WasiStubs) error {
+	img, g, mem, err := base.AnonymousMemoryInPlace(memoryCeiling(opts, wasm2go.InitialMemoryBytes), func(mem []byte) (*base.Module, error) {
+		wasm2go.InstallDataSegments(mem)
+		return wasm2go.NewWithMemory(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, mem, wasm2go.InitialMemoryBytes), nil
+	})
+	if err != nil {
+		// No mapping to be had: memory of the Go heap, which moves when
+		// it grows past what was reserved.
+		return p.bootPrivate(opts, wasi)
+	}
+	p.m.g = g
+	p.mapped = mem
+	p.image = (&memoryImage{img: img}).retain()
+	return p.start(opts)
+}
+
 // bootPrivate is the no-snapshot path: run the reactor initializer and
-// perl_new on a private linear memory.
+// perl_new on a private linear memory. Where linear memory is a
+// reservation (base.MemReserved), the reservation holds the memory's whole
+// ceiling, as the mapping of an instance on memory of its own does: a
+// memory that outgrows its reservation moves to a larger one, and native
+// code holds the address it had. A memory of the Go heap gets the room
+// MemoryReserveBytes asks for, and moves when it grows past it.
 func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err error) {
-	if opts.MemoryReserveBytes > 0 {
-		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, opts.MemoryReserveBytes)
+	ceiling := memoryCeiling(opts, wasm2go.InitialMemoryBytes)
+	reserve := opts.MemoryReserveBytes
+	if base.MemReserved && uint64(reserve) < ceiling {
+		reserve = int(ceiling)
+	}
+	if reserve > 0 {
+		p.m.g = wasm2go.NewWithWASIReserve(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m}, reserve)
 	} else {
 		p.m.g = wasm2go.NewWithWASI(wasi, envStubs{m: p.m}, wasmifyStubs{m: p.m})
 	}
 	// Cap linear-memory growth so a runaway allocation fails in the guest
-	// instead of growing the host process unbounded. Round down to a wasm
-	// page; ignore values below the module's initial memory.
-	if opts.MaxMemoryBytes > 0 {
-		const wasmPage = 65536
-		max := uint64(opts.MaxMemoryBytes) / wasmPage * wasmPage
-		if max >= uint64(len(wasm2go.Memory(p.m.g))) {
-			wasm2go.SetMaxMemory(p.m.g, max)
-		}
-	}
+	// instead of growing the host process unbounded: the same limit as an
+	// instance on a mapping has.
+	wasm2go.SetMaxMemory(p.m.g, ceiling)
+	return p.start(opts)
+}
 
+// start runs the reactor initializer and perl_new on the instance's fresh
+// module.
+func (p *Perl) start(opts InstanceOptions) (err error) {
 	// Run the reactor _initialize + wasmify init under a recover so a C++
 	// static-initializer trap surfaces as an error.
 	func() {
@@ -315,7 +638,7 @@ func (p *Perl) bootPrivate(opts InstanceOptions, wasi *base.WasiStubs) (err erro
 		return err
 	}
 
-	h, err := p.perlNew(opts.StdlibDir)
+	h, err := p.perlNew(opts.StdlibDir, opts.SiteDir)
 	if err != nil {
 		return fmt.Errorf("perl_new: %w", err)
 	}
@@ -347,7 +670,7 @@ func (p *Perl) valueOp(ctx context.Context, mid int32, inv invoker, buf []byte) 
 	p.drainReleases()
 
 	disarm := p.armInterrupt(ctx)
-	out, invokeErr := p.m.invoke(0, mid, buf, inv)
+	out, invokeErr := p.invoke(0, mid, buf, inv)
 	interrupted = disarm()
 
 	if invokeErr != nil {
@@ -560,27 +883,103 @@ func (p *Perl) Close() error {
 	}
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midClose, buf, wasm2go.Inv_0_6)
+	resp, err := p.invoke(0, midClose, buf, wasm2go.Inv_0_6)
 	if err == nil {
 		err = pbExtractError(resp)
 	}
+	// the native modules' state goes on the thread they ran on
+	var relErr error
+	p.OnThread(func() { relErr = p.releaseHostState() })
+	p.endThread()
+	return errors.Join(err, relErr)
+}
+
+// releaseHostState gives back what the host holds for an instance that
+// will never be entered again: its open descriptors and its memory mapping.
+// The end of the family's first process is the end of the pseudo-processes
+// forked from it that are still running.
+func (p *Perl) releaseHostState() error {
+	if xsDynamicLoader != nil && xsDynamicLoader.Release != nil {
+		xsDynamicLoader.Release(p)
+	}
+	first := !p.ForkChild()
+	if !first && p.family.isOver() {
+		// A pseudo-process that goes because the family is over takes its
+		// commands with it. It does that itself, here, before its process
+		// table goes: whoever ended it may find the table gone already.
+		p.wasi.KillCommands()
+	}
+	err := p.wasi.CloseAll()
+	if first && p.family != nil {
+		p.family.end()
+	}
 	p.releaseMapping()
 	return err
+}
+
+// stderr is where the host reports failures of a pseudo-process that has no
+// caller to return them to.
+func (p *Perl) stderr() io.Writer {
+	if p.opts.Stderr != nil {
+		return p.opts.Stderr
+	}
+	return io.Discard
 }
 
 // releaseMapping returns the instance's copy-on-write mapping to the OS. Must
 // only run when the module will never be entered again.
 func (p *Perl) releaseMapping() {
 	if p.mapped != nil {
-		base.UnmapMemory(p.mapped)
+		// Under the lock of base.AccessMemory: another goroutine that is
+		// setting a flag in this memory (a signal for a fork child) is
+		// done first, and one that comes later finds the instance closed.
+		base.AccessMemory(p.m.g, func([]byte) { base.UnmapMemory(p.mapped) })
 		p.mapped = nil
+	}
+	p.image.release()
+	p.image = nil
+}
+
+// memoryImage is a memory image that instances map privately, counted by
+// the instances that may still fork from it: the image is closed, and its
+// pages go once the mappings have gone, when the last of them is done.
+type memoryImage struct {
+	img  *base.SharedImage
+	refs atomic.Int32
+}
+
+// retain counts one more instance that maps the image, and returns it.
+func (i *memoryImage) retain() *memoryImage {
+	if i != nil {
+		i.refs.Add(1)
+	}
+	return i
+}
+
+// release counts an instance out.
+func (i *memoryImage) release() {
+	if i != nil && i.refs.Add(-1) == 0 {
+		i.img.Close()
 	}
 }
 
-func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
+// ArchTag names the kind of machine this process runs on, the way the
+// directories of architecture-specific files are named: the native modules
+// a process loads are built for it.
+func ArchTag() string { return runtime.GOOS + "_" + runtime.GOARCH }
+
+// perlNew starts the interpreter with its library in stdlibDir and, when
+// siteDir is not empty, its site directories under siteDir, telling it the
+// name of the architecture (ArchName): the host's, for which the native
+// modules a program loads into this process are built; and the name of the
+// system (OSName), the host's too.
+func (p *Perl) perlNew(stdlibDir, siteDir string) (uint64, error) {
 	var buf []byte
 	buf = pbAppendString(buf, 1, stdlibDir)
-	resp, err := p.m.invoke(0, midNew, buf, wasm2go.Inv_0_16)
+	buf = pbAppendString(buf, 2, siteDir)
+	buf = pbAppendString(buf, 3, ArchName())
+	buf = pbAppendString(buf, 4, OSName())
+	resp, err := p.invoke(0, midNew, buf, wasm2go.Inv_0_16)
 	if err != nil {
 		return 0, err
 	}
@@ -592,17 +991,17 @@ func (p *Perl) perlNew(stdlibDir string) (uint64, error) {
 
 // interruptAddr fetches the address of this instance's interrupt-flag word in
 // linear memory.
-func (p *Perl) interruptAddr() (uint32, error) {
+func (p *Perl) interruptAddr() (uint64, error) {
 	var buf []byte
 	buf = pbAppendUint64(buf, 1, p.h)
-	resp, err := p.m.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_13)
+	resp, err := p.invoke(0, midInterruptAddr, buf, wasm2go.Inv_0_13)
 	if err != nil {
 		return 0, err
 	}
 	if e := pbExtractError(resp); e != nil {
 		return 0, e
 	}
-	return readScalarAtField(resp, 1, (*pbReader).readUint32), nil
+	return readScalarAtField(resp, 1, (*pbReader).readUint64), nil
 }
 
 // fireInterrupt stores 1 into the interrupt-flag word. It does not take the

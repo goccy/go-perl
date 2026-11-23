@@ -23,7 +23,7 @@ func resultStr(r perl.Result) string {
 // through the public path: it stages the .so under a temp directory with
 // the conventional <Module-Name>.so spelling ("::" as "-") and hands the
 // directory to AddXSDir, exactly as an application would.
-func loadXSModule(t *testing.T, p *perl.Perl, module, so string) {
+func loadXSModule(t testing.TB, p *perl.Perl, module, so string) {
 	t.Helper()
 	dir := t.TempDir()
 	name := strings.ReplaceAll(module, "::", "-") + ".so"
