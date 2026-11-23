@@ -10,12 +10,15 @@ func TestUtimeSetsFileTimes(t *testing.T) {
 	got := runForkScript(t, `
 my $f = "$REPORT.data";
 open(my $fh, '>', $f) or die "open: $!"; print {$fh} "x"; close $fh;
-my ($atime, $mtime) = (time - 9000, time - 5000);
+# The access time is newer than the modification time: a host that updates
+# the access time only of a file whose access time is older than its
+# modification time (relatime, APFS) keeps it when something else reads it.
+my ($atime, $mtime) = (time - 5000, time - 9000);
 my $n = utime($atime, $mtime, $f);
 my @st = stat $f;
 report("by name: changed=$n atime=", ($st[8] == $atime ? 'set' : "not set ($st[8])"), " mtime=", ($st[9] == $mtime ? 'set' : "not set ($st[9])"));
 
-report("ages: -M=", (-M $f > 0.05 ? 'old' : 'new'), " -A=", (-A $f > 0.1 ? 'older' : 'new'));
+report("ages: -M=", (-M $f > 0.1 ? 'old' : 'new'), " -A=", (-A $f > 0.05 ? 'older' : 'new'));
 
 $n = utime(undef, undef, $f);
 @st = stat $f;
