@@ -191,6 +191,13 @@ func (r *signalRelay) TakeSignal(target base.SignalTarget, sig int32) (bool, err
 	return true, nil
 }
 
+// SignalIgnored reports whether the host process ignores the guest's
+// signal sig by itself (inherited, or set by native code), for any
+// instance (a fork child too): the guest takes the action as its own.
+func (r *signalRelay) SignalIgnored(target base.SignalTarget, sig int32) (bool, error) {
+	return r.ignoredByProcess(sig)
+}
+
 // ignoredByProcess reports whether the host process ignores the guest's
 // signal sig by itself (inherited, or set by native code). The ignorings
 // the relay makes for the root's guest are that guest's own.
@@ -426,6 +433,12 @@ func hostSignalsConfig() base.Signals { return hostRelay }
 
 // hostSignalTaker is the TakeSignal of a program that is the host process.
 func hostSignalTaker() func(base.SignalTarget, int32) (bool, error) { return hostRelay.TakeSignal }
+
+// hostSignalIgnoredFunc is the SignalIgnored of a program that is the host
+// process.
+func hostSignalIgnoredFunc() func(base.SignalTarget, int32) (bool, error) {
+	return hostRelay.SignalIgnored
+}
 
 // bindHostSignals makes w, the host state of a program that is the host
 // process, the root of the host process's signals when no other program

@@ -259,3 +259,32 @@ func TestSignalRelayTakesNoSignalOfTheGuests(t *testing.T) {
 		}
 	}
 }
+
+// TestSignalRelayTellsWhatTheProcessIgnores pins that SignalIgnored
+// reports a signal the process ignores by itself, read when asked, for the
+// root and for any other instance, but no signal the process does not
+// ignore, none the host has no number for, and none the relay ignores for
+// the root's guest (the guest's own).
+func TestSignalRelayTellsWhatTheProcessIgnores(t *testing.T) {
+	t.Cleanup(func() {
+		if err := restoreHostSignal(syscall.SIGUSR2); err != nil {
+			t.Error(err)
+		}
+	})
+	root := bindFake(t)
+	for _, sig := range []int32{12, 16} {
+		if ignored, err := hostRelay.SignalIgnored(root, sig); ignored || err != nil {
+			t.Errorf("signal %d: ignored %v (%v), want not", sig, ignored, err)
+		}
+	}
+	signal.Ignore(syscall.SIGUSR2)
+	for _, target := range []base.SignalTarget{root, newFakeRoot()} {
+		if ignored, err := hostRelay.SignalIgnored(target, 12); !ignored || err != nil {
+			t.Fatalf("SIGUSR2 the process ignores: ignored %v (%v), want ignored", ignored, err)
+		}
+	}
+	hostRelay.Dispositions(root, 0, guestSignalBit(12), 0)
+	if ignored, err := hostRelay.SignalIgnored(root, 12); ignored || err != nil {
+		t.Fatalf("SIGUSR2 the relay ignores for the root's guest: ignored %v (%v), want not", ignored, err)
+	}
+}

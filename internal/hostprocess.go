@@ -136,6 +136,18 @@ func hostChdir(dir string) error {
 	return nil
 }
 
+// hostCommandDir is the WASIConfig.CommandDir of the host process: "" for
+// dir when it is the host process's working directory, which a command then
+// inherits as a child of fork and exec does instead of changing into it
+// (which fails for a directory the user may no longer search), dir
+// otherwise, as without the hook.
+func hostCommandDir(dir string) (string, error) {
+	if isHostDir(dir) {
+		return "", nil
+	}
+	return dir, nil
+}
+
 // isHostDir reports whether dir is known to be the host process's working
 // directory: the one getcwd(2) names, or hostChdirAt where it names none.
 // It is not known to be when it or that directory cannot be stat'ed.

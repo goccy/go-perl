@@ -18,6 +18,11 @@ func hostSignalsConfig() base.Signals { return nil }
 // none on this platform, whose guest has every signal the runtime raises.
 func hostSignalTaker() func(base.SignalTarget, int32) (bool, error) { return nil }
 
+// hostSignalIgnoredFunc is the SignalIgnored of a program that is the host
+// process: none on this platform, whose guest ignores no signal it did not
+// set.
+func hostSignalIgnoredFunc() func(base.SignalTarget, int32) (bool, error) { return nil }
+
 // bindHostSignals has no signals of the host process to bind.
 func bindHostSignals(w *base.WasiStubs) error { return nil }
 

@@ -588,6 +588,8 @@ func buildWASI(opts InstanceOptions, family *forkFamily) (*base.WasiStubs, error
 		cfg.Syscalls = base.HostSyscalls()
 		cfg.Signals = hostSignalsConfig()
 		cfg.TakeSignal = hostSignalTaker()
+		cfg.Children = hostChildrenConfig()
+		cfg.SignalIgnored = hostSignalIgnoredFunc()
 		cfg.Numbering = base.HostNumbering()
 		cfg.MonotonicClock = hostMonotonicClock()
 		cfg.Listen = base.AllowAllListen
@@ -597,6 +599,7 @@ func buildWASI(opts InstanceOptions, family *forkFamily) (*base.WasiStubs, error
 		// program is in UTC.
 		cfg.LocalZone = time.Local
 		cfg.Chdir = hostChdir
+		cfg.CommandDir = hostCommandDir
 		cfg.Setenv = hostSetenv
 	}
 	if opts.Syslog {
