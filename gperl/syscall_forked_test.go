@@ -5,7 +5,6 @@ package gperl_test
 import (
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"testing"
 )
@@ -14,16 +13,14 @@ import (
 // program forked shares the operating system's process with its parent, so
 // there syscall() makes only the calls that depend on no state of that
 // process, and the numbers the architecture leaves unassigned, and dies for
-// any other. Rand::Urandom's rand() in a forked child calls getrandom by
-// number (318 on x86_64; 355, which aarch64 leaves unassigned, elsewhere,
-// so that it falls back to /dev/urandom). The child's first two lines are
-// what perl 5.36 on Linux prints; perl's child gets its own pid where
-// gperl's dies.
+// any other. The numbers are the guest's, the Linux ABI's of arm64, on
+// every host architecture: getpid, getrandom, and 355, which the ABI
+// leaves unassigned (Rand::Urandom's rand() in a forked child calls it on
+// aarch64, so that it falls back to /dev/urandom). The child's first two
+// lines are what perl 5.36 on aarch64 Linux prints; perl's child gets its
+// own pid where gperl's dies.
 func TestSyscallInAForkedProcess(t *testing.T) {
-	numbers := map[string][3]int{
-		"arm64": {172, 278, 355},
-		"amd64": {39, 318, 400},
-	}[runtime.GOARCH]
+	numbers := [3]int{172, 278, 355}
 	program := `my ($getpid, $getrandom, $unassigned) = (` + strconv.Itoa(numbers[0]) + `, ` +
 		strconv.Itoa(numbers[1]) + `, ` + strconv.Itoa(numbers[2]) + `);
 $| = 1;
