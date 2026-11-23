@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,8 +18,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
-	"time"
 
 	"github.com/goccy/go-perl/internal/gperl"
 )
@@ -247,6 +249,16 @@ func TestDependenciesEndToEnd(t *testing.T) {
 	if got := runScript(t, filepath.Join(dir, "app.pl")); got != testOutput {
 		t.Fatalf("gperl run printed %q, want %q", got, testOutput)
 	}
+	// The run had the module trees as one directory.
+	merged, err := filepath.Glob(filepath.Join(modDir, "cache", "lib", "*", "Demo", "XS.pm"))
+	if err != nil || len(merged) != 1 {
+		t.Fatalf("merged module trees = %v (%v), want one with Demo/XS.pm", merged, err)
+	}
+	for _, pm := range []string{"Pure/Built.pm", "Twin/A.pm", "Twin/B.pm"} {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(merged[0])), filepath.FromSlash(pm))); err != nil {
+			t.Errorf("merged module trees: %v", err)
+		}
+	}
 
 	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
 	for name, cgo := range map[string]string{"static": "1", "nocgo": "0"} {
@@ -328,20 +340,6 @@ func TestBrokenXSFailsTheSync(t *testing.T) {
 	}
 }
 
-// freePort returns a TCP port nothing listens on.
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
-
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.
@@ -356,6 +354,9 @@ func TestPSGIBuild(t *testing.T) {
 use strict;
 use Pure::Built;
 use Demo::XS;
+# The application's signal handling is its own: the server still stops on
+# SIGINT.
+$SIG{INT} = 'IGNORE';
 sub {
     my ($env) = @_;
     open(my $fh, '<', 'static/note.txt') or die "note: $!";
@@ -379,38 +380,77 @@ sub {
 		t.Fatalf("PSGIBuild: %v", err)
 	}
 
-	serve := func(env []string, args ...string) string {
+	// serveUntil runs the server on a socket the test listens on (handed
+	// over as Server::Starter does), sends it concurrent requests, sends
+	// it stop, and returns the body every request got and how the server
+	// ended.
+	serveUntil := func(stop os.Signal, env []string, args ...string) (string, error) {
 		t.Helper()
-		port := freePort(t)
-		cmd := exec.Command(server, append(args, "--port", fmt.Sprint(port))...)
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := ln.(*net.TCPListener).File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(server, args...)
 		cmd.Dir = t.TempDir()
-		cmd.Env = append(append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent")), env...)
+		cmd.Env = append(append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"),
+			"SERVER_STARTER_PORT="+ln.Addr().String()+"=3"), env...)
+		cmd.ExtraFiles = []*os.File{f}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		url := fmt.Sprintf("http://127.0.0.1:%d/", port)
-		var body string
-		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-			res, err := http.Get(url)
-			if err == nil {
-				data, rerr := io.ReadAll(res.Body)
-				if cerr := res.Body.Close(); rerr != nil || cerr != nil {
-					t.Fatalf("read response: %v, %v", rerr, cerr)
-				}
-				body = string(data)
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("server did not come up: %v\n%s", err, stderr.String())
-			}
-		}
-		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		if err := errors.Join(f.Close(), ln.Close()); err != nil {
 			t.Fatal(err)
 		}
-		if err := cmd.Wait(); err != nil {
-			t.Fatalf("server exit after SIGINT: %v\n%s", err, stderr.String())
+		url := "http://" + ln.Addr().String() + "/"
+		const clients, each = 16, 25
+		bodies := make([]string, clients*each)
+		var wg sync.WaitGroup
+		for c := range clients {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range each {
+					res, err := http.Get(url)
+					if err != nil {
+						t.Errorf("request: %v", err)
+						return
+					}
+					data, rerr := io.ReadAll(res.Body)
+					if err := errors.Join(rerr, res.Body.Close()); err != nil {
+						t.Errorf("read response: %v", err)
+						return
+					}
+					bodies[c*each+i] = string(data)
+				}
+			}()
+		}
+		wg.Wait()
+		if err := cmd.Process.Signal(stop); err != nil {
+			t.Fatal(err)
+		}
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			waitErr = fmt.Errorf("%w\n%s", waitErr, stderr.String())
+		}
+		for _, body := range bodies[1:] {
+			if body != bodies[0] {
+				t.Errorf("concurrent requests got %q and %q", bodies[0], body)
+				break
+			}
+		}
+		return bodies[0], waitErr
+	}
+	serve := func(env []string, args ...string) string {
+		t.Helper()
+		body, err := serveUntil(os.Interrupt, env, args...)
+		if err != nil {
+			t.Fatalf("server exit after SIGINT: %v", err)
 		}
 		return body
 	}
@@ -422,5 +462,11 @@ sub {
 	}
 	if got, want := serve([]string{"GPERL_PSGI_ENV=production"}, "-E", "development", "--workers", "3"), "built on static|42|from the project directory|development|multi"; got != want {
 		t.Errorf("with the command line: %q, want %q", got, want)
+	}
+	// A signal the server leaves to the Go runtime does what it does to any
+	// Go program — SIGQUIT ends it — rather than going to a worker.
+	var exit *exec.ExitError
+	if _, err := serveUntil(syscall.SIGQUIT, nil); !errors.As(err, &exit) {
+		t.Errorf("server after SIGQUIT: %v, want it ended", err)
 	}
 }

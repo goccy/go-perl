@@ -76,7 +76,7 @@ func TestRunUncaughtDie(t *testing.T) {
 // devReplaces reproduces this checkout's module wiring for a generated
 // program: go-perl itself plus whatever replace directives go-perl's go.mod
 // carries (the unreleased perlwasm2go bundle during development).
-func devReplaces(t *testing.T) string {
+func devReplaces(t testing.TB) string {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
