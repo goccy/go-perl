@@ -1,6 +1,6 @@
 //go:build !unix
 
-package perl
+package internal
 
 import (
 	"errors"
@@ -10,14 +10,14 @@ import (
 	"path/filepath"
 )
 
-// stdlibTempRoot returns the directory go-perl in the system temporary
-// directory, creating it: where the standard library goes when the user's
+// TempRoot returns the directory go-perl in the system temporary
+// directory, creating it: where unpacked trees go when the user's
 // cache directory cannot be used. On these systems the temporary directory
 // is the user's own (Windows keeps one in each user's profile; WASI has the
 // directories the host grants), and there is no owner to compare; the
 // directory must still be a directory itself, not a link to one, which is
 // not followed.
-func stdlibTempRoot() (string, error) {
+func TempRoot() (string, error) {
 	root := filepath.Join(os.TempDir(), "go-perl")
 	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return "", err

@@ -48,7 +48,7 @@ func writeProjectGoWork(m *mod.Manager, projectDir string, deps *projectDeps) er
 	if err != nil {
 		return err
 	}
-	if !fileExists(filepath.Join(projectDir, "go.mod")) || deps.lib == nil {
+	if !fileExists(filepath.Join(projectDir, "go.mod")) || len(deps.lib) == 0 {
 		return nil
 	}
 	path := filepath.Join(projectDir, "go.work")
@@ -119,11 +119,9 @@ func generateLinkSet(m *mod.Manager, deps *projectDeps) (*linkSet, error) {
 		return nil, err
 	}
 	// go:embed takes neither symlinks nor files outside the module, so the
-	// module tree is materialized here (as hard links where possible).
-	for name, host := range deps.lib.Files() {
-		if err := linkOrCopy(host, filepath.Join(l.cpanDir, "lib", filepath.FromSlash(name))); err != nil {
-			return nil, err
-		}
+	// module tree is materialized here.
+	if err := writeLib(deps.lib, filepath.Join(l.cpanDir, "lib")); err != nil {
+		return nil, err
 	}
 	files := map[string]string{
 		"go.mod":  "module " + cpanModulePath + "\n\ngo 1.25.0\n",

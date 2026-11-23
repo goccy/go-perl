@@ -92,7 +92,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	gowork := "off"
 	err = withDeps(func(m *mod.Manager) error {
 		deps, err := loadDeps(context.Background(), m, projectDir, mod.BuildTarget())
-		if err != nil || deps.lib == nil {
+		if err != nil || len(deps.lib) == 0 {
 			return err
 		}
 		links, err := generateLinkSet(m, deps)

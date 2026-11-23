@@ -51,6 +51,10 @@ func cpanLibInc(fsys FS, memfs *MemFS) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !filepath.IsLocal(rel) {
+		// The filesystem does not reach the cache: it is the embedder's.
+		return "", nil
+	}
 	return "/" + filepath.ToSlash(rel), nil
 }
 

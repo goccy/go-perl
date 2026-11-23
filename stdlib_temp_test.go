@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/goccy/go-perl/internal"
 )
 
 // withoutUserCache makes the user's cache directory unusable, as a test of
@@ -144,11 +146,11 @@ func TestStdlibTempRootRefusesWhatIsNotTheUsers(t *testing.T) {
 		// the directory is this user's; to the check it belongs to
 		// someone else when another user asks
 		other := os.Getuid() + 1
-		err := privateDir(dir, other, false)
+		err := internal.PrivateDir(dir, other, false)
 		if err == nil || !strings.Contains(err.Error(), "belongs to user") {
 			t.Fatalf("got %v, want a refusal of the owner", err)
 		}
-		if err := privateDir(dir, os.Getuid(), false); err != nil {
+		if err := internal.PrivateDir(dir, os.Getuid(), false); err != nil {
 			t.Fatalf("the user's own directory was refused: %v", err)
 		}
 	})
@@ -157,7 +159,7 @@ func TestStdlibTempRootRefusesWhatIsNotTheUsers(t *testing.T) {
 		if err := os.Mkdir(dir, 0o500); err != nil {
 			t.Fatal(err)
 		}
-		if err := privateDir(dir, os.Getuid(), true); err != nil {
+		if err := internal.PrivateDir(dir, os.Getuid(), true); err != nil {
 			t.Fatal(err)
 		}
 		if fi, _ := os.Lstat(dir); fi.Mode().Perm() != 0o700 {

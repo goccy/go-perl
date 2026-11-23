@@ -1,6 +1,6 @@
 //go:build unix
 
-package perl
+package internal
 
 import (
 	"errors"
@@ -12,12 +12,12 @@ import (
 	"syscall"
 )
 
-// stdlibTempRoot returns the directory of this user's in the system
+// TempRoot returns the directory of this user's in the system
 // temporary directory (go-perl-<uid>), creating it with mode 0700: where the
-// standard library goes when the user's cache directory cannot be used. The
+// unpacked trees go when the user's cache directory cannot be used. The
 // temporary directory is shared with every other user, so the directory is
-// used only when it is this user's alone; see privateDir.
-func stdlibTempRoot() (string, error) {
+// used only when it is this user's alone; see PrivateDir.
+func TempRoot() (string, error) {
 	uid := os.Getuid()
 	root := filepath.Join(os.TempDir(), "go-perl-"+strconv.Itoa(uid))
 	created := true
@@ -27,18 +27,18 @@ func stdlibTempRoot() (string, error) {
 		}
 		created = false
 	}
-	if err := privateDir(root, uid, created); err != nil {
+	if err := PrivateDir(root, uid, created); err != nil {
 		return "", err
 	}
 	return root, nil
 }
 
-// privateDir says why dir is not a directory only the user uid can use, or
+// PrivateDir says why dir is not a directory only the user uid can use, or
 // nil when it is one: a directory itself (not a symbolic link, which is not
 // followed), owned by uid, with mode 0700, so that nobody else can have put
 // anything in it. A directory this process has just created may have had
 // its mode narrowed by the umask; it is given 0700.
-func privateDir(dir string, uid int, created bool) error {
+func PrivateDir(dir string, uid int, created bool) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err

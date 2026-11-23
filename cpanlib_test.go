@@ -10,6 +10,37 @@ import (
 	"github.com/goccy/go-perl/internal"
 )
 
+// rootedHostFS is the host filesystem as an FS whose names are host paths
+// below root (base.HostRootFS) — one that does not reach the user's cache.
+type rootedHostFS struct {
+	perl.FS
+	root string
+}
+
+func (r rootedHostFS) HostRoot() string { return r.root }
+
+// An instance on a filesystem of the embedder's that does not reach where
+// the tree is written gets no tree on @INC, and starts all the same.
+func TestCPANLibOutsideTheFilesystem(t *testing.T) {
+	useCPANLib(t)
+	stdlib, err := perl.ExtractStdlib()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := perl.New(perl.Config{FS: rootedHostFS{FS: goperlfs.NewHostFS(), root: t.TempDir()}, StdlibDir: stdlib})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if got := evalString(t, p, `(grep({ m{/cpan-} } @INC) ? "on" : "off") . "|" . (eval { require Greeting; 1 } ? "loaded" : "missing")`); got != "off|missing" {
+		t.Fatalf("tree on @INC|Greeting: %q", got)
+	}
+}
+
 // useCPANLib installs a module tree the way a generated go-perl/cpan
 // package does, for the duration of the test.
 func useCPANLib(t *testing.T) {
