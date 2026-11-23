@@ -4,7 +4,10 @@ package internal
 // loader to the public AddXSDir entry, without the public package importing
 // the loader (which would drag purego/dlopen into every embedder).
 
-import "fmt"
+import (
+	"fmt"
+	"io/fs"
+)
 
 // xsDirLoader is installed by the xs package's init.
 var xsDirLoader func(p *Perl, dir string) error
@@ -23,6 +26,39 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 	p.nativeHoldsAddresses()
 	return true, xsDirLoader(p, dir)
 }
+
+// XSABI is the native XS SDK's ABI version: it must match GOPERL_XS_ABI in
+// the SDK's perl.h, and artifacts built against one version load only into
+// it.
+const XSABI = 42
+
+// xsLinkedLoader is installed by the xs package's init.
+var xsLinkedLoader func(p *Perl) error
+
+// RegisterXSLinkedLoader wires the loader of the native XS modules linked
+// into the binary. Called by the xs package's init; not for application use.
+func RegisterXSLinkedLoader(fn func(p *Perl) error) { xsLinkedLoader = fn }
+
+// XSLoadLinked registers the native XS modules linked into the binary with
+// the instance. Without the xs package there are none.
+func XSLoadLinked(p *Perl) error {
+	if xsLinkedLoader == nil {
+		return nil
+	}
+	return xsLinkedLoader(p)
+}
+
+// xsNative is the tree of loadable native modules a binary carries.
+var xsNative fs.FS
+
+// SetXSNative installs a tree of loadable native modules
+// (auto/<Module/Path>/<Name>.so) for every new instance to load from.
+// Called by the init of a generated go-perl/cpan package built without
+// cgo; not for application use.
+func SetXSNative(fsys fs.FS) { xsNative = fsys }
+
+// XSNative returns the installed tree, nil when the binary carries none.
+func XSNative() fs.FS { return xsNative }
 
 // XSDynamicLoader is the host half of perl's dynamic loading (DynaLoader's
 // dl_load_file / dl_find_symbol / dl_install_xsub), provided by the xs

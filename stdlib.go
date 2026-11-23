@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/goccy/go-perl/internal"
 )
 
 //go:embed stdlib.zip
@@ -45,7 +47,7 @@ var (
 // read-only. When the user cache directory cannot be used (HOME is not set,
 // say), the library goes the same way into a directory of the user's own in
 // the system temporary directory, which is used only when it is the user's
-// alone (see stdlibTempRoot); otherwise ExtractStdlib fails and says why.
+// alone (see internal.TempRoot); otherwise ExtractStdlib fails and says why.
 func ExtractStdlib() (string, error) {
 	stdlibOnce.Do(func() {
 		stdlibPath, stdlibErr = cachedStdlib()
@@ -56,18 +58,7 @@ func ExtractStdlib() (string, error) {
 // cachedStdlib resolves the shared copy, unpacking it when this is the first
 // process to need it.
 func cachedStdlib() (string, error) {
-	base, err := os.UserCacheDir()
-	if err == nil {
-		var dir string
-		if dir, err = stdlibInCache(filepath.Join(base, "go-perl")); err == nil {
-			return dir, nil
-		}
-	}
-	root, terr := stdlibTempRoot()
-	if terr != nil {
-		return "", fmt.Errorf("no directory for the standard library: the user cache directory: %v; the temporary directory: %w", err, terr)
-	}
-	return stdlibInCache(root)
+	return internal.InCache("the standard library", stdlibInCache)
 }
 
 // stdlibInCache returns the library's directory under root, creating it when

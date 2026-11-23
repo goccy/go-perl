@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/goccy/perlwasm2go/base"
@@ -193,4 +194,32 @@ func hostMonotonicClock() func() uint64 {
 		return hostClock
 	}
 	return base.HostMonotonicClock()
+}
+
+// firstOwnPID is the first pid an instance with OwnState gets: above every
+// pid of the host (Linux's PID_MAX_LIMIT, darwin's PID_MAX), and above the
+// pids the runtime gives a fork family's pseudo-processes, which it counts
+// up from 1<<22.
+const firstOwnPID = 1 << 30
+
+// nextOwnPID is the pid the next instance with OwnState gets.
+var nextOwnPID atomic.Int32
+
+func init() { nextOwnPID.Store(firstOwnPID) }
+
+// ownPIDProcess is the host process as a program with OwnState has it: its
+// own pid, the host process as its parent, the rest the host's.
+type ownPIDProcess struct {
+	base.Process
+	pid int32
+}
+
+func newOwnPIDProcess(host base.Process) ownPIDProcess {
+	return ownPIDProcess{Process: host, pid: nextOwnPID.Add(1) - 1}
+}
+
+func (p ownPIDProcess) IDs() base.ProcessIDs {
+	ids := p.Process.IDs()
+	ids.PPID, ids.PID = ids.PID, p.pid
+	return ids
 }

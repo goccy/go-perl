@@ -6,9 +6,13 @@ package perl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	_ "unsafe" // go:linkname
 
+	// The link set of the project's CPAN dependencies.
+	_ "github.com/goccy/go-perl/cpan"
 	"github.com/goccy/go-perl/internal"
 )
 
@@ -51,22 +55,46 @@ type Result struct {
 // copy-on-write from a process-wide snapshot of an already-initialized
 // interpreter, so construction is cheap and the instances share the
 // read-only bulk of their memory.
-func New(cfg Config) (*Perl, error) {
+func New(cfg Config) (*Perl, error) { return newPerl(cfg, false) }
+
+// newOwnState is New for an instance that is the host process
+// (Config.HostProcess) and a process of its own inside it: the host process
+// does not follow its working directory or environment, and its pid is its
+// own (internal.InstanceOptions.OwnState). Not part of the API: the gperl
+// command reaches it through go:linkname.
+//
+//go:linkname newOwnState
+func newOwnState(cfg Config) (*Perl, error) { return newPerl(cfg, true) }
+
+// onThread runs fn on the thread p's guest code runs on
+// (internal.Perl.OnThread), where the entries into the guest fn makes run in
+// place; on the calling goroutine for an instance that has no such thread.
+// Not part of the API: the PSGI server reaches it through go:linkname.
+//
+//go:linkname onThread
+func onThread(p *Perl, fn func()) { p.raw.OnThread(fn) }
+
+func newPerl(cfg Config, ownState bool) (*Perl, error) {
 	// Resolve the filesystem and standard library location: every file the
 	// instance opens goes through Config.FS, and StdlibDir is a path inside
 	// it. With a supplied backend the stdlib must live in the FS (host
 	// backends pair with ExtractStdlib; NewStdlibMemFS pre-loads a MemFS).
 	// The nil default is a PRIVATE in-memory filesystem pre-loaded with the
 	// stdlib - sandboxed, nothing touches the host disk.
+	var memfs *MemFS
 	if cfg.FS == nil {
-		fsys, err := NewStdlibMemFS()
-		if err != nil {
+		var err error
+		if memfs, err = NewStdlibMemFS(); err != nil {
 			return nil, fmt.Errorf("build in-memory stdlib: %w", err)
 		}
-		cfg.FS = fsys
+		cfg.FS = memfs
 	}
 	if cfg.StdlibDir == "" {
 		cfg.StdlibDir = "/"
+	}
+	cpanInc, err := cpanLibInc(cfg.FS, memfs)
+	if err != nil {
+		return nil, fmt.Errorf("the CPAN module tree: %w", err)
 	}
 
 	// Perl cannot boot without a /dev/null (the -e bootstrap opens the bit
@@ -88,6 +116,7 @@ func New(cfg Config) (*Perl, error) {
 		Exec:               cfg.Exec,
 		Fork:               cfg.Fork,
 		HostProcess:        cfg.HostProcess,
+		OwnState:           ownState,
 		InheritDescriptors: cfg.InheritDescriptors,
 		Syslog:             cfg.Syslog,
 		Stdin:              cfg.Stdin,
@@ -113,6 +142,14 @@ func New(cfg Config) (*Perl, error) {
 		if err := p.installDynaLoader(); err != nil {
 			p.Close()
 			return nil, err
+		}
+	}
+	if err := internal.XSLoadLinked(raw); err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	if cpanInc != "" {
+		if err := p.AddInc(context.Background(), cpanInc); err != nil {
+			return nil, errors.Join(err, p.Close())
 		}
 	}
 	return p, nil

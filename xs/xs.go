@@ -55,8 +55,7 @@ import (
 // debugging aid of last resort when a native module misbehaves.
 var xsTrace = os.Getenv("GOPERL_XS_TRACE") != ""
 
-// abiVersion must match GOPERL_XS_ABI in sdk/include/perl.h.
-const abiVersion = 42
+const abiVersion = internal.XSABI
 
 // plErrno is the interpreter variable id of errno (GOPERL_PL_ERRNO).
 const plErrno = 60
@@ -322,6 +321,8 @@ type magicRec struct {
 func init() {
 	// Back (*internal.Perl).AddXSDir with this package's directory loader.
 	internal.RegisterXSDirLoader(loadDir)
+	// Give every instance the modules linked into the binary (Register).
+	internal.RegisterXSLinkedLoader(loadLinked)
 	// Back DynaLoader's dl_* functions (Config.NativeModules).
 	internal.RegisterXSDynamicLoader(internal.XSDynamicLoader{
 		Open:    openLibrary,
@@ -698,13 +699,71 @@ func load(p *internal.Perl, module, path string) error {
 	if err != nil {
 		return err
 	}
-	bootName := "boot_" + strings.ReplaceAll(module, "::", "__")
-	bootFn, err := purego.Dlsym(lib, bootName)
+	return s.registerBoot(module, path, func(name string) (uintptr, error) { return purego.Dlsym(lib, name) })
+}
+
+// registerBoot registers the boot function resolve finds for module.
+func (s *state) registerBoot(module, path string, resolve func(string) (uintptr, error)) error {
+	bootName := "boot_" + mangledModule(module)
+	bootFn, err := resolve(bootName)
 	if err != nil {
 		return fmt.Errorf("%s: no %s symbol: %w", path, bootName, err)
 	}
 	_, err = s.registerNative(nativeBootPrefix+module+"::bootstrap", false, bootFn)
 	return err
+}
+
+// loadLinked registers the modules linked into the binary (Register) with
+// the instance, as load does the module of a file. Native code runs in the
+// instance from then on, so it gets the thread and the memory base of an
+// instance that runs native code.
+func loadLinked(p *internal.Perl) error {
+	modules := linkedModules()
+	if len(modules) == 0 && internal.XSNative() == nil {
+		return nil
+	}
+	p.KeepOnOneThread()
+	p.MarkMemoryBase()
+	var err error
+	p.OnThread(func() {
+		var s *state
+		if s, err = loaderState(p); err != nil {
+			return
+		}
+		if err = s.prepare(); err != nil {
+			return
+		}
+		for module, entry := range modules {
+			resolve := entryResolver(module, entry)
+			if err = s.bind(module, resolve); err != nil {
+				return
+			}
+			if err = s.registerBoot(module, module, resolve); err != nil {
+				return
+			}
+		}
+		err = loadNative(p)
+	})
+	return err
+}
+
+// loadAutoDir registers the modules of a perl architecture directory's
+// auto tree: auto/<Module/Path>/<Name>.so is the module Module::Path.
+func loadAutoDir(p *internal.Perl, auto string) error {
+	return filepath.WalkDir(auto, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".so" {
+			return err
+		}
+		rel, err := filepath.Rel(auto, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		module := strings.ReplaceAll(filepath.ToSlash(rel), "/", "::")
+		if err := load(p, module, path); err != nil {
+			return fmt.Errorf("load native module %s: %w", module, err)
+		}
+		return nil
+	})
 }
 
 // nativeBootPrefix is the package prefix under which the boot function of a
@@ -762,8 +821,8 @@ func memoryAboveCeiling(p *internal.Perl) error {
 // reads and writes those structures where they lie. A module built before
 // the SDK read any of them in place has no such table, and nothing to
 // compare.
-func (s *state) layoutAgrees(lib uintptr, path string) error {
-	fn, err := purego.Dlsym(lib, "__goperl_xs_layout")
+func (s *state) layoutAgrees(resolve func(string) (uintptr, error), path string) error {
+	fn, err := resolve("__goperl_xs_layout")
 	if err != nil {
 		return nil
 	}
@@ -798,48 +857,52 @@ func (s *state) layoutAgrees(lib uintptr, path string) error {
 	return nil
 }
 
+// prepare routes the instance's native calls to this loader.
+func (s *state) prepare() error {
+	p := s.p
+	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
+		return err
+	}
+	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
+		return err
+	}
+	if err := p.SetMagicLocalHandler(s.magicLocalized); err != nil {
+		return err
+	}
+	if err := p.SetPPHookHandler(s.ppHook); err != nil {
+		return err
+	}
+	if err := p.SetKeywordHandler(s.keywordHook); err != nil {
+		return err
+	}
+	if err := p.SetPerlIOHandler(s.perlioHook); err != nil {
+		return err
+	}
+	if err := p.SetHostCallHandler(s.hostCall); err != nil {
+		return err
+	}
+	if err := p.SetProcessMemoryHandler(readProcessMemory); err != nil {
+		return err
+	}
+	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
+		return err
+	}
+	if !s.cloneHookSet {
+		s.cloneHookSet = true
+		p.AddCloneHook(s.adoptClone)
+	}
+	return buildVtableOnce()
+}
+
 // open dlopens a native XS module built against the SDK, injects the
 // vtable, and picks up the SDK entry points the module carries. global
 // makes the library's symbols available to the libraries loaded after it
 // (RTLD_GLOBAL), as DynaLoader's dl_load_file does when a module's
 // dl_load_flags ask for it; otherwise they stay the library's own.
 func (s *state) open(path string, global bool) (lib uintptr, err error) {
-	p := s.p
-	if err := p.SetNativeXSHandler(s.dispatch); err != nil {
+	if err := s.prepare(); err != nil {
 		return 0, err
 	}
-	if err := p.SetMagicFreeHandler(s.magicFreed); err != nil {
-		return 0, err
-	}
-	if err := p.SetMagicLocalHandler(s.magicLocalized); err != nil {
-		return 0, err
-	}
-	if err := p.SetPPHookHandler(s.ppHook); err != nil {
-		return 0, err
-	}
-	if err := p.SetKeywordHandler(s.keywordHook); err != nil {
-		return 0, err
-	}
-	if err := p.SetPerlIOHandler(s.perlioHook); err != nil {
-		return 0, err
-	}
-	if err := p.SetHostCallHandler(s.hostCall); err != nil {
-		return 0, err
-	}
-	if err := p.SetProcessMemoryHandler(readProcessMemory); err != nil {
-		return 0, err
-	}
-	if err := p.SetDestructorHandler(s.dtorFired); err != nil {
-		return 0, err
-	}
-	if !s.cloneHookSet {
-		s.cloneHookSet = true
-		p.AddCloneHook(s.adoptClone)
-	}
-	if err := buildVtableOnce(); err != nil {
-		return 0, err
-	}
-
 	mode := purego.RTLD_NOW | purego.RTLD_LOCAL
 	if global {
 		mode = purego.RTLD_NOW | purego.RTLD_GLOBAL
@@ -848,68 +911,74 @@ func (s *state) open(path string, global bool) (lib uintptr, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("dlopen %s: %w", path, err)
 	}
-	initFn, err := purego.Dlsym(lib, "__goperl_xs_init")
+	return lib, s.bind(path, func(name string) (uintptr, error) { return purego.Dlsym(lib, name) })
+}
+
+// bind injects the vtable into the module whose symbols resolve finds, and
+// picks up the SDK entry points the module carries.
+func (s *state) bind(path string, resolve func(string) (uintptr, error)) error {
+	initFn, err := resolve("__goperl_xs_init")
 	if err != nil {
-		return lib, &plainLibraryError{path: path, err: err}
+		return &plainLibraryError{path: path, err: err}
 	}
 	got := ccall.Invoke(initFn, uintptr(unsafe.Pointer(vtable)))
 	if uint32(got) != abiVersion {
-		return 0, fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
+		return fmt.Errorf("%s: XS SDK ABI mismatch (module rejected vtable v%d)", path, abiVersion)
 	}
-	if err := s.layoutAgrees(lib, path); err != nil {
-		return 0, err
+	if err := s.layoutAgrees(resolve, path); err != nil {
+		return err
 	}
 	// The SDK's croak-guarded entry points for pp hooks and save-stack
 	// destructors (weak, so any SDK .so provides them).
-	if fn, err := purego.Dlsym(lib, "__goperl_pp_invoke"); err == nil {
+	if fn, err := resolve("__goperl_pp_invoke"); err == nil {
 		s.mu.Lock()
 		s.ppInvoke = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_shared_clone"); err == nil {
+	if fn, err := resolve("__goperl_shared_clone"); err == nil {
 		s.mu.Lock()
 		s.sharedClone = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_shared_release"); err == nil {
+	if fn, err := resolve("__goperl_shared_release"); err == nil {
 		s.mu.Lock()
 		s.sharedRelease = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_svt_invoke"); err == nil {
+	if fn, err := resolve("__goperl_svt_invoke"); err == nil {
 		s.mu.Lock()
 		s.svtInvoke = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_xs_invoke"); err == nil {
+	if fn, err := resolve("__goperl_xs_invoke"); err == nil {
 		s.mu.Lock()
 		s.xsInvoke = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_xs_epilogue"); err == nil {
+	if fn, err := resolve("__goperl_xs_epilogue"); err == nil {
 		s.mu.Lock()
 		s.xsEpilogue = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_keyword_invoke"); err == nil {
+	if fn, err := resolve("__goperl_keyword_invoke"); err == nil {
 		s.keywordInvoke = fn
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_perlio_invoke"); err == nil {
+	if fn, err := resolve("__goperl_perlio_invoke"); err == nil {
 		s.mu.Lock()
 		s.perlioInvoke = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_dtor_invoke"); err == nil {
+	if fn, err := resolve("__goperl_dtor_invoke"); err == nil {
 		s.mu.Lock()
 		s.dtorInvoke = fn
 		s.mu.Unlock()
 	}
-	if fn, err := purego.Dlsym(lib, "__goperl_host_invoke"); err == nil {
+	if fn, err := resolve("__goperl_host_invoke"); err == nil {
 		s.mu.Lock()
 		s.hostInvoke = fn
 		s.mu.Unlock()
 	}
-	return lib, nil
+	return nil
 }
 
 // dlGlobalSymbols is the bit of dl_load_file's flags that makes a library's
@@ -2629,7 +2698,7 @@ func libcInit() {
 			name string
 			dst  *uintptr
 		}{{"strlen", &strlenFn}, {"memcpy", &memcpyFn}, {"malloc", &mallocFn}, {"free", &freeFn}} {
-			fn, err := purego.Dlsym(purego.RTLD_DEFAULT, sym.name)
+			fn, err := libcSymbol(sym.name)
 			if err != nil {
 				libcErr = fmt.Errorf("resolve libc %s: %w", sym.name, err)
 				return
@@ -2641,6 +2710,16 @@ func libcInit() {
 			dladdrFn = fn
 		}
 	})
+}
+
+// libcSymbol finds a function of the C library: in the entry table of a
+// module linked into the binary, which has no dynamic symbols to search
+// when it is linked statically, and through the dynamic linker otherwise.
+func libcSymbol(name string) (uintptr, error) {
+	for module, entry := range linkedModules() {
+		return entryResolver(module, entry)(name)
+	}
+	return purego.Dlsym(purego.RTLD_DEFAULT, name)
 }
 
 func cMalloc(n int) uintptr {

@@ -90,6 +90,43 @@ jobs:
             ${{ steps.go-env.outputs.gomodcache }}
           key: go-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.cache }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
+  # gperl build for linux/amd64 and linux/arm64 with native (XS)
+  # dependencies, from each host: every binary is inspected, and the one
+  # for the runner's own platform is run.
+  test-cross:
+    name: gperl cross build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make test-cross
+
+  # The Plack example on real CPAN distributions (Plack, Mojolicious, and
+  # the XS distributions Cpanel::JSON::XS and Clone): gperl fetches and
+  # builds them, and the Go application links them in.
+  example-plack:
+    name: Plack example (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - working-directory: examples/plack
+        run: make setup test
+
   # Every package must at least BUILD everywhere the library is meant to
   # embed, including platforms with no native XS loading (the xs package
   # degrades to a load-time error there) — wasip1 in particular, since

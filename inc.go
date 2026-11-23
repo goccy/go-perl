@@ -12,7 +12,7 @@ import (
 )
 
 // AddInc prepends dirs to the instance's @INC, so `use`/`require` resolve
-// modules from them (a vendored local/lib/perl5 tree, an application's lib
+// modules from them (a module tree, an application's lib
 // directory). Paths cross via the function bridge, so no Perl-source
 // quoting is involved.
 func (p *Perl) AddInc(ctx context.Context, dirs ...string) error {
@@ -35,11 +35,10 @@ func (p *Perl) AddInc(ctx context.Context, dirs ...string) error {
 }
 
 // AddXSDir registers the native XS modules in dir with the instance, the
-// way AddInc registers a module tree. Each <Module-Name>.so in dir (the
-// package separator spelled "-", the `gperl xs build` output naming) is
-// registered under its module name; the architecture-specific project
-// layout is dir = local/xs/<goos>_<goarch> (see the xs package's ArchTag).
-// Registration is cheap (each module boots lazily on first `use`), and a
+// way AddInc registers a module tree. Two layouts are recognized: a perl
+// architecture directory, where auto/<Module/Path>/<Name>.so is the module
+// Module::Path, and a flat directory of <Module-Name>.so files (the package
+// separator spelled "-"). Registration is cheap (each module boots lazily on first `use`), and a
 // missing directory simply registers nothing.
 //
 // The loader itself lives in the go-perl/xs package; using AddXSDir from a

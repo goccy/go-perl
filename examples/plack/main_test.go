@@ -11,21 +11,21 @@ import (
 	"testing"
 )
 
-// newTestHandler boots a one-instance pool, skipping when the vendored
-// module tree is absent (run `make setup` first).
+// newTestHandler boots a two-worker server, skipping when the workspace
+// that carries the dependencies is absent (run `make setup` first).
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	if _, err := os.Stat("local/lib/perl5"); err != nil {
-		t.Skip("local/lib/perl5 not found - run `make setup` to vendor the cpanfile modules")
+	if _, err := os.Stat("go.work"); err != nil {
+		t.Skip("go.work not found - run `make setup` to fetch and build the cpanfile's distributions")
 	}
-	// Two workers: the second is a copy-on-write clone of the prototype,
-	// so this also exercises perl.Clone with native XS modules loaded.
-	handler, cleanup, err := appHandler(2)
+	// Two workers: both are copy-on-write clones of the prototype, so this
+	// also exercises perl.Clone with a native XS module linked in.
+	server, err := newServer(2)
 	if err != nil {
-		t.Fatalf("boot PSGI pool: %v", err)
+		t.Fatalf("boot the PSGI server: %v", err)
 	}
-	t.Cleanup(cleanup)
-	return handler
+	t.Cleanup(server.Close)
+	return server
 }
 
 func TestMojoliciousRoutes(t *testing.T) {
@@ -50,14 +50,14 @@ func TestMojoliciousRoutes(t *testing.T) {
 
 	t.Run("psgi-flags", func(t *testing.T) {
 		// Two isolated workers serve concurrently: PSGI-wise that is
-		// multiprocess (and this server never does streaming).
+		// multiprocess, and the server streams.
 		resp, err := http.Get(srv.URL + "/psgi-flags")
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if want := "multiprocess=1,multithread=0,streaming=0"; string(body) != want {
+		if want := "multiprocess=1,multithread=0,streaming=1"; string(body) != want {
 			t.Fatalf("GET /psgi-flags = %q, want %q", body, want)
 		}
 	})
