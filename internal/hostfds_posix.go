@@ -200,11 +200,11 @@ func openDescriptors() ([]int, error) {
 	}
 	fds := make([]int, 0, len(names))
 	for _, name := range names {
-		fd, err := strconv.Atoi(name)
+		fd, err := strconv.ParseInt(name, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("list the descriptors of the process: %q in /dev/fd: %w", name, err)
 		}
-		fds = append(fds, fd)
+		fds = append(fds, int(fd))
 	}
 	return fds, nil
 }
