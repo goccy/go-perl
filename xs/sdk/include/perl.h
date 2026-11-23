@@ -9733,10 +9733,17 @@ static ssize_t goperl_piofile_write_cb(void *c, const char *buf, size_t n) {
     int r = goperl_piofile_write(c, buf, n > INT_MAX ? INT_MAX : (int)n);
     return r < 0 ? 0 : r;
 }
-static int goperl_piofile_seek_cb(void *c, off64_t *off, int whence) {
+/* The offset type of fopencookie's seek function: off64_t on glibc, off_t
+ * (always 64 bits) on musl, which has no off64_t. */
+#if defined(__GLIBC__)
+typedef off64_t goperl_cookie_off_t;
+#else
+typedef off_t goperl_cookie_off_t;
+#endif
+static int goperl_piofile_seek_cb(void *c, goperl_cookie_off_t *off, int whence) {
     int64_t r = goperl_piofile_seek(c, (int64_t)*off, whence);
     if (r < 0) return -1;
-    *off = (off64_t)r;
+    *off = (goperl_cookie_off_t)r;
     return 0;
 }
 #endif

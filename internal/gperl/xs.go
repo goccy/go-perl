@@ -121,9 +121,10 @@ func toolchainStatic(goos, cc, ar string) map[string]string {
 		common["osname"] = "darwin"
 		common["so"] = "dylib"
 		// The embedded XSLoader looks for auto/Module/Module.so on every
-		// platform; a bundle under that name loads the same.
+		// platform; a module is a dynamic library under that name, which
+		// dlopen loads as it loads a bundle.
 		common["dlext"] = "so"
-		common["lddlflags"] = "-bundle -undefined dynamic_lookup -fstack-protector-strong"
+		common["lddlflags"] = "-shared -undefined dynamic_lookup -fstack-protector-strong"
 		common["cccdlflags"] = "" // PIC is the darwin default
 	default: // linux and friends
 		// glibc hides its extensions unless asked; perl's own builds

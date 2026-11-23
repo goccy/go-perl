@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 )
 
+// ManagedBin exposes the installed toolchain's tools to the tests.
+var ManagedBin = managedBin
+
 // RemoveSelfPerl removes the name the test binary has as the perl command:
 // a test binary is gone after its run, and its name would point nowhere.
 func RemoveSelfPerl() {
