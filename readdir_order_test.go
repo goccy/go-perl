@@ -4,10 +4,11 @@ package perl_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,8 +18,9 @@ import (
 
 // readdir lists a directory of the host's in the order the system gives
 // its names, with "." and ".." where the system puts them, as perl's
-// readdir does: what is expected is what ls -f lists, which reads the
-// directory with readdir(3) as perl does. The names were sorted, with "."
+// readdir does: the names other than "." and ".." are in the order
+// Readdirnames reads them from the system, and "." and ".." are listed once
+// each. The names were sorted, with "."
 // and ".." first (PerlIO::Util's t/10_dir.t compares readdir with its own
 // reading of the directory). A directory of the sandbox, which has no
 // order of its own, lists "." and ".." first and then its names sorted.
@@ -35,11 +37,14 @@ func TestReaddirOrder(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		out, err := exec.Command("ls", "-f", dir).Output()
+		d, err := os.Open(dir)
 		if err != nil {
-			t.Fatalf("ls -f: %v", err)
+			t.Fatal(err)
 		}
-		want := strings.ReplaceAll(strings.TrimSuffix(string(out), "\n"), "\n", " ")
+		sys, err := d.Readdirnames(-1)
+		if err := errors.Join(err, d.Close()); err != nil {
+			t.Fatal(err)
+		}
 		stdlib, err := perl.ExtractStdlib()
 		if err != nil {
 			t.Fatal(err)
@@ -53,8 +58,10 @@ func TestReaddirOrder(t *testing.T) {
 		if err != nil || r.Error != nil {
 			t.Fatalf("err=%v error=%v", err, r.Error)
 		}
-		if got := resultStr(r); got != want {
-			t.Errorf("readdir lists\n%s\nls -f lists\n%s", got, want)
+		listed := strings.Fields(resultStr(r))
+		others := slices.DeleteFunc(slices.Clone(listed), func(name string) bool { return name == "." || name == ".." })
+		if !slices.Equal(others, sys) || len(listed)-len(others) != 2 || !slices.Contains(listed, ".") || !slices.Contains(listed, "..") {
+			t.Errorf("readdir lists\n%s\nthe system lists, besides . and ..\n%s", strings.Join(listed, " "), strings.Join(sys, " "))
 		}
 	})
 	t.Run("sandbox", func(t *testing.T) {

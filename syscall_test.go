@@ -13,8 +13,9 @@ import (
 // process: numbers as they are, a string as the address of its buffer
 // (getrandom fills one, write sends one), and an error as $!. Rand::Urandom,
 // Sys::GetRandom::PP, Linux::Landlock and Sys::Linux::Syscall::Execve call
-// it; it died "syscall() unimplemented". What is expected is what perl 5.36
-// on Linux prints.
+// it; it died "syscall() unimplemented". The numbers are the guest's, the
+// Linux ABI's of arm64, on every host architecture. What is expected is
+// what perl 5.36 on aarch64 Linux prints.
 func TestSyscallIsTheHostsSystemCall(t *testing.T) {
 	stdlib, err := perl.ExtractStdlib()
 	if err != nil {
@@ -22,10 +23,7 @@ func TestSyscallIsTheHostsSystemCall(t *testing.T) {
 	}
 	r := runProgram(t, perl.Config{FS: goperlfs.NewHostFS(), StdlibDir: stdlib, HostProcess: true}, perl.Program{Code: code(
 		`use strict; use warnings;`,
-		`use Config;`,
-		`my %nr = $Config{archname} =~ /^aarch64/`,
-		`    ? (getpid => 172, getrandom => 278, write => 64, close => 57)`,
-		`    : (getpid => 39, getrandom => 318, write => 1, close => 3);`,
+		`my %nr = (getpid => 172, getrandom => 278, write => 64, close => 57);`,
 		`my $file = "/tmp/syscall-test-$$";`,
 		`my $pid = syscall($nr{getpid});`,
 		`my $buf = "\0" x 16;`,
