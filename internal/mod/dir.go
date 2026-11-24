@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/goccy/go-perl/internal"
 )
@@ -49,14 +51,34 @@ func ABIDir(tree string) string {
 // perl architecture directory (auto/<Module/Path>/<Name>.a and .so).
 func TargetDir(tree, target string) string { return filepath.Join(ABIDir(tree), target) }
 
-// builtMarker names the file that records a finished build.
+// builtMarker names the file that records a finished build; it holds
+// GperlVersion of the gperl that built.
 const builtMarker = "built"
 
+// GperlVersion identifies this gperl in what it builds and generates: the
+// version of its main module from the build information, and the VCS
+// revision when the build recorded one, so that another gperl builds and
+// generates them again. A development or test build without either is
+// "gperl (devel)". It is never empty, as the mark of an earlier gperl is.
+var GperlVersion = sync.OnceValue(func() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "gperl (no build information)"
+	}
+	version := "gperl " + info.Main.Version
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			version += " " + s.Value
+		}
+	}
+	return version
+})
+
 // Built reports whether the tree is ready to use on target: it needs no
-// build, or its build has finished.
+// build, or this gperl has built it.
 func Built(tree, target string) bool {
 	for _, dir := range []string{BuildDir(tree), TargetDir(tree, target)} {
-		if _, err := os.Stat(filepath.Join(dir, builtMarker)); err == nil {
+		if data, err := os.ReadFile(filepath.Join(dir, builtMarker)); err == nil && string(data) == GperlVersion() {
 			return true
 		}
 	}
@@ -73,7 +95,7 @@ func MarkBuilt(tree, target string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, builtMarker), nil, 0o644)
+	return os.WriteFile(filepath.Join(dir, builtMarker), []byte(GperlVersion()), 0o644)
 }
 
 // LibDir returns the tree's module directory for @INC: the built one when

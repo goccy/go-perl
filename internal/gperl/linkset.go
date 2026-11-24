@@ -86,7 +86,8 @@ func (l *linkSet) writeGoWork(path, mainDir string) error {
 }
 
 // generateLinkSet writes the link set of deps under the module directory,
-// keyed by what it carries, and returns it; an up-to-date one is reused.
+// keyed by what it carries and the gperl that writes it, and returns it;
+// an up-to-date one is reused.
 func generateLinkSet(m *mod.Manager, deps *projectDeps) (*linkSet, error) {
 	natives := map[string][]nativeModule{} // by tree
 	for _, tree := range deps.trees {
@@ -99,6 +100,7 @@ func generateLinkSet(m *mod.Manager, deps *projectDeps) (*linkSet, error) {
 		}
 	}
 	key := sha256.New()
+	fmt.Fprintf(key, "%s\n", mod.GperlVersion())
 	for _, tree := range deps.trees {
 		fmt.Fprintf(key, "%s\n", tree)
 		for _, n := range natives[tree] {
