@@ -383,6 +383,98 @@ func TestDistBuildFindsIncModules(t *testing.T) {
 	})
 }
 
+// A distribution whose Build.PL does not configure it is configured by its
+// Makefile.PL, as under cpanm; when both fail, the error carries both.
+func TestBuildPLFallsBackToMakefilePL(t *testing.T) {
+	requireToolchain(t)
+	const meta = `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},
+		"name":"Two-Ways","version":"0.01","prereqs":{"configure":{"requires":{"ExtUtils::MakeMaker":"0"}}}}`
+	dist := mirrorDist{pathname: "T/TW/TWO/Two-Ways-0.01.tar.gz", module: "Two::Ways", version: "0.01", files: map[string]string{
+		"META.json":       meta,
+		"Build.PL":        "die qq{Build.PL cannot configure\\n};\n",
+		"Makefile.PL":     "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Two::Ways', VERSION => '0.01');\n",
+		"lib/Two/Ways.pm": "package Two::Ways;\nour $VERSION = '0.01';\n1;\n",
+	}}
+	t.Run("Makefile.PL", func(t *testing.T) {
+		startMirror(t, dist)
+		if _, err := tidyProject(t, "requires 'Two::Ways';\n"); err != nil {
+			t.Fatalf("ModTidy: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(os.Getenv("GPERLMODCACHE"), "Two-Ways@0.01", "gperl", "lib", "Two", "Ways.pm")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("both fail", func(t *testing.T) {
+		dist.files["Makefile.PL"] = "die qq{Makefile.PL cannot configure\\n};\n"
+		startMirror(t, dist)
+		_, err := tidyProject(t, "requires 'Two::Ways';\n")
+		if err == nil {
+			t.Fatal("ModTidy succeeded with neither Build.PL nor Makefile.PL configuring")
+		}
+		for _, want := range []string{"perl Build.PL", "perl Makefile.PL"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error lacks %q:\n%v", want, err)
+			}
+		}
+	})
+}
+
+// A Build.PL distribution that requires nothing to configure gets
+// Module::Build, as under cpanm.
+func TestBuildPLGetsModuleBuild(t *testing.T) {
+	requireToolchain(t)
+	// A stand-in Module::Build whose Build copies lib/ to blib/lib.
+	moduleBuild := mirrorDist{pathname: "M/MB/MB/Module-Build-0.4234.tar.gz", module: "Module::Build", version: "0.4234", files: map[string]string{
+		"META.json": `{"abstract":"x","author":["a"],"dynamic_config":0,"generated_by":"t","license":["perl_5"],
+			"meta-spec":{"version":2},"name":"Module-Build","version":"0.4234","x_static_install":1}`,
+		"lib/Module/Build.pm": `package Module::Build;
+our $VERSION = '0.4234';
+sub new { my ($class, %args) = @_; bless {%args}, $class }
+sub create_build_script {
+    open my $fh, '>', 'Build' or die "Build: $!";
+    print $fh <<'BUILD';
+use strict;
+use File::Basename qw(dirname);
+use File::Copy qw(copy);
+use File::Find qw(find);
+use File::Path qw(make_path);
+find({ no_chdir => 1, wanted => sub {
+    return unless -f $_;
+    (my $to = $_) =~ s{^lib/}{blib/lib/};
+    make_path(dirname($to));
+    copy($_, $to) or die "copy $_: $!";
+} }, 'lib');
+BUILD
+    close $fh or die "Build: $!";
+}
+1;
+`,
+	}}
+	user := mirrorDist{pathname: "U/US/USER/MB-User-0.01.tar.gz", module: "MB::User", version: "0.01", files: map[string]string{
+		"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],
+			"meta-spec":{"version":2},"name":"MB-User","version":"0.01"}`,
+		"Build.PL":       "use Module::Build;\nModule::Build->new(module_name => 'MB::User')->create_build_script;\n",
+		"lib/MB/User.pm": "package MB::User;\nour $VERSION = '0.01';\n1;\n",
+	}}
+	startMirror(t, moduleBuild, user)
+	dir, err := tidyProject(t, "requires 'MB::User';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(dir, "cpanfile.snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"  Module-Build-0.4234\n", "      Module::Build 0.38\n"} {
+		if !strings.Contains(string(snapshot), want) {
+			t.Errorf("snapshot lacks %q:\n%s", want, snapshot)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("GPERLMODCACHE"), "MB-User@0.01", "gperl", "lib", "MB", "User.pm")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.

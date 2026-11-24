@@ -9,6 +9,7 @@ use strict;
 use warnings;
 use CPAN::Meta;
 use CPAN::Meta::Requirements;
+use File::Basename ();
 use Module::Metadata;
 use version ();
 
@@ -63,6 +64,9 @@ sub _load_meta {
     return;
 }
 
+# The distributions Module::Build depends on (cpanm's should_use_mm).
+my %use_mm = map { $_ => 1 } qw(version ExtUtils-ParseXS ExtUtils-Install ExtUtils-Manifest);
+
 # meta($dir): what a distribution tree says about itself, as key/value
 # records separated by the key "-":
 #   dynamic_config 0|1, static_install 0|1, has_xs 0|1,
@@ -89,6 +93,14 @@ sub meta {
         }
     } else {
         push @out, '-', 'dynamic_config', 1, '-', 'static_install', 0;
+    }
+    # As cpanm does, a Build.PL distribution that requires nothing to
+    # configure requires Module::Build, unless it is one Module::Build
+    # itself needs (cpanm configures those with Makefile.PL).
+    my ($name) = File::Basename::basename($dir) =~ /^([^\@]*)/;
+    if (-f "$dir/Build.PL" && !$use_mm{$name}
+        && !($meta && %{ $meta->effective_prereqs->requirements_for('configure', 'requires')->as_string_hash })) {
+        push @out, '-', 'prereq', 'Module::Build', '0.38', 'configure', 'requires';
     }
     my $provides = $meta && $meta->provides;
     if ($provides && %$provides) {

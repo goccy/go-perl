@@ -293,9 +293,19 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 		}
 		return nil
 	}
+	// As under cpanm, Build.PL has configured the distribution when it exits
+	// 0 and writes Build; otherwise Makefile.PL, if there is one, does.
+	var buildPLErr error
+	useBuildPL := fileExists(filepath.Join(src, "Build.PL"))
+	if useBuildPL {
+		if buildPLErr = perlRun("Build.PL"); buildPLErr == nil && !fileExists(filepath.Join(src, "Build")) {
+			buildPLErr = errors.New("perl Build.PL wrote no Build")
+		}
+		useBuildPL = buildPLErr == nil || !fileExists(filepath.Join(src, "Makefile.PL"))
+	}
 	switch {
-	case fileExists(filepath.Join(src, "Build.PL")):
-		if err = perlRun("Build.PL"); err == nil {
+	case useBuildPL:
+		if err = buildPLErr; err == nil {
 			err = perlRun("Build")
 		}
 	case fileExists(filepath.Join(src, "Makefile.PL")):
@@ -311,6 +321,9 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 					err = fmt.Errorf("make: %w", err)
 				}
 			}
+		}
+		if err != nil && buildPLErr != nil {
+			err = errors.Join(buildPLErr, err)
 		}
 	default:
 		err = errors.New("no Build.PL or Makefile.PL")
