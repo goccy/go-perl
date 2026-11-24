@@ -62,6 +62,13 @@ func usage() {
 environment:
   GPERL_MAX_MEMORY   the interpreter's memory limit: bytes (with K, M, G or T),
                      or host for the host's memory; 8G when unset
+  GPERLOS            the operating system gperl builds for (linux, darwin,
+                     windows, ...); this machine's when unset
+  GPERLARCH          the architecture gperl builds for (amd64, arm64, ...);
+                     this machine's when unset
+  GPERLNATIVE        how a built binary carries native (XS) modules: link
+                     (the default) links them in statically, load embeds
+                     them and loads them at run time
 `)
 	os.Exit(2)
 }

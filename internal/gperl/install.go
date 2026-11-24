@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/goccy/go-perl/internal/mod"
@@ -208,6 +210,83 @@ func goCommand() (string, error) {
 		return bin, nil
 	}
 	return "", errors.New("building a binary needs the Go toolchain, and none was found; run `gperl install toolchain`")
+}
+
+// buildConfig is what gperl builds for, as its environment sets it:
+//
+//	GPERLOS, GPERLARCH  the target platform, by Go's names; this machine's
+//	                    when unset
+//	GPERLNATIVE         how a binary carries native modules: link (the
+//	                    default) links them in statically, load embeds
+//	                    them and loads them at run time
+//
+// Go's own variables play no part: every go command gperl runs has GOOS,
+// GOARCH and CGO_ENABLED set from it (goEnv).
+type buildConfig struct {
+	goos, goarch string
+	link         bool
+}
+
+// goTarget is a platform as `go tool dist list -json` names it.
+type goTarget struct{ GOOS, GOARCH string }
+
+// readBuildConfig reads the build configuration from the environment. A
+// target platform the environment names must be one Go builds for.
+func readBuildConfig() (buildConfig, error) {
+	c := buildConfig{goos: os.Getenv("GPERLOS"), goarch: os.Getenv("GPERLARCH")}
+	switch native := os.Getenv("GPERLNATIVE"); native {
+	case "", "link":
+		c.link = true
+	case "load":
+	default:
+		return c, fmt.Errorf("GPERLNATIVE=%s: want link (link native modules in statically) or load (embed them and load them at run time)", native)
+	}
+	named := c.goos != "" || c.goarch != ""
+	if c.goos == "" {
+		c.goos = runtime.GOOS
+	}
+	if c.goarch == "" {
+		c.goarch = runtime.GOARCH
+	}
+	if !named {
+		return c, nil
+	}
+	goBin, err := goCommand()
+	if err != nil {
+		return c, fmt.Errorf("GPERLOS=%s GPERLARCH=%s: the platforms Go builds for are the Go toolchain's: %w", c.goos, c.goarch, err)
+	}
+	cmd := exec.Command(goBin, "tool", "dist", "list", "-json")
+	// Not the working directory: a go.mod there could name another Go
+	// toolchain to run.
+	cmd.Dir = os.TempDir()
+	cmd.Env = c.goEnv(false)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return c, fmt.Errorf("go tool dist list: %w", err)
+	}
+	var targets []goTarget
+	if err := json.Unmarshal(out, &targets); err != nil {
+		return c, fmt.Errorf("go tool dist list: %w", err)
+	}
+	if !slices.Contains(targets, goTarget{c.goos, c.goarch}) {
+		return c, fmt.Errorf("GPERLOS=%s GPERLARCH=%s: Go does not build for this platform (`go tool dist list` names the ones it does)", c.goos, c.goarch)
+	}
+	return c, nil
+}
+
+// target names the platform c builds for ("linux_arm64").
+func (c buildConfig) target() string { return c.goos + "_" + c.goarch }
+
+// goEnv is the environment of a go command gperl runs for c: the
+// process's, with Go's target and cgo settings replaced by c's and cgo.
+func (c buildConfig) goEnv(cgo bool) []string {
+	cgoEnabled := "0"
+	if cgo {
+		cgoEnabled = "1"
+	}
+	// The last of duplicate entries is the one a command sees (exec.Cmd).
+	return append(os.Environ(), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED="+cgoEnabled)
 }
 
 // muslSuffix ends the name of a Linux target whose C library is not glibc

@@ -55,8 +55,9 @@ test:
 
 ## test-cross: build a project with native (XS) dependencies for linux/amd64
 ## and linux/arm64 with gperl build — cgo with the modules linked in (glibc,
-## and fully static on musl), without cgo, and a pure-Perl project with no
-## C compiler — checking each binary and running the one for this machine.
+## and fully static on musl), loaded at run time, and a pure-Perl project
+## with no cross compiler — checking each binary and running the one for
+## this machine.
 ## The pinned Go and Zig come from `gperl install toolchain`, and the
 ## dependency tests run again on them (Zig building for this machine).
 test-cross:

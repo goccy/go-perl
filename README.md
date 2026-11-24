@@ -228,8 +228,8 @@ of a perl command line, which an embedding application can use directly.
 `--in-process` runs them inside one process instead, each as an isolated
 program with its own working directory and environment, which is not the
 host process (it may not listen on the network). A built binary needs
-nothing beside it: with cgo the XS modules are linked in statically;
-with `CGO_ENABLED=0` they are embedded and loaded at run time.
+nothing beside it: the XS modules are linked in statically, or with
+`GPERLNATIVE=load` embedded and loaded at run time.
 
 **Toolchain.** `gperl run` and `gperl test` need nothing but gperl for
 pure-Perl dependencies. Building a binary needs the Go toolchain, and
@@ -240,14 +240,18 @@ checked against a recorded hash. A tool named by the environment (`CC`,
 `AR`) is used first, then the installed one, then the one on `PATH`.
 Distributions that build with `Makefile.PL` also need `make`.
 
-**Cross compilation** follows `go build`: set `GOOS` and `GOARCH`. Without
-XS dependencies nothing else is needed. With them, the native modules are
-built for the target by the C compiler in `CC` — for example
-`CC="zig cc -target aarch64-linux-musl"`, which with cgo yields a fully
-static binary — or by the installed Zig when `CC` is unset. Native modules
-built for musl are kept apart from glibc's, and a build for musl carries
-the build tag `musl`: `gperl build` adds it, and a Go application built
-with `go build` on the generated `go.work` passes `-tags musl`.
+**Cross compilation**: `GPERLOS` and `GPERLARCH` name the target with Go's
+names (`linux`, `darwin`, `windows`, ... and `amd64`, `arm64`, ...); unset,
+they name this machine. Without XS dependencies nothing else is needed.
+With them, the native modules are built for the target by the C compiler
+in `CC` — for example `CC="zig cc -target aarch64-linux-musl"`, which
+with the modules linked in yields a fully static binary — or by the
+installed Zig when `CC` is unset. Native modules built for musl are kept
+apart from glibc's, and a build for musl carries the build tag `musl`:
+`gperl build` adds it, and a Go application built with `go build` on the
+generated `go.work` passes `-tags musl`. `gperl mod tidy`, `gperl mod
+download` and `gperl get` build the native modules for `GPERLOS` and
+`GPERLARCH`, so such an application is built for the same platform.
 
 **`gperl psgi`** is the application server and the front end in one
 process: one interpreter per worker goroutine, TLS with HTTP/2, graceful

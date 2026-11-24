@@ -40,6 +40,10 @@ func Build(script, out string) error { return buildBinary(script, out, nil) }
 // project directory (an application reads templates and static files next
 // to itself); a program carries the script and lib/.
 func buildBinary(script, out string, psgiDefaults []string) (err error) {
+	config, err := readBuildConfig()
+	if err != nil {
+		return err
+	}
 	if script, err = filepath.Abs(script); err != nil {
 		return err
 	}
@@ -97,15 +101,17 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	// The dependencies enter through a workspace: the generated link set
 	// stands in for the go-perl/cpan package the interpreter imports.
 	gowork := "off"
-	target := mod.BuildTarget()
+	target := config.target()
 	if declaresDeps(projectDir) {
-		target = buildTarget()
+		target = nativeTarget(target)
 	}
+	native := false
 	err = withDeps(func(m *mod.Manager) error {
 		deps, err := loadDeps(context.Background(), m, projectDir, target)
 		if err != nil || len(deps.lib) == 0 {
 			return err
 		}
+		native = len(deps.nativeDirs) > 0
 		links, err := generateLinkSet(m, deps)
 		if err != nil {
 			return err
@@ -120,10 +126,18 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	if err != nil {
 		return err
 	}
-	env := os.Environ()
+	ccWords, arWords, tcErr := cToolchain(target)
+	// cgo links native modules in (GPERLNATIVE=link). Without native
+	// modules a build for this machine has cgo when it has a C compiler, as
+	// go build does; a build for another platform needs no C compiler.
+	cgo := config.link && (native || (config.target() == hostPlatform() && tcErr == nil))
+	if cgo && tcErr != nil {
+		return fmt.Errorf("link the native modules in: %w", tcErr)
+	}
+	env := config.goEnv(cgo)
 	// A cgo build compiles and links with the same C toolchain the native
 	// modules were built with.
-	if ccWords, arWords, tcErr := cToolchain(target); tcErr == nil {
+	if tcErr == nil {
 		env = append(env, "CC="+strings.Join(ccWords, " "), "AR="+strings.Join(arWords, " "))
 	}
 	for _, step := range []struct {

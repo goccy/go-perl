@@ -26,19 +26,6 @@ import (
 // native artifacts live under ("darwin_arm64").
 func Target() string { return runtime.GOOS + "_" + runtime.GOARCH }
 
-// BuildTarget names the platform a build is for: GOOS and GOARCH from the
-// environment, as the go command reads them, and this platform otherwise.
-func BuildTarget() string {
-	goos, goarch := os.Getenv("GOOS"), os.Getenv("GOARCH")
-	if goos == "" {
-		goos = runtime.GOOS
-	}
-	if goarch == "" {
-		goarch = runtime.GOARCH
-	}
-	return goos + "_" + goarch
-}
-
 // BuildDir is where a distribution tree keeps what gperl derives from it.
 func BuildDir(tree string) string { return filepath.Join(tree, "gperl") }
 

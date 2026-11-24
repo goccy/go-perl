@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -261,13 +262,15 @@ func TestDependenciesEndToEnd(t *testing.T) {
 	}
 
 	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
-	for name, cgo := range map[string]string{"static": "1", "nocgo": "0"} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("CGO_ENABLED", cgo)
+	for native, cgo := range map[string]string{"link": "1", "load": "0"} {
+		t.Run(native, func(t *testing.T) {
+			t.Setenv("GPERLNATIVE", native)
+			setGoEnvOtherThan(t, cgo)
 			out := filepath.Join(t.TempDir(), "app")
 			if err := gperl.Build(filepath.Join(dir, "app.pl"), out); err != nil {
 				t.Fatalf("Build: %v", err)
 			}
+			wantBuildSettings(t, out, runtime.GOOS, runtime.GOARCH, cgo)
 			// The binary runs with neither the project nor the module
 			// directory.
 			cmd := exec.Command(out)
