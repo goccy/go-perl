@@ -257,7 +257,10 @@ starman (`-p`, `-o`, `-l`, `-E`, `-I`, `-M`, `--workers`, `--max-requests`,
 `--keepalive-timeout`, `--access-log`, `-r`). A server binary takes each
 setting from its command line, else from the environment
 (`GPERL_PSGI_<OPTION>`, and `PORT`), else from the options it was built
-with.
+with. A server binary's workers load the native (XS) modules linked into
+it; under `gperl psgi run` they load native modules from `@INC` only when
+the project's dependencies have some, so a native module in a directory
+given with `-I` or `PERL5LIB` is found only then.
 
 ## Supply-chain verification
 

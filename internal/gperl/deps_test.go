@@ -470,3 +470,48 @@ sub {
 		t.Errorf("server after SIGQUIT: %v, want it ended", err)
 	}
 }
+
+// gperl psgi run loads the dependencies' native modules from @INC when
+// they have some, and otherwise makes workers that load none.
+func TestPSGIRunNativeModules(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, testDists(t)...)
+	for _, c := range []struct {
+		name     string
+		cpanfile string
+		app      string
+		native   bool
+		body     string
+	}{
+		{name: "native", cpanfile: "requires 'Demo::XS';\n", native: true, body: "42",
+			app: "use Demo::XS;\nsub { [200, [], [Demo::XS::add(40, 2)]] };\n"},
+		{name: "pure", native: false, body: "pure",
+			app: "sub { [200, [], ['pure']] };\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if c.cpanfile != "" {
+				if err := os.WriteFile(filepath.Join(dir, "cpanfile"), []byte(c.cpanfile), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			appPath := filepath.Join(dir, "app.psgi")
+			if err := os.WriteFile(appPath, []byte(c.app), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			server, native, closeServer, err := gperl.PSGIServer(appPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeServer()
+			if native != c.native {
+				t.Errorf("workers load native modules = %v, want %v", native, c.native)
+			}
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			if got := rec.Body.String(); rec.Code != http.StatusOK || got != c.body {
+				t.Errorf("response %d %q, want 200 %q", rec.Code, got, c.body)
+			}
+		})
+	}
+}

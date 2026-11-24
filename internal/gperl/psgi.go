@@ -233,6 +233,9 @@ type psgiApp struct {
 	dir    string   // its working directory
 	inc    []string // module directories ahead of the dependencies
 	depInc []string // the dependencies' directories (projectDeps.inc)
+	// native says whether the dependencies have native modules to load
+	// from depInc.
+	native bool
 }
 
 // newServer loads the application into a fresh prototype and returns the
@@ -244,6 +247,10 @@ func (a *psgiApp) newServer(c *psgiConfig, accessLog io.Writer) (*psgi.Server, e
 	}
 	// The descriptors the process was started with are the server's.
 	cfg.InheritDescriptors = false
+	// Workers load native modules from @INC only when the dependencies have
+	// some, and then from any directory of @INC; the native modules linked
+	// into a binary are loaded without it (the xs package's loadLinked).
+	cfg.NativeModules = a.native
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cfg.Env = append(os.Environ(), "PLACK_ENV="+c.env)
 	p, err := newWorkerPerl(cfg)
@@ -445,7 +452,7 @@ func projectApp(file string) (*psgiApp, error) {
 	app := &psgiApp{path: path, dir: filepath.Dir(path)}
 	deps, err := hostDeps(app.dir)
 	if err == nil {
-		app.depInc = deps.inc()
+		app.depInc, app.native = deps.inc(), len(deps.nativeDirs) > 0
 	}
 	if lib := filepath.Join(app.dir, "lib"); dirExists(lib) {
 		app.inc = append(app.inc, lib)
