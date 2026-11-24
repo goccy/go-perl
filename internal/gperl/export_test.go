@@ -9,6 +9,9 @@ import (
 // ManagedBin exposes the installed toolchain's tools to the tests.
 var ManagedBin = managedBin
 
+// StaticDeps exposes the libraries a static link of a module needs.
+var StaticDeps = staticDeps
+
 // RemoveSelfPerl removes the name the test binary has as the perl command:
 // a test binary is gone after its run, and its name would point nowhere.
 func RemoveSelfPerl() {

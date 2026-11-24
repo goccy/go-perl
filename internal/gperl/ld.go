@@ -22,12 +22,14 @@ package gperl
 // `zig cc -target x86_64-linux-gnu` builds modules for another platform.
 
 import (
+	"debug/elf"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -153,10 +155,85 @@ func linkModule(args []string, sdkDir, target string) error {
 	if err := run(append(cc, args...)...); err != nil {
 		return err
 	}
-	if err := os.WriteFile(base+".ldflags", []byte(strings.Join(cmd.libs, "\n")), 0o644); err != nil {
+	deps, err := staticDeps(cc, target, cmd.out, cmd.libs)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(base+".ldflags", []byte(strings.Join(append(cmd.libs, deps...), "\n")), 0o644); err != nil {
 		return err
 	}
 	return errors.Join(os.Remove(entry), os.Remove(merged))
+}
+
+// staticDeps returns what a static link of the module so needs beyond
+// libs: the shared libraries so depends on as the linker recorded them
+// (DT_NEEDED), and theirs in turn, as -l flags, each before the libraries
+// it depends on, since a static link reads each archive once. Only a
+// library whose archive (lib<name>.a) is in a directory a -l searches
+// (libs' -L, then the compiler's own) is named; one without stays out, and
+// a static link that needs it fails with the linker's own error. A darwin
+// module, never linked statically, needs none.
+func staticDeps(cc []string, target, so string, libs []string) ([]string, error) {
+	if strings.HasPrefix(target, "darwin_") {
+		return nil, nil
+	}
+	var dirs []string
+	for _, lib := range libs {
+		if dir, ok := strings.CutPrefix(lib, "-L"); ok && dir != "" {
+			dirs = append(dirs, dir)
+		}
+	}
+	dirs = append(dirs, compilerLibraryDirs(strings.Join(cc, " "))...)
+	// lookup returns the first file named name in dirs, "" when there is
+	// none.
+	lookup := func(name string) string {
+		for _, dir := range dirs {
+			if path := filepath.Join(dir, name); fileExists(path) {
+				return path
+			}
+		}
+		return ""
+	}
+	seen := map[string]bool{}
+	var order []string // each library after the ones it depends on
+	var visit func(path string) error
+	visit = func(path string) error {
+		f, err := elf.Open(path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		needed, err := f.ImportedLibraries()
+		if err := errors.Join(err, f.Close()); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		for _, soname := range needed {
+			if seen[soname] {
+				continue
+			}
+			seen[soname] = true
+			// -l<name> finds lib<name>.so[.<version>] and lib<name>.a: a
+			// library named otherwise (the dynamic loader) has no -l.
+			rest, isLib := strings.CutPrefix(soname, "lib")
+			name, _, isSO := strings.Cut(rest, ".so")
+			if !isLib || !isSO || name == "" {
+				continue
+			}
+			if file := lookup(soname); file != "" {
+				if err := visit(file); err != nil {
+					return err
+				}
+			}
+			if lookup("lib"+name+".a") != "" {
+				order = append(order, "-l"+name)
+			}
+		}
+		return nil
+	}
+	if err := visit(so); err != nil {
+		return nil, err
+	}
+	slices.Reverse(order)
+	return order, nil
 }
 
 // archFlags pins a darwin toolchain to the target's architecture (the
