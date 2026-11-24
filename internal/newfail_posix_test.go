@@ -55,7 +55,10 @@ func TestFailedNewGivesBackWhatItMade(t *testing.T) {
 	if p != nil {
 		t.Fatalf("New returned an instance with its error %v", err)
 	}
-	if after := openNow(t); !slices.Equal(after, want) {
-		t.Fatalf("open descriptors after the failed New: %v, want %v", after, want)
+	// Only what is open now and was not before counts: a descriptor of the
+	// process that something else closes meanwhile is not the instance's.
+	after := openNow(t)
+	if left := slices.DeleteFunc(slices.Clone(after), func(fd int) bool { return slices.Contains(want, fd) }); len(left) > 0 {
+		t.Fatalf("descriptors left open by the failed New: %v (open before: %v, after: %v)", left, want, after)
 	}
 }
