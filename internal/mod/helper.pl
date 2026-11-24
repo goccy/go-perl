@@ -95,7 +95,7 @@ sub meta {
         push @out, '-', 'provides', $_, (defined $provides->{$_}{version} ? "$provides->{$_}{version}" : 'undef')
             for sort keys %$provides;
     } elsif (-d "$dir/lib") {
-        my $found = Module::Metadata->package_versions_from_directory("$dir/lib");
+        my $found = _lib_packages($dir);
         my %no_index;
         if ($meta && (my $ni = $meta->no_index)) {
             $no_index{$_} = 1 for @{ $ni->{package} || [] };
@@ -107,6 +107,34 @@ sub meta {
         }
     }
     return @out;
+}
+
+# _lib_packages($dir): the packages under $dir/lib and their versions, read
+# as the distribution's own build tools read them: from its directory, so a
+# version line that loads a module finds it in lib/, and with a version line
+# that cannot be evaluated giving an undefined version, as cpanm records it.
+sub _lib_packages {
+    my ($dir) = @_;
+    my $evaluate = Module::Metadata->can('_evaluate_version_line')
+        or die "Module::Metadata $Module::Metadata::VERSION has no _evaluate_version_line\n";
+    require Cwd;
+    my $cwd = Cwd::getcwd() // die "getcwd: $!\n";
+    chdir $dir or die "chdir $dir: $!\n";
+    my $found;
+    my $ok = eval {
+        local *Module::Metadata::_evaluate_version_line = sub {
+            my @args = @_;
+            my $v = eval { $evaluate->(@args) };
+            warn $@ if $@;
+            return $v;
+        };
+        $found = Module::Metadata->package_versions_from_directory("$dir/lib");
+        1;
+    };
+    my $err = $@;
+    chdir $cwd or die "chdir $cwd: $!\n";
+    die $err unless $ok;
+    return $found;
 }
 
 package GperlMod::DSL;

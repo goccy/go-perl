@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	perl "github.com/goccy/go-perl"
 )
 
 // sharedHelper is one interpreter for the whole test binary.
@@ -166,4 +168,48 @@ func TestHelperMeta(t *testing.T) {
 	if want := []Package{{"Bare::XS", "0.03"}}; !reflect.DeepEqual(m.Provides, want) {
 		t.Errorf("bare tree Provides = %v", m.Provides)
 	}
+
+	// Scanning lib/: a version line that cannot be evaluated gives an
+	// undefined version (this relies on Module::Metadata's private
+	// _evaluate_version_line), and one that loads a module finds it in the
+	// distribution's lib/.
+	versions := t.TempDir()
+	writeFile(t, filepath.Join(versions, "lib", "Good.pm"), "package Good;\nour $VERSION = '1.0';\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "Bad.pm"), "package Bad;\n$Bad::VERSION = '2.0'; use No::Such::Module;\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "Dep.pm"), "package Dep;\nour $VERSION = '3.0';\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "User.pm"), "package User;\nuse Dep; $User::VERSION = $Dep::VERSION;\n1;\n")
+	cwd := helperCwd(t)
+	m, err = sharedHelper.Meta(versions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []Package{{"Bad", "undef"}, {"Dep", "3.0"}, {"Good", "1.0"}, {"User", "3.0"}}; !reflect.DeepEqual(m.Provides, want) {
+		t.Errorf("Provides with version lines that fail = %v, want %v", m.Provides, want)
+	}
+	if got := helperCwd(t); got != cwd {
+		t.Errorf("helper working directory after Meta = %q, want %q", got, cwd)
+	}
+}
+
+// helperCwd returns the helper interpreter's working directory.
+func helperCwd(t *testing.T) string {
+	t.Helper()
+	sharedHelper.start.Do(sharedHelper.boot)
+	if sharedHelper.err != nil {
+		t.Fatal(sharedHelper.err)
+	}
+	sharedHelper.mu.Lock()
+	defer sharedHelper.mu.Unlock()
+	r, err := sharedHelper.p.Eval(t.Context(), "require Cwd; Cwd::getcwd()")
+	if err == nil && r.Error != nil {
+		err = r.Error
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := perl.As[perl.ScalarValue](r.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.String()
 }
