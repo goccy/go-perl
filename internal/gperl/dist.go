@@ -274,6 +274,11 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 		ldSDKEnv+"="+sdkDir,
 		"PATH="+filepath.Dir(perlShim)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
+	// As under cpanm, the build finds the modules a distribution carries
+	// in its own directory (inc/) unless the user says otherwise.
+	if _, ok := os.LookupEnv("PERL_USE_UNSAFE_INC"); !ok {
+		env = append(env, "PERL_USE_UNSAFE_INC=1")
+	}
 
 	var log bytes.Buffer
 	// A program the interpreter runs is the process (its working directory

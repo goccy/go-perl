@@ -340,6 +340,49 @@ func TestBrokenXSFailsTheSync(t *testing.T) {
 	}
 }
 
+// tidyProject writes a project whose cpanfile is cpanfile and runs
+// ModTidy on it.
+func tidyProject(t *testing.T, cpanfile string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cpanfile"), []byte(cpanfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, gperl.ModTidy(dir)
+}
+
+// A distribution's build finds the modules it carries in its own directory
+// (inc/), unless PERL_USE_UNSAFE_INC says otherwise.
+func TestDistBuildFindsIncModules(t *testing.T) {
+	requireToolchain(t)
+	dist := mirrorDist{pathname: "I/IN/INC/Inc-Probe-0.01.tar.gz", module: "Inc::Probe", version: "0.01", files: map[string]string{
+		"Makefile.PL":        "use inc::Gperl::Probe;\nuse ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Inc::Probe', VERSION => '0.01');\n",
+		"inc/Gperl/Probe.pm": "package inc::Gperl::Probe;\n1;\n",
+		"lib/Inc/Probe.pm":   "package Inc::Probe;\nour $VERSION = '0.01';\n1;\n",
+	}}
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("PERL_USE_UNSAFE_INC", "")
+		if err := os.Unsetenv("PERL_USE_UNSAFE_INC"); err != nil {
+			t.Fatal(err)
+		}
+		startMirror(t, dist)
+		if _, err := tidyProject(t, "requires 'Inc::Probe';\n"); err != nil {
+			t.Fatalf("ModTidy: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(os.Getenv("GPERLMODCACHE"), "Inc-Probe@0.01", "gperl", "lib", "Inc", "Probe.pm")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("user setting", func(t *testing.T) {
+		t.Setenv("PERL_USE_UNSAFE_INC", "0")
+		startMirror(t, dist)
+		_, err := tidyProject(t, "requires 'Inc::Probe';\n")
+		if err == nil || !strings.Contains(err.Error(), "Can't locate inc/Gperl/Probe.pm") {
+			t.Fatalf("ModTidy with PERL_USE_UNSAFE_INC=0: %v, want the build not to find inc/Gperl/Probe.pm", err)
+		}
+	})
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.
