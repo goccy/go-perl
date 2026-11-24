@@ -366,11 +366,18 @@ close $out;
 chomp $said;
 report("USR1 handled in the child: said=$said ", status());
 
-# the child signals its parent by pid
+# the child signals its parent by pid, which holds the signal blocked until
+# sigsuspend waits for it
+use POSIX qw(:signal_h);
 my $got = 0;
 local $SIG{USR2} = sub { $got++ };
+my $usr2 = POSIX::SigSet->new(SIGUSR2);
+sigprocmask(SIG_BLOCK, $usr2) or die "sigprocmask: $!";
 system($perl, '-e', 'kill USR2 => getppid()');
-report("USR2 from the child: handler ran=$got ", status());
+my $child = status();
+sigsuspend(POSIX::SigSet->new);
+sigprocmask(SIG_UNBLOCK, $usr2) or die "sigprocmask: $!";
+report("USR2 from the child: handler ran=$got ", $child);
 `)
 	report := filepath.Join(t.TempDir(), "report.txt")
 	status, err := runInThisProcess(t, script, []string{report, shim})
