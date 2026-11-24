@@ -93,6 +93,52 @@ func TestStaticDepsFollowTheRecordedDependencies(t *testing.T) {
 	if got, err := gperl.StaticDeps([]string{"cc"}, "darwin_arm64", so, libs); err != nil || got != nil {
 		t.Errorf("StaticDeps for darwin = %v, %v; want none", got, err)
 	}
+
+	// Files of a library's name that the linker would not take for the
+	// module (a linker script, an object that is no shared library) are
+	// passed over for the next directory's; a library with only such files
+	// is not named, though its archive is there.
+	decoys := t.TempDir()
+	for name, from := range map[string]string{"libgpb.so.1": "", "libgpc.so.1": "gpc.o"} {
+		content := []byte("INPUT(" + name + ")\n")
+		if from != "" {
+			var err error
+			if content, err = os.ReadFile(filepath.Join(dir, from)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(decoys, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = gperl.StaticDeps([]string{"cc"}, "linux_amd64", so, []string{"-L" + decoys, "-L" + dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b, c := slices.Index(got, "-lgpa"), slices.Index(got, "-lgpb"), slices.Index(got, "-lgpc"); a < 0 || b < 0 || c < 0 || a > b || b > c {
+		t.Errorf("StaticDeps past files the linker skips = %v, want -lgpa, -lgpb, -lgpc in that order", got)
+	}
+	for _, name := range []string{"libgpa.so.1", "libgpa.a", "libgpb.a", "libgpc.a"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(decoys, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = gperl.StaticDeps([]string{"cc"}, "linux_amd64", so, []string{"-L" + decoys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, "-lgpa") {
+		t.Errorf("StaticDeps with only files the linker skips = %v, want -lgpa", got)
+	}
+	for _, absent := range []string{"-lgpb", "-lgpc"} {
+		if slices.Contains(got, absent) {
+			t.Errorf("StaticDeps with only files the linker skips = %v, want no %s", got, absent)
+		}
+	}
 }
 
 // A native module whose library depends on others links into a binary, a

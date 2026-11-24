@@ -169,10 +169,12 @@ func linkModule(args []string, sdkDir, target string) error {
 // libs: the shared libraries so depends on as the linker recorded them
 // (DT_NEEDED), and theirs in turn, as -l flags, each before the libraries
 // it depends on, since a static link reads each archive once. Only a
-// library whose archive (lib<name>.a) is in a directory a -l searches
-// (libs' -L, then the compiler's own) is named; one without stays out, and
-// a static link that needs it fails with the linker's own error. A darwin
-// module, never linked statically, needs none.
+// library whose shared object (as the linker takes one: an ELF shared
+// object of the module's machine and class) and archive (lib<name>.a) are
+// in the directories a -l searches (libs' -L, then the compiler's own) is
+// named; one without stays out, and a static link that needs it fails with
+// the linker's own error. A darwin module, never linked statically, needs
+// none.
 func staticDeps(cc []string, target, so string, libs []string) ([]string, error) {
 	if strings.HasPrefix(target, "darwin_") {
 		return nil, nil
@@ -194,14 +196,40 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 		}
 		return ""
 	}
+	module, err := elf.Open(so)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", so, err)
+	}
+	// sharedObject opens the first file named soname in dirs that the
+	// linker takes for the module, skipping the others as it does (a
+	// linker script, another machine's library); nil when there is none.
+	sharedObject := func(soname string) (*elf.File, string, error) {
+		for _, dir := range dirs {
+			path := filepath.Join(dir, soname)
+			if !fileExists(path) {
+				continue
+			}
+			f, err := elf.Open(path)
+			var notELF *elf.FormatError
+			if errors.As(err, &notELF) {
+				continue
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("%s: %w", path, err)
+			}
+			if f.Type == elf.ET_DYN && f.Machine == module.Machine && f.Class == module.Class {
+				return f, path, nil
+			}
+			if err := f.Close(); err != nil {
+				return nil, "", fmt.Errorf("%s: %w", path, err)
+			}
+		}
+		return nil, "", nil
+	}
 	seen := map[string]bool{}
 	var order []string // each library after the ones it depends on
-	var visit func(path string) error
-	visit = func(path string) error {
-		f, err := elf.Open(path)
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
+	var visit func(f *elf.File, path string) error
+	visit = func(f *elf.File, path string) error {
 		needed, err := f.ImportedLibraries()
 		if err := errors.Join(err, f.Close()); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
@@ -218,10 +246,15 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 			if !isLib || !isSO || name == "" {
 				continue
 			}
-			if file := lookup(soname); file != "" {
-				if err := visit(file); err != nil {
-					return err
-				}
+			dep, file, err := sharedObject(soname)
+			if err != nil {
+				return err
+			}
+			if dep == nil {
+				continue
+			}
+			if err := visit(dep, file); err != nil {
+				return err
 			}
 			if lookup("lib"+name+".a") != "" {
 				order = append(order, "-l"+name)
@@ -229,7 +262,7 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 		}
 		return nil
 	}
-	if err := visit(so); err != nil {
+	if err := visit(module, so); err != nil {
 		return nil, err
 	}
 	slices.Reverse(order)
