@@ -475,6 +475,55 @@ BUILD
 	}
 }
 
+// What a distribution installs to the archlib outside auto/ (a module, a
+// header beside it) is in the module tree: for the builds of the
+// distributions that depend on it, for a script, and in a built binary.
+func TestArchlibFilesReachTheModuleTree(t *testing.T) {
+	requireToolchain(t)
+	const metaFmt = `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},
+		"name":"%s","version":"0.01"%s}`
+	thing := mirrorDist{pathname: "A/AR/ARCH/Arch-Thing-0.01.tar.gz", module: "Arch::Thing", version: "0.01", files: map[string]string{
+		"META.json": fmt.Sprintf(metaFmt, "Arch-Thing", `,"provides":{"Arch::Thing":{"file":"Thing.pm","version":"0.01"}}`),
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Arch::Thing', VERSION => '0.01',\n" +
+			"  PM => { 'Thing.pm' => '$(INST_ARCHLIB)/Arch/Thing.pm', 'thing.h' => '$(INST_ARCHLIB)/Arch/Thing/thing.h' });\n",
+		"Thing.pm": "package Arch::Thing;\nour $VERSION = '0.01';\nsub name { 'arch thing' }\n1;\n",
+		"thing.h":  "#define ARCH_THING 1\n",
+	}}
+	// Its configure step finds the header where it finds the module, as
+	// ExtUtils::Depends does.
+	user := mirrorDist{pathname: "A/AR/ARCH/Arch-User-0.01.tar.gz", module: "Arch::User", version: "0.01", files: map[string]string{
+		"META.json": fmt.Sprintf(metaFmt, "Arch-User", `,"prereqs":{"configure":{"requires":{"Arch::Thing":"0","ExtUtils::MakeMaker":"0"}},"runtime":{"requires":{"Arch::Thing":"0"}}}`),
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nrequire Arch::Thing;\n(my $h = $INC{'Arch/Thing.pm'}) =~ s/\\.pm\\z/\\/thing.h/;\n" +
+			"-e $h or die qq{no $h\\n};\nWriteMakefile(NAME => 'Arch::User', VERSION => '0.01', PREREQ_PM => { 'Arch::Thing' => 0 });\n",
+		"lib/Arch/User.pm": "package Arch::User;\nour $VERSION = '0.01';\nuse Arch::Thing;\nsub name { 'user of ' . Arch::Thing::name() }\n1;\n",
+	}}
+	startMirror(t, thing, user)
+	dir, err := tidyProject(t, "requires 'Arch::User';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	const want = "user of arch thing\n"
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use Arch::User;\nprint Arch::User::name(), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runScript(t, script); got != want {
+		t.Fatalf("gperl run printed %q, want %q", got, want)
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "0")
+	out := filepath.Join(t.TempDir(), "app")
+	if err := gperl.Build(script, out); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cmd := exec.Command(out)
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+	if got, err := cmd.CombinedOutput(); err != nil || string(got) != want {
+		t.Fatalf("binary printed %q (%v), want %q", got, err, want)
+	}
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.

@@ -418,9 +418,12 @@ func harvest(src, tree, target string) error {
 	}
 
 	// Native modules: blib/arch/auto/<Module/Path>/<Name>.{a,so,ldflags}.
-	auto := filepath.Join(blib, "arch", "auto")
+	// The rest of blib/arch (modules and headers installed to the archlib,
+	// which perl searches as it searches the lib) joins the module tree.
+	arch := filepath.Join(blib, "arch")
+	auto := filepath.Join(arch, "auto")
 	native := false
-	err := filepath.WalkDir(auto, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(arch, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return fs.SkipAll
@@ -433,6 +436,19 @@ func harvest(src, tree, target string) error {
 		rel, err := filepath.Rel(auto, path)
 		if err != nil {
 			return err
+		}
+		if !filepath.IsLocal(rel) {
+			archRel, err := filepath.Rel(arch, path)
+			if err != nil {
+				return err
+			}
+			dst := filepath.Join(build, "lib", archRel)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			// As blib/lib is copied: writable, so a build for another
+			// target can write it again.
+			return copyTree(path, dst)
 		}
 		switch filepath.Ext(path) {
 		case ".so":
