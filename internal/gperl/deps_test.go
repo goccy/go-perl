@@ -524,6 +524,38 @@ func TestArchlibFilesReachTheModuleTree(t *testing.T) {
 	}
 }
 
+// A native module that uses what perl itself links with (libm's pow) links
+// into a binary.
+func TestNativeModuleLinksPerlLibs(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, mirrorDist{pathname: "P/PO/POW/Pow-XS-0.01.tar.gz", module: "Pow::XS", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Pow::XS', VERSION => '0.01');\n",
+		"XS.xs": "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n#include <math.h>\n\n" +
+			"MODULE = Pow::XS  PACKAGE = Pow::XS\n\nNV\npower(x, y)\n    NV x\n    NV y\n  CODE:\n    RETVAL = pow(x, y);\n  OUTPUT:\n    RETVAL\n",
+		"lib/Pow/XS.pm": "package Pow::XS;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+	}})
+	dir, err := tidyProject(t, "requires 'Pow::XS';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use Pow::XS;\nprint Pow::XS::power($ARGV[0], $ARGV[1]), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	out := filepath.Join(t.TempDir(), "app")
+	if err := gperl.Build(script, out); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cmd := exec.Command(out, "2", "10")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+	if got, err := cmd.CombinedOutput(); err != nil || string(got) != "1024\n" {
+		t.Fatalf("binary printed %q (%v), want %q", got, err, "1024\n")
+	}
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.

@@ -576,6 +576,13 @@ func writeBridge(tree string) error {
 				b.WriteString(" " + lib)
 			}
 		}
+		// Then what perl itself links with, which a module takes for
+		// granted, after the module that uses it (as perl's static link
+		// puts %Config{perllibs} last).
+		goos, _, _ := strings.Cut(n.target, "_")
+		for _, lib := range strings.Fields(toolchainStatic(goos, "", "")["perllibs"]) {
+			b.WriteString(" " + lib)
+		}
 		b.WriteString("\n")
 		packages[n.perlPackage()] = true
 	}
