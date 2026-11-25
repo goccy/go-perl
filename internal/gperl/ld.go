@@ -133,7 +133,8 @@ func linkModule(args []string, sdkDir, target string) error {
 		return err
 	}
 	entry := base + ".entry.o"
-	if err := run(append(cc, "-fPIC", "-w", "-fno-sanitize=undefined", "-I"+sdkDir, "-DGOPERL_ENTRY_MODULE="+cmd.module,
+	if err := run(append(cc, "-fPIC", "-w", "-fno-sanitize=undefined", "-I"+sdkDir,
+		"-DGOPERL_ENTRY_BOOT=boot_"+cmd.module, "-DGOPERL_ENTRY_TABLE=goperl_entry_"+cmd.module,
 		"-c", "-o", entry, filepath.Join(sdkDir, "goperl_entry.c"))...); err != nil {
 		return err
 	}

@@ -600,6 +600,38 @@ func TestNativeModuleLinksPerlLibs(t *testing.T) {
 	}
 }
 
+// A native module whose package is spelled like a C macro (true, which
+// stdbool defines) links into a binary under its own name.
+func TestNativeModuleNamedLikeAMacro(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, mirrorDist{pathname: "T/TR/TRUE/true-0.01.tar.gz", module: "true", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'true', VERSION => '0.01');\n",
+		"true.xs": "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n\n" +
+			"MODULE = true  PACKAGE = true\n\nint\nvalue()\n  CODE:\n    RETVAL = 7;\n  OUTPUT:\n    RETVAL\n",
+		"lib/true.pm": "package true;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+	}})
+	dir, err := tidyProject(t, "requires 'true';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use true;\nprint true::value(), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	out := filepath.Join(t.TempDir(), "app")
+	if err := gperl.Build(script, out); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cmd := exec.Command(out)
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+	if got, err := cmd.CombinedOutput(); err != nil || string(got) != "7\n" {
+		t.Fatalf("binary printed %q (%v), want %q", got, err, "7\n")
+	}
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.

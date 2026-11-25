@@ -15,7 +15,7 @@ import (
 )
 
 // demoEntryFlags compiles the SDK's entry table for Demo::XS into the module.
-var demoEntryFlags = []string{"-DGOPERL_ENTRY_MODULE=Demo__XS", "sdk/include/goperl_entry.c"}
+var demoEntryFlags = []string{"-DGOPERL_ENTRY_BOOT=boot_Demo__XS", "-DGOPERL_ENTRY_TABLE=goperl_entry_Demo__XS", "sdk/include/goperl_entry.c"}
 
 // evalDemo runs Demo::XS through a .pm that boots it the stock way.
 func evalDemo(t *testing.T, p *perl.Perl) {
