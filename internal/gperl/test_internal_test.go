@@ -248,4 +248,12 @@ func TestTestCommand(t *testing.T) {
 			t.Errorf("Test(%v) succeeded", bad)
 		}
 	}
+	// The test binary takes the options and paths when it runs, not when
+	// it is built; -o names the binary -c builds.
+	for _, bad := range [][]string{{"-c", "t"}, {"-c", "-v"}, {"-c", "-o", "x", "-j", "2"}, {"-o", "x"}, {"-o", ""}, {"-c=false"}} {
+		status, err := Test(bad)
+		if status != 2 || err == nil || !strings.Contains(err.Error(), "usage: gperl test -c [-o out]") {
+			t.Errorf("Test(%v) = (%d, %v), want the usage error", bad, status, err)
+		}
+	}
 }

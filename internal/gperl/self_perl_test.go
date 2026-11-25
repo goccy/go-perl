@@ -108,8 +108,11 @@ func TestMakeInstallWithNothingArranged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	self := ownPerl(t)
 	env := append(plainEnv(), "PERL_MM_USE_DEFAULT=1")
+	// This perl is the user's: the one a process of the user's names, beside
+	// the standard library it has (the test process unpacked its own before
+	// it became the user).
+	self := runStep(t, t.TempDir(), env, ownPerl(t), "-e", `print $^X`)
 
 	dist := t.TempDir()
 	files := map[string]string{

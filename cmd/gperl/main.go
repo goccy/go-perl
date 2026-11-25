@@ -10,6 +10,10 @@
 //	                                (native XS modules linked in), and the
 //	                                interpreter
 //	gperl test [files]              run a project's test files
+//	gperl test -c [-o out]          build the project's test binary, which
+//	                                carries the project and its
+//	                                dependencies and runs its test files
+//	                                (it takes gperl test's options)
 //	gperl psgi run app.psgi         serve a PSGI application
 //	gperl psgi build app.psgi       build its server binary
 //	gperl mod tidy                  resolve the cpanfile into
@@ -51,6 +55,7 @@ func usage() {
   gperl run [perl switches] [script] [args...]
   gperl build [-o out] script.pl
   gperl test [options] [files or directories]
+  gperl test -c [-o out]
   gperl psgi run [options] app.psgi
   gperl psgi build [-o out] [options] app.psgi
   gperl mod download

@@ -36,23 +36,36 @@ func Build(script, out string) error { return buildBinary(script, out, nil) }
 
 // buildBinary builds script into a standalone binary: a program that runs
 // it, or — when psgiDefaults is non-nil — a server for the PSGI application
-// it is, with those settings as defaults. A server carries the whole
-// project directory (an application reads templates and static files next
-// to itself); a program carries the script and lib/.
+// it is, with those settings as defaults, or — when script is "" — the test
+// binary of the project in the current directory (default out:
+// <directory>.test). A server and a test binary carry the whole project
+// directory (an application reads templates and static files next to
+// itself, a test its data under t/); a program carries the script and lib/.
 func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	config, err := readBuildConfig()
 	if err != nil {
 		return err
 	}
-	if script, err = filepath.Abs(script); err != nil {
-		return err
-	}
-	if _, err := os.Stat(script); err != nil {
-		return err
-	}
-	projectDir := filepath.Dir(script)
-	if out == "" {
-		out = strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
+	test := script == ""
+	var projectDir string
+	if test {
+		if projectDir, err = os.Getwd(); err != nil {
+			return err
+		}
+		if out == "" {
+			out = filepath.Base(projectDir) + ".test"
+		}
+	} else {
+		if script, err = filepath.Abs(script); err != nil {
+			return err
+		}
+		if _, err := os.Stat(script); err != nil {
+			return err
+		}
+		projectDir = filepath.Dir(script)
+		if out == "" {
+			out = strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
+		}
 	}
 	if out, err = filepath.Abs(out); err != nil {
 		return err
@@ -70,7 +83,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	}
 
 	scriptName := filepath.Base(script)
-	appZip, incDirs, err := buildAppZip(projectDir, script, psgiDefaults != nil, out)
+	appZip, incDirs, err := buildAppZip(projectDir, script, psgiDefaults != nil || test, out)
 	if err != nil {
 		return err
 	}
@@ -83,6 +96,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 		"Inc":          incDirs,
 		"PSGI":         psgiDefaults != nil,
 		"PSGIDefaults": psgiDefaults,
+		"Test":         test,
 	}); err != nil {
 		return err
 	}
@@ -300,11 +314,11 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-{{- if not .PSGI}}
+{{- if not (or .PSGI .Test)}}
 	"context"
 {{- end}}
 	_ "embed"
-{{- if not .PSGI}}
+{{- if not (or .PSGI .Test)}}
 	"errors"
 {{- end}}
 	"fmt"
@@ -312,7 +326,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-{{if not .PSGI}}
+{{if not (or .PSGI .Test)}}
 	perl "github.com/goccy/go-perl"
 {{- end}}
 	"github.com/goccy/go-perl/internal/gperl"
@@ -362,6 +376,12 @@ func main() {
 			fatal(err)
 		}
 	}
+{{- if .Test}}
+	status := gperl.RunTestBinary(filepath.Join(appDir, "app"), os.Args[1:])
+	cleanup()
+	os.Exit(status)
+}
+{{- else}}
 	scriptPath := filepath.Join(appDir, filepath.FromSlash(scriptRel))
 	incDirs := make([]string, 0, len(incRel))
 	for _, rel := range incRel {
@@ -406,6 +426,7 @@ func main() {
 	cleanup()
 	os.Exit(status)
 }
+{{- end}}
 {{- end}}
 
 // cleanup removes the unpacked app dir; os.Exit skips defers, so every

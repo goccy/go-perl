@@ -17,9 +17,10 @@ import (
 // programs it installs. The executable that runs the interpreter here is
 // not a perl command by its own command line (gperl wants `run` first), so
 // it has a second name that is one: a link called perl, in a directory of
-// its own in the user's cache, that points at the executable. Started by
-// that name the executable takes its whole command line as perl's (see
-// reexec.go).
+// its own beside the standard library (in the user's cache, or where the
+// standard library goes when there is none), that points at the
+// executable. Started by that name the executable takes its whole command
+// line as perl's (see reexec.go).
 //
 // perl's own programs (prove, perldoc, pod2usage, ...) are beside it, as
 // they are beside an installed perl command: %Config names the directory
@@ -36,18 +37,13 @@ import (
 // selfPerlPath returns where the link to this executable is (whether or not
 // it exists), the executable it points at and the standard library whose
 // programs are beside it; ok is false when the process cannot name its
-// executable, the user has no cache directory or there is no standard
-// library.
+// executable or there is no standard library.
 func selfPerlPath() (link, exe, stdlib string, ok bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", "", "", false
 	}
 	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return "", "", "", false
-	}
-	cache, err := os.UserCacheDir()
-	if err != nil || !filepath.IsAbs(cache) {
 		return "", "", "", false
 	}
 	if stdlib, err = perl.ExtractStdlib(); err != nil {
@@ -59,7 +55,7 @@ func selfPerlPath() (link, exe, stdlib string, ok bool) {
 	// ones), and a process extracts it once, so a path would name another
 	// link in a process whose environment has changed since.
 	sum := sha256.Sum256([]byte(exe + "\x00" + filepath.Base(stdlib)))
-	return filepath.Join(cache, "go-perl", "perl-"+hex.EncodeToString(sum[:8]), "perl"), exe, stdlib, true
+	return filepath.Join(filepath.Dir(stdlib), "perl-"+hex.EncodeToString(sum[:8]), "perl"), exe, stdlib, true
 }
 
 // selfPerl returns the path that runs this executable as the perl command,

@@ -137,10 +137,75 @@ type testConfig struct {
 // Test implements `gperl test [options] [files or directories]`: it runs
 // the test files and reports like prove. With no path it runs t/
 // recursively with lib/ on @INC. The returned status is 0 when every file
-// passed.
+// passed. `gperl test -c [-o out]` builds the project's test binary instead
+// (RunTestBinary), which takes the options and paths when it runs.
 func Test(args []string) (int, error) {
 	c := &testConfig{}
-	fl := flag.NewFlagSet("gperl test", flag.ContinueOnError)
+	fl := c.flagSet("gperl test")
+	compile := fl.Bool("c", false, "build the project's test binary instead of running the tests")
+	out := fl.String("o", "", "with -c, the path of the test binary (default: <directory>.test)")
+	if err := fl.Parse(splitShortOptions(args, "vqlr", "jI")); err != nil {
+		return 2, err
+	}
+	building, others := false, fl.NArg() > 0
+	fl.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "c", "o":
+			building = true
+		default:
+			others = true
+		}
+	})
+	if building {
+		if others || !*compile {
+			return 2, errors.New("usage: gperl test -c [-o out]; the test binary takes the options and paths when it runs")
+		}
+		return 0, buildBinary("", *out, nil)
+	}
+	files, err := c.files(fl.Args())
+	if err != nil {
+		return 2, err
+	}
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return 2, err
+	}
+	deps, err := hostDeps(projectDir)
+	if err != nil {
+		return 2, err
+	}
+	return runTests(projectDir, files, c, deps.inc()), nil
+}
+
+// RunTestBinary is the entry point of a test binary gperl test -c makes: it
+// runs the test files of the project at projectDir (the binary's own copy)
+// that args name, with gperl test's options, and returns the exit status.
+// The dependencies are the ones the binary carries.
+func RunTestBinary(projectDir string, args []string) int {
+	name := filepath.Base(os.Args[0])
+	c := &testConfig{}
+	fl := c.flagSet(name)
+	if err := fl.Parse(splitShortOptions(args, "vqlr", "jI")); err != nil {
+		// The flag set has said why.
+		return 2
+	}
+	// Paths are the project's, as gperl test takes them in its directory.
+	if err := os.Chdir(projectDir); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
+		return 1
+	}
+	files, err := c.files(fl.Args())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
+		return 2
+	}
+	return runTests(projectDir, files, c, nil)
+}
+
+// flagSet declares the options of gperl test, which a test binary takes
+// too, on a flag set called name.
+func (c *testConfig) flagSet(name string) *flag.FlagSet {
+	fl := flag.NewFlagSet(name, flag.ContinueOnError)
 	for _, n := range []string{"v", "verbose"} {
 		fl.BoolVar(&c.verbose, n, false, "print every test's output")
 	}
@@ -160,32 +225,33 @@ func Test(args []string) (int, error) {
 	fl.BoolVar(&c.inProcess, "in-process", false, "run the test files in this process, each as an isolated program")
 	fl.Var(&c.inc, "I", "directory to add to @INC (repeatable)")
 	fl.StringVar(&c.ext, "ext", ".t", "extension of test files")
-	if err := fl.Parse(splitShortOptions(args, "vqlr", "jI")); err != nil {
-		return 2, err
-	}
+	return fl
+}
+
+// files checks the options and returns the test files the paths name: t/,
+// recursively with lib/ on @INC, when there is none.
+func (c *testConfig) files(paths []string) ([]string, error) {
 	if c.jobs < 1 {
-		return 2, errors.New("--jobs must be at least 1")
+		return nil, errors.New("--jobs must be at least 1")
 	}
-	paths := fl.Args()
 	if len(paths) == 0 {
 		// The conventional invocation: prove -lr t.
 		paths, c.lib, c.recurse = []string{"t"}, true, true
 	}
 	files, err := testFiles(paths, c)
 	if err != nil {
-		return 2, err
+		return nil, err
 	}
 	if len(files) == 0 {
-		return 2, fmt.Errorf("no test files found in %s", strings.Join(paths, " "))
+		return nil, fmt.Errorf("no test files found in %s", strings.Join(paths, " "))
 	}
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return 2, err
-	}
-	deps, err := hostDeps(projectDir)
-	if err != nil {
-		return 2, err
-	}
+	return files, nil
+}
+
+// runTests runs the test files of the project at projectDir, each with
+// depInc (the dependencies) on @INC, reports like prove and returns the
+// exit status.
+func runTests(projectDir string, files []string, c *testConfig, depInc []string) int {
 	if c.lib {
 		c.inc.values = append(c.inc.values, "lib")
 	}
@@ -218,7 +284,7 @@ func Test(args []string) (int, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			o := runTestFile(projectDir, file, c, deps.inc())
+			o := runTestFile(projectDir, file, c, depInc)
 			printMu.Lock()
 			outcomes[i] = o
 			printMu.Unlock()
@@ -226,7 +292,7 @@ func Test(args []string) (int, error) {
 		}()
 	}
 	wg.Wait()
-	return summarize(os.Stdout, outcomes, time.Since(start)), nil
+	return summarize(os.Stdout, outcomes, time.Since(start))
 }
 
 // testFiles expands the command line's paths into test files.

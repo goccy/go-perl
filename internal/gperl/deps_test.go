@@ -600,6 +600,83 @@ func TestNativeModuleLinksPerlLibs(t *testing.T) {
 	}
 }
 
+// gperl test -c builds a project's test binary, which carries the project
+// and its dependencies (a pure-Perl one and an XS one linked in) and runs
+// the test files where neither the project nor the module directory is,
+// nor a cache directory the user can write: each file as a perl process of
+// its own, which can run $^X in turn.
+func TestTestBinary(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, testDists(t)...)
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"cpanfile":       "requires 'Pure::Built';\nrequires 'Demo::XS';\n",
+		"lib/My/Calc.pm": "package My::Calc;\nsub add { $_[0] + $_[1] }\n1;\n",
+		"t/01-deps.t":    "use Test::More tests => 3;\nuse Pure::Built;\nuse Demo::XS;\nuse My::Calc;\nis(My::Calc::add(1, 1), 2);\nis(Pure::Built::name(), 'built on static');\nis(Demo::XS::add(40, 2), 42);\n",
+		"t/02-perl.t": "use Test::More tests => 2;\n" +
+			"open(my $fh, '-|', $^X, '-MDemo::XS', '-e', 'print Demo::XS::add(1, 2)') or die \"$^X: $!\";\n" +
+			"is(scalar(<$fh>), 3, '$^X runs with the dependencies');\nclose $fh;\n" +
+			"is(system($^X, '-e', 'exit 3') >> 8, 3, '$^X exits with its status');\n",
+		"t/data/note.txt": "from the project\n",
+		"t/03-data.t":     "use Test::More tests => 1;\nopen(my $fh, '<', 't/data/note.txt') or die \"note: $!\";\nis(scalar(<$fh>), \"from the project\\n\");\n",
+		"xt/fail.t":       "use Test::More tests => 1;\nok(0, 'broken');\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	t.Chdir(dir)
+	if status, err := gperl.Test([]string{"-c"}); status != 0 || err != nil {
+		t.Fatalf("gperl test -c = (%d, %v)", status, err)
+	}
+	bin := filepath.Join(dir, filepath.Base(dir)+".test")
+
+	// A home that is a file has no cache directory, for root too: what the
+	// binary unpacks goes to the temporary directory.
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.WriteFile(home, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	run := func(args ...string) (string, int) {
+		t.Helper()
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"), "HOME="+home, "XDG_CACHE_HOME=", "TMPDIR="+tmp)
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			t.Fatalf("%s: %v", bin, err)
+		}
+		return string(out), cmd.ProcessState.ExitCode()
+	}
+	out, status := run()
+	for _, want := range []string{"t/01-deps.t .. ok\n", "t/02-perl.t .. ok\n", "t/03-data.t .. ok\n", "All tests successful.\n", "Files=3, Tests=6, "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report lacks %q:\n%s", want, out)
+		}
+	}
+	if status != 0 {
+		t.Errorf("status = %d, want 0:\n%s", status, out)
+	}
+	// It takes gperl test's options and the project's paths.
+	if out, status := run("-v", "-l", "t/02-perl.t"); status != 0 || !strings.Contains(out, "ok 1 - $^X runs with the dependencies\n") {
+		t.Errorf("one file, verbose (status %d):\n%s", status, out)
+	}
+	if out, status := run("xt/fail.t"); status != 1 || !strings.Contains(out, "xt/fail.t .. Failed 1/1 subtests\n") {
+		t.Errorf("a failing file (status %d):\n%s", status, out)
+	}
+	if out, status := run("-j", "0"); status != 2 || !strings.Contains(out, "--jobs must be at least 1") {
+		t.Errorf("a bad option (status %d):\n%s", status, out)
+	}
+}
+
 // A native module whose package is spelled like a C macro (true, which
 // stdbool defines) links into a binary under its own name.
 func TestNativeModuleNamedLikeAMacro(t *testing.T) {
