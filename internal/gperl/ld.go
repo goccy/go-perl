@@ -13,9 +13,11 @@ package gperl
 //	auto/<Module/Path>/<Name>.a        linked statically into a Go binary
 //	auto/<Module/Path>/<Name>.so       loaded at run time
 //	auto/<Module/Path>/<Name>.ldflags  the libraries either needs
+//	auto/<Module/Path>/<Name>.exports  the names the .so exports
 //
 // With nothing else visible, two modules can carry the same helper names
-// and still link into one binary.
+// and still link into one binary. A module's references to what a native
+// module of its dependencies exports are given that module's names.
 //
 // The C compiler is $CC (default cc) and the archiver $AR (default ar);
 // for an ELF target nothing else is needed, so a cross compiler such as
@@ -25,6 +27,7 @@ import (
 	"debug/elf"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,17 +40,20 @@ import (
 const (
 	ldEnv  = "GPERL_INTERNAL_LD"
 	ldArg0 = "gperl-internal-ld"
-	// ldSDKEnv carries the SDK header directory to the linker, and
-	// ldTargetEnv the target the module is built for ("linux_amd64").
+	// ldSDKEnv carries the SDK header directory to the linker, ldTargetEnv
+	// the target the module is built for ("linux_amd64"), and ldNativeEnv
+	// the target directories of the distributions the module's distribution
+	// depends on.
 	ldSDKEnv    = "GPERL_INTERNAL_SDK"
 	ldTargetEnv = "GPERL_INTERNAL_TARGET"
+	ldNativeEnv = "GPERL_INTERNAL_NATIVE"
 )
 
 func init() {
 	if os.Getenv(ldEnv) == "" || len(os.Args) < 2 || os.Args[1] != ldArg0 {
 		return
 	}
-	if err := linkModule(os.Args[2:], os.Getenv(ldSDKEnv), os.Getenv(ldTargetEnv)); err != nil {
+	if err := linkModule(os.Args[2:], os.Getenv(ldSDKEnv), os.Getenv(ldTargetEnv), filepath.SplitList(os.Getenv(ldNativeEnv))); err != nil {
 		fmt.Fprintf(os.Stderr, "gperl ld: %v\n", err)
 		os.Exit(1)
 	}
@@ -112,10 +118,11 @@ func parseLd(args []string) ldCommand {
 	return cmd
 }
 
-// linkModule performs one link for target. Anything that is not a module
-// link (a configure probe, a helper executable) goes to the C compiler
-// unchanged.
-func linkModule(args []string, sdkDir, target string) error {
+// linkModule performs one link for target; natives are the target
+// directories of the distributions the module's distribution depends on.
+// Anything that is not a module link (a configure probe, a helper
+// executable) goes to the C compiler unchanged.
+func linkModule(args []string, sdkDir, target string, natives []string) error {
 	cmd := parseLd(args)
 	cc := toolCommand("CC", "cc")
 	if cmd.module == "" || len(cmd.inputs) == 0 {
@@ -138,9 +145,23 @@ func linkModule(args []string, sdkDir, target string) error {
 		"-c", "-o", entry, filepath.Join(sdkDir, "goperl_entry.c"))...); err != nil {
 		return err
 	}
+	// The loadable module is the link the build system asked for: the
+	// interpreter's loaders find its boot function by name, and a module
+	// that lends its symbols to others (dl_load_flags) keeps them.
+	if err := run(append(cc, args...)...); err != nil {
+		return err
+	}
+	imports, err := moduleImports(cc, target, cmd.out, cmd.libs, natives)
+	if err != nil {
+		return err
+	}
 	merged := base + ".merged.o"
 	inputs := append(append([]string{}, cmd.inputs...), entry)
-	if err := mergeObjects(cc, target, merged, "goperl_entry_"+cmd.module, inputs); err != nil {
+	exports, err := mergeObjects(cc, target, merged, "goperl_entry_"+cmd.module, inputs, imports)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(base+".exports", []byte(strings.Join(exports, "\n")), 0o644); err != nil {
 		return err
 	}
 	archive := base + ".a"
@@ -148,12 +169,6 @@ func linkModule(args []string, sdkDir, target string) error {
 		return err
 	}
 	if err := run(append(toolCommand("AR", "ar"), "rcs", archive, merged)...); err != nil {
-		return err
-	}
-	// The loadable module is the link the build system asked for: the
-	// interpreter's loaders find its boot function by name, and a module
-	// that lends its symbols to others (dl_load_flags) keeps them.
-	if err := run(append(cc, args...)...); err != nil {
 		return err
 	}
 	deps, err := staticDeps(cc, target, cmd.out, cmd.libs)
@@ -180,13 +195,7 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 	if strings.HasPrefix(target, "darwin_") {
 		return nil, nil
 	}
-	var dirs []string
-	for _, lib := range libs {
-		if dir, ok := strings.CutPrefix(lib, "-L"); ok && dir != "" {
-			dirs = append(dirs, dir)
-		}
-	}
-	dirs = append(dirs, compilerLibraryDirs(strings.Join(cc, " "))...)
+	dirs := libraryDirs(cc, libs)
 	// lookup returns the first file named name in dirs, "" when there is
 	// none.
 	lookup := func(name string) string {
@@ -197,9 +206,40 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 		}
 		return ""
 	}
+	var order []string // each library after the ones it depends on
+	err := walkNeeded(so, dirs, func(name string, _ *elf.File) error {
+		if lookup("lib"+name+".a") != "" {
+			order = append(order, "-l"+name)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(order)
+	return order, nil
+}
+
+// libraryDirs returns the directories a -l searches: libs' -L, then the
+// compiler's own.
+func libraryDirs(cc, libs []string) []string {
+	var dirs []string
+	for _, lib := range libs {
+		if dir, ok := strings.CutPrefix(lib, "-L"); ok && dir != "" {
+			dirs = append(dirs, dir)
+		}
+	}
+	return append(dirs, compilerLibraryDirs(strings.Join(cc, " "))...)
+}
+
+// walkNeeded calls fn, once each, for the shared libraries so depends on
+// as the linker recorded them (DT_NEEDED) and theirs in turn, each after
+// the ones it depends on, with its -l name: those a -l can name whose
+// shared object, as the linker takes one, is in dirs.
+func walkNeeded(so string, dirs []string, fn func(name string, f *elf.File) error) error {
 	module, err := elf.Open(so)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", so, err)
+		return fmt.Errorf("%s: %w", so, err)
 	}
 	// sharedObject opens the first file named soname in dirs that the
 	// linker takes for the module, skipping the others as it does (a
@@ -228,11 +268,17 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 		return nil, "", nil
 	}
 	seen := map[string]bool{}
-	var order []string // each library after the ones it depends on
-	var visit func(f *elf.File, path string) error
-	visit = func(f *elf.File, path string) error {
+	// visit walks what f depends on, then calls fn for f unless it is the
+	// module (name "").
+	var visit func(f *elf.File, path, name string) error
+	visit = func(f *elf.File, path, name string) (err error) {
+		defer func() {
+			if cerr := f.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("%s: %w", path, cerr))
+			}
+		}()
 		needed, err := f.ImportedLibraries()
-		if err := errors.Join(err, f.Close()); err != nil {
+		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 		for _, soname := range needed {
@@ -243,8 +289,8 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 			// -l<name> finds lib<name>.so[.<version>] and lib<name>.a: a
 			// library named otherwise (the dynamic loader) has no -l.
 			rest, isLib := strings.CutPrefix(soname, "lib")
-			name, _, isSO := strings.Cut(rest, ".so")
-			if !isLib || !isSO || name == "" {
+			depName, _, isSO := strings.Cut(rest, ".so")
+			if !isLib || !isSO || depName == "" {
 				continue
 			}
 			dep, file, err := sharedObject(soname)
@@ -254,20 +300,93 @@ func staticDeps(cc []string, target, so string, libs []string) ([]string, error)
 			if dep == nil {
 				continue
 			}
-			if err := visit(dep, file); err != nil {
+			if err := visit(dep, file, depName); err != nil {
 				return err
 			}
-			if lookup("lib"+name+".a") != "" {
-				order = append(order, "-l"+name)
-			}
+		}
+		if name == "" {
+			return nil
+		}
+		if err := fn(name, f); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
 		}
 		return nil
 	}
-	if err := visit(module, so); err != nil {
+	return visit(module, so, "")
+}
+
+// moduleImports returns the names privatizeELF gives what the module so
+// takes from a native module that exports it (its .exports, in the auto/
+// directory of one of natives): the name with that module's suffix. A name
+// a library so depends on defines stays, as perl resolves it there; one
+// that two modules export is an error. A darwin module imports nothing.
+func moduleImports(cc []string, target, so string, libs, natives []string) (map[string]string, error) {
+	if strings.HasPrefix(target, "darwin_") || len(natives) == 0 {
+		return nil, nil
+	}
+	exporters := map[string][]string{} // name -> the modules exporting it
+	for _, native := range natives {
+		auto := filepath.Join(native, "auto")
+		err := filepath.WalkDir(auto, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || filepath.Ext(path) != ".exports" {
+				return err
+			}
+			rel, err := filepath.Rel(auto, filepath.Dir(path))
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			// The module's suffix, as parseLd and mergeObjects make it.
+			module := strings.ReplaceAll(filepath.ToSlash(rel), "/", "__")
+			for _, name := range strings.Fields(string(data)) {
+				exporters[name] = append(exporters[name], module)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	f, err := elf.Open(so)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", so, err)
+	}
+	syms, err := f.ImportedSymbols()
+	if err := errors.Join(err, f.Close()); err != nil {
+		return nil, fmt.Errorf("%s: %w", so, err)
+	}
+	imports := map[string]string{}
+	for _, s := range syms {
+		if len(exporters[s.Name]) > 0 {
+			imports[s.Name] = ""
+		}
+	}
+	if len(imports) == 0 {
+		return nil, nil
+	}
+	err = walkNeeded(so, libraryDirs(cc, libs), func(_ string, lib *elf.File) error {
+		defined, err := lib.DynamicSymbols()
+		for _, s := range defined {
+			if s.Section != elf.SHN_UNDEF {
+				delete(imports, s.Name)
+			}
+		}
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
-	slices.Reverse(order)
-	return order, nil
+	for name := range imports {
+		modules := exporters[name]
+		if len(modules) > 1 {
+			return nil, fmt.Errorf("%s: %s is exported by native modules %s", so, name, strings.Join(modules, " and "))
+		}
+		imports[name] = name + "..gperl." + modules[0]
+	}
+	return imports, nil
 }
 
 // archFlags pins a darwin toolchain to the target's architecture (the
@@ -284,19 +403,21 @@ func archFlags(target string) []string {
 }
 
 // mergeObjects links inputs into one relocatable object in which only
-// symbol keeps its name.
-func mergeObjects(cc []string, target, out, symbol string, inputs []string) error {
+// symbol keeps its name, and returns what privatizeELF does; imports
+// renames its undefined symbols. A Mach-O object exports nothing and
+// imports nothing.
+func mergeObjects(cc []string, target, out, symbol string, inputs []string, imports map[string]string) ([]string, error) {
 	if strings.HasPrefix(target, "darwin_") {
 		// Mach-O: the linker itself can leave one symbol exported.
 		args := append([]string{"ld", "-r"}, archFlags(target)...)
-		return run(append(append(args, "-exported_symbol", "_"+symbol, "-o", out), inputs...)...)
+		return nil, run(append(append(args, "-exported_symbol", "_"+symbol, "-o", out), inputs...)...)
 	}
 	// ELF: the compiler driver merges, and the symbols are made private
 	// here — no binutils needed, whatever the host.
 	if err := run(append(append(cc, "-r", "-nostdlib", "-o", out), inputs...)...); err != nil {
-		return err
+		return nil, err
 	}
-	return privatizeELF(out, symbol, "..gperl."+strings.TrimPrefix(symbol, "goperl_entry_"))
+	return privatizeELF(out, symbol, "..gperl."+strings.TrimPrefix(symbol, "goperl_entry_"), imports)
 }
 
 // run executes a toolchain command line, passing its output through.

@@ -13,7 +13,7 @@ package gperl
 //	gperl/MYMETA.json              the prereqs configure settled on
 //	gperl/abi<N>/                  the Go package of its native modules:
 //	  go.mod, xs.go                  links the .a files, exports the entry tables
-//	  <goos>_<goarch>/auto/...       <Name>.a, <Name>.so, <Name>.ldflags
+//	  <goos>_<goarch>/auto/...       <Name>.a, <Name>.so, <Name>.ldflags, <Name>.exports
 
 import (
 	"bytes"
@@ -157,17 +157,35 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 				// Everything the distribution may load while it builds:
 				// the trees of all the distributions before it, then the
 				// architecture directories of those it can load, as
-				// projectDeps.inc orders them.
-				var inc, natives []string
-				for j := range nodes {
-					if done[j] {
-						inc = append(inc, mod.LibDir(nodes[j].tree))
-						if native := mod.TargetDir(nodes[j].tree, target); loadable && dirExists(filepath.Join(native, "auto")) {
-							natives = append(natives, native)
+				// projectDeps.inc orders them. Its native modules take
+				// symbols from those of the distributions it depends on,
+				// directly or not (providers).
+				needs := make([]bool, len(nodes))
+				var walk func(int)
+				walk = func(j int) {
+					for _, dep := range nodes[j].deps {
+						if !needs[dep] {
+							needs[dep] = true
+							walk(dep)
 						}
 					}
 				}
-				if err := buildDist(ctx, m, nodes[i].tree, target, append(inc, natives...)); err != nil {
+				walk(i)
+				var inc, natives, providers []string
+				for j := range nodes {
+					if done[j] {
+						inc = append(inc, mod.LibDir(nodes[j].tree))
+						if native := mod.TargetDir(nodes[j].tree, target); dirExists(filepath.Join(native, "auto")) {
+							if loadable {
+								natives = append(natives, native)
+							}
+							if needs[j] {
+								providers = append(providers, native)
+							}
+						}
+					}
+				}
+				if err := buildDist(ctx, m, nodes[i].tree, target, append(inc, natives...), providers); err != nil {
 					mu.Lock()
 					if first == nil {
 						first = fmt.Errorf("build %s: %w", nodes[i].dist.Name, err)
@@ -208,8 +226,9 @@ func sdkDirIn(m *mod.Manager) (string, error) {
 }
 
 // buildDist makes one distribution ready on target. inc lists the module
-// directories its build may load from.
-func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []string) (err error) {
+// directories its build may load from; providers the target directories
+// whose native modules its own may take symbols from.
+func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc, providers []string) (err error) {
 	meta, err := m.Meta(tree)
 	if err != nil {
 		return err
@@ -281,6 +300,7 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 		"PERL_MM_USE_DEFAULT=1",
 		"PERL5LIB="+strings.Join(inc, string(os.PathListSeparator)),
 		ldSDKEnv+"="+sdkDir,
+		ldNativeEnv+"="+strings.Join(providers, string(os.PathListSeparator)),
 		"PATH="+filepath.Dir(perlShim)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	// As under cpanm, the build finds the modules a distribution carries
@@ -437,7 +457,7 @@ func harvest(src, tree, target string) error {
 		}
 	}
 
-	// Native modules: blib/arch/auto/<Module/Path>/<Name>.{a,so,ldflags}.
+	// Native modules: blib/arch/auto/<Module/Path>/<Name>.{a,so,ldflags,exports}.
 	// The rest of blib/arch (modules and headers installed to the archlib,
 	// which perl searches as it searches the lib) joins the module tree.
 	arch := filepath.Join(blib, "arch")
@@ -465,7 +485,7 @@ func harvest(src, tree, target string) error {
 				}
 				native = true
 				fallthrough
-			case ".a", ".ldflags":
+			case ".a", ".ldflags", ".exports":
 				dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
 				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 					return err

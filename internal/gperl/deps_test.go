@@ -237,8 +237,8 @@ func TestDependenciesEndToEnd(t *testing.T) {
 		}
 	}
 	matches, err := filepath.Glob(filepath.Join(modDir, "Demo-XS@0.01", "gperl", "abi42", "*", "auto", "Demo", "XS", "XS.*"))
-	if err != nil || len(matches) != 3 {
-		t.Fatalf("native artifacts = %v (%v), want XS.a, XS.ldflags, XS.so", matches, err)
+	if err != nil || len(matches) != 4 {
+		t.Fatalf("native artifacts = %v (%v), want XS.a, XS.exports, XS.ldflags, XS.so", matches, err)
 	}
 
 	// A second sync has nothing to do, and the mirror is not needed for it.

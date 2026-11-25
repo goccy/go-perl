@@ -1,6 +1,7 @@
 package gperl_test
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,6 +179,117 @@ func TestNativeModuleLinksLibraryDependencies(t *testing.T) {
 	t.Run("dynamic", func(t *testing.T) {
 		build(t, "LD_LIBRARY_PATH="+dir)
 	})
+	t.Run("static", func(t *testing.T) {
+		libc, err := exec.Command("cc", "-print-file-name=libc.a").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !filepath.IsAbs(strings.TrimSpace(string(libc))) {
+			t.Skip("the C compiler has no static C library")
+		}
+		t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -ldflags=-extldflags=-static"))
+		build(t)
+	})
+}
+
+// A module's references to what a native module it depends on exports go
+// to that module's renamed definitions, unless a library the module links
+// with defines them; two such modules exporting one referenced name are an
+// error, a name nobody references is not.
+func TestModuleImportsBindToProviders(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("no cc available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("cc", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("cc %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("gpq.c", "int q_fn(void) { return 2; }\n")
+	run("-shared", "-fPIC", "-o", "libgpq.so", "gpq.c")
+	write("user.c", "int p_fn(void);\nint q_fn(void);\nint user(void) { return p_fn() + q_fn(); }\n")
+	so := filepath.Join(dir, "user.so")
+	libs := []string{"-L" + dir, "-lgpq"}
+	run(append([]string{"-shared", "-fPIC", "-o", so, "user.c"}, libs...)...)
+	provider := filepath.Join(dir, "prov")
+	write("prov/auto/P/Q/Q.exports", "p_fn\nq_fn\n__goperl_xs_init\n")
+	other := filepath.Join(dir, "other")
+	write("other/auto/O/O.exports", "__goperl_xs_init\n")
+
+	got, err := gperl.ModuleImports([]string{"cc"}, "linux_amd64", so, libs, []string{provider, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"p_fn": "p_fn..gperl.P__Q"}; !maps.Equal(got, want) {
+		t.Errorf("ModuleImports = %v, want %v", got, want)
+	}
+	write("other/auto/O/O.exports", "p_fn\n")
+	if _, err := gperl.ModuleImports([]string{"cc"}, "linux_amd64", so, libs, []string{provider, other}); err == nil {
+		t.Error("ModuleImports with p_fn exported by two modules succeeded")
+	}
+}
+
+// A native module that calls what the native module of a distribution it
+// depends on exports (lent through dl_load_flags) runs in a script and links
+// into a binary, a static one too.
+func TestNativeModuleUsesAnothersSymbols(t *testing.T) {
+	requireToolchain(t)
+	const header = "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n\n"
+	prov := mirrorDist{pathname: "P/PR/PROV/Prov-XS-0.01.tar.gz", module: "Prov::XS", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Prov::XS', VERSION => '0.01');\n",
+		"XS.xs":       header + "int prov_value(void) { return 7; }\n\nMODULE = Prov::XS  PACKAGE = Prov::XS\n\nPROTOTYPES: DISABLE\n",
+		"lib/Prov/XS.pm": "package Prov::XS;\nour $VERSION = '0.01';\nrequire DynaLoader;\nour @ISA = ('DynaLoader');\n" +
+			"sub dl_load_flags { 0x01 }\n__PACKAGE__->bootstrap($VERSION);\n1;\n",
+	}}
+	user := mirrorDist{pathname: "U/US/USER/User-XS-0.01.tar.gz", module: "User::XS", version: "0.01", files: map[string]string{
+		"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},
+			"name":"User-XS","version":"0.01","prereqs":{"runtime":{"requires":{"Prov::XS":"0"}}}}`,
+		"Makefile.PL":    "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'User::XS', VERSION => '0.01', PREREQ_PM => { 'Prov::XS' => 0 });\n",
+		"XS.xs":          header + "int prov_value(void);\n\nMODULE = User::XS  PACKAGE = User::XS\n\nint\nvalue()\n  CODE:\n    RETVAL = prov_value();\n  OUTPUT:\n    RETVAL\n",
+		"lib/User/XS.pm": "package User::XS;\nour $VERSION = '0.01';\nuse Prov::XS;\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+	}}
+	startMirror(t, prov, user)
+	project, err := tidyProject(t, "requires 'User::XS';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	script := filepath.Join(project, "app.pl")
+	if err := os.WriteFile(script, []byte("use User::XS;\nprint User::XS::value(), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runScript(t, script); got != "7\n" {
+		t.Fatalf("gperl run printed %q, want %q", got, "7\n")
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	build := func(t *testing.T) {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "app")
+		if err := gperl.Build(script, out); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		cmd := exec.Command(out)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+		if got, err := cmd.CombinedOutput(); err != nil || string(got) != "7\n" {
+			t.Fatalf("binary printed %q (%v), want %q", got, err, "7\n")
+		}
+	}
+	t.Run("dynamic", build)
 	t.Run("static", func(t *testing.T) {
 		libc, err := exec.Command("cc", "-print-file-name=libc.a").Output()
 		if err != nil {
