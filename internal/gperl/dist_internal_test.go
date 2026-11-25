@@ -157,3 +157,25 @@ func TestBridgeLinksPerlLibsAfterTheModule(t *testing.T) {
 		t.Fatalf("xs.go lacks %q:\n%s", want, src)
 	}
 }
+
+// A native module is an archive gperl's linker made, with its .ldflags; an
+// archive the distribution made itself beside it is not one.
+func TestNativeModulesAreWhatGperlLinked(t *testing.T) {
+	tree := filepath.Join(t.TempDir(), "X@0.01")
+	auto := filepath.Join(mod.TargetDir(tree, "linux_amd64"), "auto", "X")
+	if err := os.MkdirAll(filepath.Join(auto, "h"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"X.a", "X.ldflags", "libh.a", "h/h.a"} {
+		if err := os.WriteFile(filepath.Join(auto, filepath.FromSlash(name)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	modules, err := nativeModules(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(modules) != 1 || modules[0].archive != "auto/X/X.a" {
+		t.Fatalf("native modules = %+v, want auto/X/X.a only", modules)
+	}
+}

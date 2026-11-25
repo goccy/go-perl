@@ -632,6 +632,88 @@ func TestNativeModuleNamedLikeAMacro(t *testing.T) {
 	}
 }
 
+// The shared library and the archive a distribution builds for itself under
+// auto/ (a plugin it loads at run time, a library for others to link) are not
+// native modules: they stay where the build put them, and the distribution's
+// module runs in a script and links into a binary, a static one too.
+func TestDistributionLibrariesAreNotModules(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, mirrorDist{pathname: "L/LI/LIB/Lib-User-0.01.tar.gz", module: "Lib::User", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Lib::User', VERSION => '0.01');\n" +
+			"sub MY::postamble { <<'MAKE' }\n" +
+			"pure_all :: $(INST_ARCHAUTODIR)/plug-in/plug-in.so $(INST_ARCHAUTODIR)/libh$(LIB_EXT)\n\n" +
+			"$(INST_ARCHAUTODIR)/plug-in/plug-in.so : plug/plug.c\n" +
+			"\t$(MKPATH) $(INST_ARCHAUTODIR)/plug-in\n" +
+			"\t$(CC) -c $(CCCDLFLAGS) -o plug/plug$(OBJ_EXT) plug/plug.c\n" +
+			"\t$(LD) $(LDDLFLAGS) -o $@ plug/plug$(OBJ_EXT)\n\n" +
+			"$(INST_ARCHAUTODIR)/libh$(LIB_EXT) : h/h.c\n" +
+			"\t$(MKPATH) $(INST_ARCHAUTODIR)\n" +
+			"\t$(CC) -c $(CCCDLFLAGS) -o h/h$(OBJ_EXT) h/h.c\n" +
+			"\t$(AR) cr $@ h/h$(OBJ_EXT)\n" +
+			"MAKE\n",
+		"User.xs": "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n\n" +
+			"MODULE = Lib::User  PACKAGE = Lib::User\n\nint\nvalue()\n  CODE:\n    RETVAL = 7;\n  OUTPUT:\n    RETVAL\n",
+		"plug/plug.c":     "int plug(void) { return 1; }\n",
+		"h/h.c":           "int h(void) { return 2; }\n",
+		"lib/Lib/User.pm": "package Lib::User;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+	}})
+	dir, err := tidyProject(t, "requires 'Lib::User';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	abi := filepath.Join(os.Getenv("GPERLMODCACHE"), "Lib-User@0.01", "gperl", "abi*")
+	for _, name := range []string{"plug-in/plug-in.so", "libh.a"} {
+		if found, err := filepath.Glob(filepath.Join(abi, "*", "auto", "Lib", "User", filepath.FromSlash(name))); err != nil || len(found) != 1 {
+			t.Errorf("auto/Lib/User/%s in the target directory: %v, %v", name, found, err)
+		}
+	}
+	bridges, err := filepath.Glob(filepath.Join(abi, "xs.go"))
+	if err != nil || len(bridges) != 1 {
+		t.Fatalf("bridge: %v, %v", bridges, err)
+	}
+	bridge, err := os.ReadFile(bridges[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(bridge), "extern const void *const goperl_entry_"); n != 1 || !strings.Contains(string(bridge), "goperl_entry_Lib__User[") {
+		t.Fatalf("the bridge does not export Lib::User alone:\n%s", bridge)
+	}
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use Lib::User;\nprint Lib::User::value(), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runScript(t, script); got != "7\n" {
+		t.Fatalf("gperl run printed %q, want %q", got, "7\n")
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	build := func(t *testing.T) {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "app")
+		if err := gperl.Build(script, out); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		cmd := exec.Command(out)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+		if got, err := cmd.CombinedOutput(); err != nil || string(got) != "7\n" {
+			t.Fatalf("binary printed %q (%v), want %q", got, err, "7\n")
+		}
+	}
+	t.Run("dynamic", build)
+	t.Run("static", func(t *testing.T) {
+		libc, err := exec.Command("cc", "-print-file-name=libc.a").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !filepath.IsAbs(strings.TrimSpace(string(libc))) {
+			t.Skip("the C compiler has no static C library")
+		}
+		t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -ldflags=-extldflags=-static"))
+		build(t)
+	})
+}
+
 // The configure step of a distribution loads the native module of one it
 // depends on, and finds what that one installed to the archlib's auto/
 // directory, as under cpanm.

@@ -25,6 +25,7 @@ package gperl
 
 import (
 	"debug/elf"
+	"debug/macho"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -88,9 +89,9 @@ type ldCommand struct {
 	module string   // mangled Perl package ("Cpanel__JSON__XS"), "" when not a module link
 }
 
-// parseLd sorts a link command line into what the module link needs. The
-// module is recognized by its output path, which every build system
-// spells .../auto/<Module/Path>/<Name>.so.
+// parseLd sorts a link command line into what the module link needs. A
+// module's output path is .../auto/<Module/Path>/<Name>.so in every build
+// system; linkModule decides by the boot function whether it is one.
 func parseLd(args []string) ldCommand {
 	var cmd ldCommand
 	for i := 0; i < len(args); i++ {
@@ -113,9 +114,15 @@ func parseLd(args []string) ldCommand {
 	}
 	slash := filepath.ToSlash(cmd.out)
 	if i := strings.LastIndex(slash, "/auto/"); i >= 0 && strings.HasSuffix(slash, ".so") {
-		cmd.module = strings.ReplaceAll(filepath.ToSlash(filepath.Dir(slash[i+len("/auto/"):])), "/", "__")
+		cmd.module = autoModule(filepath.Dir(slash[i+len("/auto/"):]))
 	}
 	return cmd
+}
+
+// autoModule returns the mangled Perl package ("Cpanel__JSON__XS") of a
+// directory below auto/ ("Cpanel/JSON/XS").
+func autoModule(dir string) string {
+	return strings.ReplaceAll(filepath.ToSlash(dir), "/", "__")
 }
 
 // linkModule performs one link for target; natives are the target
@@ -139,16 +146,24 @@ func linkModule(args []string, sdkDir, target string, natives []string) error {
 	if err := os.MkdirAll(filepath.Dir(cmd.out), 0o755); err != nil {
 		return err
 	}
-	entry := base + ".entry.o"
-	if err := run(append(cc, "-fPIC", "-w", "-fno-sanitize=undefined", "-I"+sdkDir,
-		"-DGOPERL_ENTRY_BOOT=boot_"+cmd.module, "-DGOPERL_ENTRY_TABLE=goperl_entry_"+cmd.module,
-		"-c", "-o", entry, filepath.Join(sdkDir, "goperl_entry.c"))...); err != nil {
-		return err
-	}
 	// The loadable module is the link the build system asked for: the
 	// interpreter's loaders find its boot function by name, and a module
 	// that lends its symbols to others (dl_load_flags) keeps them.
 	if err := run(append(cc, args...)...); err != nil {
+		return err
+	}
+	// A module is what perl's loaders boot: a library exporting
+	// boot_<Module> (DynaLoader's $bootname). A library the distribution
+	// builds for itself under auto/ (one it loads at run time) is only the
+	// link it asked for.
+	boot := "boot_" + cmd.module
+	if module, err := exportsSymbol(target, cmd.out, boot); err != nil || !module {
+		return err
+	}
+	entry := base + ".entry.o"
+	if err := run(append(cc, "-fPIC", "-w", "-fno-sanitize=undefined", "-I"+sdkDir,
+		"-DGOPERL_ENTRY_BOOT="+boot, "-DGOPERL_ENTRY_TABLE=goperl_entry_"+cmd.module,
+		"-c", "-o", entry, filepath.Join(sdkDir, "goperl_entry.c"))...); err != nil {
 		return err
 	}
 	imports, err := moduleImports(cc, target, cmd.out, cmd.libs, natives)
@@ -340,7 +355,7 @@ func moduleImports(cc []string, target, so string, libs, natives []string) (map[
 				return err
 			}
 			// The module's suffix, as parseLd and mergeObjects make it.
-			module := strings.ReplaceAll(filepath.ToSlash(rel), "/", "__")
+			module := autoModule(rel)
 			for _, name := range strings.Fields(string(data)) {
 				exporters[name] = append(exporters[name], module)
 			}
@@ -387,6 +402,47 @@ func moduleImports(cc []string, target, so string, libs, natives []string) (map[
 		imports[name] = name + "..gperl." + modules[0]
 	}
 	return imports, nil
+}
+
+// exportsSymbol reports whether the shared library at path exports name to
+// the dynamic loader (dlsym finds it).
+func exportsSymbol(target, path, name string) (bool, error) {
+	if strings.HasPrefix(target, "darwin_") {
+		f, err := macho.Open(path)
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", path, err)
+		}
+		var syms []macho.Symbol
+		if f.Symtab != nil {
+			syms = f.Symtab.Syms
+		}
+		if err := f.Close(); err != nil {
+			return false, fmt.Errorf("%s: %w", path, err)
+		}
+		// <mach-o/nlist.h>: N_EXT marks an external symbol; a defined one
+		// is in a section (n_sect is NO_SECT, 0, for an undefined one).
+		const nExt = 0x01
+		for _, s := range syms {
+			if s.Name == "_"+name && s.Type&nExt != 0 && s.Sect != 0 {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	f, err := elf.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", path, err)
+	}
+	syms, err := f.DynamicSymbols()
+	if err := errors.Join(err, f.Close()); err != nil {
+		return false, fmt.Errorf("%s: %w", path, err)
+	}
+	for _, s := range syms {
+		if s.Name == name && s.Section != elf.SHN_UNDEF && elf.ST_BIND(s.Info) != elf.STB_LOCAL {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // archFlags pins a darwin toolchain to the target's architecture (the

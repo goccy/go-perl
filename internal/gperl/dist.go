@@ -480,12 +480,21 @@ func harvest(src, tree, target string) error {
 		if filepath.IsLocal(rel) {
 			switch filepath.Ext(path) {
 			case ".so":
+				// gperl's linker makes a module's archive beside it; a
+				// library without one is the distribution's own (ld.go),
+				// unless perl boots it as a module.
 				if !fileExists(strings.TrimSuffix(path, ".so") + ".a") {
-					return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
+					boot, err := exportsSymbol(target, path, "boot_"+autoModule(filepath.Dir(rel)))
+					if err != nil {
+						return err
+					}
+					if boot {
+						return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
+					}
 				}
-				native = true
 				fallthrough
 			case ".a", ".ldflags", ".exports":
+				native = true
 				dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
 				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 					return err
@@ -556,16 +565,19 @@ func nativeModules(tree string) ([]nativeModule, error) {
 				}
 				return err
 			}
-			if d.IsDir() || filepath.Ext(path) != ".a" {
+			// A module is what gperl's linker linked, which writes its
+			// .ldflags beside its .a (ld.go); an archive the distribution
+			// made itself is not one.
+			if d.IsDir() || filepath.Ext(path) != ".ldflags" {
 				return nil
 			}
-			rel, err := filepath.Rel(root, path)
+			rel, err := filepath.Rel(root, strings.TrimSuffix(path, ".ldflags")+".a")
 			if err != nil {
 				return err
 			}
 			n := nativeModule{target: t.Name(), archive: filepath.ToSlash(rel)}
-			flags, err := os.ReadFile(strings.TrimSuffix(path, ".a") + ".ldflags")
-			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			flags, err := os.ReadFile(path)
+			if err != nil {
 				return err
 			}
 			n.libs = strings.Fields(string(flags))
