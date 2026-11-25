@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -279,13 +280,21 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 	if _, ok := os.LookupEnv("PERL_USE_UNSAFE_INC"); !ok {
 		env = append(env, "PERL_USE_UNSAFE_INC=1")
 	}
+	// As under cpanm, the configure step is told a CPAN client runs it, so
+	// Module::AutoInstall leaves the prereqs to the client.
+	pid := strconv.Itoa(os.Getpid())
+	configureEnv := append(env[:len(env):len(env)],
+		"PERL5_CPAN_IS_RUNNING="+pid,
+		"PERL5_CPANPLUS_IS_RUNNING="+pid,
+		"PERL5_CPANM_IS_RUNNING="+pid,
+	)
 
 	var log bytes.Buffer
 	// A program the interpreter runs is the process (its working directory
 	// and environment are the process's), and distributions build side by
 	// side: each perl of a build is a process of its own, as the ones make
 	// starts are.
-	perlRun := func(args ...string) error {
+	perlRun := func(env []string, args ...string) error {
 		cmd := exec.CommandContext(ctx, perlShim, args...)
 		cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = src, env, &log, &log
 		if err := cmd.Run(); err != nil {
@@ -298,7 +307,7 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 	var buildPLErr error
 	useBuildPL := fileExists(filepath.Join(src, "Build.PL"))
 	if useBuildPL {
-		if buildPLErr = perlRun("Build.PL"); buildPLErr == nil && !fileExists(filepath.Join(src, "Build")) {
+		if buildPLErr = perlRun(configureEnv, "Build.PL"); buildPLErr == nil && !fileExists(filepath.Join(src, "Build")) {
 			buildPLErr = errors.New("perl Build.PL wrote no Build")
 		}
 		useBuildPL = buildPLErr == nil || !fileExists(filepath.Join(src, "Makefile.PL"))
@@ -306,10 +315,10 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 	switch {
 	case useBuildPL:
 		if err = buildPLErr; err == nil {
-			err = perlRun("Build")
+			err = perlRun(env, "Build")
 		}
 	case fileExists(filepath.Join(src, "Makefile.PL")):
-		if err = perlRun("Makefile.PL", "PERL="+perlShim, "FULLPERL="+perlShim); err == nil {
+		if err = perlRun(configureEnv, "Makefile.PL", "PERL="+perlShim, "FULLPERL="+perlShim); err == nil {
 			if err = xsRedirectMakefile(filepath.Join(src, "Makefile"), sdkDir); err == nil {
 				mkPath, lookErr := exec.LookPath("make")
 				if lookErr != nil {

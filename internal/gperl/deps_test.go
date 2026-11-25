@@ -386,6 +386,47 @@ func TestDistBuildFindsIncModules(t *testing.T) {
 	})
 }
 
+// A distribution's configure step is told a CPAN client runs it, as under
+// cpanm: PERL5_CPAN_IS_RUNNING, PERL5_CPANPLUS_IS_RUNNING and
+// PERL5_CPANM_IS_RUNNING hold the client's process ID. Its make step is not.
+func TestDistConfigureSeesCPANClient(t *testing.T) {
+	requireToolchain(t)
+	vars := []string{"PERL5_CPAN_IS_RUNNING", "PERL5_CPANPLUS_IS_RUNNING", "PERL5_CPANM_IS_RUNNING"}
+	for _, name := range vars {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makefilePL := `use ExtUtils::MakeMaker;
+my @vars = qw(` + strings.Join(vars, " ") + `);
+open my $fh, '>', 'lib/Client/Probe/Env.pm' or die "Env.pm: $!";
+print $fh map { "# $_=" . ($ENV{$_} // 'unset') . "\n" } @vars;
+close $fh or die "Env.pm: $!";
+sub MY::postamble { "pure_all ::\n\t\$(PERL) -e 'exit 1 if grep defined, \@ENV{qw(@vars)}'\n" }
+WriteMakefile(NAME => 'Client::Probe', VERSION => '0.01');
+`
+	startMirror(t, mirrorDist{pathname: "C/CL/CLIENT/Client-Probe-0.01.tar.gz", module: "Client::Probe", version: "0.01", files: map[string]string{
+		"Makefile.PL":             makefilePL,
+		"lib/Client/Probe.pm":     "package Client::Probe;\nour $VERSION = '0.01';\n1;\n",
+		"lib/Client/Probe/Env.pm": "# written by Makefile.PL\n",
+	}})
+	if _, err := tidyProject(t, "requires 'Client::Probe';\n"); err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(os.Getenv("GPERLMODCACHE"), "Client-Probe@0.01", "gperl", "lib", "Client", "Probe", "Env.pm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want strings.Builder
+	for _, name := range vars {
+		fmt.Fprintf(&want, "# %s=%d\n", name, os.Getpid())
+	}
+	if string(got) != want.String() {
+		t.Fatalf("the configure step saw:\n%swant:\n%s", got, want.String())
+	}
+}
+
 // A distribution whose Build.PL does not configure it is configured by its
 // Makefile.PL, as under cpanm; when both fail, the error carries both.
 func TestBuildPLFallsBackToMakefilePL(t *testing.T) {
