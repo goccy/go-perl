@@ -16,6 +16,7 @@ package gperl
 // it) — no perl needs to be installed.
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -360,7 +361,28 @@ func dirExists(path string) bool {
 	return err == nil && st.IsDir()
 }
 
+// errLinkInsideCopy is copyTree's error for a symbolic link to a directory
+// the copy is already inside (one that holds the link, or one a loop of
+// links leads back to): the copy would never end.
+var errLinkInsideCopy = errors.New("a link to a directory the copy is already inside")
+
+// copyTree copies src to dst, following symbolic links. A link to a
+// directory the copy is already inside fails with errLinkInsideCopy.
 func copyTree(src, dst string) error {
+	root, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		return err
+	}
+	return copyTreeFollowing(root, dst, []string{root})
+}
+
+// copyTreeFollowing copies src, a path without symbolic links, to dst.
+// following lists the directories whose copy holds this one: the root of
+// the copy and each linked directory followed to reach src.
+func copyTreeFollowing(src, dst string, following []string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -388,7 +410,16 @@ func copyTree(src, dst string) error {
 				return err
 			}
 			if st.IsDir() {
-				return copyTree(resolved, target)
+				for _, dir := range following {
+					rel, err := filepath.Rel(resolved, dir)
+					if err != nil {
+						return err
+					}
+					if filepath.IsLocal(rel) {
+						return fmt.Errorf("%s -> %s: %w", path, resolved, errLinkInsideCopy)
+					}
+				}
+				return copyTreeFollowing(resolved, target, append(following, resolved))
 			}
 			path, modTime = resolved, st.ModTime()
 		}

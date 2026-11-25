@@ -638,6 +638,41 @@ func TestExtractArchiveFormats(t *testing.T) {
 	if err := extract(moved, filepath.Join(dir, "Moved@1")); err == nil {
 		t.Error("hard link to a link leading outside: extracted")
 	}
+	// Links are checked against the tree that remains once the top
+	// directory is dropped.
+	for name, hdrs := range map[string][]*tar.Header{
+		"link to the top directory's parent": {
+			{Name: "D-1/up", Typeflag: tar.TypeSymlink, Linkname: ".."}},
+		"link beside the top directory": {
+			{Name: "D-1/a/b", Typeflag: tar.TypeSymlink, Linkname: "../../x"}},
+		"chain through a link to the top directory": {
+			{Name: "D-1/a/up", Typeflag: tar.TypeSymlink, Linkname: ".."},
+			{Name: "D-1/m", Typeflag: tar.TypeSymlink, Linkname: "a/up/.."}},
+		"hard link to a link to the top directory": {
+			{Name: "D-1/a/up", Typeflag: tar.TypeSymlink, Linkname: ".."},
+			{Name: "D-1/up", Typeflag: tar.TypeLink, Linkname: "D-1/a/up"}},
+	} {
+		dst := filepath.Join(dir, name)
+		if err := extract(tarWith("stripped.tar.gz", hdrs...), dst); err == nil {
+			t.Errorf("%s: extracted", name)
+		}
+		if _, err := os.Stat(dst); !os.IsNotExist(err) {
+			t.Errorf("%s: left a tree behind", name)
+		}
+	}
+	// Links inside that tree, to its top directory too, are kept.
+	inside := tarWith("inside.tar.gz",
+		&tar.Header{Name: "D-1/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		&tar.Header{Name: "D-1/a/b", Typeflag: tar.TypeSymlink, Linkname: "../x"},
+		&tar.Header{Name: "D-1/a/top", Typeflag: tar.TypeSymlink, Linkname: ".."})
+	if err := extract(inside, filepath.Join(dir, "Inside@1")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a/b", "a/top/x"} {
+		if _, err := os.Stat(filepath.Join(dir, "Inside@1", filepath.FromSlash(name))); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
 	if err := extract(filepath.Join(dir, "missing.tar.gz"), filepath.Join(dir, "Missing@1")); err == nil {
 		t.Error("extracted a missing archive")
 	}

@@ -1,6 +1,7 @@
 package gperl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,47 @@ func TestCopyDistSourceKeepsModTimes(t *testing.T) {
 		}
 		if !info.ModTime().Equal(modTime) {
 			t.Errorf("%s: modification time %v, want %v", name, info.ModTime(), modTime)
+		}
+	}
+}
+
+// The copy a distribution builds in follows a link to a directory, and
+// fails for a link to a directory the copy is already inside: one holding
+// the link, or one a loop of links leads back to.
+func TestCopyDistSourceLinkedDirectories(t *testing.T) {
+	build := func(links map[string]string) string {
+		tree := t.TempDir()
+		for _, dir := range []string{"lib/a", "lib/b", "lib/c"} {
+			if err := os.MkdirAll(filepath.Join(tree, filepath.FromSlash(dir)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(tree, "lib", "c", "X.pm"), []byte("1;"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for name, link := range links {
+			if err := os.Symlink(link, filepath.Join(tree, filepath.FromSlash(name))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tree
+	}
+	dst := filepath.Join(t.TempDir(), "src")
+	if err := copyDistSource(build(map[string]string{"lib/a/c": "../c"}), dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "lib", "a", "c", "X.pm")); err != nil || string(got) != "1;" {
+		t.Fatalf("lib/a/c/X.pm = %q, %v", got, err)
+	}
+	for name, links := range map[string]map[string]string{
+		"link to the top directory": {"lib/a/top": "../.."},
+		"link to its own directory": {"lib/a/self": "."},
+		"link to the tree's parent": {"lib/a/up": "../../.."},
+		"loop of links":             {"lib/a/b": "../b", "lib/b/a": "../a"},
+	} {
+		err := copyDistSource(build(links), filepath.Join(t.TempDir(), "src"))
+		if !errors.Is(err, errLinkInsideCopy) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
