@@ -632,6 +632,34 @@ func TestNativeModuleNamedLikeAMacro(t *testing.T) {
 	}
 }
 
+// The configure step of a distribution loads the native module of one it
+// depends on, and finds what that one installed to the archlib's auto/
+// directory, as under cpanm.
+func TestDependencyNativeModuleLoadsAtBuild(t *testing.T) {
+	requireToolchain(t)
+	const metaFmt = `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},
+		"name":"%s","version":"0.01"%s}`
+	native := mirrorDist{pathname: "N/NA/NATIVE/Dep-Native-0.01.tar.gz", module: "Dep::Native", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Dep::Native', VERSION => '0.01',\n" +
+			"  PM => { 'lib/Dep/Native.pm' => '$(INST_LIB)/Dep/Native.pm', 'native.h' => '$(INST_ARCHAUTODIR)/native.h' });\n",
+		"Native.xs": "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n\n" +
+			"MODULE = Dep::Native  PACKAGE = Dep::Native\n\nint\nanswer()\n  CODE:\n    RETVAL = 42;\n  OUTPUT:\n    RETVAL\n",
+		"lib/Dep/Native.pm": "package Dep::Native;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+		"native.h":          "#define DEP_NATIVE 1\n",
+	}}
+	user := mirrorDist{pathname: "N/NA/NATIVE/Dep-User-0.01.tar.gz", module: "Dep::User", version: "0.01", files: map[string]string{
+		"META.json": fmt.Sprintf(metaFmt, "Dep-User", `,"prereqs":{"configure":{"requires":{"Dep::Native":"0","ExtUtils::MakeMaker":"0"}}}`),
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nrequire Dep::Native;\nDep::Native::answer() == 42 or die qq{no answer\\n};\n" +
+			"grep { -e qq{$_/auto/Dep/Native/native.h} } @INC or die qq{no native.h in @INC\\n};\n" +
+			"WriteMakefile(NAME => 'Dep::User', VERSION => '0.01');\n",
+		"lib/Dep/User.pm": "package Dep::User;\nour $VERSION = '0.01';\n1;\n",
+	}}
+	startMirror(t, native, user)
+	if _, err := tidyProject(t, "requires 'Dep::User';\n"); err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+}
+
 // A PSGI application builds into a server binary that carries its
 // directory and dependencies, takes its settings from the build, the
 // environment, and the command line, and stops cleanly on SIGTERM.

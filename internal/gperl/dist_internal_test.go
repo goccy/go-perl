@@ -11,13 +11,17 @@ import (
 	"github.com/goccy/go-perl/internal/mod"
 )
 
-// The archlib files of a distribution with native modules reach the module
-// tree from the build for each target, though the build left them
-// read-only (as ExtUtils::MakeMaker does).
+// The archlib files of a distribution with native modules (inside auto/
+// too) reach the module tree from the build for each target, though the
+// build left them read-only (as ExtUtils::MakeMaker does); the native
+// modules reach the target's directory.
 func TestHarvestArchlibFilesForTwoTargets(t *testing.T) {
 	src := t.TempDir()
 	tree := filepath.Join(t.TempDir(), "X@0.01")
-	for name, mode := range map[string]os.FileMode{"blib/arch/X/Util.pm": 0o444, "blib/arch/auto/X/X.a": 0o444, "blib/arch/auto/X/X.so": 0o555} {
+	for name, mode := range map[string]os.FileMode{
+		"blib/arch/X/Util.pm": 0o444, "blib/arch/auto/X/x.h": 0o444,
+		"blib/arch/auto/X/X.a": 0o444, "blib/arch/auto/X/X.so": 0o555, "blib/arch/auto/X/X.ldflags": 0o444,
+	} {
 		path := filepath.Join(src, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -33,10 +37,20 @@ func TestHarvestArchlibFilesForTwoTargets(t *testing.T) {
 		if !mod.Built(tree, target) {
 			t.Errorf("not built for %s", target)
 		}
+		for _, name := range []string{"X.a", "X.so", "X.ldflags"} {
+			if _, err := os.Stat(filepath.Join(mod.TargetDir(tree, target), "auto", "X", name)); err != nil {
+				t.Errorf("native module for %s: %v", target, err)
+			}
+			if _, err := os.Stat(filepath.Join(mod.BuildDir(tree), "lib", "auto", "X", name)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("auto/X/%s in the module tree: %v, want none", name, err)
+			}
+		}
 	}
-	got, err := os.ReadFile(filepath.Join(mod.BuildDir(tree), "lib", "X", "Util.pm"))
-	if err != nil || string(got) != "blib/arch/X/Util.pm" {
-		t.Fatalf("X/Util.pm in the module tree = %q, %v", got, err)
+	for _, name := range []string{"X/Util.pm", "auto/X/x.h"} {
+		got, err := os.ReadFile(filepath.Join(mod.BuildDir(tree), "lib", filepath.FromSlash(name)))
+		if err != nil || string(got) != "blib/arch/"+name {
+			t.Fatalf("%s in the module tree = %q, %v", name, got, err)
+		}
 	}
 }
 

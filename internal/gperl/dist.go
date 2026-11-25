@@ -110,6 +110,9 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 		}
 	}
 
+	// The perl of a build loads the native modules built for target when
+	// target is the one gperl run loads (hostDeps).
+	loadable := target == nativeTarget(mod.Target())
 	done := make([]bool, len(nodes))
 	built := 0
 	for remaining := len(nodes); remaining > 0; {
@@ -152,14 +155,19 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 				defer wg.Done()
 				defer func() { <-slots }()
 				// Everything the distribution may load while it builds:
-				// the trees of all the distributions before it.
-				var inc []string
+				// the trees of all the distributions before it, then the
+				// architecture directories of those it can load, as
+				// projectDeps.inc orders them.
+				var inc, natives []string
 				for j := range nodes {
 					if done[j] {
 						inc = append(inc, mod.LibDir(nodes[j].tree))
+						if native := mod.TargetDir(nodes[j].tree, target); loadable && dirExists(filepath.Join(native, "auto")) {
+							natives = append(natives, native)
+						}
 					}
 				}
-				if err := buildDist(ctx, m, nodes[i].tree, target, inc); err != nil {
+				if err := buildDist(ctx, m, nodes[i].tree, target, append(inc, natives...)); err != nil {
 					mu.Lock()
 					if first == nil {
 						first = fmt.Errorf("build %s: %w", nodes[i].dist.Name, err)
@@ -449,36 +457,35 @@ func harvest(src, tree, target string) error {
 		if err != nil {
 			return err
 		}
-		if !filepath.IsLocal(rel) {
-			archRel, err := filepath.Rel(arch, path)
-			if err != nil {
-				return err
+		if filepath.IsLocal(rel) {
+			switch filepath.Ext(path) {
+			case ".so":
+				if !fileExists(strings.TrimSuffix(path, ".so") + ".a") {
+					return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
+				}
+				native = true
+				fallthrough
+			case ".a", ".ldflags":
+				dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
+				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+					return err
+				}
+				return copyFileMode(path, dst)
+			case ".bundle", ".dylib", ".dll":
+				return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker)", rel)
 			}
-			dst := filepath.Join(build, "lib", archRel)
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				return err
-			}
-			// As blib/lib is copied: writable, so a build for another
-			// target can write it again.
-			return copyTree(path, dst)
 		}
-		switch filepath.Ext(path) {
-		case ".so":
-			if !fileExists(strings.TrimSuffix(path, ".so") + ".a") {
-				return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
-			}
-			native = true
-		case ".a", ".ldflags":
-		case ".bundle", ".dylib", ".dll":
-			return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker)", rel)
-		default:
-			return nil
+		archRel, err := filepath.Rel(arch, path)
+		if err != nil {
+			return err
 		}
-		dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
+		dst := filepath.Join(build, "lib", archRel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		return copyFileMode(path, dst)
+		// As blib/lib is copied: writable, so a build for another
+		// target can write it again.
+		return copyTree(path, dst)
 	})
 	if err != nil {
 		return err
