@@ -42,7 +42,9 @@ type tapResult struct {
 
 var (
 	tapPlan = regexp.MustCompile(`^1\.\.(\d+)(?:\s*#\s*(?i:skip)\S*\s*(.*))?$`)
-	tapTest = regexp.MustCompile(`^(not )?ok\b(?:\s+(\d+))?([^#]*)(?:#\s*(?i:(todo|skip))\b.*)?$`)
+	// After the description, a # starts a directive (TODO, SKIP) or else a
+	// comment.
+	tapTest = regexp.MustCompile(`^(not )?ok\b(?:\s+(\d+))?([^#]*)(?:#\s*(?:(?i:(todo|skip))\b)?.*)?$`)
 	tapBail = regexp.MustCompile(`^Bail out!\s*(.*)$`)
 )
 
@@ -265,7 +267,15 @@ func testFiles(paths []string, c *testConfig) ([]string, error) {
 // runTestFile runs one test file on its own interpreter instance.
 func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testOutcome {
 	o := &testOutcome{file: file}
-	argv := make([]string, 0, len(c.inc.values)+len(depInc)+1)
+	argv := make([]string, 0, len(c.inc.values)+len(depInc)+2)
+	taint, err := taintSwitch(file)
+	if err != nil {
+		o.problem = err.Error()
+		return o
+	}
+	if taint != "" {
+		argv = append(argv, taint)
+	}
 	for _, dir := range append(c.inc.values[:len(c.inc.values):len(c.inc.values)], depInc...) {
 		argv = append(argv, "-I"+dir)
 	}
@@ -274,7 +284,6 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 	env := append(os.Environ(), "HARNESS_ACTIVE=1", "HARNESS_VERSION=3.50")
 	start := time.Now()
 	var status int
-	var err error
 	if !c.inProcess {
 		status, err = runTestProcess(projectDir, env, &stdout, argv)
 	} else {
@@ -298,6 +307,36 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 		o.problem = err.Error()
 	}
 	return o
+}
+
+// tapTaint is TAP::Parser::SourceHandler::Perl's get_taint: the taint
+// switches of a #! line that names perl.
+var tapTaint = regexp.MustCompile(`^#!.*\bperl.*\s-\w*([Tt]+)`)
+
+// taintSwitch returns the switch a test file's command line gets for the
+// taint mode its #! line asks for ("-T", "-t"), "" for none, as
+// TAP::Parser::SourceHandler::Perl gives it: the #! line is the first line
+// of the file's first 512 bytes (TAP::Parser::Source's shebang), and perl
+// refuses -T on that line when it is not on the command line too.
+func taintSwitch(file string) (string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, 512)
+	n, err := io.ReadFull(f, buf)
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		err = nil // a file shorter than the block
+	}
+	if err := errors.Join(err, f.Close()); err != nil {
+		return "", err
+	}
+	line, _, _ := bytes.Cut(buf[:n], []byte("\n"))
+	m := tapTaint.FindSubmatch(line)
+	if m == nil {
+		return "", nil
+	}
+	return "-" + string(m[1]), nil
 }
 
 // runTestProcess runs a test file as a perl process of its own: this

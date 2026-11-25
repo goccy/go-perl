@@ -38,6 +38,13 @@ func TestParseTAP(t *testing.T) {
 		t.Fatalf("the line callback ran %d times", seen)
 	}
 
+	// A # that starts no directive starts a comment: the line is a test
+	// line all the same.
+	res, err = parseTAP(strings.NewReader("1..5\nok 1 # foo\nnot ok 2 # bar\nok 3 # SKIP gone\nnot ok 4 # TODO later\nok 6 # 7\n"), nil)
+	if want := (tapResult{planned: 5, run: 5, failed: []int{2}, skippedN: 1}); err != nil || !reflect.DeepEqual(res, want) {
+		t.Fatalf("comments = %+v (%v)\nwant       %+v", res, err, want)
+	}
+
 	res, err = parseTAP(strings.NewReader("1..0 # SKIP not here\n"), nil)
 	if err != nil || res.planned != 0 || res.skipAll != "not here" {
 		t.Fatalf("skip-all plan = %+v, %v", res, err)
@@ -49,6 +56,37 @@ func TestParseTAP(t *testing.T) {
 	res, err = parseTAP(strings.NewReader("ok 1\n"), nil)
 	if err != nil || res.planned != -1 {
 		t.Fatalf("no plan = %+v, %v", res, err)
+	}
+}
+
+// A test file whose #! line asks for taint mode runs in it, as prove runs
+// it: the switch goes on its command line too, which perl requires.
+func TestTestFileTaintSwitch(t *testing.T) {
+	dir := t.TempDir()
+	for name, src := range map[string]string{
+		"t/taint.t": "#!perl -T\nuse Test::More tests => 1;\nis(${^TAINT}, 1, 'taint mode');\n",
+		"t/warn.t":  "#!/usr/bin/perl -wt\nuse Test::More tests => 1;\nis(${^TAINT}, -1, 'taint warnings');\n",
+		"t/plain.t": "#!perl -w\nuse Test::More tests => 1;\nis(${^TAINT}, 0, 'no taint');\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+	t.Setenv("GPERLMODCACHE", filepath.Join(t.TempDir(), "mod"))
+	var status int
+	out := captureStdout(t, func() {
+		var err error
+		if status, err = Test(nil); err != nil {
+			t.Errorf("Test: %v", err)
+		}
+	})
+	if status != 0 || !strings.Contains(out, "All tests successful.\n") || !strings.Contains(out, "Files=3, Tests=3, ") {
+		t.Errorf("status %d:\n%s", status, out)
 	}
 }
 
