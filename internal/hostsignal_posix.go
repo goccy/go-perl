@@ -55,11 +55,17 @@ var hostSignals = map[int]syscall.Signal{
 // default action of every caught signal, and keeps the process — its pid,
 // its parent, its open files. So the process becomes a shell whose only
 // act is to send itself the signal (and, should it survive that, to exit
-// with the status shells report for the signal).
+// with the status shells report for the signal). SIGKILL, which no process
+// can catch, the process sends itself, and needs no shell.
 func DieOfSignal(sig int) {
 	hostSig, known := hostSignals[sig]
 	if !known || signal.Ignored(hostSig) {
 		return
+	}
+	if hostSig == syscall.SIGKILL {
+		// kill(2) returns only when the signal could not be sent; the
+		// shell is the way left then.
+		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 	}
 	const shell = "/bin/sh"
 	number := strconv.Itoa(int(hostSig))
