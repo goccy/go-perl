@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Fetch makes the distribution at pathname present in the module directory
@@ -170,9 +171,10 @@ func member(name string) (string, error) {
 }
 
 // writeMember writes the file name of the tree rooted at root, with r's
-// content. The root keeps every step inside the tree, symbolic links
-// included.
-func writeMember(root *os.Root, name string, mode os.FileMode, r io.Reader) error {
+// content and the modification time modTime, as tar does (a build's make
+// compares the times). The root keeps every step inside the tree, symbolic
+// links included.
+func writeMember(root *os.Root, name string, mode os.FileMode, modTime time.Time, r io.Reader) error {
 	p, err := member(name)
 	if err != nil {
 		return err
@@ -185,7 +187,31 @@ func writeMember(root *os.Root, name string, mode os.FileMode, r io.Reader) erro
 		return err
 	}
 	_, err = io.Copy(f, r)
-	return errors.Join(err, f.Close())
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	return root.Chtimes(p, time.Time{}, modTime)
+}
+
+// writeHardLink makes name a hard link to the member target written before
+// it, as tar does. A link to itself (tar archives so a file with several
+// links that it is given twice) is the file already written.
+func writeHardLink(root *os.Root, name, target string) error {
+	p, err := member(name)
+	if err != nil {
+		return err
+	}
+	old, err := member(target)
+	if err != nil {
+		return err
+	}
+	if old == p {
+		return nil
+	}
+	if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return root.Link(old, p)
 }
 
 // writeSymlink makes name a symbolic link to link, which must name a path
@@ -254,9 +280,14 @@ func ExtractTar(archive, dir string) (err error) {
 				err = root.MkdirAll(p, 0o755)
 			}
 		case tar.TypeReg:
-			err = writeMember(root, hdr.Name, hdr.FileInfo().Mode(), tr)
+			err = writeMember(root, hdr.Name, hdr.FileInfo().Mode(), hdr.ModTime, tr)
 		case tar.TypeSymlink:
 			err = writeSymlink(root, hdr.Name, hdr.Linkname)
+			links = append(links, hdr.Name)
+		case tar.TypeLink:
+			// A hard link to a symbolic link is that link again, so it is
+			// checked as one.
+			err = writeHardLink(root, hdr.Name, hdr.Linkname)
 			links = append(links, hdr.Name)
 		}
 		if err != nil {
@@ -291,7 +322,7 @@ func extractZip(archive, dir string) (err error) {
 		if err != nil {
 			return err
 		}
-		if err := errors.Join(writeMember(root, zf.Name, zf.Mode(), rc), rc.Close()); err != nil {
+		if err := errors.Join(writeMember(root, zf.Name, zf.Mode(), zf.Modified, rc), rc.Close()); err != nil {
 			return err
 		}
 	}

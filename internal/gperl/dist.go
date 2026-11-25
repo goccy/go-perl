@@ -383,7 +383,7 @@ func copyDistSource(tree, dst string) error {
 	return nil
 }
 
-// copyFileMode copies one file, keeping its mode.
+// copyFileMode copies one file, keeping its mode and modification time.
 func copyFileMode(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -393,7 +393,10 @@ func copyFileMode(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return keepModTime(dst, info.ModTime())
 }
 
 // tail returns the last n lines of s.

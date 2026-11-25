@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeDist is one release on the fake CPAN.
@@ -508,10 +509,24 @@ func TestNewManagerReadsTheEnvironment(t *testing.T) {
 func TestExtractArchiveFormats(t *testing.T) {
 	dir := t.TempDir()
 
+	// Extracted files keep their modification times, as tar keeps them.
+	zipTime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	tarTime := time.Date(2002, 3, 4, 5, 6, 7, 0, time.UTC)
+	hasModTime := func(path string, want time.Time) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(want) {
+			t.Errorf("%s: modification time %v, want %v", path, info.ModTime(), want)
+		}
+	}
+
 	var zbuf bytes.Buffer
 	zw := zip.NewWriter(&zbuf)
 	for name, body := range map[string]string{"Zip-Dist-1.0/": "", "Zip-Dist-1.0/lib/Zip.pm": "package Zip;1;"} {
-		w, err := zw.Create(name)
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Modified: zipTime})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -529,9 +544,7 @@ func TestExtractArchiveFormats(t *testing.T) {
 	if err := extract(zipPath, filepath.Join(dir, "Zip-Dist@1.0")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "Zip-Dist@1.0", "lib", "Zip.pm")); err != nil {
-		t.Fatal(err)
-	}
+	hasModTime(filepath.Join(dir, "Zip-Dist@1.0", "lib", "Zip.pm"), zipTime)
 	// Extracting over a finished tree leaves it alone.
 	if err := extract(zipPath, filepath.Join(dir, "Zip-Dist@1.0")); err != nil {
 		t.Fatalf("second extract: %v", err)
@@ -565,17 +578,29 @@ func TestExtractArchiveFormats(t *testing.T) {
 	}
 	ok := tarWith("ok.tar.gz",
 		&tar.Header{Name: "D-1/", Typeflag: tar.TypeDir, Mode: 0o755},
-		&tar.Header{Name: "D-1/bin/tool", Typeflag: tar.TypeReg, Mode: 0o755, Size: 3},
-		&tar.Header{Name: "D-1/bin/alias", Typeflag: tar.TypeSymlink, Linkname: "tool"})
+		&tar.Header{Name: "D-1/bin/tool", Typeflag: tar.TypeReg, Mode: 0o755, Size: 3, ModTime: tarTime},
+		&tar.Header{Name: "D-1/bin/alias", Typeflag: tar.TypeSymlink, Linkname: "tool"},
+		&tar.Header{Name: "D-1/inc/tool", Typeflag: tar.TypeLink, Linkname: "D-1/bin/tool"},
+		&tar.Header{Name: "D-1/bin/tool", Typeflag: tar.TypeLink, Linkname: "D-1/bin/tool"})
 	if err := extract(ok, filepath.Join(dir, "D@1")); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "D@1", "bin", "alias")); err != nil || fi.Mode()&0o100 == 0 {
 		t.Fatalf("symlinked executable: %v, %v", fi, err)
 	}
+	hasModTime(filepath.Join(dir, "D@1", "bin", "tool"), tarTime)
+	tool, err := os.Stat(filepath.Join(dir, "D@1", "bin", "tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hard, err := os.Stat(filepath.Join(dir, "D@1", "inc", "tool")); err != nil || !os.SameFile(tool, hard) {
+		t.Errorf("hard link: %v, %v, want the file of bin/tool", hard, err)
+	}
 	for name, hdr := range map[string]*tar.Header{
-		"escaping file": {Name: "../evil", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
-		"escaping link": {Name: "D-1/link", Typeflag: tar.TypeSymlink, Linkname: "../../../etc/passwd"},
+		"escaping file":      {Name: "../evil", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		"escaping link":      {Name: "D-1/link", Typeflag: tar.TypeSymlink, Linkname: "../../../etc/passwd"},
+		"escaping hard link": {Name: "D-1/hard", Typeflag: tar.TypeLink, Linkname: "../../../etc/passwd"},
+		"hard link to none":  {Name: "D-1/hard", Typeflag: tar.TypeLink, Linkname: "D-1/none"},
 	} {
 		bad := tarWith("bad.tar.gz", hdr)
 		if err := extract(bad, filepath.Join(dir, "Bad@1")); err == nil {
@@ -604,6 +629,14 @@ func TestExtractArchiveFormats(t *testing.T) {
 		&tar.Header{Name: "D-1/y", Typeflag: tar.TypeSymlink, Linkname: "x/../.."})
 	if err := extract(chain, filepath.Join(dir, "Chain@1")); err == nil {
 		t.Error("chained links: extracted")
+	}
+	// A hard link to a symbolic link is refused when, from the hard link's
+	// place, the link leads outside the tree.
+	moved := tarWith("moved.tar.gz",
+		&tar.Header{Name: "D-1/sub/up", Typeflag: tar.TypeSymlink, Linkname: ".."},
+		&tar.Header{Name: "up", Typeflag: tar.TypeLink, Linkname: "D-1/sub/up"})
+	if err := extract(moved, filepath.Join(dir, "Moved@1")); err == nil {
+		t.Error("hard link to a link leading outside: extracted")
 	}
 	if err := extract(filepath.Join(dir, "missing.tar.gz"), filepath.Join(dir, "Missing@1")); err == nil {
 		t.Error("extracted a missing archive")

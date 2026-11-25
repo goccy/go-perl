@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // xsNeutralizePPPort overwrites every bundled ppport.h in the staged tree
@@ -372,6 +373,11 @@ func copyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		modTime := info.ModTime()
 		if d.Type()&fs.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {
@@ -384,17 +390,26 @@ func copyTree(src, dst string) error {
 			if st.IsDir() {
 				return copyTree(resolved, target)
 			}
-			path = resolved
+			path, modTime = resolved, st.ModTime()
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
 		mode := fs.FileMode(0o644)
-		if err == nil && info.Mode()&0o100 != 0 {
+		if info.Mode()&0o100 != 0 {
 			mode = 0o755
 		}
-		return os.WriteFile(target, data, mode)
+		if err := os.WriteFile(target, data, mode); err != nil {
+			return err
+		}
+		return keepModTime(target, modTime)
 	})
+}
+
+// keepModTime gives the copy at path the modification time of the file it
+// copies, as tar extraction and ExtUtils::Install do: a build's make
+// compares the times of a distribution's files.
+func keepModTime(path string, modTime time.Time) error {
+	return os.Chtimes(path, time.Time{}, modTime)
 }
