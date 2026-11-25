@@ -13,6 +13,9 @@ func TestLibFilesMergesTrees(t *testing.T) {
 	writeFile(t, filepath.Join(b, "Plack", "Util.pm"), "from b")
 	writeFile(t, filepath.Join(b, "Plack", "Request.pm"), "package Plack::Request;")
 	writeFile(t, filepath.Join(b, "auto", "share", "dist", "X", "data.txt"), "shared")
+	// MakeMaker's blib directory markers, which no installed tree has.
+	writeFile(t, filepath.Join(a, "Plack", ".exists"), "")
+	writeFile(t, filepath.Join(b, "auto", "Plack", "Request", ".exists"), "")
 	files, err := LibFiles([]string{a, filepath.Join(t.TempDir(), "missing"), b})
 	if err != nil {
 		t.Fatal(err)

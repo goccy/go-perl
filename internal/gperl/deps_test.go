@@ -714,6 +714,44 @@ func TestDistributionLibrariesAreNotModules(t *testing.T) {
 	})
 }
 
+// Two modules whose file names differ only in case both reach a binary.
+func TestBuildCarriesNamesDifferingInCase(t *testing.T) {
+	requireToolchain(t)
+	probe := t.TempDir()
+	if err := os.WriteFile(filepath.Join(probe, "a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(probe, "A")); err == nil {
+		t.Skip("the filesystem does not tell names apart by case, so the distribution unpacks with one of the two files")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	startMirror(t, mirrorDist{pathname: "C/CA/CASE/Case-Name-0.01.tar.gz", module: "Case::Name", version: "0.01", files: map[string]string{
+		"Makefile.PL":      "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Case::Name', VERSION => '0.01');\n",
+		"lib/Case/Name.pm": "package Case::Name;\nour $VERSION = '0.01';\nsub v { 1 }\n1;\n",
+		"lib/Case/NAME.pm": "package Case::NAME;\nsub v { 2 }\n1;\n",
+	}})
+	dir, err := tidyProject(t, "requires 'Case::Name';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use Case::Name;\nuse Case::NAME;\nprint Case::Name::v(), Case::NAME::v(), qq{\\n};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	out := filepath.Join(t.TempDir(), "app")
+	if err := gperl.Build(script, out); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	cmd := exec.Command(out)
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+	if got, err := cmd.CombinedOutput(); err != nil || string(got) != "12\n" {
+		t.Fatalf("binary printed %q (%v), want %q", got, err, "12\n")
+	}
+}
+
 // The configure step of a distribution loads the native module of one it
 // depends on, and finds what that one installed to the archlib's auto/
 // directory, as under cpanm.

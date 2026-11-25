@@ -20,7 +20,10 @@ func LibFiles(dirs []string) (map[string]string, error) {
 				}
 				return err
 			}
-			if d.IsDir() {
+			// .exists is MakeMaker's make timestamp of a blib directory
+			// (MM_Any.pm blibdirs_target), which ExtUtils::Install does
+			// not install (Install.pm:737).
+			if d.IsDir() || d.Name() == ".exists" {
 				return nil
 			}
 			rel, err := filepath.Rel(dir, p)
