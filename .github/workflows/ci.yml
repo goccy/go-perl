@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify upstream-sourced files (release attestation)
         run: make verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   # Tests run on every architecture the native XS loading supports:
   # linux/amd64, linux/arm64, and darwin/arm64. The runners ship perl,

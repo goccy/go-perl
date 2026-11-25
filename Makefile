@@ -29,7 +29,8 @@ download:
 
 ## verify: confirm each upstream-sourced file carries a valid GitHub artifact
 ## attestation signed by the upstream release.yml workflow. Each bundle is
-## fetched anonymously from the public attestation API and verified offline via
+## fetched from the public attestation API, with GITHUB_TOKEN when it is set
+## and anonymously otherwise, and verified offline via
 ## `gh attestation verify --bundle`. No GH access token is required.
 verify:
 	@set -eu; \
@@ -40,6 +41,7 @@ verify:
 	  digest=$$(shasum -a 256 $$f | awk '{print $$1}'); \
 	  echo "==> fetching attestation bundle for $$f (sha256:$$digest)"; \
 	  curl -fsSL --proto '=https' --tlsv1.2 \
+	    $${GITHUB_TOKEN:+-H "Authorization: Bearer $$GITHUB_TOKEN"} \
 	    "$(ATTESTATION_API)/sha256:$$digest" \
 	    | jq -c '.attestations[].bundle' > $$bundle; \
 	  echo "==> verifying $$f"; \
