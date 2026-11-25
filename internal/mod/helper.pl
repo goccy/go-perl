@@ -9,6 +9,7 @@ use strict;
 use warnings;
 use CPAN::Meta;
 use CPAN::Meta::Requirements;
+use File::Basename ();
 use Module::Metadata;
 use version ();
 
@@ -63,6 +64,9 @@ sub _load_meta {
     return;
 }
 
+# The distributions Module::Build depends on (cpanm's should_use_mm).
+my %use_mm = map { $_ => 1 } qw(version ExtUtils-ParseXS ExtUtils-Install ExtUtils-Manifest);
+
 # meta($dir): what a distribution tree says about itself, as key/value
 # records separated by the key "-":
 #   dynamic_config 0|1, static_install 0|1, has_xs 0|1,
@@ -90,12 +94,20 @@ sub meta {
     } else {
         push @out, '-', 'dynamic_config', 1, '-', 'static_install', 0;
     }
+    # As cpanm does, a Build.PL distribution that requires nothing to
+    # configure requires Module::Build, unless it is one Module::Build
+    # itself needs (cpanm configures those with Makefile.PL).
+    my ($name) = File::Basename::basename($dir) =~ /^([^\@]*)/;
+    if (-f "$dir/Build.PL" && !$use_mm{$name}
+        && !($meta && %{ $meta->effective_prereqs->requirements_for('configure', 'requires')->as_string_hash })) {
+        push @out, '-', 'prereq', 'Module::Build', '0.38', 'configure', 'requires';
+    }
     my $provides = $meta && $meta->provides;
     if ($provides && %$provides) {
         push @out, '-', 'provides', $_, (defined $provides->{$_}{version} ? "$provides->{$_}{version}" : 'undef')
             for sort keys %$provides;
     } elsif (-d "$dir/lib") {
-        my $found = Module::Metadata->package_versions_from_directory("$dir/lib");
+        my $found = _lib_packages($dir);
         my %no_index;
         if ($meta && (my $ni = $meta->no_index)) {
             $no_index{$_} = 1 for @{ $ni->{package} || [] };
@@ -107,6 +119,34 @@ sub meta {
         }
     }
     return @out;
+}
+
+# _lib_packages($dir): the packages under $dir/lib and their versions, read
+# as the distribution's own build tools read them: from its directory, so a
+# version line that loads a module finds it in lib/, and with a version line
+# that cannot be evaluated giving an undefined version, as cpanm records it.
+sub _lib_packages {
+    my ($dir) = @_;
+    my $evaluate = Module::Metadata->can('_evaluate_version_line')
+        or die "Module::Metadata $Module::Metadata::VERSION has no _evaluate_version_line\n";
+    require Cwd;
+    my $cwd = Cwd::getcwd() // die "getcwd: $!\n";
+    chdir $dir or die "chdir $dir: $!\n";
+    my $found;
+    my $ok = eval {
+        local *Module::Metadata::_evaluate_version_line = sub {
+            my @args = @_;
+            my $v = eval { $evaluate->(@args) };
+            warn $@ if $@;
+            return $v;
+        };
+        $found = Module::Metadata->package_versions_from_directory("$dir/lib");
+        1;
+    };
+    my $err = $@;
+    chdir $cwd or die "chdir $cwd: $!\n";
+    die $err unless $ok;
+    return $found;
 }
 
 package GperlMod::DSL;

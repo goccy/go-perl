@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	perl "github.com/goccy/go-perl"
 )
 
 // sharedHelper is one interpreter for the whole test binary.
@@ -166,4 +168,82 @@ func TestHelperMeta(t *testing.T) {
 	if want := []Package{{"Bare::XS", "0.03"}}; !reflect.DeepEqual(m.Provides, want) {
 		t.Errorf("bare tree Provides = %v", m.Provides)
 	}
+
+	// A Build.PL distribution that requires nothing to configure requires
+	// Module::Build, as under cpanm.
+	moduleBuild := []Prereq{{"Module::Build", "0.38", "configure", "requires"}}
+	for _, c := range []struct {
+		name  string
+		dir   string // the tree's directory name
+		files map[string]string
+		want  []Prereq
+	}{
+		{name: "Build.PL, no configure requires", dir: "MB-Dist@1.0", want: moduleBuild, files: map[string]string{
+			"Build.PL":  "",
+			"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},"name":"MB-Dist","version":"1.0"}`,
+		}},
+		{name: "Build.PL, no META", dir: "MB-Dist@1.0", want: moduleBuild, files: map[string]string{"Build.PL": ""}},
+		{name: "Build.PL, configure requires", dir: "MB-Dist@1.0", want: []Prereq{{"ExtUtils::MakeMaker", "0", "configure", "requires"}}, files: map[string]string{
+			"Build.PL":  "",
+			"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},"name":"MB-Dist","version":"1.0","prereqs":{"configure":{"requires":{"ExtUtils::MakeMaker":"0"}}}}`,
+		}},
+		{name: "no Build.PL", dir: "MM-Dist@1.0", files: map[string]string{"Makefile.PL": ""}},
+		{name: "a distribution Module::Build needs", dir: "ExtUtils-ParseXS@3.51", files: map[string]string{"Build.PL": ""}},
+	} {
+		tree := filepath.Join(t.TempDir(), c.dir)
+		for name, content := range c.files {
+			writeFile(t, filepath.Join(tree, name), content)
+		}
+		m, err := sharedHelper.Meta(tree)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(m.Prereqs, c.want) {
+			t.Errorf("%s: Prereqs = %v, want %v", c.name, m.Prereqs, c.want)
+		}
+	}
+
+	// Scanning lib/: a version line that cannot be evaluated gives an
+	// undefined version (this relies on Module::Metadata's private
+	// _evaluate_version_line), and one that loads a module finds it in the
+	// distribution's lib/.
+	versions := t.TempDir()
+	writeFile(t, filepath.Join(versions, "lib", "Good.pm"), "package Good;\nour $VERSION = '1.0';\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "Bad.pm"), "package Bad;\n$Bad::VERSION = '2.0'; use No::Such::Module;\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "Dep.pm"), "package Dep;\nour $VERSION = '3.0';\n1;\n")
+	writeFile(t, filepath.Join(versions, "lib", "User.pm"), "package User;\nuse Dep; $User::VERSION = $Dep::VERSION;\n1;\n")
+	cwd := helperCwd(t)
+	m, err = sharedHelper.Meta(versions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []Package{{"Bad", "undef"}, {"Dep", "3.0"}, {"Good", "1.0"}, {"User", "3.0"}}; !reflect.DeepEqual(m.Provides, want) {
+		t.Errorf("Provides with version lines that fail = %v, want %v", m.Provides, want)
+	}
+	if got := helperCwd(t); got != cwd {
+		t.Errorf("helper working directory after Meta = %q, want %q", got, cwd)
+	}
+}
+
+// helperCwd returns the helper interpreter's working directory.
+func helperCwd(t *testing.T) string {
+	t.Helper()
+	sharedHelper.start.Do(sharedHelper.boot)
+	if sharedHelper.err != nil {
+		t.Fatal(sharedHelper.err)
+	}
+	sharedHelper.mu.Lock()
+	defer sharedHelper.mu.Unlock()
+	r, err := sharedHelper.p.Eval(t.Context(), "require Cwd; Cwd::getcwd()")
+	if err == nil && r.Error != nil {
+		err = r.Error
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := perl.As[perl.ScalarValue](r.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.String()
 }

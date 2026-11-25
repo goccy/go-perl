@@ -10,12 +10,13 @@ import (
 // What was written to a pipe or sent to a socket of this machine is there
 // when the write has returned: a read, a receive or an accept that does not
 // wait finds it, and select with no time to wait reports it — every time,
-// however busy the machine is. (A datagram is there at once on Linux; the
-// loopback of other systems delivers it after the send has returned, and a
-// receive without waiting may be too early there for perl as well.)
+// however busy the machine is. (A datagram and a connection are there at
+// once on Linux; the loopback of other systems delivers them after the send
+// or the connect has returned, and a receive or an accept without waiting
+// may be too early there for perl as well.)
 func TestInputThatIsThereIsFoundWithoutWaiting(t *testing.T) {
 	got := runForkScriptArgs(t, `
-my $datagrams_at_once = shift @ARGV;
+my $loopback_at_once = shift @ARGV;
 use IO::Socket::INET;
 use Socket;
 my $rounds = 3000;
@@ -29,7 +30,7 @@ $to->blocking(0);
 my %seen;
 for my $round (1 .. $rounds) {
     defined $from->send("datagram $round") or die "send: $!";
-    settle($to) unless $datagrams_at_once;
+    settle($to) unless $loopback_at_once;
     my $sender = $to->recv(my $data, 100);
     $seen{defined $sender ? ($data eq "datagram $round" ? "received" : "received '$data'") : $!{EAGAIN} ? "EAGAIN" : "error $!"}++;
     if (!defined $sender) { settle($to); $to->recv($data, 100) }
@@ -72,6 +73,7 @@ $listener->blocking(0);
 %seen = ();
 for my $round (1 .. 300) {
     my $client = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $listener->sockport) or die "connect: $!";
+    settle($listener) unless $loopback_at_once;
     my $conn = $listener->accept;
     $seen{$conn ? "accepted" : $!{EAGAIN} ? "EAGAIN" : "error $!"}++;
     if (!$conn) { settle($listener); $listener->accept }

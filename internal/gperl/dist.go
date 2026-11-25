@@ -13,7 +13,7 @@ package gperl
 //	gperl/MYMETA.json              the prereqs configure settled on
 //	gperl/abi<N>/                  the Go package of its native modules:
 //	  go.mod, xs.go                  links the .a files, exports the entry tables
-//	  <goos>_<goarch>/auto/...       <Name>.a, <Name>.so, <Name>.ldflags
+//	  <goos>_<goarch>/auto/...       <Name>.a, <Name>.so, <Name>.ldflags, <Name>.exports
 
 import (
 	"bytes"
@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -109,6 +110,9 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 		}
 	}
 
+	// The perl of a build loads the native modules built for target when
+	// target is the one gperl run loads (hostDeps).
+	loadable := target == nativeTarget(mod.Target())
 	done := make([]bool, len(nodes))
 	built := 0
 	for remaining := len(nodes); remaining > 0; {
@@ -151,14 +155,37 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 				defer wg.Done()
 				defer func() { <-slots }()
 				// Everything the distribution may load while it builds:
-				// the trees of all the distributions before it.
-				var inc []string
+				// the trees of all the distributions before it, then the
+				// architecture directories of those it can load, as
+				// projectDeps.inc orders them. Its native modules take
+				// symbols from those of the distributions it depends on,
+				// directly or not (providers).
+				needs := make([]bool, len(nodes))
+				var walk func(int)
+				walk = func(j int) {
+					for _, dep := range nodes[j].deps {
+						if !needs[dep] {
+							needs[dep] = true
+							walk(dep)
+						}
+					}
+				}
+				walk(i)
+				var inc, natives, providers []string
 				for j := range nodes {
 					if done[j] {
 						inc = append(inc, mod.LibDir(nodes[j].tree))
+						if native := mod.TargetDir(nodes[j].tree, target); dirExists(filepath.Join(native, "auto")) {
+							if loadable {
+								natives = append(natives, native)
+							}
+							if needs[j] {
+								providers = append(providers, native)
+							}
+						}
 					}
 				}
-				if err := buildDist(ctx, m, nodes[i].tree, target, inc); err != nil {
+				if err := buildDist(ctx, m, nodes[i].tree, target, append(inc, natives...), providers); err != nil {
 					mu.Lock()
 					if first == nil {
 						first = fmt.Errorf("build %s: %w", nodes[i].dist.Name, err)
@@ -199,8 +226,9 @@ func sdkDirIn(m *mod.Manager) (string, error) {
 }
 
 // buildDist makes one distribution ready on target. inc lists the module
-// directories its build may load from.
-func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []string) (err error) {
+// directories its build may load from; providers the target directories
+// whose native modules its own may take symbols from.
+func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc, providers []string) (err error) {
 	meta, err := m.Meta(tree)
 	if err != nil {
 		return err
@@ -272,7 +300,21 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 		"PERL_MM_USE_DEFAULT=1",
 		"PERL5LIB="+strings.Join(inc, string(os.PathListSeparator)),
 		ldSDKEnv+"="+sdkDir,
+		ldNativeEnv+"="+strings.Join(providers, string(os.PathListSeparator)),
 		"PATH="+filepath.Dir(perlShim)+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	// As under cpanm, the build finds the modules a distribution carries
+	// in its own directory (inc/) unless the user says otherwise.
+	if _, ok := os.LookupEnv("PERL_USE_UNSAFE_INC"); !ok {
+		env = append(env, "PERL_USE_UNSAFE_INC=1")
+	}
+	// As under cpanm, the configure step is told a CPAN client runs it, so
+	// Module::AutoInstall leaves the prereqs to the client.
+	pid := strconv.Itoa(os.Getpid())
+	configureEnv := append(env[:len(env):len(env)],
+		"PERL5_CPAN_IS_RUNNING="+pid,
+		"PERL5_CPANPLUS_IS_RUNNING="+pid,
+		"PERL5_CPANM_IS_RUNNING="+pid,
 	)
 
 	var log bytes.Buffer
@@ -280,7 +322,7 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 	// and environment are the process's), and distributions build side by
 	// side: each perl of a build is a process of its own, as the ones make
 	// starts are.
-	perlRun := func(args ...string) error {
+	perlRun := func(env []string, args ...string) error {
 		cmd := exec.CommandContext(ctx, perlShim, args...)
 		cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = src, env, &log, &log
 		if err := cmd.Run(); err != nil {
@@ -288,13 +330,23 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 		}
 		return nil
 	}
+	// As under cpanm, Build.PL has configured the distribution when it exits
+	// 0 and writes Build; otherwise Makefile.PL, if there is one, does.
+	var buildPLErr error
+	useBuildPL := fileExists(filepath.Join(src, "Build.PL"))
+	if useBuildPL {
+		if buildPLErr = perlRun(configureEnv, "Build.PL"); buildPLErr == nil && !fileExists(filepath.Join(src, "Build")) {
+			buildPLErr = errors.New("perl Build.PL wrote no Build")
+		}
+		useBuildPL = buildPLErr == nil || !fileExists(filepath.Join(src, "Makefile.PL"))
+	}
 	switch {
-	case fileExists(filepath.Join(src, "Build.PL")):
-		if err = perlRun("Build.PL"); err == nil {
-			err = perlRun("Build")
+	case useBuildPL:
+		if err = buildPLErr; err == nil {
+			err = perlRun(env, "Build")
 		}
 	case fileExists(filepath.Join(src, "Makefile.PL")):
-		if err = perlRun("Makefile.PL", "PERL="+perlShim, "FULLPERL="+perlShim); err == nil {
+		if err = perlRun(configureEnv, "Makefile.PL", "PERL="+perlShim, "FULLPERL="+perlShim); err == nil {
 			if err = xsRedirectMakefile(filepath.Join(src, "Makefile"), sdkDir); err == nil {
 				mkPath, lookErr := exec.LookPath("make")
 				if lookErr != nil {
@@ -306,6 +358,9 @@ func buildDist(ctx context.Context, m *mod.Manager, tree, target string, inc []s
 					err = fmt.Errorf("make: %w", err)
 				}
 			}
+		}
+		if err != nil && buildPLErr != nil {
+			err = errors.Join(buildPLErr, err)
 		}
 	default:
 		err = errors.New("no Build.PL or Makefile.PL")
@@ -356,7 +411,7 @@ func copyDistSource(tree, dst string) error {
 	return nil
 }
 
-// copyFileMode copies one file, keeping its mode.
+// copyFileMode copies one file, keeping its mode and modification time.
 func copyFileMode(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -366,7 +421,10 @@ func copyFileMode(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return keepModTime(dst, info.ModTime())
 }
 
 // tail returns the last n lines of s.
@@ -399,10 +457,13 @@ func harvest(src, tree, target string) error {
 		}
 	}
 
-	// Native modules: blib/arch/auto/<Module/Path>/<Name>.{a,so,ldflags}.
-	auto := filepath.Join(blib, "arch", "auto")
+	// Native modules: blib/arch/auto/<Module/Path>/<Name>.{a,so,ldflags,exports}.
+	// The rest of blib/arch (modules and headers installed to the archlib,
+	// which perl searches as it searches the lib) joins the module tree.
+	arch := filepath.Join(blib, "arch")
+	auto := filepath.Join(arch, "auto")
 	native := false
-	err := filepath.WalkDir(auto, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(arch, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return fs.SkipAll
@@ -416,23 +477,44 @@ func harvest(src, tree, target string) error {
 		if err != nil {
 			return err
 		}
-		switch filepath.Ext(path) {
-		case ".so":
-			if !fileExists(strings.TrimSuffix(path, ".so") + ".a") {
-				return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
+		if filepath.IsLocal(rel) {
+			switch filepath.Ext(path) {
+			case ".so":
+				// gperl's linker makes a module's archive beside it; a
+				// library without one is the distribution's own (ld.go),
+				// unless perl boots it as a module.
+				if !fileExists(strings.TrimSuffix(path, ".so") + ".a") {
+					boot, err := exportsSymbol(target, path, "boot_"+autoModule(filepath.Dir(rel)))
+					if err != nil {
+						return err
+					}
+					if boot {
+						return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker), so it cannot be linked statically", rel)
+					}
+				}
+				fallthrough
+			case ".a", ".ldflags", ".exports":
+				native = true
+				dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
+				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+					return err
+				}
+				return copyFileMode(path, dst)
+			case ".bundle", ".dylib", ".dll":
+				return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker)", rel)
 			}
-			native = true
-		case ".a", ".ldflags":
-		case ".bundle", ".dylib", ".dll":
-			return fmt.Errorf("%s was not linked by gperl (the distribution overrides the linker)", rel)
-		default:
-			return nil
 		}
-		dst := filepath.Join(mod.TargetDir(tree, target), "auto", rel)
+		archRel, err := filepath.Rel(arch, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(build, "lib", archRel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		return copyFileMode(path, dst)
+		// As blib/lib is copied: writable, so a build for another
+		// target can write it again.
+		return copyTree(path, dst)
 	})
 	if err != nil {
 		return err
@@ -483,16 +565,19 @@ func nativeModules(tree string) ([]nativeModule, error) {
 				}
 				return err
 			}
-			if d.IsDir() || filepath.Ext(path) != ".a" {
+			// A module is what gperl's linker linked, which writes its
+			// .ldflags beside its .a (ld.go); an archive the distribution
+			// made itself is not one.
+			if d.IsDir() || filepath.Ext(path) != ".ldflags" {
 				return nil
 			}
-			rel, err := filepath.Rel(root, path)
+			rel, err := filepath.Rel(root, strings.TrimSuffix(path, ".ldflags")+".a")
 			if err != nil {
 				return err
 			}
 			n := nativeModule{target: t.Name(), archive: filepath.ToSlash(rel)}
-			flags, err := os.ReadFile(strings.TrimSuffix(path, ".a") + ".ldflags")
-			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			flags, err := os.ReadFile(path)
+			if err != nil {
 				return err
 			}
 			n.libs = strings.Fields(string(flags))
@@ -541,6 +626,13 @@ func writeBridge(tree string) error {
 			case strings.HasPrefix(lib, "-l"), strings.HasPrefix(lib, "-L"), lib == "-pthread":
 				b.WriteString(" " + lib)
 			}
+		}
+		// Then what perl itself links with, which a module takes for
+		// granted, after the module that uses it (as perl's static link
+		// puts %Config{perllibs} last).
+		goos, _, _ := strings.Cut(n.target, "_")
+		for _, lib := range strings.Fields(toolchainStatic(goos, "", "")["perllibs"]) {
+			b.WriteString(" " + lib)
 		}
 		b.WriteString("\n")
 		packages[n.perlPackage()] = true

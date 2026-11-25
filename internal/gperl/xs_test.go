@@ -62,7 +62,7 @@ func TestNativeModuleLoadsFromInc(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := withDeps(func(m *mod.Manager) error {
-		return buildDist(context.Background(), m, tree, mod.Target(), nil)
+		return buildDist(context.Background(), m, tree, mod.Target(), nil, nil)
 	}); err != nil {
 		t.Fatalf("buildDist: %v", err)
 	}

@@ -21,7 +21,7 @@ const crossEnv = "GPERL_TEST_CROSS"
 type crossCase struct {
 	name     string
 	goarch   string
-	cgo      string
+	native   string // GPERLNATIVE
 	triple   string // Zig's target for CC; none builds without a C compiler
 	cpanfile string
 	script   string
@@ -31,10 +31,11 @@ type crossCase struct {
 }
 
 // gperl build makes binaries for linux/amd64 and linux/arm64 from any host:
-// with cgo the native modules are compiled by Zig for the target and
-// linked in (into a fully static binary on musl), without cgo they are
+// the native modules are compiled by Zig for the target and linked in
+// (into a fully static binary on musl), with GPERLNATIVE=load they are
 // carried as files, and a project without native modules needs no C
-// compiler at all. A binary for the platform the test runs on is run.
+// compiler for another platform. Go's own variables in the environment
+// play no part. A binary for the platform the test runs on is run.
 func TestCrossBuild(t *testing.T) {
 	requireToolchain(t)
 	zig := gperl.ManagedBin("zig")
@@ -57,17 +58,17 @@ func TestCrossBuild(t *testing.T) {
 	var cases []crossCase
 	for _, arch := range []struct{ goarch, cpu string }{{"amd64", "x86_64"}, {"arm64", "aarch64"}} {
 		cases = append(cases,
-			crossCase{name: "linux_" + arch.goarch + "_musl_static", goarch: arch.goarch, cgo: "1",
+			crossCase{name: "linux_" + arch.goarch + "_musl_static", goarch: arch.goarch,
 				triple: arch.cpu + "-linux-musl", cpanfile: testCPANfile, script: testScript, output: testOutput,
 				static: true, linked: true},
-			crossCase{name: "linux_" + arch.goarch + "_gnu", goarch: arch.goarch, cgo: "1",
+			crossCase{name: "linux_" + arch.goarch + "_gnu", goarch: arch.goarch, native: "link",
 				triple: arch.cpu + "-linux-gnu", cpanfile: testCPANfile, script: testScript, output: testOutput,
 				linked: true},
 			// Without cgo the binary loads the C library through the
 			// dynamic loader (purego), so it has a program interpreter.
-			crossCase{name: "linux_" + arch.goarch + "_nocgo", goarch: arch.goarch, cgo: "0",
+			crossCase{name: "linux_" + arch.goarch + "_load", goarch: arch.goarch, native: "load",
 				triple: arch.cpu + "-linux-gnu", cpanfile: testCPANfile, script: testScript, output: testOutput},
-			crossCase{name: "linux_" + arch.goarch + "_pure_nocgo", goarch: arch.goarch, cgo: "0",
+			crossCase{name: "linux_" + arch.goarch + "_pure", goarch: arch.goarch,
 				cpanfile: pureCPANfile, script: pureScript, output: "built on static\n"},
 		)
 	}
@@ -79,15 +80,22 @@ func TestCrossBuild(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t.Setenv("GOOS", "linux")
-			t.Setenv("GOARCH", c.goarch)
-			t.Setenv("CGO_ENABLED", c.cgo)
+			t.Setenv("GPERLOS", "linux")
+			t.Setenv("GPERLARCH", c.goarch)
+			t.Setenv("GPERLNATIVE", c.native)
+			// Without native modules a build for this machine has cgo
+			// with the C compiler on PATH (requireToolchain).
+			cgo := "0"
+			if c.linked || (c.native != "load" && runtime.GOOS == "linux" && runtime.GOARCH == c.goarch) {
+				cgo = "1"
+			}
+			setGoEnvOtherThan(t, cgo)
 			if c.triple != "" {
 				t.Setenv("CC", zig+" cc -target "+c.triple)
 				t.Setenv("AR", zig+" ar")
 			} else {
-				// No C compiler of any kind: not the environment's, not an
-				// installed one.
+				// No C compiler but the one on PATH: not the environment's,
+				// not an installed one.
 				t.Setenv("CC", "")
 				t.Setenv("AR", "")
 				t.Setenv("GPERLTOOLCHAIN", t.TempDir())
@@ -97,6 +105,7 @@ func TestCrossBuild(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			inspectCrossBinary(t, out, c)
+			wantBuildSettings(t, out, "linux", c.goarch, cgo)
 			// A C library's native modules have a directory of their own.
 			if c.triple != "" {
 				native := "linux_" + c.goarch
@@ -120,6 +129,36 @@ func TestCrossBuild(t *testing.T) {
 			}
 		})
 	}
+
+	// Native modules built for another platform before, and no C compiler
+	// for it now: linking them in fails with what is missing.
+	t.Run("link_without_cross_compiler", func(t *testing.T) {
+		goarch, cpu := "arm64", "aarch64"
+		if runtime.GOOS == "linux" && runtime.GOARCH == goarch {
+			goarch, cpu = "amd64", "x86_64"
+		}
+		dir := t.TempDir()
+		for name, content := range map[string]string{"cpanfile": testCPANfile, "app.pl": testScript} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("GPERLOS", "linux")
+		t.Setenv("GPERLARCH", goarch)
+		t.Setenv("GPERLNATIVE", "link")
+		t.Setenv("CC", zig+" cc -target "+cpu+"-linux-gnu")
+		t.Setenv("AR", zig+" ar")
+		if err := gperl.ModDownload(dir); err != nil {
+			t.Fatalf("ModDownload: %v", err)
+		}
+		t.Setenv("CC", "")
+		t.Setenv("AR", "")
+		t.Setenv("GPERLTOOLCHAIN", t.TempDir())
+		err := gperl.Build(filepath.Join(dir, "app.pl"), filepath.Join(t.TempDir(), "app"))
+		if err == nil || !strings.Contains(err.Error(), "link the native modules in: ") || !strings.Contains(err.Error(), "needs a C cross compiler") {
+			t.Fatalf("Build = %v, want the missing C cross compiler", err)
+		}
+	})
 }
 
 // inspectCrossBinary verifies the binary at path is an ELF executable for

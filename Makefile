@@ -1,5 +1,5 @@
 PERL_WASM_REPO     ?= goccy/perl-wasm
-PERL_WASM_VERSION  ?= v0.3.0
+PERL_WASM_VERSION  ?= v0.3.1
 # perl-wasm emits its release attestations from release.yml (the v* tag
 # workflow), NOT build.yml — releasing lives only in release.yml there.
 PERL_WASM_WORKFLOW ?= goccy/perl-wasm/.github/workflows/release.yml
@@ -29,7 +29,8 @@ download:
 
 ## verify: confirm each upstream-sourced file carries a valid GitHub artifact
 ## attestation signed by the upstream release.yml workflow. Each bundle is
-## fetched anonymously from the public attestation API and verified offline via
+## fetched from the public attestation API, with GITHUB_TOKEN when it is set
+## and anonymously otherwise, and verified offline via
 ## `gh attestation verify --bundle`. No GH access token is required.
 verify:
 	@set -eu; \
@@ -40,6 +41,7 @@ verify:
 	  digest=$$(shasum -a 256 $$f | awk '{print $$1}'); \
 	  echo "==> fetching attestation bundle for $$f (sha256:$$digest)"; \
 	  curl -fsSL --proto '=https' --tlsv1.2 \
+	    $${GITHUB_TOKEN:+-H "Authorization: Bearer $$GITHUB_TOKEN"} \
 	    "$(ATTESTATION_API)/sha256:$$digest" \
 	    | jq -c '.attestations[].bundle' > $$bundle; \
 	  echo "==> verifying $$f"; \
@@ -55,8 +57,9 @@ test:
 
 ## test-cross: build a project with native (XS) dependencies for linux/amd64
 ## and linux/arm64 with gperl build — cgo with the modules linked in (glibc,
-## and fully static on musl), without cgo, and a pure-Perl project with no
-## C compiler — checking each binary and running the one for this machine.
+## and fully static on musl), loaded at run time, and a pure-Perl project
+## with no cross compiler — checking each binary and running the one for
+## this machine.
 ## The pinned Go and Zig come from `gperl install toolchain`, and the
 ## dependency tests run again on them (Zig building for this machine).
 test-cross:

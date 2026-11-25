@@ -12,24 +12,26 @@ import (
 // except keep, private to the object: each gets a name no other object
 // has (its own name plus suffix), so objects that define the same names
 // link into one binary. References inside the object go by symbol index
-// and are unaffected; undefined symbols (what the object needs from libc
-// and friends) keep their names.
+// and are unaffected; an undefined symbol (what the object needs from libc
+// and friends) keeps its name, unless imports gives it another. It returns
+// the names of the renamed symbols of default visibility: what the module's
+// shared object exports.
 //
 // The file is edited in place: the renamed symbols point into a new string
 // table appended to the file, and the string table's section header is
 // redirected to it. Nothing else moves.
-func privatizeELF(path, keep, suffix string) (err error) {
+func privatizeELF(path, keep, suffix string, imports map[string]string) (exports []string, err error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { err = errors.Join(err, f.Close()) }()
 	ef, err := elf.NewFile(f)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if ef.Class != elf.ELFCLASS64 || ef.Type != elf.ET_REL {
-		return fmt.Errorf("%s: want a 64-bit relocatable ELF object, got %s %s", path, ef.Class, ef.Type)
+		return nil, fmt.Errorf("%s: want a 64-bit relocatable ELF object, got %s %s", path, ef.Class, ef.Type)
 	}
 	var symtab *elf.Section
 	for _, s := range ef.Sections {
@@ -38,19 +40,19 @@ func privatizeELF(path, keep, suffix string) (err error) {
 		}
 	}
 	if symtab == nil {
-		return fmt.Errorf("%s: no symbol table", path)
+		return nil, fmt.Errorf("%s: no symbol table", path)
 	}
 	if int(symtab.Link) >= len(ef.Sections) {
-		return fmt.Errorf("%s: symbol table names a string table that does not exist", path)
+		return nil, fmt.Errorf("%s: symbol table names a string table that does not exist", path)
 	}
 	strtab := ef.Sections[symtab.Link]
 	names, err := strtab.Data()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	syms, err := symtab.Data()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Elf64_Sym: st_name u32, st_info u8, st_other u8, st_shndx u16,
 	// st_value u64, st_size u64.
@@ -61,39 +63,49 @@ func privatizeELF(path, keep, suffix string) (err error) {
 		nameOff := order.Uint32(syms[off:])
 		bind := elf.SymBind(syms[off+4] >> 4)
 		shndx := elf.SectionIndex(order.Uint16(syms[off+6:]))
-		if (bind != elf.STB_GLOBAL && bind != elf.STB_WEAK) || shndx == elf.SHN_UNDEF || int(nameOff) >= len(names) {
+		if (bind != elf.STB_GLOBAL && bind != elf.STB_WEAK) || int(nameOff) >= len(names) {
 			continue
 		}
 		end := bytes.IndexByte(names[nameOff:], 0)
 		if end < 0 {
-			return fmt.Errorf("%s: unterminated symbol name", path)
+			return nil, fmt.Errorf("%s: unterminated symbol name", path)
 		}
 		name := string(names[nameOff : int(nameOff)+end])
-		if name == "" || name == keep {
+		newName := imports[name]
+		if shndx != elf.SHN_UNDEF {
+			if name == "" || name == keep {
+				continue
+			}
+			newName = name + suffix
+			if elf.SymVis(syms[off+5]&3) == elf.STV_DEFAULT {
+				exports = append(exports, name)
+			}
+		}
+		if newName == "" {
 			continue
 		}
 		order.PutUint32(syms[off:], uint32(len(names)))
-		names = append(append(names, name+suffix...), 0)
+		names = append(append(names, newName...), 0)
 		renamed++
 	}
 	if renamed == 0 {
-		return nil
+		return exports, nil
 	}
 	if _, err := f.WriteAt(syms, int64(symtab.Offset)); err != nil {
-		return err
+		return nil, err
 	}
 	end, err := f.Seek(0, 2)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := f.WriteAt(names, end); err != nil {
-		return err
+		return nil, err
 	}
 	// Redirect the string table's section header: Elf64_Shdr has sh_offset
 	// at byte 24 and sh_size at byte 32.
 	var ehdr [64]byte
 	if _, err := f.ReadAt(ehdr[:], 0); err != nil {
-		return err
+		return nil, err
 	}
 	shoff := int64(order.Uint64(ehdr[0x28:]))
 	shentsize := int64(order.Uint16(ehdr[0x3a:]))
@@ -102,5 +114,5 @@ func privatizeELF(path, keep, suffix string) (err error) {
 	order.PutUint64(buf[0:], uint64(end))
 	order.PutUint64(buf[8:], uint64(len(names)))
 	_, err = f.WriteAt(buf[:], hdr+24)
-	return err
+	return exports, err
 }

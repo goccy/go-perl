@@ -69,11 +69,12 @@ func (d *projectDeps) inc() []string {
 }
 
 // mergedLib writes lib under the module directory, keyed by the trees it
-// is made of, and returns the directory; one already there is used as it
-// is. The directory is only ever there complete: it is written beside its
-// place and renamed into it.
+// is made of and the gperl that writes it, and returns the directory; one
+// already there is used as it is. The directory is only ever there
+// complete: it is written beside its place and renamed into it.
 func mergedLib(m *mod.Manager, trees []string, lib map[string]string) (string, error) {
 	key := sha256.New()
+	fmt.Fprintf(key, "%s\n", mod.GperlVersion())
 	for _, tree := range trees {
 		fmt.Fprintf(key, "%s\n", tree)
 	}

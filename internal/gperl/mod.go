@@ -41,7 +41,10 @@ func finishSync(m *mod.Manager, projectDir, target string) error {
 // dependencies.
 func ModTidy(projectDir string) error {
 	return withDeps(func(m *mod.Manager) error {
-		target := buildTarget()
+		target, err := buildTarget()
+		if err != nil {
+			return err
+		}
 		if _, err := syncDeps(context.Background(), m, projectDir, target, true); err != nil {
 			return err
 		}
@@ -53,7 +56,13 @@ func ModTidy(projectDir string) error {
 // names; a project without a snapshot is resolved first. In a Go module it
 // also writes go.work.
 func ModDownload(projectDir string) error {
-	return withDeps(func(m *mod.Manager) error { return finishSync(m, projectDir, buildTarget()) })
+	return withDeps(func(m *mod.Manager) error {
+		target, err := buildTarget()
+		if err != nil {
+			return err
+		}
+		return finishSync(m, projectDir, target)
+	})
 }
 
 // Get adds modules to the project's cpanfile — "Module::Name" for the
@@ -62,10 +71,13 @@ func ModDownload(projectDir string) error {
 // go.work.
 func Get(projectDir string, modules ...string) error {
 	return withDeps(func(m *mod.Manager) error {
+		target, err := buildTarget()
+		if err != nil {
+			return err
+		}
 		if _, err := m.Get(context.Background(), projectDir, modules...); err != nil {
 			return err
 		}
-		target := buildTarget()
 		if _, err := syncDeps(context.Background(), m, projectDir, target, true); err != nil {
 			return err
 		}
@@ -78,6 +90,12 @@ func CleanModCache() error {
 	return withDeps(func(m *mod.Manager) error { return m.Clean() })
 }
 
-// buildTarget is the platform a build is for (mod.BuildTarget), as its
+// buildTarget is the platform a build is for (readBuildConfig), as its
 // native modules are built (nativeTarget).
-func buildTarget() string { return nativeTarget(mod.BuildTarget()) }
+func buildTarget() (string, error) {
+	c, err := readBuildConfig()
+	if err != nil {
+		return "", err
+	}
+	return nativeTarget(c.target()), nil
+}

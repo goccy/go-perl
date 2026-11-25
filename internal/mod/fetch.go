@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Fetch makes the distribution at pathname present in the module directory
@@ -128,8 +129,9 @@ type checksumSet struct {
 }
 
 // extract unpacks the archive into dst, dropping the single top-level
-// directory a distribution archive wraps its files in. dst appears only
-// once complete, so concurrent processes never see a partial tree.
+// directory a distribution archive wraps its files in; a symbolic link that
+// leads outside the tree that remains is an error. dst appears only once
+// complete, so concurrent processes never see a partial tree.
 func extract(archive, dst string) (err error) {
 	tmp, err := os.MkdirTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-*")
 	if err != nil {
@@ -149,6 +151,9 @@ func extract(archive, dst string) (err error) {
 		return err
 	} else if len(entries) == 1 && entries[0].IsDir() {
 		root = filepath.Join(tmp, entries[0].Name())
+	}
+	if err := treeLinksInside(root); err != nil {
+		return err
 	}
 	if err := os.Rename(root, dst); err != nil {
 		if _, statErr := os.Stat(dst); statErr == nil {
@@ -170,9 +175,10 @@ func member(name string) (string, error) {
 }
 
 // writeMember writes the file name of the tree rooted at root, with r's
-// content. The root keeps every step inside the tree, symbolic links
-// included.
-func writeMember(root *os.Root, name string, mode os.FileMode, r io.Reader) error {
+// content and the modification time modTime, as tar does (a build's make
+// compares the times). The root keeps every step inside the tree, symbolic
+// links included.
+func writeMember(root *os.Root, name string, mode os.FileMode, modTime time.Time, r io.Reader) error {
 	p, err := member(name)
 	if err != nil {
 		return err
@@ -185,7 +191,31 @@ func writeMember(root *os.Root, name string, mode os.FileMode, r io.Reader) erro
 		return err
 	}
 	_, err = io.Copy(f, r)
-	return errors.Join(err, f.Close())
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	return root.Chtimes(p, time.Time{}, modTime)
+}
+
+// writeHardLink makes name a hard link to the member target written before
+// it, as tar does. A link to itself (tar archives so a file with several
+// links that it is given twice) is the file already written.
+func writeHardLink(root *os.Root, name, target string) error {
+	p, err := member(name)
+	if err != nil {
+		return err
+	}
+	old, err := member(target)
+	if err != nil {
+		return err
+	}
+	if old == p {
+		return nil
+	}
+	if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return root.Link(old, p)
 }
 
 // writeSymlink makes name a symbolic link to link, which must name a path
@@ -196,13 +226,48 @@ func writeSymlink(root *os.Root, name, link string) error {
 	if err != nil {
 		return err
 	}
-	if path.IsAbs(link) || !filepath.IsLocal(filepath.FromSlash(path.Join(path.Dir(name), link))) {
+	if linkLeaves(name, link) {
 		return fmt.Errorf("archive member %s links outside the tree: %s", name, link)
 	}
 	if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	return root.Symlink(link, p)
+}
+
+// linkLeaves reports whether link, the target of the symbolic link name (a
+// slash-separated path below a tree), names a path outside the tree.
+func linkLeaves(name, link string) bool {
+	return path.IsAbs(link) || !filepath.IsLocal(filepath.FromSlash(path.Join(path.Dir(name), link)))
+}
+
+// treeLinksInside fails for a symbolic link of the tree at dir whose target
+// names a path outside the tree, or that linksInside refuses.
+func treeLinksInside(dir string) (err error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	var links []string
+	err = fs.WalkDir(root.FS(), ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.Type()&fs.ModeSymlink == 0 {
+			return err
+		}
+		link, err := root.Readlink(filepath.FromSlash(name))
+		if err != nil {
+			return err
+		}
+		if linkLeaves(name, link) {
+			return fmt.Errorf("archive member %s links outside the tree: %s", name, link)
+		}
+		links = append(links, name)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return linksInside(root, links)
 }
 
 // linksInside fails for a symbolic link of the tree at root that cannot be
@@ -254,9 +319,14 @@ func ExtractTar(archive, dir string) (err error) {
 				err = root.MkdirAll(p, 0o755)
 			}
 		case tar.TypeReg:
-			err = writeMember(root, hdr.Name, hdr.FileInfo().Mode(), tr)
+			err = writeMember(root, hdr.Name, hdr.FileInfo().Mode(), hdr.ModTime, tr)
 		case tar.TypeSymlink:
 			err = writeSymlink(root, hdr.Name, hdr.Linkname)
+			links = append(links, hdr.Name)
+		case tar.TypeLink:
+			// A hard link to a symbolic link is that link again, so it is
+			// checked as one.
+			err = writeHardLink(root, hdr.Name, hdr.Linkname)
 			links = append(links, hdr.Name)
 		}
 		if err != nil {
@@ -291,7 +361,7 @@ func extractZip(archive, dir string) (err error) {
 		if err != nil {
 			return err
 		}
-		if err := errors.Join(writeMember(root, zf.Name, zf.Mode(), rc), rc.Close()); err != nil {
+		if err := errors.Join(writeMember(root, zf.Name, zf.Mode(), zf.Modified, rc), rc.Close()); err != nil {
 			return err
 		}
 	}

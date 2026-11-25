@@ -3,11 +3,13 @@
  *
  * Compile it once per module, together with the module's XS objects:
  *
- *   cc -I<sdk> -DGOPERL_ENTRY_MODULE=Demo__XS -c goperl_entry.c
+ *   cc -I<sdk> -DGOPERL_ENTRY_BOOT=boot_Demo__XS \
+ *      -DGOPERL_ENTRY_TABLE=goperl_entry_Demo__XS -c goperl_entry.c
  *
- * GOPERL_ENTRY_MODULE is the Perl package with "::" spelled "__", exactly as
- * in the module's boot_ symbol. The slot order is the loader's contract
- * (entryNames in xs/entry.go). */
+ * Both names end in the Perl package with "::" spelled "__", exactly as in
+ * the module's boot_ symbol. Both are whole identifiers: this file pastes
+ * nothing onto them. The slot order is the loader's contract (entryNames in
+ * xs/entry.go). */
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -16,12 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef GOPERL_ENTRY_MODULE
-#error "GOPERL_ENTRY_MODULE must name the module (package with :: spelled __)"
+#if !defined(GOPERL_ENTRY_BOOT) || !defined(GOPERL_ENTRY_TABLE)
+#error "GOPERL_ENTRY_BOOT and GOPERL_ENTRY_TABLE must name the module's boot function and entry table"
 #endif
-
-#define GOPERL_ENTRY_BOOT CAT2(boot_, GOPERL_ENTRY_MODULE)
-#define GOPERL_ENTRY_TABLE CAT2(goperl_entry_, GOPERL_ENTRY_MODULE)
 
 XS_EXTERNAL(GOPERL_ENTRY_BOOT);
 

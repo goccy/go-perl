@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify upstream-sourced files (release attestation)
         run: make verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   # Tests run on every architecture the native XS loading supports:
   # linux/amd64, linux/arm64, and darwin/arm64. The runners ship perl,
@@ -92,21 +94,55 @@ jobs:
 
   # gperl build for linux/amd64 and linux/arm64 with native (XS)
   # dependencies, from each host: every binary is inspected, and the one
-  # for the runner's own platform is run.
+  # for the runner's own platform is run. The builds for each target
+  # architecture are a job of their own; the dependency tests run with the
+  # arm64 builds. The Go caches and the toolchain gperl installs are saved
+  # and restored as the test jobs' caches are.
   test-cross:
-    name: gperl cross build (${{ matrix.os }})
+    name: gperl cross build (${{ matrix.os }}, ${{ matrix.part.name }})
     runs-on: ${{ matrix.os }}
     needs: verify
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        part:
+          - { name: amd64, run: '^TestCrossBuild$/^linux_amd64_' }
+          - { name: arm64, run: '^(TestCrossBuild|TestDependenciesEndToEnd)$/^(linux_arm64_.*|link_without_cross_compiler|link|load)$' }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make test-cross
+          cache: false
+      - name: Locate the Go caches
+        id: go-env
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+            ~/gperl/toolchain
+          key: gperl-cross-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.name }}-${{ hashFiles('go.sum', 'internal/gperl/install.go') }}-${{ github.sha }}
+          restore-keys: |
+            gperl-cross-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.name }}-${{ hashFiles('go.sum', 'internal/gperl/install.go') }}-
+            gperl-cross-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.name }}-
+      - run: go run ./cmd/gperl install toolchain
+      - env:
+          GPERL_TEST_CROSS: "1"
+          RUN: ${{ matrix.part.run }}
+        run: go test -count=1 -timeout 10m -run "$RUN" ./internal/gperl
+      - if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+            ~/gperl/toolchain
+          key: gperl-cross-${{ runner.os }}-${{ runner.arch }}-${{ matrix.part.name }}-${{ hashFiles('go.sum', 'internal/gperl/install.go') }}-${{ github.sha }}
 
   # The Plack example on real CPAN distributions (Plack, Mojolicious, and
   # the XS distributions Cpanel::JSON::XS and Clone): gperl fetches and

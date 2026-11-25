@@ -16,6 +16,7 @@ package gperl
 // it) — no perl needs to be installed.
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // xsNeutralizePPPort overwrites every bundled ppport.h in the staged tree
@@ -359,7 +361,28 @@ func dirExists(path string) bool {
 	return err == nil && st.IsDir()
 }
 
+// errLinkInsideCopy is copyTree's error for a symbolic link to a directory
+// the copy is already inside (one that holds the link, or one a loop of
+// links leads back to): the copy would never end.
+var errLinkInsideCopy = errors.New("a link to a directory the copy is already inside")
+
+// copyTree copies src to dst, following symbolic links. A link to a
+// directory the copy is already inside fails with errLinkInsideCopy.
 func copyTree(src, dst string) error {
+	root, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		return err
+	}
+	return copyTreeFollowing(root, dst, []string{root})
+}
+
+// copyTreeFollowing copies src, a path without symbolic links, to dst.
+// following lists the directories whose copy holds this one: the root of
+// the copy and each linked directory followed to reach src.
+func copyTreeFollowing(src, dst string, following []string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -372,6 +395,11 @@ func copyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		modTime := info.ModTime()
 		if d.Type()&fs.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {
@@ -382,19 +410,37 @@ func copyTree(src, dst string) error {
 				return err
 			}
 			if st.IsDir() {
-				return copyTree(resolved, target)
+				for _, dir := range following {
+					rel, err := filepath.Rel(resolved, dir)
+					if err != nil {
+						return err
+					}
+					if filepath.IsLocal(rel) {
+						return fmt.Errorf("%s -> %s: %w", path, resolved, errLinkInsideCopy)
+					}
+				}
+				return copyTreeFollowing(resolved, target, append(following, resolved))
 			}
-			path = resolved
+			path, modTime = resolved, st.ModTime()
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
 		mode := fs.FileMode(0o644)
-		if err == nil && info.Mode()&0o100 != 0 {
+		if info.Mode()&0o100 != 0 {
 			mode = 0o755
 		}
-		return os.WriteFile(target, data, mode)
+		if err := os.WriteFile(target, data, mode); err != nil {
+			return err
+		}
+		return keepModTime(target, modTime)
 	})
+}
+
+// keepModTime gives the copy at path the modification time of the file it
+// copies, as tar extraction and ExtUtils::Install do: a build's make
+// compares the times of a distribution's files.
+func keepModTime(path string, modTime time.Time) error {
+	return os.Chtimes(path, time.Time{}, modTime)
 }
