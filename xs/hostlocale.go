@@ -3,12 +3,13 @@
 package xs
 
 import (
+	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
 
-	"github.com/ebitengine/purego"
 	"github.com/goccy/go-perl/internal/ccall"
 )
 
@@ -29,8 +30,10 @@ var hostLocaleOnce sync.Once
 
 func setHostLocale(env []string) {
 	hostLocaleOnce.Do(func() {
-		fn, err := purego.Dlsym(purego.RTLD_DEFAULT, "setlocale")
+		fn, err := libcSymbol("setlocale")
 		if err != nil {
+			// Loading native code goes on; it runs in the "C" locale.
+			fmt.Fprintf(os.Stderr, "gperl: native code's locale not set: %v\n", err)
 			return
 		}
 		set := func(category int, name string) bool {

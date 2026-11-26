@@ -1532,7 +1532,11 @@ func releaseState(p *internal.Perl) {
 // went out before, in its teardown, as on perl.
 func flushNativeStdio() {
 	fflushOnce.Do(func() {
-		fflushFn, _ = purego.Dlsym(purego.RTLD_DEFAULT, "fflush")
+		var err error
+		if fflushFn, err = libcSymbol("fflush"); err != nil {
+			// Teardown has no caller to tell; native output stays unflushed.
+			fmt.Fprintf(os.Stderr, "gperl: native stdio not flushed: %v\n", err)
+		}
 	})
 	if fflushFn != 0 {
 		ccall.Invoke(fflushFn, 0)

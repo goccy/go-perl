@@ -15,6 +15,8 @@
 #include "XSUB.h"
 #include "perliol.h"
 
+#include <locale.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,10 +26,10 @@
 
 XS_EXTERNAL(GOPERL_ENTRY_BOOT);
 
-GOPERL_C const void *const GOPERL_ENTRY_TABLE[17];
+GOPERL_C const void *const GOPERL_ENTRY_TABLE[19];
 
 GOPERL_C __attribute__((visibility("default"), used))
-const void *const GOPERL_ENTRY_TABLE[17] = {
+const void *const GOPERL_ENTRY_TABLE[19] = {
     (const void *)GOPERL_ENTRY_BOOT,
     (const void *)__goperl_xs_init,
     (const void *)__goperl_xs_layout,
@@ -45,4 +47,6 @@ const void *const GOPERL_ENTRY_TABLE[17] = {
     (const void *)memcpy,
     (const void *)malloc,
     (const void *)free,
+    (const void *)fflush,
+    (const void *)setlocale,
 };

@@ -66,10 +66,11 @@ func TestCToolchainPrecedence(t *testing.T) {
 		t.Fatalf("no compiler anywhere: %v", err)
 	}
 
-	// The managed Zig takes over, and is told a foreign target.
+	// The managed Zig takes over, compiling for any CPU of this platform,
+	// and is told a foreign target.
 	zig := fakeTool(t, dir, "zig")
 	cc, ar, err = cToolchain(host)
-	if err != nil || !reflect.DeepEqual(cc, []string{zig, "cc"}) || !reflect.DeepEqual(ar, []string{zig, "ar"}) {
+	if err != nil || !reflect.DeepEqual(cc, []string{zig, "cc", "-mcpu=baseline"}) || !reflect.DeepEqual(ar, []string{zig, "ar"}) {
 		t.Fatalf("managed compiler: %v %v %v", cc, ar, err)
 	}
 	other := "linux_amd64"
