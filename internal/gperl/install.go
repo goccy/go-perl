@@ -366,6 +366,10 @@ func cToolchain(target string) (cc, ar []string, err error) {
 				abi = "-musl"
 			}
 			cc = append(cc, "-target", zigTriple(platform)+abi)
+		} else {
+			// Told no target, Zig compiles for this machine's CPU; baseline
+			// makes what it builds run on any machine of the platform.
+			cc = append(cc, "-mcpu=baseline")
 		}
 		if len(ar) == 0 {
 			ar = []string{zig, "ar"}
