@@ -41,11 +41,16 @@ func Build(script, out string) error { return buildBinary(script, out, nil) }
 // <directory>.test). A server and a test binary carry the whole project
 // directory (an application reads templates and static files next to
 // itself, a test its data under t/); a program carries the script and lib/.
-func buildBinary(script, out string, psgiDefaults []string) (err error) {
+func buildBinary(script, out string, psgiDefaults []string) error {
 	config, err := readBuildConfig()
 	if err != nil {
 		return err
 	}
+	return buildBinaryFor(config, script, out, psgiDefaults)
+}
+
+// buildBinaryFor is buildBinary for the platform config names.
+func buildBinaryFor(config buildConfig, script, out string, psgiDefaults []string) (err error) {
 	test := script == ""
 	var projectDir string
 	if test {

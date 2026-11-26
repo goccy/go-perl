@@ -233,7 +233,14 @@ type goTarget struct{ GOOS, GOARCH string }
 // readBuildConfig reads the build configuration from the environment. A
 // target platform the environment names must be one Go builds for.
 func readBuildConfig() (buildConfig, error) {
-	c := buildConfig{goos: os.Getenv("GPERLOS"), goarch: os.Getenv("GPERLARCH")}
+	return newBuildConfig(os.Getenv("GPERLOS"), os.Getenv("GPERLARCH"))
+}
+
+// newBuildConfig is the build configuration for the platform goos and
+// goarch name (this machine's where they are ""), with the rest from the
+// environment.
+func newBuildConfig(goos, goarch string) (buildConfig, error) {
+	c := buildConfig{goos: goos, goarch: goarch}
 	switch native := os.Getenv("GPERLNATIVE"); native {
 	case "", "link":
 		c.link = true
