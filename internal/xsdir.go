@@ -30,7 +30,7 @@ func XSDirLoad(p *Perl, dir string) (linked bool, err error) {
 // XSABI is the native XS SDK's ABI version: it must match GOPERL_XS_ABI in
 // the SDK's perl.h, and artifacts built against one version load only into
 // it.
-const XSABI = 42
+const XSABI = 43
 
 // xsLinkedLoader is installed by the xs package's init.
 var xsLinkedLoader func(p *Perl) error

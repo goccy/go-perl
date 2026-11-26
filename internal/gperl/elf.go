@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // privatizeELF makes every symbol an ELF relocatable object defines,
@@ -13,7 +14,10 @@ import (
 // has (its own name plus suffix), so objects that define the same names
 // link into one binary. References inside the object go by symbol index
 // and are unaffected; an undefined symbol (what the object needs from libc
-// and friends) keeps its name, unless imports gives it another. It returns
+// and friends) keeps its name, unless imports gives it another, or it is
+// one of the SDK's references to the C library function a wrapper stands in
+// for (libcRealPrefix + the function's name), which becomes that name, bound
+// global so that a static link takes the function from the C library. It returns
 // the names of the renamed symbols of default visibility: what the module's
 // shared object exports.
 //
@@ -21,6 +25,9 @@ import (
 // table appended to the file, and the string table's section header is
 // redirected to it. Nothing else moves.
 func privatizeELF(path, keep, suffix string, imports map[string]string) (exports []string, err error) {
+	// GOPERL_LIBC in the SDK's perl.h: declared weak, so a loadable module,
+	// which has no such symbol, loads and asks the dynamic linker instead.
+	const libcRealPrefix = "goperl_libc_real_"
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
@@ -72,6 +79,10 @@ func privatizeELF(path, keep, suffix string, imports map[string]string) (exports
 		}
 		name := string(names[nameOff : int(nameOff)+end])
 		newName := imports[name]
+		if libc, ok := strings.CutPrefix(name, libcRealPrefix); ok && shndx == elf.SHN_UNDEF {
+			newName = libc
+			syms[off+4] = byte(elf.STB_GLOBAL)<<4 | syms[off+4]&0xf
+		}
 		if shndx != elf.SHN_UNDEF {
 			if name == "" || name == keep {
 				continue

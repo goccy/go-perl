@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 42u
+#define GOPERL_XS_ABI 43u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the
@@ -217,8 +217,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
  * They are functions of the module itself (hidden: its own calls bind to
  * them, and nothing outside it sees them), not macros: a module may #undef
  * signal and sigaction after perl.h, as EV does, and still installs its
- * handlers through them. The C library's sigaction is the next one after
- * the module (RTLD_NEXT).
+ * handlers through them. The C library's sigaction is GOPERL_LIBC(sigaction).
  *
  * goperl_seen_action is what the module was shown, by signal: a handler
  * pointer does not tell what action it came from. */
@@ -233,6 +232,26 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
 #else
 #define GOPERL_LIBC_THROW
 #endif
+/* GOPERL_LIBC(name) is the C library's function a wrapper of the module
+ * stands in for. In a module gperl links into a binary, the wrapper has a
+ * name of its own and goperl_libc_real_<name> is renamed to name (gperl's
+ * privatizeELF), so it is the C library's function, in a static binary
+ * too; a loadable module has no such symbol and takes the function after
+ * the module (RTLD_NEXT). GOPERL_LIBC_DECLARE declares it, once the C
+ * library's declaration of name is in scope, of default visibility whatever
+ * visibility pragma surrounds perl.h (the C library's is not hidden).
+ * Elsewhere than ELF (Mach-O: no static binaries, and a weak reference must
+ * be found at link time) every module takes the function after it. */
+#if defined(__ELF__)
+#define GOPERL_LIBC_DECLARE(name) \
+    GOPERL_C __attribute__((weak, visibility("default"))) __typeof__(name) goperl_libc_real_##name
+#define GOPERL_LIBC(name) \
+    (goperl_libc_real_##name ? (void *)goperl_libc_real_##name : dlsym(RTLD_NEXT, #name))
+#else
+#define GOPERL_LIBC_DECLARE(name) GOPERL_C __typeof__(name) name
+#define GOPERL_LIBC(name) dlsym(RTLD_NEXT, #name)
+#endif
+GOPERL_LIBC_DECLARE(sigaction);
 GOPERL_C __attribute__((weak, visibility("hidden"))) struct sigaction goperl_seen_action[NSIG] = {0};
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigaction)(
     int, const struct sigaction *, struct sigaction *) = 0;
@@ -264,7 +283,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int sigaction(
     struct sigaction current, with;
     if (!goperl_libc_sigaction) {
         goperl_libc_sigaction = (int (*)(int, const struct sigaction *, struct sigaction *))
-            dlsym(RTLD_NEXT, "sigaction");
+            GOPERL_LIBC(sigaction);
         if (!goperl_libc_sigaction) {
             errno = ENOSYS;
             return -1;
@@ -1147,10 +1166,11 @@ static goperl_frame_t **goperl_own_slot(void) __attribute__((const, noinline));
  * Perl code) ends instead, at its first such call, with a message: perl
  * would run that child, gperl cannot. fork is the module's own (hidden), as
  * sigaction is; it marks the child's copy of the process block. */
+GOPERL_LIBC_DECLARE(fork);
 GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t (*goperl_libc_fork)(void) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t fork(void) GOPERL_LIBC_THROW {
     if (!goperl_libc_fork) {
-        goperl_libc_fork = (pid_t (*)(void))dlsym(RTLD_NEXT, "fork");
+        goperl_libc_fork = (pid_t (*)(void))GOPERL_LIBC(fork);
         if (!goperl_libc_fork) {
             errno = ENOSYS;
             return -1;
@@ -10476,12 +10496,13 @@ static pid_t goperl_getpid(void) {
  * perl API of the process it is loaded into; here dlopen gives it the
  * vtable of the module that loads it. A library compiled for another ABI,
  * or not against perl.h, is loaded as it is. */
+GOPERL_LIBC_DECLARE(dlopen);
 GOPERL_C __attribute__((weak, visibility("hidden"))) void *(*goperl_libc_dlopen)(const char *,
                                                                                  int) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) void *dlopen(const char *file,
                                                                    int mode) GOPERL_LIBC_THROWNL {
     if (!goperl_libc_dlopen) {
-        goperl_libc_dlopen = (void *(*)(const char *, int))dlsym(RTLD_NEXT, "dlopen");
+        goperl_libc_dlopen = (void *(*)(const char *, int))GOPERL_LIBC(dlopen);
         if (!goperl_libc_dlopen) return NULL;
     }
     void *const h = goperl_libc_dlopen(file, mode);
@@ -10492,6 +10513,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) void *dlopen(const char *fi
     }
     return h;
 }
+GOPERL_LIBC_DECLARE(wait4);
 GOPERL_C __attribute__((weak, visibility("hidden"))) pid_t (*goperl_libc_wait4)(
     pid_t, int *, int, struct rusage *) = 0;
 /* The host's number for a signal of the interpreter's (Linux's numbers, on
@@ -10581,7 +10603,7 @@ static int goperl_program_action(int sig) {
 }
 static pid_t goperl_wait_child(pid_t pid, int *status, int options, struct rusage *usage) {
     if (!goperl_libc_wait4) {
-        goperl_libc_wait4 = (pid_t (*)(pid_t, int *, int, struct rusage *))dlsym(RTLD_NEXT, "wait4");
+        goperl_libc_wait4 = (pid_t (*)(pid_t, int *, int, struct rusage *))GOPERL_LIBC(wait4);
         if (!goperl_libc_wait4) {
             errno = ENOSYS;
             return -1;
@@ -10667,7 +10689,7 @@ static void goperl_write_failed(int fd, int flags) {
         struct sigaction act;
         if (!goperl_libc_sigaction)
             goperl_libc_sigaction = (int (*)(int, const struct sigaction *, struct sigaction *))
-                dlsym(RTLD_NEXT, "sigaction");
+                GOPERL_LIBC(sigaction);
         const int r = goperl_libc_sigaction ? goperl_libc_sigaction(SIGPIPE, NULL, &act) : -1;
         errno = e;
         if (r != 0 || !goperl_runtime_action(&act)) return;
@@ -10680,32 +10702,35 @@ static void goperl_write_failed(int fd, int flags) {
                         GOPERL_INT_RAISE, 0, 0, 0);
     errno = e;
 }
+GOPERL_LIBC_DECLARE(write);
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_write)(int, const void *,
                                                                                   size_t) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t write(int fd, const void *buf,
                                                                    size_t n) {
     if (!goperl_libc_write)
-        goperl_libc_write = (ssize_t (*)(int, const void *, size_t))dlsym(RTLD_NEXT, "write");
+        goperl_libc_write = (ssize_t (*)(int, const void *, size_t))GOPERL_LIBC(write);
     const ssize_t r = goperl_libc_write(fd, buf, n);
     if (r < 0) goperl_write_failed(fd, 0);
     return r;
 }
+GOPERL_LIBC_DECLARE(writev);
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_writev)(
     int, const struct iovec *, int) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t writev(int fd, const struct iovec *iov,
                                                                     int n) {
     if (!goperl_libc_writev)
-        goperl_libc_writev = (ssize_t (*)(int, const struct iovec *, int))dlsym(RTLD_NEXT, "writev");
+        goperl_libc_writev = (ssize_t (*)(int, const struct iovec *, int))GOPERL_LIBC(writev);
     const ssize_t r = goperl_libc_writev(fd, iov, n);
     if (r < 0) goperl_write_failed(fd, 0);
     return r;
 }
+GOPERL_LIBC_DECLARE(send);
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_send)(int, const void *,
                                                                                  size_t, int) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t send(int fd, const void *buf, size_t n,
                                                                   int flags) {
     if (!goperl_libc_send)
-        goperl_libc_send = (ssize_t (*)(int, const void *, size_t, int))dlsym(RTLD_NEXT, "send");
+        goperl_libc_send = (ssize_t (*)(int, const void *, size_t, int))GOPERL_LIBC(send);
     const ssize_t r = goperl_libc_send(fd, buf, n, flags);
     if (r < 0) goperl_write_failed(fd, flags);
     return r;
@@ -10718,6 +10743,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t send(int fd, const 
 #define GOPERL_SENDTO_ADDR const struct sockaddr *
 #define GOPERL_SENDTO_PTR(a) (a)
 #endif
+GOPERL_LIBC_DECLARE(sendto);
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_sendto)(
     int, const void *, size_t, int, const struct sockaddr *, socklen_t) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t sendto(int fd, const void *buf,
@@ -10726,19 +10752,19 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t sendto(int fd, cons
                                                                     socklen_t tolen) {
     if (!goperl_libc_sendto)
         goperl_libc_sendto = (ssize_t (*)(int, const void *, size_t, int, const struct sockaddr *,
-                                          socklen_t))dlsym(RTLD_NEXT, "sendto");
+                                          socklen_t))GOPERL_LIBC(sendto);
     const ssize_t r = goperl_libc_sendto(fd, buf, n, flags, GOPERL_SENDTO_PTR(to), tolen);
     if (r < 0) goperl_write_failed(fd, flags);
     return r;
 }
+GOPERL_LIBC_DECLARE(sendmsg);
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t (*goperl_libc_sendmsg)(
     int, const struct msghdr *, int) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) ssize_t sendmsg(int fd,
                                                                      const struct msghdr *msg,
                                                                      int flags) {
     if (!goperl_libc_sendmsg)
-        goperl_libc_sendmsg = (ssize_t (*)(int, const struct msghdr *, int))dlsym(RTLD_NEXT,
-                                                                                  "sendmsg");
+        goperl_libc_sendmsg = (ssize_t (*)(int, const struct msghdr *, int))GOPERL_LIBC(sendmsg);
     const ssize_t r = goperl_libc_sendmsg(fd, msg, flags);
     if (r < 0) goperl_write_failed(fd, flags);
     return r;
@@ -10881,13 +10907,14 @@ static int goperl_sigmask_call(int how, const sigset_t *set, sigset_t *old,
     errno = e;
     return 0;
 }
+GOPERL_LIBC_DECLARE(sigprocmask);
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_sigprocmask)(
     int, const sigset_t *, sigset_t *) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) int sigprocmask(
     int how, const sigset_t *set, sigset_t *old) GOPERL_LIBC_THROW {
     if (!goperl_libc_sigprocmask) {
         goperl_libc_sigprocmask =
-            (int (*)(int, const sigset_t *, sigset_t *))dlsym(RTLD_NEXT, "sigprocmask");
+            (int (*)(int, const sigset_t *, sigset_t *))GOPERL_LIBC(sigprocmask);
         if (!goperl_libc_sigprocmask) {
             errno = ENOSYS;
             return -1;
@@ -10895,6 +10922,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int sigprocmask(
     }
     return goperl_sigmask_call(how, set, old, goperl_libc_sigprocmask);
 }
+GOPERL_LIBC_DECLARE(pthread_sigmask);
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_pthread_sigmask)(
     int, const sigset_t *, sigset_t *) = 0;
 /* pthread_sigmask says what failed by its result, not by errno */
@@ -10910,7 +10938,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int pthread_sigmask(
     int how, const sigset_t *set, sigset_t *old) GOPERL_LIBC_THROW {
     if (!goperl_libc_pthread_sigmask) {
         goperl_libc_pthread_sigmask =
-            (int (*)(int, const sigset_t *, sigset_t *))dlsym(RTLD_NEXT, "pthread_sigmask");
+            (int (*)(int, const sigset_t *, sigset_t *))GOPERL_LIBC(pthread_sigmask);
         if (!goperl_libc_pthread_sigmask) return ENOSYS;
     }
     const int saved = errno;
@@ -10922,6 +10950,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int pthread_sigmask(
     errno = saved;
     return 0;
 }
+GOPERL_LIBC_DECLARE(pselect);
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_pselect)(
     int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) int pselect(
@@ -10929,7 +10958,7 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int pselect(
     const sigset_t *mask) {
     if (!goperl_libc_pselect) {
         goperl_libc_pselect = (int (*)(int, fd_set *, fd_set *, fd_set *, const struct timespec *,
-                                       const sigset_t *))dlsym(RTLD_NEXT, "pselect");
+                                       const sigset_t *))GOPERL_LIBC(pselect);
         if (!goperl_libc_pselect) {
             errno = ENOSYS;
             return -1;
@@ -10948,13 +10977,14 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int pselect(
 #ifdef __linux__
 #include <poll.h>
 #include <sys/epoll.h>
+GOPERL_LIBC_DECLARE(ppoll);
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_ppoll)(
     struct pollfd *, nfds_t, const struct timespec *, const sigset_t *) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) int ppoll(
     struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *mask) {
     if (!goperl_libc_ppoll) {
         goperl_libc_ppoll = (int (*)(struct pollfd *, nfds_t, const struct timespec *,
-                                     const sigset_t *))dlsym(RTLD_NEXT, "ppoll");
+                                     const sigset_t *))GOPERL_LIBC(ppoll);
         if (!goperl_libc_ppoll) {
             errno = ENOSYS;
             return -1;
@@ -10970,13 +11000,14 @@ GOPERL_C __attribute__((weak, visibility("hidden"))) int ppoll(
     }
     return goperl_wait_mask_end(f, old, goperl_libc_ppoll(fds, nfds, timeout, NULL));
 }
+GOPERL_LIBC_DECLARE(epoll_pwait);
 GOPERL_C __attribute__((weak, visibility("hidden"))) int (*goperl_libc_epoll_pwait)(
     int, struct epoll_event *, int, int, const sigset_t *) = 0;
 GOPERL_C __attribute__((weak, visibility("hidden"))) int epoll_pwait(
     int epfd, struct epoll_event *events, int maxevents, int timeout, const sigset_t *mask) {
     if (!goperl_libc_epoll_pwait) {
         goperl_libc_epoll_pwait = (int (*)(int, struct epoll_event *, int, int,
-                                           const sigset_t *))dlsym(RTLD_NEXT, "epoll_pwait");
+                                           const sigset_t *))GOPERL_LIBC(epoll_pwait);
         if (!goperl_libc_epoll_pwait) {
             errno = ENOSYS;
             return -1;

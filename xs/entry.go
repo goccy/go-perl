@@ -29,10 +29,12 @@ var entryNames = []string{
 	"memcpy",
 	"malloc",
 	"free",
+	"fflush",
+	"setlocale",
 }
 
 // entrySlots is the number of slots in an entry table.
-const entrySlots = 17
+const entrySlots = 19
 
 // entrySlotOf maps a name of entryNames to its slot.
 var entrySlotOf = func() map[string]int {

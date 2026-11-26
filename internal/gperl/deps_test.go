@@ -229,14 +229,14 @@ func TestDependenciesEndToEnd(t *testing.T) {
 		"Pure-Static@1.00/gperl/built",
 		"Pure-Built@0.50/gperl/lib/Pure/Built.pm",
 		"Demo-XS@0.01/gperl/lib/Demo/XS.pm",
-		"Demo-XS@0.01/gperl/abi42/xs.go",
-		"Demo-XS@0.01/gperl/abi42/go.mod",
+		"Demo-XS@0.01/gperl/abi43/xs.go",
+		"Demo-XS@0.01/gperl/abi43/go.mod",
 	} {
 		if _, err := os.Stat(filepath.Join(modDir, filepath.FromSlash(artifact))); err != nil {
 			t.Errorf("module directory: %v", err)
 		}
 	}
-	matches, err := filepath.Glob(filepath.Join(modDir, "Demo-XS@0.01", "gperl", "abi42", "*", "auto", "Demo", "XS", "XS.*"))
+	matches, err := filepath.Glob(filepath.Join(modDir, "Demo-XS@0.01", "gperl", "abi43", "*", "auto", "Demo", "XS", "XS.*"))
 	if err != nil || len(matches) != 4 {
 		t.Fatalf("native artifacts = %v (%v), want XS.a, XS.exports, XS.ldflags, XS.so", matches, err)
 	}
@@ -333,7 +333,7 @@ func TestBrokenXSFailsTheSync(t *testing.T) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
 	}
-	logs, globErr := filepath.Glob(filepath.Join(os.Getenv("GPERLMODCACHE"), "Twin-A@0.01", "gperl", "abi42", "*", "build-error.log"))
+	logs, globErr := filepath.Glob(filepath.Join(os.Getenv("GPERLMODCACHE"), "Twin-A@0.01", "gperl", "abi43", "*", "build-error.log"))
 	if globErr != nil || len(logs) != 1 {
 		t.Fatalf("build log: %v, %v", logs, globErr)
 	}
@@ -786,6 +786,72 @@ func TestDistributionLibrariesAreNotModules(t *testing.T) {
 		cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
 		if got, err := cmd.CombinedOutput(); err != nil || string(got) != "7\n" {
 			t.Fatalf("binary printed %q (%v), want %q", got, err, "7\n")
+		}
+	}
+	t.Run("dynamic", build)
+	t.Run("static", func(t *testing.T) {
+		libc, err := exec.Command("cc", "-print-file-name=libc.a").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !filepath.IsAbs(strings.TrimSpace(string(libc))) {
+			t.Skip("the C compiler has no static C library")
+		}
+		t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -ldflags=-extldflags=-static"))
+		build(t)
+	})
+}
+
+// Native code calls the C library functions the SDK stands in for (write,
+// sendmsg, sigaction, pselect) and leaves printf output for the end to
+// flush, under gperl run and in a binary, a static one too.
+func TestNativeCodeReachesTheCLibrary(t *testing.T) {
+	requireToolchain(t)
+	startMirror(t, mirrorDist{pathname: "L/LI/LIBC/Libc-Calls-0.01.tar.gz", module: "Libc::Calls", version: "0.01", files: map[string]string{
+		"Makefile.PL": "use ExtUtils::MakeMaker;\nWriteMakefile(NAME => 'Libc::Calls', VERSION => '0.01');\n",
+		"Calls.xs": "#define PERL_NO_GET_CONTEXT\n#include \"EXTERN.h\"\n#include \"perl.h\"\n#include \"XSUB.h\"\n" +
+			"#include <signal.h>\n#include <stdio.h>\n#include <string.h>\n#include <sys/select.h>\n#include <sys/socket.h>\n#include <sys/uio.h>\n#include <unistd.h>\n\n" +
+			"static volatile sig_atomic_t caught;\nstatic void on_usr1(int sig) { (void)sig; caught = 1; }\n\n" +
+			"MODULE = Libc::Calls  PACKAGE = Libc::Calls\n\nint\ncalls()\n  CODE:\n" +
+			"    {\n        int sv[2];\n        char c = 0;\n        struct iovec iov;\n        struct msghdr msg;\n        struct sigaction sa;\n" +
+			"        fd_set r;\n        struct timespec ts = {0, 0};\n        RETVAL = 0;\n" +
+			"        if (write(1, \"w\", 1) == 1) RETVAL |= 1;\n" +
+			"        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) croak(\"socketpair: %s\", strerror(errno));\n" +
+			"        iov.iov_base = \"x\";\n        iov.iov_len = 1;\n        memset(&msg, 0, sizeof msg);\n        msg.msg_iov = &iov;\n        msg.msg_iovlen = 1;\n" +
+			"        if (sendmsg(sv[0], &msg, 0) == 1) RETVAL |= 2;\n" +
+			"        memset(&sa, 0, sizeof sa);\n        sa.sa_handler = on_usr1;\n        sigemptyset(&sa.sa_mask);\n" +
+			"        if (sigaction(SIGUSR1, &sa, NULL) == 0 && raise(SIGUSR1) == 0 && caught) RETVAL |= 4;\n" +
+			"        FD_ZERO(&r);\n        FD_SET(sv[1], &r);\n" +
+			"        if (pselect(sv[1] + 1, &r, NULL, NULL, &ts, NULL) == 1 && read(sv[1], &c, 1) == 1 && c == 'x') RETVAL |= 8;\n" +
+			"        close(sv[0]);\n        close(sv[1]);\n    }\n  OUTPUT:\n    RETVAL\n\n" +
+			"void\nprinted()\n  CODE:\n    printf(\"printed\\n\");\n",
+		"lib/Libc/Calls.pm": "package Libc::Calls;\nour $VERSION = '0.01';\nuse XSLoader;\nXSLoader::load(__PACKAGE__, $VERSION);\n1;\n",
+	}})
+	dir, err := tidyProject(t, "requires 'Libc::Calls';\n")
+	if err != nil {
+		t.Fatalf("ModTidy: %v", err)
+	}
+	script := filepath.Join(dir, "app.pl")
+	if err := os.WriteFile(script, []byte("use Libc::Calls;\n$| = 1;\nprint Libc::Calls::calls(), qq{\\n};\nLibc::Calls::printed();\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const want = "w15\nprinted\n"
+	if got := runScript(t, script); got != want {
+		t.Fatalf("gperl run printed %q, want %q", got, want)
+	}
+	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
+	t.Setenv("CGO_ENABLED", "1")
+	build := func(t *testing.T) {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "app")
+		if err := gperl.Build(script, out); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		cmd := exec.Command(out)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "GPERLMODCACHE="+filepath.Join(t.TempDir(), "absent"))
+		if got, err := cmd.Output(); err != nil || string(got) != want {
+			t.Fatalf("binary printed %q (%v), want %q", got, err, want)
 		}
 	}
 	t.Run("dynamic", build)
