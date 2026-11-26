@@ -181,19 +181,16 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 func buildAppZip(projectDir, script string, whole bool, out string) ([]byte, []string, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	// add stores host at name with its mode and modification time: a file
-	// (what a symbolic link to one names), or a directory as an entry of its
-	// own, so that an empty one stays.
+	// add stores host at name with its mode: a file (what a symbolic link
+	// to one names), or a directory as an entry of its own, so that an empty
+	// one stays. No time goes with it: the same tree makes the same binary.
 	add := func(name, host string, dir bool) error {
 		info, err := os.Stat(host)
 		if err != nil {
 			return err
 		}
-		hdr, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		hdr.Name, hdr.Method = name, zip.Deflate
+		hdr := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		hdr.SetMode(info.Mode())
 		var data []byte
 		switch {
 		case info.IsDir() != dir:
@@ -402,9 +399,6 @@ func main() {
 			fatal(err)
 		}
 		if err := os.WriteFile(target, data, f.Mode().Perm()); err != nil {
-			fatal(err)
-		}
-		if err := os.Chtimes(target, f.Modified, f.Modified); err != nil {
 			fatal(err)
 		}
 	}
