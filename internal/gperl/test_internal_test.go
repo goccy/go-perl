@@ -49,6 +49,26 @@ func TestParseTAP(t *testing.T) {
 	if err != nil || res.planned != 0 || res.skipAll != "not here" {
 		t.Fatalf("skip-all plan = %+v, %v", res, err)
 	}
+	// A plan of no tests skips them whatever follows it; another plan with
+	// more than a todo list after it is no plan (TAP::Parser::Grammar, 12).
+	res, err = parseTAP(strings.NewReader("1..0 # no fork here\n"), nil)
+	if err != nil || res.planned != 0 || res.skipAll != "" {
+		t.Fatalf("plan of no tests = %+v, %v", res, err)
+	}
+	res, err = parseTAP(strings.NewReader("1..1 # what\nok 1\n"), nil)
+	if err != nil || res.planned != -1 {
+		t.Fatalf("plan with a comment = %+v, %v", res, err)
+	}
+	// The plan's todo list makes those numbered tests TODO.
+	res, err = parseTAP(strings.NewReader("1..4 todo 2 3;\nok 1\nnot ok 2\nok 3\nnot ok 4\n"), nil)
+	if want := (tapResult{planned: 4, run: 4, failed: []int{4}, todoOK: []int{3}}); err != nil || !reflect.DeepEqual(res, want) {
+		t.Fatalf("todo plan = %+v (%v)\nwant       %+v", res, err, want)
+	}
+	// An escaped # is part of the description.
+	res, err = parseTAP(strings.NewReader("1..3\nnot ok 1 - GH\\#4 # TODO later\nok 2 - a \\\\# comment\nok 3 - ends in \\\n"), nil)
+	if want := (tapResult{planned: 3, run: 3}); err != nil || !reflect.DeepEqual(res, want) {
+		t.Fatalf("escaped # = %+v (%v)\nwant       %+v", res, err, want)
+	}
 	res, err = parseTAP(strings.NewReader("ok 1\nBail out! database is down\nnot ok 2\n"), nil)
 	if err != nil || !res.hasBailed || res.bailout != "database is down" || res.run != 1 {
 		t.Fatalf("bail out = %+v, %v", res, err)
@@ -255,5 +275,37 @@ func TestTestCommand(t *testing.T) {
 		if status != 2 || err == nil || !strings.Contains(err.Error(), "usage: gperl test -c [-o out]") {
 			t.Errorf("Test(%v) = (%d, %v), want the usage error", bad, status, err)
 		}
+	}
+}
+
+// The libraries a test file gets head PERL5LIB, for the perl processes it
+// starts, unless it runs tainted, as with prove.
+func TestTestPERL5LIB(t *testing.T) {
+	dir := t.TempDir()
+	for name, src := range map[string]string{
+		"t/01-env.t": "use Test::More tests => 1;\nuse Config;\n" +
+			"is($ENV{PERL5LIB}, \"lib$Config{path_sep}pre\");\n",
+		"t/02-taint.t": "#!perl -T\nuse Test::More tests => 1;\nis($ENV{PERL5LIB}, 'pre');\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+	t.Setenv("GPERLMODCACHE", filepath.Join(t.TempDir(), "mod"))
+	t.Setenv("PERL5LIB", "pre")
+	var status int
+	out := captureStdout(t, func() {
+		var err error
+		if status, err = Test([]string{"-l", "-v"}); err != nil {
+			t.Errorf("Test: %v", err)
+		}
+	})
+	if status != 0 || !strings.Contains(out, "Files=2, Tests=2, ") {
+		t.Errorf("status %d:\n%s", status, out)
 	}
 }

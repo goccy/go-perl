@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,10 +42,15 @@ type tapResult struct {
 }
 
 var (
-	tapPlan = regexp.MustCompile(`^1\.\.(\d+)(?:\s*#\s*(?i:skip)\S*\s*(.*))?$`)
-	// After the description, a # starts a directive (TODO, SKIP) or else a
-	// comment.
-	tapTest = regexp.MustCompile(`^(not )?ok\b(?:\s+(\d+))?([^#]*)(?:#\s*(?:(?i:(todo|skip))\b)?.*)?$`)
+	// A plan, then what follows it: TAP::Parser::Grammar's version 12 plan,
+	// its todo list (tapPlanTodo), and the reason of a plan of no tests
+	// (tapPlanSkip).
+	tapPlan     = regexp.MustCompile(`^1\.\.(\d+)\s*(.*)$`)
+	tapPlanTodo = regexp.MustCompile(`^todo((?:\s+\d+)+)`)
+	tapPlanSkip = regexp.MustCompile(`^#\s*(?i:skip)\S*\s+(.*)`)
+	// After the description, in which a backslash escapes a #, a # starts a
+	// directive (TODO, SKIP) or else a comment.
+	tapTest = regexp.MustCompile(`^(not )?ok\b(?:\s+(\d+))?((?:[^\\#]|\\.)*\\?)(?:#\s*(?:(?i:(todo|skip))\b)?.*)?$`)
 	tapBail = regexp.MustCompile(`^Bail out!\s*(.*)$`)
 )
 
@@ -52,6 +58,7 @@ var (
 // subtests are indented, and their outcome is restated by a top-level line.
 func parseTAP(r io.Reader, each func(line string)) (tapResult, error) {
 	res := tapResult{planned: -1}
+	planTodo := map[int]bool{} // the tests the plan says are TODO
 	sc := bufio.NewScanner(r)
 	sc.Buffer(nil, 4<<20)
 	for sc.Scan() {
@@ -67,11 +74,26 @@ func parseTAP(r io.Reader, each func(line string)) (tapResult, error) {
 			m := tapPlan.FindStringSubmatch(line)
 			// The pattern admits digits only; a count too large to be a
 			// plan stays "no plan".
-			if n, err := strconv.Atoi(m[1]); err == nil {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				break
+			}
+			switch todo := tapPlanTodo.FindStringSubmatch(m[2]); {
+			case todo != nil:
 				res.planned = n
-				if n == 0 {
-					res.skipAll = m[2]
+				for _, f := range strings.Fields(todo[1]) {
+					// Digits only, as above.
+					if k, err := strconv.Atoi(f); err == nil {
+						planTodo[k] = true
+					}
 				}
+			case n == 0:
+				res.planned = 0
+				if skip := tapPlanSkip.FindStringSubmatch(m[2]); skip != nil {
+					res.skipAll = skip[1]
+				}
+			case strings.TrimSpace(m[2]) == "":
+				res.planned = n
 			}
 		case tapTest.MatchString(line):
 			m := tapTest.FindStringSubmatch(line)
@@ -81,6 +103,11 @@ func parseTAP(r io.Reader, each func(line string)) (tapResult, error) {
 				number = n
 			}
 			directive := strings.ToLower(m[4])
+			// The plan's todo list names numbered test lines (TAP::Parser).
+			if m[2] != "" && planTodo[number] {
+				delete(planTodo, number)
+				directive = "todo"
+			}
 			switch {
 			case directive == "skip":
 				res.skippedN++
@@ -351,12 +378,22 @@ func runTestFile(projectDir, file string, c *testConfig, depInc []string) *testO
 	if taint != "" {
 		argv = append(argv, taint)
 	}
-	for _, dir := range append(c.inc.values[:len(c.inc.values):len(c.inc.values)], depInc...) {
+	libs := append(c.inc.values[:len(c.inc.values):len(c.inc.values)], depInc...)
+	for _, dir := range libs {
 		argv = append(argv, "-I"+dir)
 	}
 	argv = append(argv, file)
 	var stdout bytes.Buffer
 	env := append(os.Environ(), "HARNESS_ACTIVE=1", "HARNESS_VERSION=3.50")
+	// The libraries head PERL5LIB too, for the perl processes the test file
+	// starts, unless it runs tainted (TAP::Parser::SourceHandler::Perl).
+	if len(libs) > 0 && taint == "" {
+		if old, ok := os.LookupEnv("PERL5LIB"); ok {
+			libs = append(libs, old)
+		}
+		env = append(slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "PERL5LIB=") }),
+			"PERL5LIB="+strings.Join(libs, string(os.PathListSeparator)))
+	}
 	start := time.Now()
 	var status int
 	if !c.inProcess {
