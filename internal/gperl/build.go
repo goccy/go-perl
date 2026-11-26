@@ -181,28 +181,54 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 func buildAppZip(projectDir, script string, whole bool, out string) ([]byte, []string, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	addFile := func(name, host string) error {
-		data, err := os.ReadFile(host)
+	// add stores host at name with its mode and modification time: a file
+	// (what a symbolic link to one names), or a directory as an entry of its
+	// own, so that an empty one stays.
+	add := func(name, host string, dir bool) error {
+		info, err := os.Stat(host)
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(name)
+		hdr, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		hdr.Name, hdr.Method = name, zip.Deflate
+		var data []byte
+		switch {
+		case info.IsDir() != dir:
+			return fmt.Errorf("%s: a symbolic link to a directory cannot be embedded", host)
+		case dir:
+			hdr.Name, hdr.Method = name+"/", zip.Store
+		case !info.Mode().IsRegular():
+			return fmt.Errorf("%s: not a regular file or a directory", host)
+		default:
+			if data, err = os.ReadFile(host); err != nil {
+				return err
+			}
+		}
+		w, err := zw.CreateHeader(hdr)
 		if err != nil {
 			return err
 		}
 		_, err = w.Write(data)
 		return err
 	}
+	addFile := func(name, host string) error { return add(name, host, false) }
 	addTree := func(name, host string) error {
 		return filepath.WalkDir(host, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
 				return err
 			}
-			rel, rErr := filepath.Rel(host, path)
-			if rErr != nil {
-				return rErr
+			rel, err := filepath.Rel(host, path)
+			if err != nil {
+				return err
 			}
-			return addFile(name+"/"+filepath.ToSlash(rel), path)
+			entry := name
+			if rel != "." {
+				entry += "/" + filepath.ToSlash(rel)
+			}
+			return add(entry, path, d.IsDir())
 		})
 	}
 
@@ -353,12 +379,15 @@ func main() {
 		fatal(err)
 	}
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
 		target := filepath.Join(appDir, filepath.FromSlash(f.Name))
 		if !strings.HasPrefix(target, appDir+string(os.PathSeparator)) {
 			fatal(fmt.Errorf("embedded path escapes app dir: %s", f.Name))
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				fatal(err)
+			}
+			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			fatal(err)
@@ -372,7 +401,10 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		if err := os.WriteFile(target, data, 0o644); err != nil {
+		if err := os.WriteFile(target, data, f.Mode().Perm()); err != nil {
+			fatal(err)
+		}
+		if err := os.Chtimes(target, f.Modified, f.Modified); err != nil {
 			fatal(err)
 		}
 	}

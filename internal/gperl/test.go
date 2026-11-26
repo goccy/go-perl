@@ -194,6 +194,15 @@ func RunTestBinary(projectDir string, args []string) int {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		return 1
 	}
+	// The test files see the directory in PWD, as a shell's cd sets it.
+	wd, err := os.Getwd()
+	if err == nil {
+		err = os.Setenv("PWD", wd)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
+		return 1
+	}
 	files, err := c.files(fl.Args())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)

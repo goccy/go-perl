@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/goccy/go-perl/internal/gperl"
 )
@@ -619,7 +620,13 @@ func TestTestBinary(t *testing.T) {
 			"is(system($^X, '-e', 'exit 3') >> 8, 3, '$^X exits with its status');\n",
 		"t/data/note.txt": "from the project\n",
 		"t/03-data.t":     "use Test::More tests => 1;\nopen(my $fh, '<', 't/data/note.txt') or die \"note: $!\";\nis(scalar(<$fh>), \"from the project\\n\");\n",
-		"xt/fail.t":       "use Test::More tests => 1;\nok(0, 'broken');\n",
+		"t/bin/tool":      "#!/bin/sh\necho tool\n",
+		"t/04-tree.t": "use Test::More tests => 4;\nuse Cwd ();\n" +
+			"is(`t/bin/tool`, \"tool\\n\", 'a program of the project runs');\n" +
+			"ok(-d 't/empty', 'an empty directory stays');\n" +
+			"cmp_ok(-M 't/data/note.txt', '>', 365, 'a file keeps its modification time');\n" +
+			"is($ENV{PWD}, Cwd::getcwd(), 'PWD names the directory');\n",
+		"xt/fail.t": "use Test::More tests => 1;\nok(0, 'broken');\n",
 	} {
 		p := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -628,6 +635,16 @@ func TestTestBinary(t *testing.T) {
 		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Chmod(filepath.Join(dir, "t", "bin", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "t", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(dir, "t", "data", "note.txt"), old, old); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("GPERL_DEV_REPLACE", devReplaces(t))
 	t.Setenv("CGO_ENABLED", "1")
@@ -657,7 +674,7 @@ func TestTestBinary(t *testing.T) {
 		return string(out), cmd.ProcessState.ExitCode()
 	}
 	out, status := run()
-	for _, want := range []string{"t/01-deps.t .. ok\n", "t/02-perl.t .. ok\n", "t/03-data.t .. ok\n", "All tests successful.\n", "Files=3, Tests=6, "} {
+	for _, want := range []string{"t/01-deps.t .. ok\n", "t/02-perl.t .. ok\n", "t/03-data.t .. ok\n", "t/04-tree.t .. ok\n", "All tests successful.\n", "Files=4, Tests=10, "} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report lacks %q:\n%s", want, out)
 		}
