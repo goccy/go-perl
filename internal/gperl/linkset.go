@@ -222,13 +222,21 @@ func writeLibZip(lib map[string]string, path string) (err error) {
 	defer func() { err = errors.Join(err, f.Close()) }()
 	zw := zip.NewWriter(f)
 	for _, name := range slices.Sorted(maps.Keys(lib)) {
-		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-		if err != nil {
-			return err
-		}
 		src, err := os.Open(lib[name])
 		if err != nil {
 			return err
+		}
+		info, err := src.Stat()
+		if err != nil {
+			return errors.Join(err, src.Close())
+		}
+		// The file's mode goes with it (a program a distribution installs
+		// stays one); no time does, so the same tree makes the same archive.
+		hdr := &zip.FileHeader{Name: name, Method: zip.Store}
+		hdr.SetMode(info.Mode())
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return errors.Join(err, src.Close())
 		}
 		_, err = io.Copy(w, src)
 		if err := errors.Join(err, src.Close()); err != nil {

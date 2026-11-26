@@ -201,6 +201,8 @@ gperl run [switches] [script]   # the perl(1) command line: every perlrun
                                 # switch (-e/-n/-p/-i/-M/-C/-T/...), a
                                 # program on stdin, #! line switches
 gperl test [-v] [-j N] [paths]  # run t/*.t, report like prove
+gperl test -c [-o out]          # the project's test binary (<dir>.test), which
+                                # takes gperl test's options and paths
 gperl build [-o out] script.pl  # one binary: script + dependencies + interpreter
 
 gperl psgi run [options] app.psgi          # serve a PSGI application
@@ -229,7 +231,11 @@ of a perl command line, which an embedding application can use directly.
 program with its own working directory and environment, which is not the
 host process (it may not listen on the network). A built binary needs
 nothing beside it: the XS modules are linked in statically, or with
-`GPERLNATIVE=load` embedded and loaded at run time.
+`GPERLNATIVE=load` embedded and loaded at run time. `gperl test -c` builds
+the test run into such a binary, as `go test -c` does: it carries the
+whole project directory and its dependencies, and runs the test files from
+its own copy of the project, each as a perl process of its own whose `$^X`
+runs the binary as perl.
 
 **Toolchain.** `gperl run` and `gperl test` need nothing but gperl for
 pure-Perl dependencies. Building a binary needs the Go toolchain, and

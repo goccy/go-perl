@@ -2,12 +2,14 @@ package gperl
 
 import (
 	"archive/zip"
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goccy/go-perl/internal/mod"
 )
@@ -87,5 +89,70 @@ func TestLinkSetCarriesNamesDifferingInCase(t *testing.T) {
 	}
 	if !strings.Contains(string(src), "//go:embed lib.zip\n") {
 		t.Fatalf("cpan.go does not embed lib.zip:\n%s", src)
+	}
+}
+
+// A program the module tree holds (an Alien distribution's) stays one where
+// a binary unpacks the tree; the archive carries no times.
+func TestLibZipKeepsModes(t *testing.T) {
+	dir := t.TempDir()
+	lib := map[string]string{}
+	for name, mode := range map[string]os.FileMode{"auto/share/dist/A/bin/tool": 0o755, "A.pm": 0o644} {
+		host := filepath.Join(dir, strings.ReplaceAll(name, "/", "_"))
+		if err := os.WriteFile(host, []byte("x\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(host, mode); err != nil {
+			t.Fatal(err)
+		}
+		lib[name] = host
+	}
+	archive := filepath.Join(dir, "lib.zip")
+	if err := writeLibZip(lib, archive); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := zr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	// Other modification times make the same archive.
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, host := range lib {
+		if err := os.Chtimes(host, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again := filepath.Join(dir, "again.zip")
+	if err := writeLibZip(lib, again); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Error("the archive changed with the files' modification times")
+	}
+	out := filepath.Join(t.TempDir(), "tree")
+	if err := os.CopyFS(out, zr); err != nil {
+		t.Fatal(err)
+	}
+	for name, exec := range map[string]bool{"auto/share/dist/A/bin/tool": true, "A.pm": false} {
+		info, err := os.Stat(filepath.Join(out, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm()&0o100 != 0; got != exec {
+			t.Errorf("%s unpacked as %v, want executable %v", name, info.Mode(), exec)
+		}
 	}
 }

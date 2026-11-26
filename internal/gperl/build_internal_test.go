@@ -1,9 +1,46 @@
 package gperl
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"testing"
+	"time"
 )
+
+// The embedded tree carries no times: the same project makes the same
+// archive whatever its files' modification times.
+func TestAppZipCarriesNoTimes(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "app.pl")
+	for _, p := range []string{script, filepath.Join(dir, "lib", "My.pm")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("1;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(dir, "app")
+	a, _, err := buildAppZip(dir, script, true, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, p := range []string{script, filepath.Join(dir, "lib", "My.pm"), filepath.Join(dir, "lib")} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, _, err := buildAppZip(dir, script, true, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("the archive changed with the files' modification times")
+	}
+}
 
 func TestGoModSrcRequiresGperlsGoPerlVersion(t *testing.T) {
 	const header = "module " + generatedModulePath + "\n\ngo 1.25.0\n\n"

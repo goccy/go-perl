@@ -36,23 +36,36 @@ func Build(script, out string) error { return buildBinary(script, out, nil) }
 
 // buildBinary builds script into a standalone binary: a program that runs
 // it, or — when psgiDefaults is non-nil — a server for the PSGI application
-// it is, with those settings as defaults. A server carries the whole
-// project directory (an application reads templates and static files next
-// to itself); a program carries the script and lib/.
+// it is, with those settings as defaults, or — when script is "" — the test
+// binary of the project in the current directory (default out:
+// <directory>.test). A server and a test binary carry the whole project
+// directory (an application reads templates and static files next to
+// itself, a test its data under t/); a program carries the script and lib/.
 func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	config, err := readBuildConfig()
 	if err != nil {
 		return err
 	}
-	if script, err = filepath.Abs(script); err != nil {
-		return err
-	}
-	if _, err := os.Stat(script); err != nil {
-		return err
-	}
-	projectDir := filepath.Dir(script)
-	if out == "" {
-		out = strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
+	test := script == ""
+	var projectDir string
+	if test {
+		if projectDir, err = os.Getwd(); err != nil {
+			return err
+		}
+		if out == "" {
+			out = filepath.Base(projectDir) + ".test"
+		}
+	} else {
+		if script, err = filepath.Abs(script); err != nil {
+			return err
+		}
+		if _, err := os.Stat(script); err != nil {
+			return err
+		}
+		projectDir = filepath.Dir(script)
+		if out == "" {
+			out = strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
+		}
 	}
 	if out, err = filepath.Abs(out); err != nil {
 		return err
@@ -70,7 +83,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 	}
 
 	scriptName := filepath.Base(script)
-	appZip, incDirs, err := buildAppZip(projectDir, script, psgiDefaults != nil, out)
+	appZip, incDirs, err := buildAppZip(projectDir, script, psgiDefaults != nil || test, out)
 	if err != nil {
 		return err
 	}
@@ -83,6 +96,7 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 		"Inc":          incDirs,
 		"PSGI":         psgiDefaults != nil,
 		"PSGIDefaults": psgiDefaults,
+		"Test":         test,
 	}); err != nil {
 		return err
 	}
@@ -167,28 +181,51 @@ func buildBinary(script, out string, psgiDefaults []string) (err error) {
 func buildAppZip(projectDir, script string, whole bool, out string) ([]byte, []string, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	addFile := func(name, host string) error {
-		data, err := os.ReadFile(host)
+	// add stores host at name with its mode: a file (what a symbolic link
+	// to one names), or a directory as an entry of its own, so that an empty
+	// one stays. No time goes with it: the same tree makes the same binary.
+	add := func(name, host string, dir bool) error {
+		info, err := os.Stat(host)
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(name)
+		hdr := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		hdr.SetMode(info.Mode())
+		var data []byte
+		switch {
+		case info.IsDir() != dir:
+			return fmt.Errorf("%s: a symbolic link to a directory cannot be embedded", host)
+		case dir:
+			hdr.Name, hdr.Method = name+"/", zip.Store
+		case !info.Mode().IsRegular():
+			return fmt.Errorf("%s: not a regular file or a directory", host)
+		default:
+			if data, err = os.ReadFile(host); err != nil {
+				return err
+			}
+		}
+		w, err := zw.CreateHeader(hdr)
 		if err != nil {
 			return err
 		}
 		_, err = w.Write(data)
 		return err
 	}
+	addFile := func(name, host string) error { return add(name, host, false) }
 	addTree := func(name, host string) error {
 		return filepath.WalkDir(host, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
 				return err
 			}
-			rel, rErr := filepath.Rel(host, path)
-			if rErr != nil {
-				return rErr
+			rel, err := filepath.Rel(host, path)
+			if err != nil {
+				return err
 			}
-			return addFile(name+"/"+filepath.ToSlash(rel), path)
+			entry := name
+			if rel != "." {
+				entry += "/" + filepath.ToSlash(rel)
+			}
+			return add(entry, path, d.IsDir())
 		})
 	}
 
@@ -300,11 +337,11 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-{{- if not .PSGI}}
+{{- if not (or .PSGI .Test)}}
 	"context"
 {{- end}}
 	_ "embed"
-{{- if not .PSGI}}
+{{- if not (or .PSGI .Test)}}
 	"errors"
 {{- end}}
 	"fmt"
@@ -312,7 +349,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-{{if not .PSGI}}
+{{if not (or .PSGI .Test)}}
 	perl "github.com/goccy/go-perl"
 {{- end}}
 	"github.com/goccy/go-perl/internal/gperl"
@@ -339,12 +376,15 @@ func main() {
 		fatal(err)
 	}
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
 		target := filepath.Join(appDir, filepath.FromSlash(f.Name))
 		if !strings.HasPrefix(target, appDir+string(os.PathSeparator)) {
 			fatal(fmt.Errorf("embedded path escapes app dir: %s", f.Name))
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				fatal(err)
+			}
+			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			fatal(err)
@@ -358,10 +398,16 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		if err := os.WriteFile(target, data, 0o644); err != nil {
+		if err := os.WriteFile(target, data, f.Mode().Perm()); err != nil {
 			fatal(err)
 		}
 	}
+{{- if .Test}}
+	status := gperl.RunTestBinary(filepath.Join(appDir, "app"), os.Args[1:])
+	cleanup()
+	os.Exit(status)
+}
+{{- else}}
 	scriptPath := filepath.Join(appDir, filepath.FromSlash(scriptRel))
 	incDirs := make([]string, 0, len(incRel))
 	for _, rel := range incRel {
@@ -406,6 +452,7 @@ func main() {
 	cleanup()
 	os.Exit(status)
 }
+{{- end}}
 {{- end}}
 
 // cleanup removes the unpacked app dir; os.Exit skips defers, so every

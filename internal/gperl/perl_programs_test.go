@@ -5,6 +5,7 @@ package gperl_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,31 @@ print "prove: ", ($version =~ /\ATAP::Harness v[\d.]+ and Perl v5\.44\.0\n\z/ ? 
 `, home)
 	if want := "prove: runs on this perl\n"; status != 0 || out != want {
 		t.Fatalf("status %d, output:\n%s\nwant:\n%s", status, out, want)
+	}
+}
+
+// A user who has no cache directory to write still has a perl command: it
+// is beside the standard library, in this user's directory of the
+// temporary directory, and it runs as perl.
+func TestPerlCommandWithoutACacheDirectory(t *testing.T) {
+	// A home that is a file has no cache directory, for root too.
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.WriteFile(home, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	cmd := perlProcess("-e", `print $^X; exit(system($^X, '-e', 'exit 3') >> 8)`)
+	cmd.Env = append(cmd.Env, "HOME="+home, "XDG_CACHE_HOME=", "TMPDIR="+tmp)
+	var errOut strings.Builder
+	cmd.Stderr = &errOut
+	out, err := cmd.Output()
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 3 {
+		t.Fatalf("perl: %v (want status 3 from $^X)\n%s", err, errOut.String())
+	}
+	link := string(out)
+	root := filepath.Join(tmp, "go-perl-"+strconv.Itoa(os.Getuid()))
+	if !strings.HasPrefix(link, root+string(filepath.Separator)+"perl-") || filepath.Base(link) != "perl" {
+		t.Errorf("$^X = %q, want a perl link in %s", link, root)
 	}
 }
 
