@@ -5,9 +5,12 @@ package perl
 // stdlib.zip is a trimmed copy of the assembled perl5/lib/ tree (no XS static
 // archives — those are already linked into perl.wasm — no test suites, no pod)
 // embedded into this module so an embedding application does not have to ship
-// the lib/ directory alongside its binary. ExtractStdlib unpacks it onto the
-// host filesystem — once per user, not once per process — and returns that
-// path, suitable for Config.StdlibDir.
+// the lib/ directory alongside its binary. The library default serves it from
+// memory, mounted read-only at StdlibDir (WithStdlib, what a nil Config.FS
+// gets); ExtractStdlib is the host-filesystem alternative: it unpacks the tree
+// onto the host filesystem — once per user, not once per process — and
+// returns that path, suitable for Config.StdlibDir when the FS is a host
+// backend (fs.NewHostFS).
 
 import (
 	"archive/zip"

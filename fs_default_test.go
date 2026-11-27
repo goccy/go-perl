@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -112,5 +113,71 @@ func TestHostFSOptIn(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
 	if err != nil || !strings.EqualFold(string(data), "from host") {
 		t.Fatalf("host write-back = %q, err=%v", data, err)
+	}
+}
+
+// TestDefaultStdlibIsReadOnly pins how the library default serves the
+// standard library: mounted read-only at perl.StdlibDir and loaded from
+// there, while the rest of the filesystem is the instance's own MemFS.
+func TestDefaultStdlibIsReadOnly(t *testing.T) {
+	p, err := perl.New(perl.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx := context.Background()
+	eval := func(src string) string {
+		t.Helper()
+		r, err := p.Eval(ctx, src)
+		if err != nil || r.Error != nil {
+			t.Fatalf("%s: err=%v error=%v", src, err, r.Error)
+		}
+		return resultStr(r)
+	}
+
+	lib := perl.StdlibDir
+	if got := eval(`require File::Spec; $INC{'File/Spec.pm'}`); got != lib+"/File/Spec.pm" {
+		t.Errorf("File::Spec loaded from %q", got)
+	}
+	for _, src := range []string{
+		`open(my $fh, '>>', '` + lib + `/strict.pm') ? "writable" : "$!"`,
+		`open(my $fh, '>', '` + lib + `/New.pm') ? "writable" : "$!"`,
+		`unlink('` + lib + `/strict.pm') ? "removed" : "$!"`,
+		`mkdir('` + lib + `/newdir') ? "created" : "$!"`,
+	} {
+		if got := eval(src); got != "Permission denied" {
+			t.Errorf("%s = %q, want Permission denied", src, got)
+		}
+	}
+	if got := eval(`open(my $fh, '>', '/scratch.txt') ? "ok" : "$!"`); got != "ok" {
+		t.Errorf("writing outside the library: %q", got)
+	}
+
+	// What the guest asks about the files: access(2) by the mount (the
+	// file tests ask it under filetest 'access'; otherwise they read the
+	// mode, which lets uid 0 write anything, as perl does on a read-only
+	// mount), a trailing slash for directories only, each file a device and
+	// inode of its own.
+	for _, c := range []struct {
+		src, want  string
+		needsInode bool // files of the mounts have inode numbers on darwin and linux only
+	}{
+		{src: `use filetest 'access'; (-r '` + lib + `/strict.pm' ? "r" : "-") . (-w '` + lib + `/strict.pm' ? "w" : "-")`, want: "r-"},
+		{src: `use filetest 'access'; -w '/scratch.txt' ? "w" : "-"`, want: "w"},
+		{src: `(-e '/scratch.txt/' ? "e" : "-") . (-e '` + lib + `/strict.pm/' ? "e" : "-") . (-d '` + lib + `/File/' ? "d" : "-")`, want: "--d"},
+		{src: `unlink('/scratch.txt/') ? "removed" : "kept"`, want: "kept"},
+		{src: `my @a = stat '` + lib + `/strict.pm'; my @b = stat '` + lib + `/warnings.pm'; my @c = stat '/scratch.txt';
+		 ($a[1] != $b[1] ? "ino" : "same-ino") . " " . ($a[0] != $c[0] ? "dev" : "same-dev")`, want: "ino dev", needsInode: true},
+		// File::Find tells directories apart by device and inode when it
+		// follows links: it finds what it finds without following them.
+		{src: `use File::Find; my %n; for my $follow (0, 1) { find({ follow => $follow, wanted => sub { $n{$follow}++ if -f } }, '` + lib + `/File') }
+		 $n{0} && $n{0} == $n{1} ? "same" : "$n{0} != $n{1}"`, want: "same", needsInode: true},
+	} {
+		if c.needsInode && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			continue
+		}
+		if got := eval(c.src); got != c.want {
+			t.Errorf("%s = %q, want %q", c.src, got, c.want)
+		}
 	}
 }

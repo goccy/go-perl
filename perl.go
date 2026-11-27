@@ -13,6 +13,7 @@ import (
 
 	// The link set of the project's CPAN dependencies.
 	_ "github.com/goccy/go-perl/cpan"
+	goperlfs "github.com/goccy/go-perl/fs"
 	"github.com/goccy/go-perl/internal"
 )
 
@@ -78,21 +79,21 @@ func newPerl(cfg Config, ownState bool) (*Perl, error) {
 	// Resolve the filesystem and standard library location: every file the
 	// instance opens goes through Config.FS, and StdlibDir is a path inside
 	// it. With a supplied backend the stdlib must live in the FS (host
-	// backends pair with ExtractStdlib; NewStdlibMemFS pre-loads a MemFS).
-	// The nil default is a PRIVATE in-memory filesystem pre-loaded with the
-	// stdlib - sandboxed, nothing touches the host disk.
-	var memfs *MemFS
+	// backends pair with ExtractStdlib; WithStdlib mounts it on a MemFS).
+	// The nil default is a PRIVATE in-memory filesystem with the shared,
+	// read-only stdlib mounted at StdlibDir - sandboxed, nothing touches the
+	// host disk.
 	if cfg.FS == nil {
-		var err error
-		if memfs, err = NewStdlibMemFS(); err != nil {
+		fsys, err := WithStdlib(goperlfs.NewMemFS())
+		if err != nil {
 			return nil, fmt.Errorf("build in-memory stdlib: %w", err)
 		}
-		cfg.FS = memfs
+		cfg.FS = fsys
 	}
 	if cfg.StdlibDir == "" {
-		cfg.StdlibDir = "/"
+		cfg.StdlibDir = StdlibDir
 	}
-	cpanInc, err := cpanLibInc(cfg.FS, memfs)
+	cpanInc, err := cpanLibInc(cfg.FS)
 	if err != nil {
 		return nil, fmt.Errorf("the CPAN module tree: %w", err)
 	}

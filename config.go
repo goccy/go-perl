@@ -10,7 +10,7 @@ import (
 
 // Config configures a new Perl instance created by New. The zero value is a
 // usable, FULLY SANDBOXED interpreter: a private in-memory filesystem
-// pre-loaded with the embedded standard library, an empty environment (the
+// with the embedded standard library mounted read-only, an empty environment (the
 // host process env is not leaked), sandboxed stdio, and every capability
 // hook denying — no outbound connections, no name resolution, no subprocess
 // spawns, no fork, no system logger, and an identity of its own instead of
@@ -34,8 +34,8 @@ type Config struct {
 	// Env, so a module found there shadows the standard library's copy.
 	// PERL5OPT in Env is not applied when the instance is created: it
 	// belongs to a perl command line, which the host interprets (gperl
-	// does). Empty defaults to "/" — right for the
-	// library default and for NewStdlibMemFS. An instance on the host
+	// does). Empty defaults to StdlibDir — right for the library default
+	// and for WithStdlib. An instance on the host
 	// filesystem (fs.NewHostFS) points this at a host directory, e.g. the
 	// one ExtractStdlib returns.
 	StdlibDir string
@@ -221,8 +221,10 @@ type Config struct {
 	// fs.DirFS (the host filesystem scoped to one directory), or any other
 	// fs.FS implementation.
 	//
-	// When nil, the instance gets a PRIVATE in-memory filesystem
-	// pre-loaded with the standard library (NewStdlibMemFS), so a library
-	// embedding never touches the host disk unless explicitly asked to.
+	// When nil, the instance gets a PRIVATE in-memory filesystem with the
+	// standard library mounted read-only at StdlibDir
+	// (WithStdlib(fs.NewMemFS())), so a library embedding never touches the
+	// host disk unless explicitly asked to. The library itself is shared by
+	// every such instance.
 	FS FS
 }

@@ -97,7 +97,7 @@ func TestNoCPANLibByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	if got := evalString(t, p, `(-e "/.goperl" ? "present" : "absent") . (grep({ m{\.goperl} } @INC) ? "+inc" : "")`); got != "absent" {
+	if got := evalString(t, p, `(-e "/.goperl/cpan" ? "present" : "absent") . (grep({ m{\.goperl/cpan} } @INC) ? "+inc" : "")`); got != "absent" {
 		t.Fatalf("default instance: %q", got)
 	}
 }

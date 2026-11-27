@@ -4,7 +4,7 @@
 //
 //   - NewMemFS gives a private in-memory filesystem — nothing touches the
 //     host disk, and separate MemFS values are fully isolated (this backs
-//     the library default, pre-loaded with the standard library);
+//     the library default, with the standard library mounted on it);
 //   - NewHostFS passes straight through to the operating system's
 //     filesystem — how the perl command behaves, and what gperl uses;
 //   - DirFS is the host filesystem scoped to one directory, which becomes

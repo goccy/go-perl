@@ -50,8 +50,9 @@ func main() {
   Windows, and even wasip1.
 - **Batteries included**: libperl plus every static XS extension (List::Util,
   POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib are
-  embedded in the binary (served from a private in-memory filesystem by
-  default) — nothing to install or deploy next to your executable.
+  embedded in the binary (by default the stdlib is mounted read-only at
+  `/.goperl/stdlib` on a private in-memory filesystem, one copy shared by every
+  instance) — nothing to install or deploy next to your executable.
 - **Native XS support, unmodified modules**: real CPAN XS distributions
   compile against go-perl's XS SDK with their own `Makefile.PL`/`Build.PL`
   — no source changes. Moose, Text::Xslate, Devel::NYTProf, DBD::mysql,
@@ -89,7 +90,8 @@ func main() {
   otherwise — `Config.FS` selects the backend from the [`fs`](./fs) package
   (`fs.NewHostFS()` passes through to the OS, matching `perl`; `fs.DirFS`
   scopes to one directory; `fs.NewMemFS()` or any custom backend plugs in
-  the same way). The capability hooks are FAIL-CLOSED: with a zero `Config`,
+  the same way, and `perl.WithStdlib(mem)` mounts the stdlib on a `MemFS` of
+  your own). The capability hooks are FAIL-CLOSED: with a zero `Config`,
   outbound connections (`Dial`), name resolution (`Resolve`), subprocess
   spawns (`Exec`), and `fork` (`Fork`) are all denied — each capability is
   granted explicitly.
