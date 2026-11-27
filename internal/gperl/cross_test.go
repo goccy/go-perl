@@ -30,6 +30,21 @@ type crossCase struct {
 	linked   bool // the binary has the native modules linked in
 }
 
+// idsScript also changes the effective uid of the process, which a binary
+// with native modules linked in does through the C library linked into it
+// (and not one the dynamic loader would load beside it): root takes
+// another uid and goes back, anyone else is refused uid 0 (EPERM).
+const (
+	idsScript = testScript + `my $other = $< == 0 ? 65534 : 0;
+$! = 0;
+$> = $other;
+my $answer = $< == 0 ? ($> == $other ? 'answered' : "not changed: $!") : ($!{EPERM} ? 'answered' : "not refused: $!");
+$> = $<;
+print "ids $answer\n";
+`
+	idsOutput = testOutput + "ids answered\n"
+)
+
 // gperl build makes binaries for linux/amd64 and linux/arm64 from any host:
 // the native modules are compiled by Zig for the target and linked in
 // (into a fully static binary on musl), with GPERLNATIVE=load they are
@@ -59,10 +74,10 @@ func TestCrossBuild(t *testing.T) {
 	for _, arch := range []struct{ goarch, cpu string }{{"amd64", "x86_64"}, {"arm64", "aarch64"}} {
 		cases = append(cases,
 			crossCase{name: "linux_" + arch.goarch + "_musl_static", goarch: arch.goarch,
-				triple: arch.cpu + "-linux-musl", cpanfile: testCPANfile, script: testScript, output: testOutput,
+				triple: arch.cpu + "-linux-musl", cpanfile: testCPANfile, script: idsScript, output: idsOutput,
 				static: true, linked: true},
 			crossCase{name: "linux_" + arch.goarch + "_gnu", goarch: arch.goarch, native: "link",
-				triple: arch.cpu + "-linux-gnu", cpanfile: testCPANfile, script: testScript, output: testOutput,
+				triple: arch.cpu + "-linux-gnu", cpanfile: testCPANfile, script: idsScript, output: idsOutput,
 				linked: true},
 			// Without cgo the binary loads the C library through the
 			// dynamic loader (purego), so it has a program interpreter.

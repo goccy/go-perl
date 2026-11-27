@@ -229,14 +229,14 @@ func TestDependenciesEndToEnd(t *testing.T) {
 		"Pure-Static@1.00/gperl/built",
 		"Pure-Built@0.50/gperl/lib/Pure/Built.pm",
 		"Demo-XS@0.01/gperl/lib/Demo/XS.pm",
-		"Demo-XS@0.01/gperl/abi43/xs.go",
-		"Demo-XS@0.01/gperl/abi43/go.mod",
+		"Demo-XS@0.01/gperl/abi44/xs.go",
+		"Demo-XS@0.01/gperl/abi44/go.mod",
 	} {
 		if _, err := os.Stat(filepath.Join(modDir, filepath.FromSlash(artifact))); err != nil {
 			t.Errorf("module directory: %v", err)
 		}
 	}
-	matches, err := filepath.Glob(filepath.Join(modDir, "Demo-XS@0.01", "gperl", "abi43", "*", "auto", "Demo", "XS", "XS.*"))
+	matches, err := filepath.Glob(filepath.Join(modDir, "Demo-XS@0.01", "gperl", "abi44", "*", "auto", "Demo", "XS", "XS.*"))
 	if err != nil || len(matches) != 4 {
 		t.Fatalf("native artifacts = %v (%v), want XS.a, XS.exports, XS.ldflags, XS.so", matches, err)
 	}
@@ -333,7 +333,7 @@ func TestBrokenXSFailsTheSync(t *testing.T) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
 	}
-	logs, globErr := filepath.Glob(filepath.Join(os.Getenv("GPERLMODCACHE"), "Twin-A@0.01", "gperl", "abi43", "*", "build-error.log"))
+	logs, globErr := filepath.Glob(filepath.Join(os.Getenv("GPERLMODCACHE"), "Twin-A@0.01", "gperl", "abi44", "*", "build-error.log"))
 	if globErr != nil || len(logs) != 1 {
 		t.Fatalf("build log: %v, %v", logs, globErr)
 	}

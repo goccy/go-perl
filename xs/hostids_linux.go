@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/ebitengine/purego"
 	"github.com/goccy/go-perl/internal/ccall"
 
 	"github.com/goccy/go-perl/internal"
@@ -40,16 +39,20 @@ type libcIDs struct{}
 // the call and the reading of errno, at the address
 // __errno_location gives, run on one locked OS thread, and the C library's
 // memcpy reads it (Go code does not dereference the C library's memory).
+//
+// The functions are the C library's the native modules are linked with
+// (libcSymbol): in a binary that links the modules in, the one linked into
+// it, not one the dynamic loader would load beside it.
 func libcCall(name string, args ...uintptr) error {
-	fn, err := purego.Dlsym(purego.RTLD_DEFAULT, name)
+	fn, err := libcSymbol(name)
 	if err != nil {
 		return errors.ErrUnsupported
 	}
-	errnoLocation, err := purego.Dlsym(purego.RTLD_DEFAULT, "__errno_location")
+	errnoLocation, err := libcSymbol("__errno_location")
 	if err != nil {
 		return errors.ErrUnsupported
 	}
-	memcpy, err := purego.Dlsym(purego.RTLD_DEFAULT, "memcpy")
+	memcpy, err := libcSymbol("memcpy")
 	if err != nil {
 		return errors.ErrUnsupported
 	}
@@ -92,5 +95,9 @@ func (libcIDs) Setgroups(gids []int) error {
 	if len(list) > 0 {
 		first = unsafe.Pointer(&list[0])
 	}
-	return libcCall("setgroups", uintptr(len(list)), uintptr(first))
+	err := libcCall("setgroups", uintptr(len(list)), uintptr(first))
+	// list is only an address to libcCall: it stays alive until the call
+	// has returned.
+	runtime.KeepAlive(list)
+	return err
 }
