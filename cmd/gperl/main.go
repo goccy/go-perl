@@ -58,6 +58,8 @@ func usage() {
   gperl test -c [-o out]
   gperl psgi run [options] app.psgi
   gperl psgi build [-o out] [options] app.psgi
+  gperl image build [-platform list] [-base image] [-push repository:tag]
+                    [-tarball file] (script.pl | -psgi app.psgi [-- options])
   gperl mod download
   gperl mod tidy
   gperl get module[@version]...
@@ -116,6 +118,11 @@ func main() {
 		default:
 			usage()
 		}
+	case "image":
+		if len(os.Args) < 3 || os.Args[2] != "build" {
+			usage()
+		}
+		exitOn(gperl.ImageBuild(os.Args[3:]))
 	case "install":
 		if len(os.Args) != 3 || os.Args[2] != "toolchain" {
 			usage()

@@ -207,6 +207,9 @@ gperl build [-o out] script.pl  # one binary: script + dependencies + interprete
 
 gperl psgi run [options] app.psgi          # serve a PSGI application
 gperl psgi build [-o out] [options] app.psgi   # build its server binary
+
+gperl image build -push ghcr.io/me/app:v1 script.pl   # a container image
+gperl image build -push ghcr.io/me/app:v1 -psgi app.psgi [-- options]
 ```
 
 **Dependencies** follow the Perl conventions on the outside — a `cpanfile`
@@ -271,6 +274,21 @@ with. A server binary's workers load the native (XS) modules linked into
 it; under `gperl psgi run` they load native modules from `@INC` only when
 the project's dependencies have some, so a native module in a directory
 given with `-I` or `PERL5LIB` is found only then.
+
+**`gperl image build`** makes a container image without Docker: it builds
+the script — or with `-psgi` the application's server, taking `gperl psgi
+build`'s options after `--` — for `linux/amd64`, `linux/arm64` or both
+(`-platform`, default both), and puts each binary at `/app/<name>` on the
+base image as its entrypoint. The base is `-base`, or
+`cgr.dev/chainguard/static` for a static binary and
+`cgr.dev/chainguard/glibc-dynamic` for one that needs the dynamic loader.
+`-push repository:tag` pushes the image (an index of the platforms' images
+for several) with the credentials of `docker login` and prints its digest;
+`-tarball file` writes an image of one platform as the archive `docker
+load` reads. The image's layer and config carry no build time, so the same
+binary makes the same image. The binary unpacks its standard library into
+the user cache directory or the temporary directory at startup, so an image
+run with a read-only root filesystem needs a writable `/tmp`.
 
 ## Supply-chain verification
 

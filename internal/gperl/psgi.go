@@ -485,17 +485,27 @@ func PSGIRun(args []string) error {
 // dependencies, and the interpreter. The options become the binary's
 // defaults.
 func PSGIBuild(args []string) error {
-	c := &psgiConfig{}
-	fs := c.flags("gperl psgi build", false)
-	out := fs.String("o", "", "output binary path")
-	if err := fs.Parse(splitShortOptions(args, "r", "IMplE")); err != nil {
+	app, out, defaults, err := parsePSGIBuild(args)
+	if err != nil {
 		return err
 	}
+	return buildBinary(app, out, defaults)
+}
+
+// parsePSGIBuild parses gperl psgi build's arguments into the application,
+// the output path, and the server's defaults.
+func parsePSGIBuild(args []string) (app, out string, defaults []string, err error) {
+	c := &psgiConfig{}
+	fs := c.flags("gperl psgi build", false)
+	fs.StringVar(&out, "o", "", "output binary path")
+	if err := fs.Parse(splitShortOptions(args, "r", "IMplE")); err != nil {
+		return "", "", nil, err
+	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: gperl psgi build [-o out] [options] app.psgi")
+		return "", "", nil, errors.New("usage: gperl psgi build [-o out] [options] app.psgi")
 	}
 	// Never nil: no defaults is still a server (buildBinary).
-	defaults := []string{}
+	defaults = []string{}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "o" {
 			return
@@ -508,7 +518,7 @@ func PSGIBuild(args []string) error {
 		}
 		defaults = append(defaults, "--"+f.Name+"="+f.Value.String())
 	})
-	return buildBinary(fs.Arg(0), *out, defaults)
+	return fs.Arg(0), out, defaults, nil
 }
 
 // PSGIMain is the entry point of a server binary gperl psgi build makes:
