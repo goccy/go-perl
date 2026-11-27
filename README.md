@@ -219,7 +219,21 @@ live in a module directory shared by every project (`~/gperl/pkg/mod`, or
 `GPERLMODCACHE`), each release extracted and built once. Modules are
 resolved through CPAN MetaDB and MetaCPAN, fetched from a CPAN mirror
 (`GPERLMIRROR`; `GPERLMIRRORONLY=1` resolves with the mirror's own index),
-and verified against the author's `CHECKSUMS`. Builds ride each
+and verified against the author's `CHECKSUMS`. A requirement can name a
+distribution that is not on CPAN, with the options cpm reads:
+
+```perl
+requires 'Plack', dist => 'MIYAGAWA/Plack-1.0050.tar.gz';            # that release
+requires 'My::Lib', dist => 'ME/My-Lib-0.1.tar.gz',
+    mirror => 'https://pause.example.com/';                         # a DarkPAN
+requires 'Other', url => 'https://example.com/Other-1.0.tar.gz';    # an archive
+requires 'Fork', git => 'https://github.com/me/Fork.git', ref => 'v1.0';
+```
+
+The snapshot pins what was fetched — an archive's sha256, a repository's
+commit — and later downloads are checked against it. URLs must be https
+(ssh too for git). An option, statement (`mirror`, `osname`) or phase gperl
+does not support is an error, not ignored. Builds ride each
 distribution's own `Makefile.PL`/`Build.PL` with every `perl` in the
 pipeline being the embedded interpreter, so the only tools required are
 `make` and a C compiler.

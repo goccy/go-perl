@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	perl "github.com/goccy/go-perl"
@@ -48,28 +49,60 @@ configure_requires 'Module::Build::Tiny';
 feature 'sqlite', 'SQLite support' => sub {
     requires 'DBD::SQLite';
 };
+my $repo = 'https://example.com/x/Fork.git';
+requires 'Fork', '2.0', git => $repo, ref => 'v2.0';
+conflicts 'Bad::Thing', '< 1.5';
+feature 'short' => sub { suggests 'Short::Form' };
+our $seen = 1;
 `)
 	got, err := sharedHelper.CPANfile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Prereq{
-		{"Plack", "1.0050", "runtime", "requires"},
-		{"Mojolicious", "0", "runtime", "requires"},
-		{"Old::Thing", ">= 1.0, < 2.0", "runtime", "requires"},
-		{"Pinned", "== 1.23", "runtime", "requires"},
-		{"Cpanel::JSON::XS", "4.0", "runtime", "recommends"},
-		{"Test::More", "0.98", "test", "requires"},
-		{"Perl::Tidy", "0", "develop", "requires"},
-		{"Module::Build::Tiny", "0", "configure", "requires"},
+		{Module: "Plack", Range: "1.0050", Phase: "runtime", Type: "requires", Line: 2},
+		{Module: "Mojolicious", Range: "0", Phase: "runtime", Type: "requires", Line: 3},
+		{Module: "Old::Thing", Range: ">= 1.0, < 2.0", Phase: "runtime", Type: "requires", Line: 4},
+		{Module: "Pinned", Range: "== 1.23", Phase: "runtime", Type: "requires", Line: 5,
+			Options: map[string]string{"dist": "X/XX/XXX/Pinned-1.23.tar.gz"}},
+		{Module: "Cpanel::JSON::XS", Range: "4.0", Phase: "runtime", Type: "recommends", Line: 6},
+		{Module: "Test::More", Range: "0.98", Phase: "test", Type: "requires", Line: 8},
+		{Module: "Perl::Tidy", Range: "0", Phase: "develop", Type: "requires", Line: 10},
+		{Module: "Module::Build::Tiny", Range: "0", Phase: "configure", Type: "requires", Line: 11},
+		{Module: "DBD::SQLite", Range: "0", Phase: "runtime", Type: "requires", Feature: "sqlite", Line: 13},
+		{Module: "Fork", Range: "2.0", Phase: "runtime", Type: "requires", Line: 16,
+			Options: map[string]string{"git": "https://example.com/x/Fork.git", "ref": "v2.0"}},
+		{Module: "Bad::Thing", Range: "< 1.5", Phase: "runtime", Type: "conflicts", Line: 17},
+		{Module: "Short::Form", Range: "0", Phase: "runtime", Type: "suggests", Feature: "short", Line: 18},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("CPANfile =\n%v\nwant\n%v", got, want)
 	}
 
-	writeFile(t, path, "requires 'Plack'\nthis is not perl (\n")
-	if _, err := sharedHelper.CPANfile(path); err == nil {
-		t.Fatal("a cpanfile with a syntax error evaluated")
+	// Each file runs in a package of its own: a package variable the file
+	// above set is not set for the next one.
+	writeFile(t, path, "requires 'Plack' unless our $seen;\n")
+	if got, err := sharedHelper.CPANfile(path); err != nil || len(got) != 1 {
+		t.Fatalf("CPANfile after a file setting $seen = %v, %v", got, err)
+	}
+
+	for _, c := range []struct{ src, want string }{
+		{"requires 'Plack'\nthis is not perl (\n", "syntax error"},
+		{"\nosname 'MSWin32' => sub { requires 'Win32' };\n", "cpanfile line 2: osname is not supported"},
+		{"mirror 'https://pause.local/';\n", "cpanfile line 1: the mirror statement is not supported"},
+		{"on 'deploy' => sub { requires 'X' };\n", "cpanfile line 1: unknown phase 'deploy'"},
+		{"on 'test', 'X';\n", "cpanfile line 1: usage: on"},
+		{"feature 'x', ['y'] => sub {};\n", "cpanfile line 1: usage: feature"},
+		{"requires 'X', '>= nonsense';\n", "cpanfile line 1: X: "},
+		{"requires 'X', git => ['a'];\n", "cpanfile line 1: X: option git needs a string"},
+		{"requires;\n", "cpanfile line 1: requires needs a module name"},
+		{"$undeclared = 1;\n", "Global symbol"},
+	} {
+		writeFile(t, path, c.src)
+		_, err := sharedHelper.CPANfile(path)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("CPANfile(%q) error = %v, want %q", c.src, err, c.want)
+		}
 	}
 	if _, err := sharedHelper.CPANfile(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("a missing cpanfile evaluated")
@@ -139,11 +172,11 @@ func TestHelperMeta(t *testing.T) {
 		t.Errorf("flags = %+v", m)
 	}
 	wantPrereqs := []Prereq{
-		{"Module::Build::Tiny", "0.035", "configure", "requires"},
-		{"Test::More", "0.98", "test", "requires"},
-		{"Try::Tiny", "0.30", "runtime", "requires"},
-		{"perl", "5.008001", "runtime", "requires"},
-		{"Fast::XS", "0", "runtime", "recommends"},
+		{Module: "Module::Build::Tiny", Range: "0.035", Phase: "configure", Type: "requires"},
+		{Module: "Test::More", Range: "0.98", Phase: "test", Type: "requires"},
+		{Module: "Try::Tiny", Range: "0.30", Phase: "runtime", Type: "requires"},
+		{Module: "perl", Range: "5.008001", Phase: "runtime", Type: "requires"},
+		{Module: "Fast::XS", Range: "0", Phase: "runtime", Type: "recommends"},
 	}
 	if !reflect.DeepEqual(m.Prereqs, wantPrereqs) {
 		t.Errorf("Prereqs =\n%v\nwant\n%v", m.Prereqs, wantPrereqs)
@@ -171,7 +204,7 @@ func TestHelperMeta(t *testing.T) {
 
 	// A Build.PL distribution that requires nothing to configure requires
 	// Module::Build, as under cpanm.
-	moduleBuild := []Prereq{{"Module::Build", "0.38", "configure", "requires"}}
+	moduleBuild := []Prereq{{Module: "Module::Build", Range: "0.38", Phase: "configure", Type: "requires"}}
 	for _, c := range []struct {
 		name  string
 		dir   string // the tree's directory name
@@ -183,7 +216,7 @@ func TestHelperMeta(t *testing.T) {
 			"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},"name":"MB-Dist","version":"1.0"}`,
 		}},
 		{name: "Build.PL, no META", dir: "MB-Dist@1.0", want: moduleBuild, files: map[string]string{"Build.PL": ""}},
-		{name: "Build.PL, configure requires", dir: "MB-Dist@1.0", want: []Prereq{{"ExtUtils::MakeMaker", "0", "configure", "requires"}}, files: map[string]string{
+		{name: "Build.PL, configure requires", dir: "MB-Dist@1.0", want: []Prereq{{Module: "ExtUtils::MakeMaker", Range: "0", Phase: "configure", Type: "requires"}}, files: map[string]string{
 			"Build.PL":  "",
 			"META.json": `{"abstract":"x","author":["a"],"dynamic_config":1,"generated_by":"t","license":["perl_5"],"meta-spec":{"version":2},"name":"MB-Dist","version":"1.0","prereqs":{"configure":{"requires":{"ExtUtils::MakeMaker":"0"}}}}`,
 		}},

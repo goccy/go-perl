@@ -151,11 +151,26 @@ func TarballPath(dir, pathname string) string {
 }
 
 // TreePath returns where the module directory keeps the extracted tree of
-// the distribution at pathname.
-func TreePath(dir, pathname string) (string, error) {
-	name, version, err := SplitPathname(pathname)
+// the distribution d. A distribution that is not from the CPAN mirror
+// carries what pins it in the name — the digest of its archive, or its git
+// commit — so it never shares the tree of a release of the same name.
+func TreePath(dir string, d *Distribution) (string, error) {
+	if err := validateSource(d); err != nil {
+		return "", fmt.Errorf("%s: %w", d.Pathname, err)
+	}
+	if d.Git != "" {
+		name, err := repoName(d.Git)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, name+"@git."+d.Revision[:12]), nil
+	}
+	name, version, err := SplitPathname(d.Pathname)
 	if err != nil {
 		return "", err
+	}
+	if d.SHA256 != "" {
+		version += "+sha256." + d.SHA256[:16]
 	}
 	return filepath.Join(dir, name+"@"+version), nil
 }
