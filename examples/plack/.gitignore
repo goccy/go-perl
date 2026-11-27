@@ -1,4 +1,4 @@
-/local/
-/vendor/
-/.tools/
+/go.work
+/go.work.sum
 /plack
+/plack-server

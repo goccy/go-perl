@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"sync/atomic"
@@ -34,7 +35,8 @@ const (
 	KindUndef Kind = iota
 	// KindBool is a core boolean scalar (SV: !!1 / !!0).
 	KindBool
-	// KindInt is an integer scalar (SV: IV).
+	// KindInt is an integer scalar that an int64 holds (SV: IV, or a UV
+	// up to IV_MAX).
 	KindInt
 	// KindFloat is a floating-point scalar (SV: NV).
 	KindFloat
@@ -52,11 +54,15 @@ const (
 	KindGlob
 	// KindIO is a filehandle body (IO).
 	KindIO
+	// KindUint is an integer scalar above the range of an int64 (SV: a UV
+	// beyond IV_MAX); read it with Uint. Every smaller integer is a
+	// KindInt.
+	KindUint
 )
 
 var kindNames = [...]string{
 	"undef", "bool", "int", "float", "string",
-	"ref", "array", "hash", "code", "glob", "io",
+	"ref", "array", "hash", "code", "glob", "io", "uint",
 }
 
 func (k Kind) String() string {
@@ -99,9 +105,11 @@ func As[T PerlValue](v Value) (T, error) {
 type ScalarValue struct {
 	kind Kind
 	b    bool
-	i    int64
-	f    float64
-	s    []byte
+	// i is the integer of a KindInt, and the bits of the uint64 of a
+	// KindUint.
+	i int64
+	f float64
+	s []byte
 	// utf8 mirrors the guest SvUTF8 flag so the encoding round-trips.
 	utf8 bool
 }
@@ -109,7 +117,7 @@ type ScalarValue struct {
 func (ScalarValue) sealed() {}
 
 // Kind reports the scalar's representation: KindUndef, KindBool, KindInt,
-// KindFloat, or KindString.
+// KindUint, KindFloat, or KindString.
 func (v ScalarValue) Kind() Kind { return v.kind }
 
 // Bool applies Perl truth: undef, "", "0", and zero are false, everything
@@ -118,7 +126,7 @@ func (v ScalarValue) Bool() bool {
 	switch v.kind {
 	case KindBool:
 		return v.b
-	case KindInt:
+	case KindInt, KindUint:
 		return v.i != 0
 	case KindFloat:
 		return v.f != 0
@@ -129,7 +137,11 @@ func (v ScalarValue) Bool() bool {
 	}
 }
 
-// Int numifies the scalar the way Perl does and truncates toward zero.
+// Int is the scalar as a signed integer, the way Perl makes an IV of it
+// (SvIV): a float is truncated toward zero and held to the range of an
+// int64, a string is read as the number it starts with — exactly, when
+// that is an integer — and an integer above the int64 range (KindUint)
+// wraps, as Perl's conversion of such a UV does. Use Uint for those.
 func (v ScalarValue) Int() int64 {
 	switch v.kind {
 	case KindBool:
@@ -137,12 +149,48 @@ func (v ScalarValue) Int() int64 {
 			return 1
 		}
 		return 0
-	case KindInt:
+	case KindInt, KindUint:
 		return v.i
 	case KindFloat:
-		return int64(v.f)
+		return floatToInt(v.f)
 	case KindString:
-		return int64(numify(string(v.s)))
+		if mag, negative, ok := integerPrefix(string(v.s)); ok {
+			if negative {
+				return -int64(mag)
+			}
+			return int64(mag)
+		}
+		return floatToInt(numify(string(v.s)))
+	default:
+		return 0
+	}
+}
+
+// Uint is the scalar as an unsigned integer, the way Perl makes a UV of it
+// (SvUV): every integer up to the largest uint64 is exact, a negative
+// integer wraps as its conversion to a UV does, a float is truncated toward
+// zero and held to the range of a uint64 (a negative one converts as the
+// integer it truncates to), and a string is read as the number it starts
+// with.
+func (v ScalarValue) Uint() uint64 {
+	switch v.kind {
+	case KindBool:
+		if v.b {
+			return 1
+		}
+		return 0
+	case KindInt, KindUint:
+		return uint64(v.i)
+	case KindFloat:
+		return floatToUint(v.f)
+	case KindString:
+		if mag, negative, ok := integerPrefix(string(v.s)); ok {
+			if negative {
+				return uint64(-int64(mag))
+			}
+			return mag
+		}
+		return floatToUint(numify(string(v.s)))
 	default:
 		return 0
 	}
@@ -159,6 +207,8 @@ func (v ScalarValue) Float() float64 {
 		return 0
 	case KindInt:
 		return float64(v.i)
+	case KindUint:
+		return float64(uint64(v.i))
 	case KindFloat:
 		return v.f
 	case KindString:
@@ -179,6 +229,8 @@ func (v ScalarValue) String() string {
 		return ""
 	case KindInt:
 		return strconv.FormatInt(v.i, 10)
+	case KindUint:
+		return strconv.FormatUint(uint64(v.i), 10)
 	case KindFloat:
 		return strconv.FormatFloat(v.f, 'g', 15, 64)
 	case KindString:
@@ -199,12 +251,13 @@ func (v ScalarValue) Bytes() []byte {
 
 // ScalarType constrains the Go types ValueOf accepts as one Perl scalar.
 type ScalarType interface {
-	bool | int | int32 | int64 | uint32 | float64 | string | []byte
+	bool | int | int32 | int64 | uint | uint32 | uint64 | float64 | string | []byte
 }
 
 // ValueOf builds the scalar for a Go value: a bool crosses as a Perl core
-// boolean, integers as IVs, floats as NVs, a string as a utf8 character
-// string, and a []byte as a raw byte string.
+// boolean, integers as IVs (an unsigned one above the int64 range as a UV),
+// floats as NVs, a string as a utf8 character string, and a []byte as a raw
+// byte string. Every int64 and uint64 arrives as the integer it is.
 func ValueOf[T ScalarType](v T) ScalarValue {
 	switch x := any(v).(type) {
 	case bool:
@@ -215,8 +268,12 @@ func ValueOf[T ScalarType](v T) ScalarValue {
 		return ScalarValue{kind: KindInt, i: int64(x)}
 	case int64:
 		return ScalarValue{kind: KindInt, i: x}
+	case uint:
+		return unsignedScalar(uint64(x))
 	case uint32:
 		return ScalarValue{kind: KindInt, i: int64(x)}
+	case uint64:
+		return unsignedScalar(x)
 	case float64:
 		return ScalarValue{kind: KindFloat, f: x}
 	case string:
@@ -228,6 +285,100 @@ func ValueOf[T ScalarType](v T) ScalarValue {
 
 // Undef is the undefined scalar.
 func Undef() ScalarValue { return ScalarValue{kind: KindUndef} }
+
+// unsignedScalar is the integer scalar for u: a KindInt when an int64 holds
+// it, as Perl itself keeps such a number in an IV, and a KindUint otherwise.
+func unsignedScalar(u uint64) ScalarValue {
+	if u > math.MaxInt64 {
+		return ScalarValue{kind: KindUint, i: int64(u)}
+	}
+	return ScalarValue{kind: KindInt, i: int64(u)}
+}
+
+// The first float64 beyond the range of an int64 and of a uint64: 2**63 and
+// 2**64.
+const (
+	int64Limit  = 9223372036854775808.0
+	uint64Limit = 18446744073709551616.0
+)
+
+// floatToInt converts a float to a signed integer as Perl's cast of an NV
+// to an IV does (Perl_cast_iv): truncated toward zero, the smallest int64
+// for anything below the range, the bits of the unsigned value for what
+// only a uint64 holds, those of the largest uint64 above that, and 0 for
+// NaN.
+func floatToInt(f float64) int64 {
+	switch {
+	case f < int64Limit:
+		if f < -int64Limit {
+			return math.MinInt64
+		}
+		return int64(f)
+	case f < uint64Limit:
+		return int64(uint64(f))
+	case f > 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
+// floatToUint converts a float to an unsigned integer as Perl's cast of an
+// NV to a UV does (Perl_cast_uv): a negative value converts as the int64 it
+// truncates to, a value beyond the range is the largest uint64, NaN is 0.
+func floatToUint(f float64) uint64 {
+	switch {
+	case f < 0:
+		if f < -int64Limit {
+			return 1 << 63
+		}
+		return uint64(int64(f))
+	case f < uint64Limit:
+		return uint64(f)
+	case f > 0:
+		return math.MaxUint64
+	default:
+		return 0
+	}
+}
+
+// integerPrefix reads the number s starts with, as numify does, when that
+// number is a plain decimal integer (no fraction, no exponent) an integer
+// type holds exactly: mag is its magnitude and negative its sign. ok is
+// false for any other string — one that starts with no number, with a
+// number that is not an integer, or with an integer beyond the range of a
+// uint64 (of an int64, for a negative one) — which numify then reads as a
+// float.
+func integerPrefix(s string) (mag uint64, negative, ok bool) {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f') {
+		i++
+	}
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		negative = s[i] == '-'
+		i++
+	}
+	start := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		digit := uint64(s[i] - '0')
+		if mag > (math.MaxUint64-digit)/10 {
+			return 0, false, false
+		}
+		mag = mag*10 + digit
+		i++
+	}
+	if i == start {
+		return 0, false, false
+	}
+	if i < len(s) && (s[i] == '.' || s[i] == 'e' || s[i] == 'E') {
+		// A fraction or an exponent may follow: the float reading decides.
+		return 0, false, false
+	}
+	if negative && mag > 1<<63 {
+		return 0, false, false
+	}
+	return mag, negative, true
+}
 
 // ---- reference handles ---------------------------------------------------
 
@@ -243,6 +394,29 @@ type refHandle struct {
 	// released flips once the release has been queued so views never
 	// double-release.
 	released atomic.Bool
+}
+
+// opPins are the reference handles one guest operation names: the
+// handle it operates on and the handles encoded in its arguments.
+type opPins []*refHandle
+
+// guestOp runs op, one guest operation, and keeps the handles in pins
+// reachable until op has returned, that is until the guest has run the
+// operation — the callbacks into Go it makes included.
+//
+// A handle's registry entry is released once no Go value holds the handle
+// any more (newRefHandle's finalizer queues the release, and the queue is
+// sent to the guest ahead of the next operation). An operation reads the
+// ids it sends out of its handles before it starts, and the last Go
+// reference to a handle can be the operation itself: Deref(...).Call(...)
+// on a reference nothing else holds, or a value made only to be passed as
+// an argument. Without the pins a collection while the operation is on its
+// way releases the very entry it names — before the guest looks it up, or
+// while it runs (a callback's operation sends the queue too).
+func guestOp(pins opPins, op func() ([]byte, bool, error)) ([]byte, bool, error) {
+	resp, interrupted, err := op()
+	runtime.KeepAlive(pins)
+	return resp, interrupted, err
 }
 
 func newRefHandle(p *Perl, id uint64, refkind uint8, class string) *refHandle {
@@ -302,7 +476,9 @@ func (v RefValue) Deref(ctx context.Context) (Value, error) {
 	case wireRefIO:
 		return IOValue{h: v.h}, nil
 	default:
-		resp, interrupted, err := v.h.p.raw.DerefOp(ctx, v.h.id)
+		resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+			return v.h.p.raw.DerefOp(ctx, v.h.id)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -318,11 +494,13 @@ func (v RefValue) MethodCall(ctx context.Context, method string, args ...Value) 
 		return nil, errors.New("perl: empty method name")
 	}
 	p := v.h.p
-	enc, err := p.encodeArgs(args)
+	enc, pins, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	resp, interrupted, err := p.raw.MethodCallOp(ctx, v.h.id, method, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return p.raw.MethodCallOp(ctx, v.h.id, method, enc)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +553,9 @@ func (v ArrayValue) Ref() RefValue { return RefValue{h: v.h} }
 
 // Len returns scalar @array.
 func (v ArrayValue) Len(ctx context.Context) (int, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayLenOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayLenOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -385,7 +565,9 @@ func (v ArrayValue) Len(ctx context.Context) (int, error) {
 
 // Index returns $array[i] (Perl indexing: negative counts from the end).
 func (v ArrayValue) Index(ctx context.Context, i int) (Value, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayGetOp(ctx, v.h.id, int64(i))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayGetOp(ctx, v.h.id, int64(i))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -394,11 +576,14 @@ func (v ArrayValue) Index(ctx context.Context, i int) (Value, error) {
 
 // SetIndex performs $array[i] = val.
 func (v ArrayValue) SetIndex(ctx context.Context, i int, val Value) error {
-	enc, err := v.h.p.encodeSingle(val)
+	pins := opPins{v.h}
+	enc, err := v.h.p.encodeSingle(&pins, val)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.ArraySetOp(ctx, v.h.id, int64(i), enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArraySetOp(ctx, v.h.id, int64(i), enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -408,11 +593,13 @@ func (v ArrayValue) SetIndex(ctx context.Context, i int, val Value) error {
 // Push appends vals to the array. An ArrayValue or HashValue among vals
 // flattens into its contents, exactly like push @a, @b, %h in Perl.
 func (v ArrayValue) Push(ctx context.Context, vals ...Value) error {
-	enc, err := v.h.p.encodeArgs(vals)
+	enc, pins, err := v.h.p.encodeArgs(vals)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.ArrayPushOp(ctx, v.h.id, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayPushOp(ctx, v.h.id, enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -421,7 +608,9 @@ func (v ArrayValue) Push(ctx context.Context, vals ...Value) error {
 
 // Values returns every element in one crossing.
 func (v ArrayValue) Values(ctx context.Context) ([]Value, error) {
-	resp, interrupted, err := v.h.p.raw.ArrayValuesOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.ArrayValuesOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +635,9 @@ func (v HashValue) Ref() RefValue { return RefValue{h: v.h} }
 
 // Get returns $hash{key} and whether the key exists.
 func (v HashValue) Get(ctx context.Context, key string) (Value, bool, error) {
-	resp, interrupted, err := v.h.p.raw.HashGetOp(ctx, v.h.id, encodeKey(key))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashGetOp(ctx, v.h.id, encodeKey(key))
+	})
 	if err != nil {
 		return nil, false, err
 	}
@@ -455,11 +646,14 @@ func (v HashValue) Get(ctx context.Context, key string) (Value, bool, error) {
 
 // Set performs $hash{key} = val.
 func (v HashValue) Set(ctx context.Context, key string, val Value) error {
-	enc, err := v.h.p.encodeSingle(val)
+	pins := opPins{v.h}
+	enc, err := v.h.p.encodeSingle(&pins, val)
 	if err != nil {
 		return err
 	}
-	resp, interrupted, err := v.h.p.raw.HashSetOp(ctx, v.h.id, encodeKey(key), enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashSetOp(ctx, v.h.id, encodeKey(key), enc)
+	})
 	if err != nil {
 		return err
 	}
@@ -468,7 +662,9 @@ func (v HashValue) Set(ctx context.Context, key string, val Value) error {
 
 // Delete performs delete $hash{key}.
 func (v HashValue) Delete(ctx context.Context, key string) error {
-	resp, interrupted, err := v.h.p.raw.HashDeleteOp(ctx, v.h.id, encodeKey(key))
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashDeleteOp(ctx, v.h.id, encodeKey(key))
+	})
 	if err != nil {
 		return err
 	}
@@ -477,7 +673,9 @@ func (v HashValue) Delete(ctx context.Context, key string) error {
 
 // Keys returns keys %hash (Perl's hash order: unordered).
 func (v HashValue) Keys(ctx context.Context) ([]string, error) {
-	resp, interrupted, err := v.h.p.raw.HashKeysOp(ctx, v.h.id)
+	resp, interrupted, err := guestOp(opPins{v.h}, func() ([]byte, bool, error) {
+		return v.h.p.raw.HashKeysOp(ctx, v.h.id)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -535,11 +733,13 @@ func (v CodeValue) CallScalar(ctx context.Context, args ...Value) (Value, error)
 
 func (v CodeValue) call(ctx context.Context, scalarCtx bool, args []Value) ([]Value, error) {
 	p := v.h.p
-	enc, err := p.encodeArgs(args)
+	enc, pins, err := p.encodeArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	resp, interrupted, err := p.raw.InvokeOp(ctx, v.h.id, scalarCtx, enc)
+	resp, interrupted, err := guestOp(append(pins, v.h), func() ([]byte, bool, error) {
+		return p.raw.InvokeOp(ctx, v.h.id, scalarCtx, enc)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -588,11 +788,13 @@ type Pair struct {
 // crossing) and returns it. An ArrayValue or HashValue among vals flattens,
 // like [@a, %h]; pass Ref() to nest a reference.
 func (p *Perl) NewArray(ctx context.Context, vals ...Value) (ArrayValue, error) {
-	enc, err := p.encodeArgs(vals)
+	enc, pins, err := p.encodeArgs(vals)
 	if err != nil {
 		return ArrayValue{}, err
 	}
-	resp, interrupted, err := p.raw.NewArrayOp(ctx, enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return p.raw.NewArrayOp(ctx, enc)
+	})
 	if err != nil {
 		return ArrayValue{}, err
 	}
@@ -611,16 +813,19 @@ func (p *Perl) NewArray(ctx context.Context, vals ...Value) (ArrayValue, error) 
 // crossing) and returns it.
 func (p *Perl) NewHash(ctx context.Context, pairs ...Pair) (HashValue, error) {
 	var enc []byte
+	var pins opPins
 	enc = appendU32(enc, uint32(len(pairs)*2))
 	for _, pr := range pairs {
 		enc = append(enc, encodeKey(pr.K)...)
-		one, err := p.encodeSingle(pr.V)
+		one, err := p.encodeSingle(&pins, pr.V)
 		if err != nil {
 			return HashValue{}, err
 		}
 		enc = append(enc, one...)
 	}
-	resp, interrupted, err := p.raw.NewHashOp(ctx, enc)
+	resp, interrupted, err := guestOp(pins, func() ([]byte, bool, error) {
+		return p.raw.NewHashOp(ctx, enc)
+	})
 	if err != nil {
 		return HashValue{}, err
 	}

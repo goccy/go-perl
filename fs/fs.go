@@ -4,7 +4,7 @@
 //
 //   - NewMemFS gives a private in-memory filesystem — nothing touches the
 //     host disk, and separate MemFS values are fully isolated (this backs
-//     the library default, pre-loaded with the standard library);
+//     the library default, with the standard library mounted on it);
 //   - NewHostFS passes straight through to the operating system's
 //     filesystem — how the perl command behaves, and what gperl uses;
 //   - DirFS is the host filesystem scoped to one directory, which becomes
@@ -12,12 +12,7 @@
 //   - any other implementation of FS plugs in the same way.
 package fs
 
-import (
-	"os"
-	"path/filepath"
-
-	"github.com/goccy/perlwasm2go/base"
-)
+import "github.com/goccy/perlwasm2go/base"
 
 // FS is the read/write filesystem backend a Perl instance is given via
 // perl.Config.FS. It is a write-capable superset of io/fs.FS. Names are
@@ -36,41 +31,27 @@ type MemFS = base.MemFS
 // NewMemFS returns an empty in-memory filesystem.
 func NewMemFS() *MemFS { return base.NewMemFS() }
 
-// NewHostFS returns a pass-through to the operating system's filesystem:
-// the guest sees the host's real root, so absolute paths mean the same
-// thing inside and outside the instance. This is how the perl command
-// behaves (and how gperl runs scripts).
-func NewHostFS() FS { return hostFS{} }
+// NewHostFS returns the operating system's whole filesystem: the guest sees
+// the host's real root, so absolute paths mean the same thing inside and
+// outside the instance. This is how the perl command behaves (and how gperl
+// runs scripts).
+//
+// It is the runtime's own backend for the operating system's filesystem, so
+// everything the host provides — file modes and owners, link counts, the
+// three file times, flock — reaches the guest.
+func NewHostFS() FS {
+	fsys, err := base.HostFS("/")
+	if err != nil {
+		// HostFS opens nothing for the whole filesystem, so it has no error
+		// to give; one would be a broken runtime.
+		panic(err)
+	}
+	return fsys
+}
 
 // DirFS returns the host filesystem scoped to dir: dir becomes the guest's
-// root, and nothing outside it is reachable.
-func DirFS(dir string) FS { return hostFS{root: dir} }
-
-// hostFS is a thin pass-through to the host filesystem, optionally scoped
-// to root. It mirrors the runtime's own OS backend, so behavior matches an
-// instance running directly on the host filesystem.
-type hostFS struct{ root string }
-
-func (o hostFS) join(name string) string {
-	if o.root == "" || o.root == "/" {
-		return "/" + name
-	}
-	return filepath.Join(o.root, name)
-}
-
-func (o hostFS) OpenFile(name string, flag int, perm os.FileMode) (File, error) {
-	f, err := os.OpenFile(o.join(name), flag, perm)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-func (o hostFS) Mkdir(name string, perm os.FileMode) error { return os.Mkdir(o.join(name), perm) }
-func (o hostFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(o.join(name), mode) }
-func (o hostFS) Remove(name string) error                  { return os.Remove(o.join(name)) }
-func (o hostFS) Rename(a, b string) error                  { return os.Rename(o.join(a), o.join(b)) }
-func (o hostFS) Stat(name string) (os.FileInfo, error)     { return os.Stat(o.join(name)) }
-func (o hostFS) Lstat(name string) (os.FileInfo, error)    { return os.Lstat(o.join(name)) }
-func (o hostFS) Symlink(target, name string) error         { return os.Symlink(target, o.join(name)) }
-func (o hostFS) Readlink(name string) (string, error)      { return os.Readlink(o.join(name)) }
-func (o hostFS) Link(a, b string) error                    { return os.Link(o.join(a), o.join(b)) }
+// root, and nothing outside it is reachable, through ".." or through a
+// symbolic link (it is built on os.OpenRoot, whose error it returns). The
+// FS holds dir open until its Close method (it is an io.Closer) is called,
+// which the caller does once no instance uses it any more.
+func DirFS(dir string) (FS, error) { return base.HostFS(dir) }

@@ -9,9 +9,14 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"syscall"
 	"testing"
+	"testing/fstest"
+	"time"
 
 	goperlfs "github.com/goccy/go-perl/fs"
+	"github.com/goccy/go-perl/internal"
+	"github.com/goccy/perlwasm2go/base"
 )
 
 func newStdlibFS(t *testing.T) (FS, *MemFS) {
@@ -99,8 +104,9 @@ func TestWithStdlibServesTheLibrary(t *testing.T) {
 			t.Errorf("library listing lacks %s", want)
 		}
 	}
-	// The mount point is reachable by listing its parents.
-	for dir, child := range map[string]string{"": "usr", "usr": "lib", "usr/lib": "perl5"} {
+	// The mount point is reachable by listing the root, and lists the
+	// library.
+	for dir, child := range map[string]string{"": goperlMount, goperlMount: "stdlib"} {
 		if got := dirNames(t, fsys, dir); len(got) != 1 || got[0] != child {
 			t.Errorf("listing %q = %v, want [%s]", dir, got, child)
 		}
@@ -126,8 +132,8 @@ func TestWithStdlibIsReadOnly(t *testing.T) {
 	if err := fsys.Mkdir(lib+"File", 0o755); !errors.Is(err, iofs.ErrExist) {
 		t.Errorf("mkdir File: err = %v, want exist", err)
 	}
-	isPerm("remove strict.pm", fsys.Remove(lib+"strict.pm"))
-	isPerm("remove the mount point", fsys.Remove(stdlibMount))
+	isPerm("unlink strict.pm", fsys.Unlink(lib+"strict.pm"))
+	isPerm("rmdir the mount point", fsys.Rmdir(stdlibMount))
 	isPerm("rename strict.pm out", fsys.Rename(lib+"strict.pm", "strict.pm"))
 
 	f, err := fsys.OpenFile(lib+"strict.pm", os.O_RDONLY, 0)
@@ -138,15 +144,51 @@ func TestWithStdlibIsReadOnly(t *testing.T) {
 	_, err = f.Write([]byte("x"))
 	isPerm("write through a read-only handle", err)
 	isPerm("truncate through a read-only handle", f.Truncate(0))
+	isPerm("chmod through a read-only handle", f.Chmod(0o644))
+	isPerm("chown through a read-only handle", f.Chown(0, 0))
 
-	// The directories holding the mount point cannot be moved or replaced.
+	// Metadata changes are refused; on a missing name, the name's own error.
+	now := time.Now()
+	for what, err := range map[string]error{
+		"chmod":    fsys.Chmod(lib+"strict.pm", 0o644),
+		"chown":    fsys.Chown(lib+"strict.pm", 0, 0),
+		"lchown":   fsys.Lchown(lib+"strict.pm", 0, 0),
+		"chtimes":  fsys.Chtimes(lib+"strict.pm", now, now),
+		"lchtimes": fsys.Lchtimes(lib+"strict.pm", now, now),
+		"symlink":  fsys.Symlink("strict.pm", lib+"link.pm"),
+		"link":     fsys.Link(lib+"strict.pm", "strict.pm"),
+	} {
+		isPerm(what, err)
+	}
+	if err := fsys.Chmod(lib+"No/Such.pm", 0o644); !errors.Is(err, iofs.ErrNotExist) {
+		t.Errorf("chmod of a missing file: %v", err)
+	}
+	if _, err := fsys.OpenFile(lib+"strict.pm", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); !errors.Is(err, iofs.ErrExist) {
+		t.Errorf("exclusive create of strict.pm: %v", err)
+	}
+
+	// access(2) answers by the modes, and never for writing.
+	access := fsys.(base.AccessFS)
+	if err := access.Access(lib+"strict.pm", 4, true); err != nil {
+		t.Errorf("R_OK on strict.pm: %v", err)
+	}
+	if err := access.Access(lib+"File", 1, true); err != nil {
+		t.Errorf("X_OK on File: %v", err)
+	}
+	isPerm("W_OK on strict.pm", access.Access(lib+"strict.pm", 2, true))
+	isPerm("X_OK on strict.pm", access.Access(lib+"strict.pm", 1, true))
+	// A lock on a library file is granted; nothing can change it.
+	if err := fsys.(base.LockFS).Flock(f, 2); err != nil {
+		t.Errorf("flock strict.pm: %v", err)
+	}
+
+	// The mount point cannot be moved, replaced or removed.
 	if err := mem.WriteFile("x", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	isPerm("rename usr", fsys.Rename("usr", "elsewhere"))
-	isPerm("rename usr/lib", fsys.Rename("usr/lib", "elsewhere"))
-	isPerm("rename over usr", fsys.Rename("x", "usr"))
-	isPerm("remove usr/lib", fsys.Remove("usr/lib"))
+	isPerm("rename the mount point", fsys.Rename(goperlMount, "elsewhere"))
+	isPerm("rename over the mount point", fsys.Rename("x", goperlMount))
+	isPerm("rmdir the mount point", fsys.Rmdir(goperlMount))
 }
 
 func TestWithStdlibWritesGoToTheMemFS(t *testing.T) {
@@ -161,13 +203,119 @@ func TestWithStdlibWritesGoToTheMemFS(t *testing.T) {
 	if got := readFile(t, mem, "app.pl"); string(got) != "print 1;\n" {
 		t.Fatalf("app.pl in the MemFS = %q", got)
 	}
-	if err := fsys.Mkdir("usr/local", 0o755); err != nil {
+	if err := fsys.Mkdir("usr", 0o755); err != nil {
 		t.Fatalf("mkdir beside the mount point: %v", err)
 	}
 	// Another instance's FS sees none of it.
 	other, _ := newStdlibFS(t)
 	if _, err := other.Stat("app.pl"); !errors.Is(err, iofs.ErrNotExist) {
 		t.Fatalf("app.pl leaked into another FS: %v", err)
+	}
+}
+
+// open(2), unlink(2) and a trailing slash behave as on a read-only mount,
+// and a trailing slash still reaches the MemFS beside it.
+func TestWithStdlibErrnos(t *testing.T) {
+	fsys, mem := newStdlibFS(t)
+	lib := stdlibMount + "/"
+	f, err := fsys.OpenFile(lib+"strict.pm", os.O_RDONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatalf("O_CREAT on an existing library file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for what, c := range map[string]struct {
+		err  error
+		want error
+	}{
+		"open File for writing":   {openErr(fsys, lib+"File", os.O_WRONLY), syscall.EISDIR},
+		"unlink File":             {fsys.Unlink(lib + "File"), syscall.EISDIR},
+		"stat strict.pm/":         {statErr(fsys, lib+"strict.pm/"), syscall.ENOTDIR},
+		"open strict.pm/":         {openErr(fsys, lib+"strict.pm/", os.O_RDONLY), syscall.ENOTDIR},
+		"create in a missing dir": {openErr(fsys, lib+"No/New.pm", os.O_WRONLY|os.O_CREATE), iofs.ErrPermission},
+	} {
+		if !errors.Is(c.err, c.want) {
+			t.Errorf("%s: err = %v, want %v", what, c.err, c.want)
+		}
+	}
+	if err := mem.WriteFile("app.pl", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := statErr(fsys, "app.pl/"); !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("stat app.pl/: err = %v, want ENOTDIR", err)
+	}
+	if err := statErr(fsys, lib+"File/"); err != nil {
+		t.Errorf("stat File/: %v", err)
+	}
+}
+
+func openErr(fsys FS, name string, flag int) error {
+	f, err := fsys.OpenFile(name, flag, 0o644)
+	if err == nil {
+		err = f.Close()
+		if err == nil {
+			return errors.New("opened")
+		}
+	}
+	return err
+}
+
+func statErr(fsys FS, name string) error {
+	_, err := fsys.Stat(name)
+	return err
+}
+
+func TestWithStdlibFileOffsets(t *testing.T) {
+	fsys, _ := newStdlibFS(t)
+	want := zipContent(t, "strict.pm")
+	f, err := fsys.OpenFile(stdlibMount+"/strict.pm", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(-1, io.SeekStart); err == nil {
+		t.Error("seek before the start succeeded")
+	}
+	if _, err := f.ReadAt(make([]byte, 1), -1); err == nil {
+		t.Error("ReadAt a negative offset succeeded")
+	}
+	if off, err := f.Seek(-3, io.SeekEnd); err != nil || off != int64(len(want)-3) {
+		t.Fatalf("seek from the end = %d, %v", off, err)
+	}
+	got, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(got, want[len(want)-3:]) {
+		t.Fatalf("read after seeking from the end = %q, %v", got, err)
+	}
+	if n, err := f.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("read at the end = %d, %v", n, err)
+	}
+}
+
+// The module tree the go-perl/cpan package carries is mounted the same way,
+// beside the standard library.
+func TestWithStdlibMountsTheCPANTree(t *testing.T) {
+	internal.SetCPANLib(fstest.MapFS{
+		"Greeting.pm":  {Data: []byte("package Greeting;\n1;\n"), Mode: 0o644},
+		"script/greet": {Data: []byte("#!perl\n"), Mode: 0o755},
+	})
+	t.Cleanup(func() { internal.SetCPANLib(nil) })
+	fsys, _ := newStdlibFS(t)
+	if got := readFile(t, fsys, cpanLibDir+"/Greeting.pm"); string(got) != "package Greeting;\n1;\n" {
+		t.Fatalf("Greeting.pm = %q", got)
+	}
+	fi, err := fsys.Stat(cpanLibDir + "/script/greet")
+	if err != nil || fi.Mode() != 0o555 {
+		t.Fatalf("stat script/greet = %v, %v; want mode 0555", fi, err)
+	}
+	if err := fsys.Unlink(cpanLibDir + "/Greeting.pm"); !errors.Is(err, iofs.ErrPermission) {
+		t.Errorf("unlink Greeting.pm: %v", err)
+	}
+	if got := dirNames(t, fsys, goperlMount); len(got) != 2 || got[0] != "cpan" || got[1] != "stdlib" {
+		t.Errorf("listing %s = %v, want [cpan stdlib]", goperlMount, got)
+	}
+	if inc, err := cpanLibInc(fsys); err != nil || inc != "/"+cpanLibDir {
+		t.Errorf("cpanLibInc = %q, %v", inc, err)
 	}
 }
 

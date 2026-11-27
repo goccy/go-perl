@@ -51,17 +51,21 @@ func main() {
 - **Batteries included**: libperl plus every static XS extension (List::Util,
   POSIX, Socket, re, Storable, Encode, ...) and the pure-Perl stdlib are
   embedded in the binary (by default the stdlib is mounted read-only at
-  `/usr/lib/perl5` on a private in-memory filesystem, one copy shared by every
+  `/.goperl/stdlib` on a private in-memory filesystem, one copy shared by every
   instance) — nothing to install or deploy next to your executable.
 - **Native XS support, unmodified modules**: real CPAN XS distributions
   compile against go-perl's XS SDK with their own `Makefile.PL`/`Build.PL`
-  and load into the running interpreter as shared libraries — no source
-  changes. Moose, Text::Xslate, Devel::NYTProf, DBD::mysql,
+  — no source changes. Moose, Text::Xslate, Devel::NYTProf, DBD::mysql,
   PerlIO::utf8_strict, and keyword plugins like Syntax::Keyword::Match run
-  as-is (exercised by the test suite). `gperl xs build` drives the whole
-  pipeline with the embedded interpreter, so no host `perl` is needed even
-  at build time; at run time loading is a `dlopen`, no compiler required.
-  Native loading is available on linux/amd64, linux/arm64, and darwin/arm64.
+  as-is (exercised by the test suite). The embedded interpreter drives the
+  whole build, so no host `perl` is needed even at build time.
+- **XS in one binary**: a built XS module is one object whose only global
+  symbol is its entry table, so any number of them link *statically* into a
+  Go binary — `go build` produces a single file that carries the
+  interpreter, the pure-Perl modules, and the XS modules, and on Linux it
+  can be a fully static executable. Without cgo the same modules are
+  embedded as shared libraries and loaded at run time instead. Native
+  modules are available on linux/amd64, linux/arm64, and darwin/arm64.
 - **Go and Perl call each other in-process**: because the interpreter *is*
   Go code, the two languages meet at the Go ABI — crossing the boundary is
   a function call, not FFI or IPC. `Call` invokes named Perl subs from Go,
@@ -88,17 +92,17 @@ func main() {
   scopes to one directory; `fs.NewMemFS()` or any custom backend plugs in
   the same way, and `perl.WithStdlib(mem)` mounts the stdlib on a `MemFS` of
   your own). The capability hooks are FAIL-CLOSED: with a zero `Config`,
-  outbound connections (`Dial`), name resolution (`Resolve`), and subprocess
-  spawns (`Exec`) are all denied — each capability is granted explicitly.
+  outbound connections (`Dial`), name resolution (`Resolve`), subprocess
+  spawns (`Exec`), and `fork` (`Fork`) are all denied — each capability is
+  granted explicitly.
 - **Cancellable**: cancelling the `context.Context` passed to `Eval`/`Call`
   stops a runaway script at the next Perl opcode.
-- **Go-style tooling for Perl**: the [`gperl`](./cmd/gperl) command runs
-  scripts (`gperl run`, with `perl(1)` switches), builds self-contained
-  binaries that embed a script and its vendored CPAN modules
-  (`gperl build`), and compiles XS distributions (`gperl xs build`) —
-  resolving cpanfile dependencies with an embedded cpanminus. Everything it
-  does is also available programmatically via the
-  [`gperl`](https://pkg.go.dev/github.com/goccy/go-perl/gperl) library.
+- **Go-style tooling for Perl**: the [`gperl`](./cmd/gperl) command manages
+  CPAN dependencies the way `go` manages modules (`gperl get`,
+  `gperl mod tidy`), runs scripts (`gperl run`, with `perl(1)` switches)
+  and test suites (`gperl test`), builds self-contained binaries
+  (`gperl build`), and serves PSGI applications or builds their server
+  binary (`gperl psgi run`, `gperl psgi build`).
 - **Supply-chain verified**: the Perl-derived artifacts are consumed as
   attested release binaries, verified against SLSA build provenance on every
   refresh and re-verified in CI — see
@@ -165,40 +169,142 @@ bridge: the `.psgi` file's last evaluated value is the application, exactly
 as PSGI specifies, and every request builds the environment as a guest hash
 and calls it — no serialisation format sits between Go and the application.
 `psgi.Server` is a fixed pool of warm interpreter workers (the
-starman/starlet model): prepare ONE instance, and every other worker is a
-copy-on-write clone that adopts the same loaded application, so the loading
-work runs once no matter the worker count.
+starman/starlet model): prepare ONE instance, and every worker is a
+copy-on-write clone of it, so the loading work runs once no matter the
+worker count. Delayed and streaming responses are supported, and a request
+holds a worker only while the application runs — a slow client does not
+occupy one.
 
 ```go
-stdlib, _ := perl.ExtractStdlib()
-p, _ := perl.New(perl.Config{FS: fs.NewHostFS(), StdlibDir: stdlib})
-p.AddInc(ctx, "local/lib/perl5")
-p.AddXSDir("local/xs/" + xs.ArchTag())
+p, _ := perl.New(perl.Config{})
 server, _ := psgi.New(p, 4, "app.psgi")
 server.ListenAndServe(":8091") // or http.ListenAndServe(addr, server)
 ```
 
+The application's CPAN dependencies need no code: declare them in a
+`cpanfile` next to `go.mod` and run `gperl mod tidy`. It writes a `go.work`
+through which `go build` links them into the binary — see
+[examples/plack](./examples/plack).
+
 ## The gperl command
 
-`gperl` is the perl-meets-go toolchain: it runs Perl programs on the
-embedded interpreter with go-style workflows.
+`gperl` is the perl-meets-go toolchain: it handles Perl programs with
+go-style workflows on the embedded interpreter.
 
 ```sh
-gperl run script.pl [args...]   # resolve cpanfile deps, then run
-gperl run -e '...' [switches]   # any perl(1) switch (-e/-I/-M/-l/...)
-gperl build [-o out] script.pl  # self-contained Go binary: script +
-                                # vendored modules + interpreter
-gperl xs build dist...          # compile XS dists (dir or .tar.gz)
-                                # against the native XS SDK into ./local/xs
+gperl get Module[@version]...   # add to the cpanfile and resolve
+gperl mod tidy                  # resolve the cpanfile, write cpanfile.snapshot
+gperl mod download              # fetch and build what the snapshot names
+gperl clean -modcache           # remove the module directory
+gperl install toolchain         # install the Go and C toolchains gperl builds with
+
+gperl run script.pl [args...]   # sync dependencies, then run
+gperl run [switches] [script]   # the perl(1) command line: every perlrun
+                                # switch (-e/-n/-p/-i/-M/-C/-T/...), a
+                                # program on stdin, #! line switches
+gperl test [-v] [-j N] [paths]  # run t/*.t, report like prove
+gperl test -c [-o out]          # the project's test binary (<dir>.test), which
+                                # takes gperl test's options and paths
+gperl build [-o out] script.pl  # one binary: script + dependencies + interpreter
+
+gperl psgi run [options] app.psgi          # serve a PSGI application
+gperl psgi build [-o out] [options] app.psgi   # build its server binary
+
+gperl image build -push ghcr.io/me/app:v1 script.pl   # a container image
+gperl image build -push ghcr.io/me/app:v1 -psgi app.psgi [-- options]
 ```
 
-`gperl run` and the binaries `gperl build` produces behave like `perl`:
-host filesystem, host environment, no sandbox (the library's zero `Config`
-is the opposite — deny by default). XS builds ride each distribution's own
-`Makefile.PL`/`Build.PL` with every `perl` in the pipeline being the
-embedded interpreter, so the only tools required are `make` and a C
-compiler; the artifacts land in `local/xs/<goos>_<goarch>/` and load
-automatically.
+**Dependencies** follow the Perl conventions on the outside — a `cpanfile`
+declares them and `cpanfile.snapshot` (the Carton format) pins the resolved
+releases — and the Go model on the inside: the distributions themselves
+live in a module directory shared by every project (`~/gperl/pkg/mod`, or
+`GPERLMODCACHE`), each release extracted and built once. Modules are
+resolved through CPAN MetaDB and MetaCPAN, fetched from a CPAN mirror
+(`GPERLMIRROR`; `GPERLMIRRORONLY=1` resolves with the mirror's own index),
+and verified against the author's `CHECKSUMS`. A requirement can name a
+distribution that is not on CPAN, with the options cpm reads:
+
+```perl
+requires 'Plack', dist => 'MIYAGAWA/Plack-1.0050.tar.gz';            # that release
+requires 'My::Lib', dist => 'ME/My-Lib-0.1.tar.gz',
+    mirror => 'https://pause.example.com/';                         # a DarkPAN
+requires 'Other', url => 'https://example.com/Other-1.0.tar.gz';    # an archive
+requires 'Fork', git => 'https://github.com/me/Fork.git', ref => 'v1.0';
+```
+
+The snapshot pins what was fetched — an archive's sha256, a repository's
+commit — and later downloads are checked against it. URLs must be https
+(ssh too for git). An option, statement (`mirror`, `osname`) or phase gperl
+does not support is an error, not ignored. Builds ride each
+distribution's own `Makefile.PL`/`Build.PL` with every `perl` in the
+pipeline being the embedded interpreter, so the only tools required are
+`make` and a C compiler.
+
+**`gperl run` and the binaries `gperl build` produces** behave like
+`perl`: host filesystem, host environment, no sandbox (the library's zero
+`Config` is the opposite — deny by default). The program runs as perl's
+main program — `(*Perl).RunProgram` with a `perl.Program`, the parsed form
+of a perl command line, which an embedding application can use directly.
+`gperl test` runs every test file as a perl process of its own;
+`--in-process` runs them inside one process instead, each as an isolated
+program with its own working directory and environment, which is not the
+host process (it may not listen on the network). A built binary needs
+nothing beside it: the XS modules are linked in statically, or with
+`GPERLNATIVE=load` embedded and loaded at run time. `gperl test -c` builds
+the test run into such a binary, as `go test -c` does: it carries the
+whole project directory and its dependencies, and runs the test files from
+its own copy of the project, each as a perl process of its own whose `$^X`
+runs the binary as perl.
+
+**Toolchain.** `gperl run` and `gperl test` need nothing but gperl for
+pure-Perl dependencies. Building a binary needs the Go toolchain, and
+building an XS distribution a C compiler; a machine with neither gets both
+from `gperl install toolchain`, which puts a pinned Go and Zig (as the C
+compiler) into `~/gperl/toolchain` (`GPERLTOOLCHAIN`), each download
+checked against a recorded hash. A tool named by the environment (`CC`,
+`AR`) is used first, then the installed one, then the one on `PATH`.
+Distributions that build with `Makefile.PL` also need `make`.
+
+**Cross compilation**: `GPERLOS` and `GPERLARCH` name the target with Go's
+names (`linux`, `darwin`, `windows`, ... and `amd64`, `arm64`, ...); unset,
+they name this machine. Without XS dependencies nothing else is needed.
+With them, the native modules are built for the target by the C compiler
+in `CC` — for example `CC="zig cc -target aarch64-linux-musl"`, which
+with the modules linked in yields a fully static binary — or by the
+installed Zig when `CC` is unset. Native modules built for musl are kept
+apart from glibc's, and a build for musl carries the build tag `musl`:
+`gperl build` adds it, and a Go application built with `go build` on the
+generated `go.work` passes `-tags musl`. `gperl mod tidy`, `gperl mod
+download` and `gperl get` build the native modules for `GPERLOS` and
+`GPERLARCH`, so such an application is built for the same platform.
+
+**`gperl psgi`** is the application server and the front end in one
+process: one interpreter per worker goroutine, TLS with HTTP/2, graceful
+shutdown, access log, and worker recycling. Options follow plackup and
+starman (`-p`, `-o`, `-l`, `-E`, `-I`, `-M`, `--workers`, `--max-requests`,
+`--enable-ssl`, `--ssl-cert`, `--ssl-key`, `--read-timeout`,
+`--keepalive-timeout`, `--access-log`, `-r`). A server binary takes each
+setting from its command line, else from the environment
+(`GPERL_PSGI_<OPTION>`, and `PORT`), else from the options it was built
+with. A server binary's workers load the native (XS) modules linked into
+it; under `gperl psgi run` they load native modules from `@INC` only when
+the project's dependencies have some, so a native module in a directory
+given with `-I` or `PERL5LIB` is found only then.
+
+**`gperl image build`** makes a container image without Docker: it builds
+the script — or with `-psgi` the application's server, taking `gperl psgi
+build`'s options after `--` — for `linux/amd64`, `linux/arm64` or both
+(`-platform`, default both), and puts each binary at `/app/<name>` on the
+base image as its entrypoint. The base is `-base`, or
+`cgr.dev/chainguard/static` for a static binary and
+`cgr.dev/chainguard/glibc-dynamic` for one that needs the dynamic loader.
+`-push repository:tag` pushes the image (an index of the platforms' images
+for several) with the credentials of `docker login` and prints its digest;
+`-tarball file` writes an image of one platform as the archive `docker
+load` reads. The image's layer and config carry no build time, so the same
+binary makes the same image. The binary unpacks its standard library into
+the user cache directory or the temporary directory at startup, so an image
+run with a read-only root filesystem needs a writable `/tmp`.
 
 ## Supply-chain verification
 
@@ -228,12 +334,6 @@ attestation-verified vendoring on its side.
   version ([`LICENSE-GPL`](./LICENSE-GPL)), **or** the "Artistic License"
   ([`LICENSE-ARTISTIC`](./LICENSE-ARTISTIC)), at your choice. Both texts are
   vendored verbatim from the pinned Perl 5.44.0 sources.
-- **`gperl/cpanm` is not MIT**: it is the fatpacked
-  [cpanminus](https://github.com/miyagawa/cpanminus) program, vendored
-  verbatim from the App-cpanminus 1.7049 CPAN release and embedded so the
-  XS build pipeline can resolve CPAN dependencies without downloading or
-  consulting a host installation. It stays under its own terms — the same
-  dual license as Perl itself (see the script's POD).
 - The [`perlwasm2go`](https://github.com/goccy/perlwasm2go) dependency (the
   translated interpreter) is likewise dual-licensed under Perl's terms in its
   own repository.

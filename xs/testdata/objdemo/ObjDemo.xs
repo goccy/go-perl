@@ -29,6 +29,17 @@ extern "C" {
 
 typedef Counter * Obj_Demo;
 
+/* The argument stack read by a function that was given no interpreter
+ * context (dXSARGS without pTHX), next to the XSUBs, which were given one:
+ * the two kinds of function a C++ module has. */
+static void objdemo_count_args(void) {
+    dXSARGS;
+    sp = mark;
+    XPUSHs(sv_2mortal(newSViv(items)));
+    PUTBACK;
+    XSRETURN(1);
+}
+
 MODULE = Obj::Demo  PACKAGE = Obj::Demo
 PROTOTYPES: DISABLE
 
@@ -75,3 +86,16 @@ CODE:
 }
 OUTPUT:
 	RETVAL
+
+void
+count_args(...)
+PPCODE:
+{
+	I32 *temp = PL_markstack_ptr++;
+	objdemo_count_args();
+	if (PL_markstack_ptr != temp) {
+		PL_markstack_ptr = temp;
+		XSRETURN_EMPTY;
+	}
+	return;
+}
