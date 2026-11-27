@@ -6,7 +6,7 @@ require github.com/goccy/go-perl v0.0.0
 
 require (
 	github.com/ebitengine/purego v0.10.2 // indirect
-	github.com/goccy/perlwasm2go v0.3.1 // indirect
+	github.com/goccy/perlwasm2go v0.3.2 // indirect
 )
 
 replace github.com/goccy/go-perl => ../..
