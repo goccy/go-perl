@@ -34,7 +34,7 @@ type Manager struct {
 	helper *Helper
 
 	mu        sync.Mutex
-	checksums map[string]*checksumSet // by author directory
+	checksums map[string]*checksumSet // by the URL of an author directory's CHECKSUMS
 	index     map[string]indexEntry   // the mirror's 02packages, once loaded
 	bundled   map[string]bundledModule
 }

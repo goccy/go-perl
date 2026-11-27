@@ -92,15 +92,37 @@ type Prereq struct {
 	Range  string // a CPAN::Meta version range; "0" accepts any version
 	Phase  string // configure, build, test, runtime, develop
 	Type   string // requires, recommends, suggests, conflicts
+
+	// What a cpanfile says besides:
+	Feature string            // the optional feature declaring it; "" outside feature blocks
+	Line    int               // the cpanfile line declaring it
+	Options map[string]string // its options (dist, mirror, url, git, ref)
 }
 
-func prereqsOf(fields []string) ([]Prereq, error) {
-	if len(fields)%4 != 0 {
-		return nil, fmt.Errorf("malformed prereq list (%d fields)", len(fields))
-	}
-	out := make([]Prereq, 0, len(fields)/4)
-	for i := 0; i < len(fields); i += 4 {
-		out = append(out, Prereq{Module: fields[i], Range: fields[i+1], Phase: fields[i+2], Type: fields[i+3]})
+// cpanfilePrereqs reads the records of the helper's cpanfile sub.
+func cpanfilePrereqs(fields []string) ([]Prereq, error) {
+	var out []Prereq
+	for len(fields) > 0 {
+		if len(fields) < 7 {
+			return nil, fmt.Errorf("malformed prereq list (%d fields left)", len(fields))
+		}
+		line, err := strconv.Atoi(fields[5])
+		if err != nil {
+			return nil, fmt.Errorf("malformed prereq line: %w", err)
+		}
+		n, err := strconv.Atoi(fields[6])
+		if err != nil || n < 0 || len(fields) < 7+2*n {
+			return nil, fmt.Errorf("malformed prereq options of %s", fields[0])
+		}
+		p := Prereq{Module: fields[0], Range: fields[1], Phase: fields[2], Type: fields[3], Feature: fields[4], Line: line}
+		for i := 0; i < n; i++ {
+			if p.Options == nil {
+				p.Options = map[string]string{}
+			}
+			p.Options[fields[7+2*i]] = fields[8+2*i]
+		}
+		out = append(out, p)
+		fields = fields[7+2*n:]
 	}
 	return out, nil
 }
@@ -116,7 +138,7 @@ func (h *Helper) CPANfile(path string) ([]Prereq, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return prereqsOf(fields)
+	return cpanfilePrereqs(fields)
 }
 
 // Best returns the index of the highest of versions that rng accepts, or

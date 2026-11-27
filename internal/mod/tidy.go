@@ -8,8 +8,10 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // CPANfile is the dependency declaration's name in a project directory.
@@ -18,7 +20,8 @@ const CPANfile = "cpanfile"
 // request is one requirement on its way through resolution.
 type request struct {
 	Prereq
-	by string // who requires it, for error messages
+	pin *Distribution // the distribution the cpanfile's options name, or nil
+	by  string        // who requires it, for error messages
 }
 
 // provider records which resolved distribution provides a package.
@@ -48,17 +51,52 @@ func (m *Manager) Tidy(ctx context.Context, projectDir string, upgrade ...string
 	for _, module := range upgrade {
 		w.fresh[module] = true
 	}
-	var level []request
+	var level, named []request // named: those whose options name the distribution
+	var conflicts []Prereq
+	pins := map[string]request{} // by module
 	for _, p := range declared {
-		// The project's own tests run too, so its test prereqs count.
-		if p.Type == "requires" && p.Phase != "develop" {
-			level = append(level, request{Prereq: p, by: CPANfile})
+		pin, err := pinned(p)
+		if err != nil {
+			return nil, fmt.Errorf("%s line %d: %s: %w", CPANfile, p.Line, p.Module, err)
 		}
+		// Optional features are not selected. The project's own tests
+		// run too, so its test prereqs count.
+		if p.Feature != "" || p.Phase == "develop" {
+			continue
+		}
+		switch p.Type {
+		case "requires":
+			r := request{Prereq: p, pin: pin, by: CPANfile}
+			if other, ok := pins[p.Module]; ok && !samePin(other.pin, pin) {
+				return nil, fmt.Errorf("%s lines %d and %d name different distributions for %s", CPANfile, other.Line, p.Line, p.Module)
+			}
+			pins[p.Module] = r
+			if pin != nil {
+				named = append(named, r)
+			} else {
+				level = append(level, r)
+			}
+		case "conflicts":
+			conflicts = append(conflicts, p)
+		}
+	}
+	// The distributions the cpanfile names come first: the other modules
+	// they provide meet the requirements on them, which are not resolved
+	// elsewhere.
+	if len(named) > 0 {
+		next, err := w.step(ctx, named)
+		if err != nil {
+			return nil, err
+		}
+		level = append(level, next...)
 	}
 	for len(level) > 0 {
 		if level, err = w.step(ctx, level); err != nil {
 			return nil, err
 		}
+	}
+	if err := w.conflict(conflicts); err != nil {
+		return nil, err
 	}
 	snap := &Snapshot{}
 	for _, d := range w.dists {
@@ -74,21 +112,25 @@ type walk struct {
 	old      *Snapshot
 	fresh    map[string]bool          // modules to resolve ignoring the old snapshot
 	provided map[string]provider      // package -> resolved provider
-	dists    map[string]*Distribution // by pathname
-	releases map[string]string        // distribution name -> selected pathname
+	dists    map[string]*Distribution // by tree
+	releases map[string]string        // distribution name -> selected tree
 }
 
 // step resolves one level of requirements and returns the next: the
 // prereqs of the distributions this level added.
 func (w *walk) step(ctx context.Context, level []request) ([]request, error) {
 	// Requirements already met by the interpreter or by a distribution
-	// resolved earlier need no work.
+	// resolved earlier need no work, unless the cpanfile names the
+	// distribution to use.
 	var open []request
 	seen := map[string]bool{}
 	for _, r := range level {
-		met, err := w.met(r)
-		if err != nil {
-			return nil, err
+		met := false
+		if r.pin == nil {
+			var err error
+			if met, err = w.met(r); err != nil {
+				return nil, err
+			}
 		}
 		if !met && !seen[r.Module+"\x00"+r.Range] {
 			seen[r.Module+"\x00"+r.Range] = true
@@ -97,46 +139,108 @@ func (w *walk) step(ctx context.Context, level []request) ([]request, error) {
 	}
 
 	// Lookups and downloads are network-bound: run them concurrently.
-	pathnames := make([]string, len(open))
+	picked := make([]*Distribution, len(open))
+	// One distribution per source the cpanfile names, however many of its
+	// modules it requires: the old snapshot's entry when it still serves
+	// every one of them, otherwise one fetch.
+	type pinKey struct {
+		pathname string
+		source   Source
+	}
+	type pinFetch struct {
+		once sync.Once
+		d    Distribution
+		err  error
+		old  *Distribution // the old snapshot's entry while it serves every request so far
+		kept bool          // no request has refused old
+	}
+	fetches := map[pinKey]*pinFetch{}
+	for _, r := range open {
+		if r.pin == nil {
+			continue
+		}
+		k := pinKey{r.pin.Pathname, r.pin.Source}
+		f := fetches[k]
+		if f == nil {
+			f = &pinFetch{d: *r.pin, kept: true}
+			fetches[k] = f
+		}
+		if !f.kept {
+			continue
+		}
+		old := w.old.Provider(r.Module)
+		f.kept = old != nil && !w.fresh[r.Module] && sameSource(r.pin, old) && (f.old == nil || f.old == old)
+		if f.kept {
+			accepted, err := w.m.helper.Accepts(r.Range, providedVersion(old, r.Module))
+			if err != nil {
+				return nil, err
+			}
+			f.kept, f.old = accepted, old
+		}
+	}
+	for _, f := range fetches {
+		if f.kept {
+			f.d = Distribution{Pathname: f.old.Pathname, Source: f.old.Source}
+			f.once.Do(func() {})
+		}
+	}
 	err := each(ctx, indexes(len(open)), func(ctx context.Context, i int) error {
 		r := open[i]
-		if d := w.old.Provider(r.Module); d != nil && !w.fresh[r.Module] {
+		if d := w.old.Provider(r.Module); r.pin == nil && d != nil && !w.fresh[r.Module] && sameSource(nil, d) {
 			if ok, err := w.m.helper.Accepts(r.Range, providedVersion(d, r.Module)); err != nil {
 				return err
 			} else if ok {
-				pathnames[i] = d.Pathname
+				picked[i] = &Distribution{Pathname: d.Pathname, Source: d.Source}
 				return nil
 			}
+		}
+		if r.pin != nil {
+			// Fetching pins it: its digest or commit becomes known.
+			f := fetches[pinKey{r.pin.Pathname, r.pin.Source}]
+			// A kept entry's Once has run already, so Do does nothing.
+			f.once.Do(func() { _, f.err = w.m.Fetch(ctx, &f.d) })
+			if f.err != nil {
+				return fmt.Errorf("%s line %d: %s: %w", r.by, r.Line, r.Module, f.err)
+			}
+			d := f.d
+			picked[i] = &d
+			return nil
 		}
 		rel, err := w.m.resolve(ctx, r.Module, r.Range)
 		if err != nil {
 			return fmt.Errorf("%s requires %s: %w", r.by, r.Module, err)
 		}
-		pathnames[i] = rel.Pathname
+		picked[i] = &Distribution{Pathname: rel.Pathname}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	var added []string
-	for i, pathname := range pathnames {
-		name, _, err := SplitPathname(pathname)
+	var added []*Distribution
+	keys := make([]string, len(picked))
+	for i, d := range picked {
+		name, err := distName(d)
 		if err != nil {
 			return nil, fmt.Errorf("%s requires %s: %w", open[i].by, open[i].Module, err)
 		}
 		if name == "perl" {
 			return nil, fmt.Errorf("%s requires %s, which only perl itself provides and this interpreter does not carry", open[i].by, open[i].Module)
 		}
+		tree, err := TreePath(w.m.Dir, d)
+		if err != nil {
+			return nil, fmt.Errorf("%s requires %s: %w", open[i].by, open[i].Module, err)
+		}
+		keys[i] = tree
 		// One release per distribution: two requirements that can only be
 		// met by different releases cannot both hold.
-		if other, ok := w.releases[name]; ok && other != pathname {
+		if other, ok := w.releases[name]; ok && other != tree {
 			return nil, fmt.Errorf("%s requires %s %s, which needs %s, but %s is already selected",
-				open[i].by, open[i].Module, open[i].Range, path.Base(pathname), path.Base(other))
+				open[i].by, open[i].Module, open[i].Range, filepath.Base(tree), filepath.Base(other))
 		}
-		w.releases[name] = pathname
-		if _, ok := w.dists[pathname]; !ok {
-			w.dists[pathname] = nil
-			added = append(added, pathname)
+		w.releases[name] = tree
+		if _, ok := w.dists[tree]; !ok {
+			w.dists[tree] = nil
+			added = append(added, d)
 		}
 	}
 	trees := make([]string, len(added))
@@ -151,13 +255,13 @@ func (w *walk) step(ctx context.Context, level []request) ([]request, error) {
 
 	// Reading metadata runs on the interpreter, one tree at a time.
 	var next []request
-	for i, pathname := range added {
+	for i, d := range added {
 		meta, err := w.m.helper.Meta(trees[i])
 		if err != nil {
 			return nil, err
 		}
-		name := strings.TrimSuffix(path.Base(pathname), archiveSuffix(pathname))
-		dist := &Distribution{Name: name, Pathname: pathname, Provides: meta.Provides}
+		name := strings.TrimSuffix(path.Base(d.Pathname), archiveSuffix(d.Pathname))
+		dist := &Distribution{Name: name, Pathname: d.Pathname, Source: d.Source, Provides: meta.Provides}
 		reqs := map[string]string{}
 		for _, p := range meta.Prereqs {
 			// A dependency's own tests are never run.
@@ -177,12 +281,58 @@ func (w *walk) step(ctx context.Context, level []request) ([]request, error) {
 		sort.Slice(next, func(i, j int) bool { return next[i].Module < next[j].Module })
 		for _, p := range meta.Provides {
 			if _, ok := w.provided[p.Name]; !ok {
-				w.provided[p.Name] = provider{version: p.Version, pathname: pathname}
+				w.provided[p.Name] = provider{version: p.Version, pathname: d.Pathname}
 			}
 		}
-		w.dists[pathname] = dist
+		w.dists[trees[i]] = dist
+	}
+
+	// A distribution the cpanfile names must provide the module at a
+	// version the requirement accepts; nothing else has checked it.
+	for i, r := range open {
+		if r.pin == nil {
+			continue
+		}
+		d := w.dists[keys[i]]
+		at := slices.IndexFunc(d.Provides, func(p Package) bool { return p.Name == r.Module })
+		if at < 0 {
+			return nil, fmt.Errorf("%s line %d: %s: %s does not provide it", r.by, r.Line, r.Module, d.Name)
+		}
+		if ok, err := w.m.helper.Accepts(r.Range, d.Provides[at].Version); err != nil {
+			return nil, err
+		} else if !ok {
+			return nil, fmt.Errorf("%s line %d: %s %s: %s has version %s", r.by, r.Line, r.Module, r.Range, d.Name, d.Provides[at].Version)
+		}
 	}
 	return next, nil
+}
+
+// conflict reports a module the cpanfile conflicts with that the
+// resolution selected, or that the interpreter carries, at a version the
+// conflicts range covers.
+func (w *walk) conflict(conflicts []Prereq) error {
+	for _, p := range conflicts {
+		version, ok := "", false
+		if pr, found := w.provided[p.Module]; found {
+			version, ok = pr.version, true
+		} else {
+			var err error
+			if version, ok, err = w.m.bundledVersion(p.Module); err != nil {
+				return err
+			}
+		}
+		if !ok {
+			continue
+		}
+		hit, err := w.m.helper.Accepts(p.Range, version)
+		if err != nil {
+			return err
+		}
+		if hit {
+			return fmt.Errorf("%s line %d: conflicts %s %s, but version %s is selected", CPANfile, p.Line, p.Module, p.Range, version)
+		}
+	}
+	return nil
 }
 
 // met reports whether a requirement is already satisfied: by the
@@ -242,8 +392,12 @@ func providedVersion(d *Distribution, module string) string {
 }
 
 func archiveSuffix(pathname string) string {
-	if m := distFile.FindStringSubmatch(path.Base(pathname)); m != nil {
-		return m[3]
+	// The name of a git repository's archive carries a commit, not a
+	// version, so distFile need not match it.
+	for _, suffix := range []string{".tar.gz", ".tgz", ".tar.bz2", ".zip"} {
+		if strings.HasSuffix(pathname, suffix) {
+			return suffix
+		}
 	}
 	return path.Ext(pathname)
 }
@@ -271,7 +425,7 @@ func (m *Manager) Download(ctx context.Context, projectDir string) (*Snapshot, e
 		return nil, err
 	}
 	err = each(ctx, snap.Distributions, func(ctx context.Context, d Distribution) error {
-		_, err := m.Fetch(ctx, d.Pathname)
+		_, err := m.Fetch(ctx, &d)
 		return err
 	})
 	return snap, err

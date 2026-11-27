@@ -3,6 +3,8 @@ package mod
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
+	"cmp"
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
@@ -13,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -21,67 +24,212 @@ import (
 	"time"
 )
 
-// Fetch makes the distribution at pathname present in the module directory
-// — its tarball downloaded and verified, its tree extracted — and returns
-// the tree's path. Work already done is not repeated.
-func (m *Manager) Fetch(ctx context.Context, pathname string) (string, error) {
-	tree, err := TreePath(m.Dir, pathname)
+// Fetch makes the distribution d present in the module directory — its
+// archive downloaded and verified, its tree extracted — and returns the
+// tree's path. Work already done is not repeated. A distribution from
+// another mirror, a URL, or a git repository that is not pinned yet gets
+// pinned: d records the digest or the commit fetched.
+func (m *Manager) Fetch(ctx context.Context, d *Distribution) (string, error) {
+	if d.Git == "" && d.URL == "" && d.Mirror == "" || d.Revision != "" || d.SHA256 != "" {
+		tree, err := TreePath(m.Dir, d)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(tree); err == nil {
+			return tree, nil
+		}
+	}
+	var archive string
+	var err error
+	switch {
+	case d.Git != "":
+		archive, err = m.fetchGit(ctx, d)
+	case d.URL != "" || d.Mirror != "":
+		archive, err = m.fetchArchive(ctx, d)
+	default:
+		archive, err = m.download(ctx, d.Pathname)
+	}
+	if err != nil {
+		return "", err
+	}
+	tree, err := TreePath(m.Dir, d)
 	if err != nil {
 		return "", err
 	}
 	if _, err := os.Stat(tree); err == nil {
 		return tree, nil
 	}
-	tarball, err := m.download(ctx, pathname)
-	if err != nil {
-		return "", err
-	}
-	if err := extract(tarball, tree); err != nil {
-		return "", fmt.Errorf("extract %s: %w", pathname, err)
+	if err := extract(archive, tree); err != nil {
+		return "", fmt.Errorf("extract %s: %w", d.Pathname, err)
 	}
 	return tree, nil
 }
 
 // download fetches the tarball into the module directory, checking it
 // against the author's CHECKSUMS file before it takes its final name.
-func (m *Manager) download(ctx context.Context, pathname string) (_ string, err error) {
+func (m *Manager) download(ctx context.Context, pathname string) (string, error) {
 	dst := TarballPath(m.Dir, pathname)
 	if _, err := os.Stat(dst); err == nil {
 		return dst, nil
 	}
-	want, err := m.checksum(ctx, pathname)
+	want, err := m.checksum(ctx, m.Mirror, pathname)
 	if err != nil {
 		return "", err
 	}
+	tmp, _, err := m.save(ctx, m.Mirror+"authors/id/"+pathname, filepath.Dir(dst), want, "CHECKSUMS")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", errors.Join(err, os.Remove(tmp))
+	}
+	return dst, nil
+}
+
+// fetchArchive returns the archive of a distribution from another mirror
+// or a URL, kept under its digest, downloading it when the module
+// directory lacks it. The digest the snapshot pins must match; without
+// one, the mirror's CHECKSUMS (a URL has none) must, and d records the
+// digest.
+func (m *Manager) fetchArchive(ctx context.Context, d *Distribution) (string, error) {
+	dir := filepath.Join(m.Dir, "cache", "download", "sha256")
+	base := path.Base(d.Pathname)
+	if d.SHA256 != "" {
+		if p := filepath.Join(dir, d.SHA256, base); exists(p) {
+			return p, nil
+		}
+	}
+	u, want, against := d.URL, d.SHA256, "the snapshot"
+	if d.Mirror != "" {
+		u = d.Mirror + "authors/id/" + d.Pathname
+		if want == "" {
+			var err error
+			if want, err = m.checksum(ctx, d.Mirror, d.Pathname); err != nil {
+				return "", err
+			}
+			against = "CHECKSUMS"
+		}
+	}
+	tmp, sum, err := m.save(ctx, u, dir, want, against)
+	if err != nil {
+		return "", err
+	}
+	dst := filepath.Join(dir, sum, base)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return "", err
+		return "", errors.Join(err, os.Remove(tmp))
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-*")
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", errors.Join(err, os.Remove(tmp))
+	}
+	d.SHA256 = sum
+	return dst, nil
+}
+
+// save downloads u into a temporary file in dir and returns the file and
+// its sha256, which must be want unless want is empty (against names where
+// want comes from).
+func (m *Manager) save(ctx context.Context, u, dir, want, against string) (_, _ string, err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", err
+	}
+	tmp, err := os.CreateTemp(dir, path.Base(u)+".tmp-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, tmp.Close(), os.Remove(tmp.Name()))
 		}
 	}()
-	u := m.Mirror + "authors/id/" + pathname
 	body, err := m.open(ctx, u)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	sum := sha256.New()
 	_, err = io.Copy(io.MultiWriter(tmp, sum), body)
 	if err = errors.Join(err, body.Close()); err != nil {
-		return "", fmt.Errorf("download %s: %w", u, err)
+		return "", "", fmt.Errorf("download %s: %w", u, err)
 	}
-	if got := hex.EncodeToString(sum.Sum(nil)); want != "" && got != want {
-		return "", fmt.Errorf("%s: sha256 %s does not match CHECKSUMS (%s)", u, got, want)
+	got := hex.EncodeToString(sum.Sum(nil))
+	if want != "" && got != want {
+		return "", "", fmt.Errorf("%s: sha256 %s does not match %s (%s)", u, got, against, want)
 	}
 	if err := tmp.Close(); err != nil {
+		return "", "", err
+	}
+	return tmp.Name(), got, nil
+}
+
+// fetchGit returns the archive of a distribution from a git repository,
+// kept under its commit, cloning the repository when the module directory
+// lacks it. Without a pinned revision, d.Ref (the default branch when
+// empty) is resolved, and d records the commit and a pathname naming it.
+func (m *Manager) fetchGit(ctx context.Context, d *Distribution) (_ string, err error) {
+	dir := filepath.Join(m.Dir, "cache", "download", "git")
+	if d.Revision != "" {
+		if p := filepath.Join(dir, d.Revision+".tar.gz"); exists(p) {
+			return p, nil
+		}
+	}
+	name, err := repoName(d.Git)
+	if err != nil {
 		return "", err
 	}
-	return dst, os.Rename(tmp.Name(), dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	clone, err := os.MkdirTemp(dir, name+".clone-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(clone)) }()
+	// Plain http is allowed only for a repository on the loopback
+	// interface (validateGitURL), so that no redirect leaves https.
+	allow := "https:ssh"
+	if strings.HasPrefix(d.Git, "http://") {
+		allow += ":http"
+	}
+	if _, err := git(ctx, dir, allow, "clone", "--bare", "--quiet", "--", d.Git, clone); err != nil {
+		return "", err
+	}
+	ref := cmp.Or(d.Revision, d.Ref, "HEAD")
+	out, err := git(ctx, dir, allow, "--git-dir="+clone, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("%s: ref %s: %w", d.Git, ref, err)
+	}
+	rev := strings.TrimSpace(out)
+	dst := filepath.Join(dir, rev+".tar.gz")
+	tmp := filepath.Join(clone, "archive.tar.gz")
+	if _, err := git(ctx, dir, allow, "--git-dir="+clone, "archive", "--format=tar.gz", "--prefix="+name+"/", "-o", tmp, rev); err != nil {
+		return "", fmt.Errorf("%s: %w", d.Git, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", err
+	}
+	d.Revision = rev
+	d.Pathname = name + "-" + rev[:12] + ".tar.gz"
+	return dst, nil
+}
+
+// git runs git and returns what it prints. git's own credential prompt is
+// off (ssh may still ask on the terminal), and only the transports allow
+// lists are allowed, whatever git's configuration says.
+func git(ctx context.Context, dir, allow string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+allow)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return string(out), nil
+}
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // checksumEntry matches one file's record in a CHECKSUMS file and captures
@@ -92,19 +240,19 @@ var checksumEntry = regexp.MustCompile(`'([^']+)'\s*=>\s*\{[^}]*?'sha256'\s*=>\s
 // distribution, or "" when the mirror publishes none for it (a private
 // mirror need not keep CHECKSUMS; the download then goes unverified, and
 // says so).
-func (m *Manager) checksum(ctx context.Context, pathname string) (string, error) {
+func (m *Manager) checksum(ctx context.Context, mirror, pathname string) (string, error) {
 	author, file := path.Split(pathname)
+	u := mirror + "authors/id/" + author + "CHECKSUMS"
 	m.mu.Lock()
-	set, ok := m.checksums[author]
+	set, ok := m.checksums[u]
 	if !ok {
 		set = &checksumSet{}
-		m.checksums[author] = set
+		m.checksums[u] = set
 	}
 	m.mu.Unlock()
 	// One request per author directory, however many of its
 	// distributions are being fetched at once.
 	set.once.Do(func() {
-		u := m.Mirror + "authors/id/" + author + "CHECKSUMS"
 		body, err := m.get(ctx, u)
 		switch {
 		case errors.Is(err, errNotFound):

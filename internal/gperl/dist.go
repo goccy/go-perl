@@ -89,7 +89,7 @@ func buildSnapshot(ctx context.Context, m *mod.Manager, snap *mod.Snapshot, targ
 	pending := 0
 	for i := range snap.Distributions {
 		d := &snap.Distributions[i]
-		tree, err := mod.TreePath(m.Dir, d.Pathname)
+		tree, err := mod.TreePath(m.Dir, d)
 		if err != nil {
 			return 0, err
 		}

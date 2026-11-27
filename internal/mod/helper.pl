@@ -13,17 +13,26 @@ use File::Basename ();
 use Module::Metadata;
 use version ();
 
-# cpanfile($path): (module, range, phase, relationship)* of every prereq the
-# file declares outside feature blocks.
+# cpanfile($path): every prereq the file declares, as (module, range, phase,
+# relationship, feature, line, option count, (option, value)*)*; feature is
+# empty outside feature blocks. The file runs in a package of its own, with
+# warnings off, as Module::CPANfile runs it.
+my $sandbox = 0;
 sub cpanfile {
     my ($path) = @_;
     open my $fh, '<', $path or die "$path: $!\n";
     my $src = do { local $/; <$fh> };
     close $fh;
-    local @GperlMod::DSL::out   = ();
-    local $GperlMod::DSL::phase = 'runtime';
-    local $GperlMod::DSL::skip  = 0;
-    eval "package GperlMod::DSL;\n#line 1 \"$path\"\n$src\n;1" or die $@;
+    local @GperlMod::DSL::out     = ();
+    local $GperlMod::DSL::path    = $path;
+    local $GperlMod::DSL::phase   = 'runtime';
+    local $GperlMod::DSL::feature = '';
+    my $pkg = 'GperlMod::Sandbox' . ++$sandbox;
+    {
+        no strict 'refs';
+        *{"${pkg}::$_"} = \&{"GperlMod::DSL::$_"} for @GperlMod::DSL::bindings;
+    }
+    eval "package $pkg;\nno warnings;\n#line 1 \"$path\"\n$src\n;1" or die $@;
     return @GperlMod::DSL::out;
 }
 
@@ -151,14 +160,40 @@ sub _lib_packages {
 
 package GperlMod::DSL;
 
-our (@out, $phase, $skip);
+# The functions a cpanfile calls, bound into its package as
+# Module::CPANfile::Environment binds them, and reading their arguments by
+# the same rules.
+our @bindings = qw(
+    on requires recommends suggests conflicts feature osname mirror
+    configure_requires build_requires test_requires author_requires
+);
+
+our (@out, $path, $phase, $feature);
+
+# _line: the line of the cpanfile the running function was called from.
+sub _line {
+    for (my $i = 1; my @frame = caller($i); $i++) {
+        return $frame[2] if $frame[1] eq $path;
+    }
+    return 0;
+}
+
+sub _fail { die "$path line " . _line() . ": $_[0]\n" }
 
 sub _prereq {
     my ($type, $module, @args) = @_;
-    return if $skip;
-    my ($version, %opts) = @args % 2 ? @args : (undef, @args);
-    $version = $opts{version} unless defined $version;
-    push @out, $module, (defined $version && length $version ? "$version" : '0'), $phase, $type;
+    _fail("$type needs a module name") if !defined $module || ref $module || $module eq '';
+    my $version = @args % 2 ? shift @args : 0;
+    my %opts = @args;
+    $version = delete $opts{version} if exists $opts{version};
+    $version ||= 0;
+    for my $key (sort keys %opts) {
+        _fail("$module: option $key needs a string") if !defined $opts{$key} || ref $opts{$key};
+    }
+    eval { CPAN::Meta::Requirements->new->add_string_requirement($module => "$version"); 1 }
+        or _fail("$module: " . ($@ =~ s/\s+\z//r));
+    push @out, $module, "$version", $phase, $type, $feature, _line(),
+        scalar(keys %opts), map { ($_, "$opts{$_}") } sort keys %opts;
 }
 
 sub requires   { _prereq('requires',   @_) }
@@ -166,8 +201,12 @@ sub recommends { _prereq('recommends', @_) }
 sub suggests   { _prereq('suggests',   @_) }
 sub conflicts  { _prereq('conflicts',  @_) }
 
+my %phases = map { $_ => 1 } qw(configure build test runtime develop);
+
 sub on {
     my ($name, $code) = @_;
+    _fail("usage: on 'phase' => sub { ... }") if !defined $name || ref $name || ref $code ne 'CODE';
+    _fail("unknown phase '$name'") unless $phases{$name};
     local $phase = $name;
     $code->();
 }
@@ -177,14 +216,18 @@ sub build_requires     { local $phase = 'build';     requires(@_) }
 sub test_requires      { local $phase = 'test';      requires(@_) }
 sub author_requires    { local $phase = 'develop';   requires(@_) }
 
-# Optional features are not selected.
 sub feature {
-    my $code = pop;
-    local $skip = 1;
+    my ($identifier, $description, $code) = @_;
+    # feature 'identifier' => sub { ... }
+    ($description, $code) = ($identifier, $description) if @_ == 2 && ref $description eq 'CODE';
+    _fail("usage: feature 'identifier', 'Description' => sub { ... }")
+        if !defined $identifier || ref $identifier || $identifier eq '' || ref $description ne '' || ref $code ne 'CODE';
+    local $feature = $identifier;
     $code->();
 }
 
-sub mirror { }
-sub osname { }
+sub osname { _fail('osname is not supported') }
+
+sub mirror { _fail('the mirror statement is not supported; name a mirror with the dist and mirror options of a requirement') }
 
 1;

@@ -41,7 +41,7 @@ func loadDeps(ctx context.Context, m *mod.Manager, projectDir, target string) (*
 	}
 	libDirs := make([]string, 0, len(snap.Distributions))
 	for _, d := range snap.Distributions {
-		tree, err := mod.TreePath(m.Dir, d.Pathname)
+		tree, err := mod.TreePath(m.Dir, &d)
 		if err != nil {
 			return nil, err
 		}

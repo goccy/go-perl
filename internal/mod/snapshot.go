@@ -26,6 +26,7 @@ type Package struct {
 type Distribution struct {
 	Name         string // "Cpanel-JSON-XS-4.38"
 	Pathname     string // "R/RU/RURBAN/Cpanel-JSON-XS-4.38.tar.gz"
+	Source              // where it comes from when not the CPAN mirror
 	Provides     []Package
 	Requirements []Package
 }
@@ -75,6 +76,8 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 			switch key {
 			case "pathname":
 				dist.Pathname, list = strings.TrimSpace(value), nil
+			case "mirror", "url", "git", "ref", "revision", "sha256":
+				*dist.sourceField(key), list = strings.TrimSpace(value), nil
 			case "provides":
 				list = &dist.Provides
 			case "requirements":
@@ -99,6 +102,9 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 		if d.Pathname == "" {
 			return nil, fmt.Errorf("distribution %s has no pathname", d.Name)
 		}
+		if err := validateSource(&d); err != nil {
+			return nil, fmt.Errorf("distribution %s: %w", d.Name, err)
+		}
 	}
 	return snap, nil
 }
@@ -113,6 +119,11 @@ func (s *Snapshot) Format() []byte {
 	b.WriteString(snapshotHeader + "\nDISTRIBUTIONS\n")
 	for _, d := range dists {
 		fmt.Fprintf(&b, "  %s\n    pathname: %s\n", d.Name, d.Pathname)
+		for _, key := range sourceFields {
+			if value := *d.sourceField(key); value != "" {
+				fmt.Fprintf(&b, "    %s: %s\n", key, value)
+			}
+		}
 		for _, field := range []struct {
 			name string
 			list []Package
@@ -126,6 +137,16 @@ func (s *Snapshot) Format() []byte {
 		}
 	}
 	return b.Bytes()
+}
+
+// sourceFields are the snapshot fields of a Source, in the order they are
+// written. A distribution from the CPAN mirror has none of them, so its
+// entry stays as carton writes it.
+var sourceFields = []string{"mirror", "url", "git", "ref", "revision", "sha256"}
+
+// sourceField returns the Source field a snapshot key names.
+func (d *Distribution) sourceField(key string) *string {
+	return map[string]*string{"mirror": &d.Mirror, "url": &d.URL, "git": &d.Git, "ref": &d.Ref, "revision": &d.Revision, "sha256": &d.SHA256}[key]
 }
 
 // Provider returns the distribution that provides module, or nil.

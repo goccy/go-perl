@@ -129,12 +129,31 @@ func TestDistributionPaths(t *testing.T) {
 	if _, _, err := SplitPathname("X/XX/XXX/README"); err == nil {
 		t.Error("SplitPathname accepted a non-archive name")
 	}
-	if _, err := TreePath("/mod", "X/XX/XXX/README"); err == nil {
+	if _, err := TreePath("/mod", &Distribution{Pathname: "X/XX/XXX/README"}); err == nil {
 		t.Error("TreePath accepted a non-archive name")
 	}
-	tree, err := TreePath("/mod", "R/RU/RURBAN/Cpanel-JSON-XS-4.38.tar.gz")
-	if err != nil || tree != filepath.Join("/mod", "Cpanel-JSON-XS@4.38") {
-		t.Errorf("TreePath = %q, %v", tree, err)
+	sum, rev := strings.Repeat("ab", 32), strings.Repeat("cd", 20)
+	for _, c := range []struct {
+		d    Distribution
+		want string
+	}{
+		{Distribution{Pathname: "R/RU/RURBAN/Cpanel-JSON-XS-4.38.tar.gz"}, "Cpanel-JSON-XS@4.38"},
+		{Distribution{Pathname: "M/MY/MYCO/Plack-1.0.tar.gz", Source: Source{Mirror: "https://pause.local/", SHA256: sum}}, "Plack@1.0+sha256.abababababababab"},
+		{Distribution{Pathname: "Plack-1.0.tar.gz", Source: Source{URL: "https://example.com/Plack-1.0.tar.gz", SHA256: sum}}, "Plack@1.0+sha256.abababababababab"},
+		{Distribution{Pathname: "Fork-cdcdcdcdcdcd.tar.gz", Source: Source{Git: "git@example.com:x/Fork.git", Revision: rev}}, "Fork@git.cdcdcdcdcdcd"},
+	} {
+		tree, err := TreePath("/mod", &c.d)
+		if err != nil || tree != filepath.Join("/mod", c.want) {
+			t.Errorf("TreePath(%+v) = %q, %v, want %s", c.d, tree, err, c.want)
+		}
+	}
+	for _, d := range []Distribution{
+		{Pathname: "Plack-1.0.tar.gz", Source: Source{URL: "https://example.com/Plack-1.0.tar.gz"}},
+		{Pathname: "Fork-1.tar.gz", Source: Source{Git: "https://example.com/Fork.git", Revision: "abc"}},
+	} {
+		if _, err := TreePath("/mod", &d); err == nil {
+			t.Errorf("TreePath(%+v) accepted a distribution with no pin", d)
+		}
 	}
 	if got, want := TarballPath("/mod", "R/RU/RURBAN/Cpanel-JSON-XS-4.38.tar.gz"),
 		filepath.Join("/mod", "cache", "download", "authors", "id", "R", "RU", "RURBAN", "Cpanel-JSON-XS-4.38.tar.gz"); got != want {
