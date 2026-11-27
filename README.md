@@ -49,11 +49,12 @@ environment, and publishes the result of every distribution:
 
 - **93.4%** of the reference set — the 14,437 latest CPAN releases whose CPAN
   Testers reports on perl 5.44.0 pass more often than they fail on Linux —
-  passes its own tests on go-perl (13,486), which is **96.3%** of what perl
-  itself passes there.
-- **94.0%** of those 13,486 build into a single static binary with
-  `gperl build` (12,672), and for **11,027** the distribution's tests pass
-  with its test binary alone (`gperl test -c`).
+  passes its own tests on go-perl (13,486); **96.3%** of what perl itself
+  passes there (13,458 of 13,978) also passes on go-perl.
+- For **94.0%** of those 13,486 (12,672), a program using the distribution
+  builds with `gperl build` into a fully static binary that runs where there
+  is nothing but the binary; for **11,027** of those, the distribution's
+  tests pass with its test binary alone (`gperl test -c`).
 
 Measured with go-perl v0.3.0 and, for the static builds, gperl v0.3.4, on
 linux/arm64. The site also checks a `cpanfile` against the results.
