@@ -41,6 +41,23 @@ func main() {
 }
 ```
 
+## CPAN compatibility
+
+[go-perl CPAN Reports](https://goccy.github.io/go-perl-cpan-reports/) runs the
+test suites of CPAN distributions on go-perl and on perl 5.44.0 in the same
+environment, and publishes the result of every distribution:
+
+- **93.4%** of the reference set — the 14,437 latest CPAN releases whose CPAN
+  Testers reports on perl 5.44.0 pass more often than they fail on Linux —
+  passes its own tests on go-perl (13,486), which is **96.3%** of what perl
+  itself passes there.
+- **94.0%** of those 13,486 build into a single static binary with
+  `gperl build` (12,672), and for **11,027** the distribution's tests pass
+  with its test binary alone (`gperl test -c`).
+
+Measured with go-perl v0.3.0 and, for the static builds, gperl v0.3.4, on
+linux/arm64. The site also checks a `cpanfile` against the results.
+
 ## Highlights
 
 - **Pure Go, cross-compile anywhere**: the interpreter is ordinary Go code —
@@ -305,6 +322,18 @@ load` reads. The image's layer and config carry no build time, so the same
 binary makes the same image. The binary unpacks its standard library into
 the user cache directory or the temporary directory at startup, so an image
 run with a read-only root filesystem needs a writable `/tmp`.
+
+**GitHub Actions**: [`goccy/go-perl-action`](https://github.com/goccy/go-perl-action)
+installs gperl from a release — the archive checked against the release's
+checksums and their attested build provenance — and caches the module
+directory, on Linux and macOS runners:
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: goccy/go-perl-action/setup@v1
+  - run: gperl test
+```
 
 ## Supply-chain verification
 
