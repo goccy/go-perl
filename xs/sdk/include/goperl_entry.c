@@ -19,17 +19,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <errno.h>
+#include <grp.h>
+#include <unistd.h>
+#endif
 
 #if !defined(GOPERL_ENTRY_BOOT) || !defined(GOPERL_ENTRY_TABLE)
 #error "GOPERL_ENTRY_BOOT and GOPERL_ENTRY_TABLE must name the module's boot function and entry table"
 #endif
 
+/* The C library functions that change the ids of the process (the
+ * runtime calls them on Linux only), each slot empty elsewhere. */
+#if defined(__linux__)
+#define GOPERL_ENTRY_LINUX(fn) (const void *)fn
+#else
+#define GOPERL_ENTRY_LINUX(fn) (const void *)0
+#endif
+
 XS_EXTERNAL(GOPERL_ENTRY_BOOT);
 
-GOPERL_C const void *const GOPERL_ENTRY_TABLE[19];
+GOPERL_C const void *const GOPERL_ENTRY_TABLE[29];
 
 GOPERL_C __attribute__((visibility("default"), used))
-const void *const GOPERL_ENTRY_TABLE[19] = {
+const void *const GOPERL_ENTRY_TABLE[29] = {
     (const void *)GOPERL_ENTRY_BOOT,
     (const void *)__goperl_xs_init,
     (const void *)__goperl_xs_layout,
@@ -49,4 +62,14 @@ const void *const GOPERL_ENTRY_TABLE[19] = {
     (const void *)free,
     (const void *)fflush,
     (const void *)setlocale,
+    GOPERL_ENTRY_LINUX(setuid),
+    GOPERL_ENTRY_LINUX(seteuid),
+    GOPERL_ENTRY_LINUX(setreuid),
+    GOPERL_ENTRY_LINUX(setresuid),
+    GOPERL_ENTRY_LINUX(setgid),
+    GOPERL_ENTRY_LINUX(setegid),
+    GOPERL_ENTRY_LINUX(setregid),
+    GOPERL_ENTRY_LINUX(setresgid),
+    GOPERL_ENTRY_LINUX(setgroups),
+    GOPERL_ENTRY_LINUX(__errno_location),
 };

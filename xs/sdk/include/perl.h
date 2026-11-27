@@ -183,7 +183,7 @@ static inline int *goperl_jb_onstack_if(int *jb, int savemask) {
     sigsetjmp(goperl_jb_onstack_if((jb), (savemask)), (savemask))
 #endif
 
-#define GOPERL_XS_ABI 43u
+#define GOPERL_XS_ABI 44u
 
 /* The width of a pointer, a size_t and an SSize_t of the interpreter, as
  * its structures hold them in its memory: it is LP64 (wasm64), like the

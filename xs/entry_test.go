@@ -43,6 +43,15 @@ func evalDemo(t *testing.T, p *perl.Perl) {
 // A module registered as linked into the binary reaches every instance
 // created afterwards, with no per-instance loading.
 func TestRegisteredModule(t *testing.T) {
+	registerDemo(t)
+	evalDemo(t, newHostPerl(t))
+	evalDemo(t, newHostPerl(t))
+}
+
+// registerDemo builds Demo::XS with its entry table and registers the
+// loaded module as linked into the binary, for the rest of the test.
+func registerDemo(t *testing.T) {
+	t.Helper()
 	so := buildDemo(t, demoEntryFlags...)
 	lib, err := purego.Dlopen(so, purego.RTLD_NOW|purego.RTLD_LOCAL)
 	if err != nil {
@@ -55,7 +64,4 @@ func TestRegisteredModule(t *testing.T) {
 	// The address is C memory handed back as a uintptr.
 	xs.Register("Demo::XS", *(*unsafe.Pointer)(unsafe.Pointer(&entry)))
 	t.Cleanup(func() { xs.Unregister("Demo::XS") })
-
-	evalDemo(t, newHostPerl(t))
-	evalDemo(t, newHostPerl(t))
 }

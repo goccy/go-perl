@@ -31,10 +31,21 @@ var entryNames = []string{
 	"free",
 	"fflush",
 	"setlocale",
+	// the ones that change the ids of the process, on Linux (hostids_linux.go)
+	"setuid",
+	"seteuid",
+	"setreuid",
+	"setresuid",
+	"setgid",
+	"setegid",
+	"setregid",
+	"setresgid",
+	"setgroups",
+	"__errno_location",
 }
 
 // entrySlots is the number of slots in an entry table.
-const entrySlots = 19
+const entrySlots = 29
 
 // entrySlotOf maps a name of entryNames to its slot.
 var entrySlotOf = func() map[string]int {
