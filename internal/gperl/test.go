@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/goccy/go-perl/internal"
 )
 
 // tapResult is what one test file's TAP stream amounted to.
@@ -207,7 +209,10 @@ func Test(args []string) (int, error) {
 // RunTestBinary is the entry point of a test binary gperl test -c makes: it
 // runs the test files of the project at projectDir (the binary's own copy)
 // that args name, with gperl test's options, and returns the exit status.
-// The dependencies are the ones the binary carries.
+// The dependencies are the ones the binary carries: their module tree, as
+// the interpreter unpacks it into the cache, is on @INC and PERL5LIB as
+// gperl test puts the dependencies there, for the perl processes a test
+// file starts.
 func RunTestBinary(projectDir string, args []string) int {
 	name := filepath.Base(os.Args[0])
 	c := &testConfig{}
@@ -235,7 +240,16 @@ func RunTestBinary(projectDir string, args []string) int {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		return 2
 	}
-	return runTests(projectDir, files, c, nil)
+	var depInc []string
+	if lib, _ := internal.CPANLib(); lib != nil {
+		dir, err := internal.UnpackTree(lib, "cpan")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: the dependencies' module tree: %v\n", name, err)
+			return 1
+		}
+		depInc = []string{dir}
+	}
+	return runTests(projectDir, files, c, depInc)
 }
 
 // flagSet declares the options of gperl test, which a test binary takes

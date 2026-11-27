@@ -624,6 +624,11 @@ func TestTestBinary(t *testing.T) {
 			"is(`t/bin/tool`, \"tool\\n\", 'a program of the project runs');\n" +
 			"ok(-d 't/empty', 'an empty directory stays');\n" +
 			"is($ENV{PWD}, Cwd::getcwd(), 'PWD names the directory');\n",
+		// A perl the test file starts that is not $^X (perl on PATH, a
+		// #!/usr/bin/perl program) finds the dependencies through
+		// PERL5LIB, as under gperl test.
+		"t/05-libs.t": "use Test::More tests => 1;\n" +
+			"ok(scalar(grep { -f \"$_/Pure/Built.pm\" } split /:/, $ENV{PERL5LIB} // ''), 'PERL5LIB holds the dependencies');\n",
 		"xt/fail.t": "use Test::More tests => 1;\nok(0, 'broken');\n",
 	} {
 		p := filepath.Join(dir, name)
@@ -668,7 +673,7 @@ func TestTestBinary(t *testing.T) {
 		return string(out), cmd.ProcessState.ExitCode()
 	}
 	out, status := run()
-	for _, want := range []string{"t/01-deps.t .. ok\n", "t/02-perl.t .. ok\n", "t/03-data.t .. ok\n", "t/04-tree.t .. ok\n", "All tests successful.\n", "Files=4, Tests=9, "} {
+	for _, want := range []string{"t/01-deps.t .. ok\n", "t/02-perl.t .. ok\n", "t/03-data.t .. ok\n", "t/04-tree.t .. ok\n", "t/05-libs.t .. ok\n", "All tests successful.\n", "Files=5, Tests=10, "} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report lacks %q:\n%s", want, out)
 		}
